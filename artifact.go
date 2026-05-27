@@ -53,8 +53,8 @@ type FileBody struct {
 
 // PatchBody — used when ArtifactType == ArtifactPatch.
 type PatchBody struct {
-	Diff       []byte   // unified diff bytes
-	BaseSHA    string   // base commit the diff applies against
+	Diff       []byte // unified diff bytes
+	BaseSHA    string // base commit the diff applies against
 	BaseBranch string
 	RepoURL    string   // origin URL for restoration context
 	Untracked  []string // names of untracked files (content NOT embedded)

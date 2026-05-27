@@ -31,8 +31,8 @@ func NewFlow(name string, types []ItemType) *Flow {
 	}
 }
 
-func (f *Flow) Name() string       { return f.name }
-func (f *Flow) Types() []ItemType  { return f.types }
+func (f *Flow) Name() string      { return f.name }
+func (f *Flow) Types() []ItemType { return f.types }
 
 // Steps returns the ordered registration list (state-independent), keyed by
 // step name.
@@ -212,13 +212,75 @@ func (f *Flow) DeriveNext(s *ItemState) (string, bool) {
 	return "", false
 }
 
-// stepByNameOrPanic — internal accessor; used by the orchestrator.
-func (f *Flow) stepByNameOrPanic(name string) *step {
+// LifecycleKind discriminates the three lifecycle item shapes the cli
+// orchestrator needs to dispatch by.
+type LifecycleKind int
+
+const (
+	LifecycleArtifact LifecycleKind = iota + 1 // AddStep — handler resolves an artifact
+	LifecycleSignal                            // AddSignalStep — handler side-effects; backend writes signal
+	LifecycleAwait                             // AwaitSignal — no handler; pure wait
+)
+
+// LifecycleItem is the orchestrator-facing view of one entry in the flow's
+// ordered list. Returned by Flow.Item / Flow.Items.
+type LifecycleItem struct {
+	Name       string
+	Kind       LifecycleKind
+	ArtifactId ArtifactId // set when Kind==LifecycleArtifact
+	SignalId   SignalId   // set when Kind==LifecycleSignal or LifecycleAwait
+	Required   bool
+	Handler    StepHandler // nil when Kind==LifecycleAwait
+	Budget     StepBudget  // resolved (merged with defaults)
+}
+
+// Result returns the result identifier as a string — either the ArtifactId or
+// the SignalId, depending on Kind. Used for InvocationResult / budget keying.
+func (li LifecycleItem) Result() string {
+	if li.Kind == LifecycleArtifact {
+		return string(li.ArtifactId)
+	}
+	return string(li.SignalId)
+}
+
+// Item returns the LifecycleItem for the named step. ok==false if the name is
+// unknown to this flow.
+func (f *Flow) Item(name string) (LifecycleItem, bool) {
 	st, ok := f.stepByName[name]
 	if !ok {
-		panic(fmt.Sprintf("flow %q: unknown step %q", f.name, name))
+		return LifecycleItem{}, false
 	}
-	return st
+	return toLifecycleItem(st), true
+}
+
+// Items returns the ordered slice of LifecycleItems. Stable; safe to range.
+func (f *Flow) Items() []LifecycleItem {
+	out := make([]LifecycleItem, len(f.steps))
+	for i, st := range f.steps {
+		out[i] = toLifecycleItem(st)
+	}
+	return out
+}
+
+func toLifecycleItem(st *step) LifecycleItem {
+	li := LifecycleItem{
+		Name:     st.name,
+		Required: st.required,
+		Handler:  st.handler,
+		Budget:   resolveBudget(st.budget),
+	}
+	switch st.kind {
+	case stepArtifact:
+		li.Kind = LifecycleArtifact
+		li.ArtifactId = st.artifact
+	case stepSignal:
+		li.Kind = LifecycleSignal
+		li.SignalId = st.signal
+	case stepAwait:
+		li.Kind = LifecycleAwait
+		li.SignalId = st.signal
+	}
+	return li
 }
 
 // IsReady returns true iff all RequireSignal preconditions are set on the

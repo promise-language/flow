@@ -6,9 +6,9 @@ import "time"
 type ParkKind string
 
 const (
-	ParkBlocked          ParkKind = "blocked"
-	ParkQuestion         ParkKind = "question"
-	ParkBudgetExhausted  ParkKind = "budget-exhausted"
+	ParkBlocked           ParkKind = "blocked"
+	ParkQuestion          ParkKind = "question"
+	ParkBudgetExhausted   ParkKind = "budget-exhausted"
 	ParkStepDidNotResolve ParkKind = "step-did-not-resolve"
 )
 
@@ -27,8 +27,8 @@ const (
 // Backend.Park to mark a step blocked / waiting on input / exhausted.
 type ParkRequest struct {
 	Kind    ParkKind   `json:"kind"`
-	Step    string     `json:"step,omitempty"`     // lifecycle item name
-	Axis    BudgetAxis `json:"axis,omitempty"`     // set when Kind==ParkBudgetExhausted
+	Step    string     `json:"step,omitempty"` // lifecycle item name
+	Axis    BudgetAxis `json:"axis,omitempty"` // set when Kind==ParkBudgetExhausted
 	Reason  string     `json:"reason,omitempty"`
 	Details string     `json:"details,omitempty"`
 }

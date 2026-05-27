@@ -14,15 +14,15 @@ const (
 // step is the internal record for one lifecycle item in a flow's ordered
 // list. Exposed surface is via Flow's Add*/Steps/DeriveNext helpers.
 type step struct {
-	kind       stepKind
-	name       string
-	artifact   ArtifactId // set when kind==stepArtifact
-	signal     SignalId   // set when kind==stepSignal or stepAwait
-	handler    StepHandler
-	required   bool
-	staleAfter []ArtifactId
+	kind          stepKind
+	name          string
+	artifact      ArtifactId // set when kind==stepArtifact
+	signal        SignalId   // set when kind==stepSignal or stepAwait
+	handler       StepHandler
+	required      bool
+	staleAfter    []ArtifactId
 	staleOnCommit bool
-	budget     StepBudget // before resolveBudget merge with defaults
+	budget        StepBudget // before resolveBudget merge with defaults
 }
 
 // resultName returns the result identifier (artifact id OR signal id) as a
