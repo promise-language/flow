@@ -30,7 +30,7 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 		return 1
 	}
 	if claim == nil {
-		fmt.Fprintln(app.Err, "grant: no active lease")
+		fmt.Fprintln(app.Err, "grant: no active claim")
 		return 1
 	}
 

@@ -29,7 +29,7 @@ func activeJSONPath() string {
 }
 
 // LoadActiveClaim reads the serialized Claim from .flow/active.json. Returns
-// (nil, nil) if no active lease exists.
+// (nil, nil) if no active claim exists.
 func LoadActiveClaim() (*flow.Claim, error) {
 	b, err := os.ReadFile(activeJSONPath())
 	if err != nil {

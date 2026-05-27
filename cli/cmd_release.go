@@ -12,7 +12,7 @@ func (app *App) cmdRelease(ctx context.Context, args []string) int {
 		return 1
 	}
 	if claim == nil {
-		fmt.Fprintln(app.Err, "release: no active lease")
+		fmt.Fprintln(app.Err, "release: no active claim")
 		return 1
 	}
 	if err := app.Backend.Release(ctx, *claim); err != nil {

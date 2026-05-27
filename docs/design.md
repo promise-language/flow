@@ -12,7 +12,7 @@ The flow author writes a Go binary that:
 - Declares one or more **flows**, each an ordered list of steps that produce
   those artifacts or trigger those signals.
 - Embeds the SDK's CLI (`cli.Run`) which dispatches
-  `lease | run | release | status | grant` against the registered flows.
+  `claim | run | release | status | grant` against the registered flows.
 
 The SDK is **backend-pluggable**. Two backend implementations:
 
@@ -52,7 +52,7 @@ The tracker repo then imports the SDK and adds only:
 | Signal state on the issue | Same state-comment YAML carries a signals section keyed by SignalId, written by the backend when observed. Source-of-truth is GitHub itself (PR state, labels, etc.); the comment holds the cached observation. |
 | Large artifact bytes | Orphan branch in the same repo. Committed to `flow/artifacts/issue-N/<key>/<filename>` on a `flow-artifacts` orphan branch; comments link via `raw.githubusercontent.com`. No second repo, no external blob store. |
 | GitHub auth | Shell out to `gh` CLI. Hard runtime dep on `gh`. |
-| `.flow/` worktree state | Pointer + prefetched cache. Written by `claim`/`lease`, kept fresh by `run`, deleted by `release`. Contains `active.json` (the serialized `Claim`), `state.yml` (the parsed `ItemState`), and `artifacts/<key>.{md,bytes,json}` (prefetched contents). Handler reads via `ctx.Markdown/File/CommitHash/JSON/Patch(key)` are zero-API. |
+| `.flow/` worktree state | Pointer + prefetched cache. Written by `claim` (alias `lease`), kept fresh by `run`, deleted by `release`. Contains `active.json` (the serialized `Claim`), `state.yml` (the parsed `ItemState`), and `artifacts/<key>.{md,bytes,json}` (prefetched contents). Handler reads via `ctx.Markdown/File/CommitHash/JSON/Patch(key)` are zero-API. |
 | Multi-flow per binary | **Multiple flows per binary, distinguished by `Item.Type` and `RequireSignal` preconditions.** `cli.Run` picks the first flow whose constraints match per dispatch. Replaces the earlier "one binary = one flow" rule — needed to model contributor (open PR) vs maintainer (merge PR) lifecycles on the same issue. |
 | Runner concept | Eliminated for github backend. The flow binary is self-contained; one step per `./<binary> run` invocation. |
 
@@ -66,20 +66,21 @@ project-supplied flow binary:
 ```
 $ ./implement doctor                 # verifies gh + auth + repo access
 $ ./implement list                   # lists eligible open issues
-$ ./implement lease 42               # equivalent to `claim` — assigns me + labels
-$ ./implement run                    # advances one step on the leased issue
+$ ./implement claim 42               # assigns me + labels for this flow binary
+$ ./implement run                    # advances one step on the claimed issue
 $ ./implement run                    # advances next step
 $ ./implement status [<id>]          # read-only lifecycle checklist
 $ ./implement grant <key> ...        # extend a step's budget after BudgetExhausted
-$ ./implement release                # unassign / drop the lease
+$ ./implement release                # unassign / drop the claim
 ```
 
-`run` without `--issue` reads `.flow/active.json` (written by `lease`); falls
+`run` without `--issue` reads `.flow/active.json` (written by `claim`); falls
 back to "the open issue assigned to me with label `flow:<binary>`." If
 multiple match, errors and asks for `--issue N`.
 
-The CLI commands (`lease`, `claim`, `run`, `release`, `status`, `grant`,
-`doctor`) all live in `cli/`; the binary opts in by calling `cli.Run(app)`.
+The CLI commands (`claim` / alias `lease`, `run`, `release`, `status`,
+`grant`, `doctor`, `list`) all live in `cli/`; the binary opts in by calling
+`cli.Run(app)`.
 
 ---
 
@@ -394,7 +395,7 @@ type App struct {
     Flows     []*flow.Flow              // REQUIRED — at least one; order matters
 }
 
-func Run(app App) int  // dispatches lease|run|release|status|grant against os.Args[1:]
+func Run(app App) int  // dispatches claim|run|release|status|grant against os.Args[1:]
 ```
 
 **Flow selection.** On each `run`, `cli.App` scans `Flows` in order and picks
@@ -431,7 +432,7 @@ type Backend interface {
     // RequireSignal; flows that need finer filtering use ctx.Skip(reason).
     ListEligible(ctx context.Context) ([]ItemRef, error)
 
-    // Claim/release lifecycle. Claim acquires an exclusive lease;
+    // Claim/release lifecycle. Claim acquires an exclusive claim;
     // subsequent ops require the credentialed handle.
     Claim(ctx context.Context, ref ItemRef, owner string) (Claim, error)
     Release(ctx context.Context, claim Claim) error
@@ -533,7 +534,7 @@ label `type:task` → `Item.Type = "task"`); the convention is configurable
 per binary.
 
 **Claim semantics.** The "one claim per arena" constraint is enforced at the
-**client** layer (`cli.Run`'s `lease`/`claim` command checks `.flow/active.json`
+**client** layer (`cli.Run`'s `claim` command checks `.flow/active.json`
 exists before calling `Backend.Claim`), not at the Backend. The Backend
 tracks claims by `(item, owner)`; a single owner holding multiple claims
 across different worktrees is legitimate. The constraint is local to the
@@ -901,11 +902,11 @@ issues.
 
 ### SDK orchestration commands
 
-#### `claim` / `lease N`
+#### `claim N` (alias `lease N`)
 
-`claim` (alias `lease`) is where the SDK does its heavy reads. After it
-completes, every subsequent `run` has a fully populated `.flow/` directory
-and can dispatch handlers without per-artifact API calls.
+`claim` is where the SDK does its heavy reads. After it completes, every
+subsequent `run` has a fully populated `.flow/` directory and can dispatch
+handlers without per-artifact API calls.
 
 1. **Resolve token** — `gh auth token`, fall back to `GITHUB_TOKEN`.
 2. **Resolve repo** — `git remote get-url origin`, parsed.
@@ -1151,7 +1152,7 @@ github.com/promise-language/flow/
 ├── cli/
 │   ├── app.go                          App struct, Run(App) int entry point, startup validation
 │   ├── cmd_run.go                      ★ orchestrator: one step per invocation, flow selection, budget enforcement
-│   ├── cmd_lease.go                    ★ claim entry point; primes the local cache
+│   ├── cmd_claim.go                    ★ claim entry point (alias: lease); primes the local cache
 │   ├── cmd_release.go
 │   ├── cmd_status.go                   read-only checklist via LookupClaim + LoadState
 │   ├── cmd_grant.go                    extend Granted* on a parked item
@@ -1202,8 +1203,9 @@ github.com/promise-language/flow/
 5. **`cli/cmd_run.go`** — the per-step orchestrator. Flow selection, budget
    gating, ctx-with-timeout wrapping, handler dispatch, sentinel
    translation.
-6. **`cli/cmd_lease.go`** — explicit claim entrypoint; wraps the
-   backend-specific claim flow, seeds state, prefetches resolved artifacts.
+6. **`cli/cmd_claim.go`** — explicit claim entrypoint (alias: `lease`);
+   wraps the backend-specific claim flow, seeds state, prefetches resolved
+   artifacts.
 7. **`pkg/backend/github/state_comment.go`** — parse/render the
    `<details>`-wrapped YAML; PATCH-in-place or supersede. No body CAS.
 8. **`pkg/backend/github/claim.go`** — two-phase claim race-lock.
@@ -1242,7 +1244,7 @@ End-to-end against a real repo:
 3. Create a private test repo; push it.
 4. Open issue with labels `type:task needs-flow`.
 5. `./implement doctor` → green.
-6. `./implement lease 1` → state comment posted; labels `flow:seeded`,
+6. `./implement claim 1` → state comment posted; labels `flow:seeded`,
    `flow:implement`, `flow:owner:<me>` set; assignee set; `.flow/active.json`
    present.
 7. `./implement run` ×5 → plan, implementation, review, coverage,

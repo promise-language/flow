@@ -14,7 +14,7 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		return 1
 	}
 	if claim == nil {
-		fmt.Fprintln(app.Err, "status: no active lease (run `lease <id>` first)")
+		fmt.Fprintln(app.Err, "status: no active claim (run `claim <id>` first)")
 		return 1
 	}
 	state, err := app.Backend.LoadState(ctx, *claim)

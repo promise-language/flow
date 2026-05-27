@@ -344,7 +344,7 @@ func (c *Client) spawnCmd(ctx context.Context, name string, args ...string) cmdH
 // execCmd adapts *exec.Cmd to cmdHandle.
 type execCmd struct{ cmd *exec.Cmd }
 
-func (e *execCmd) SetDir(dir string)                 { e.cmd.Dir = dir }
+func (e *execCmd) SetDir(dir string)                  { e.cmd.Dir = dir }
 func (e *execCmd) StdinPipe() (io.WriteCloser, error) { return e.cmd.StdinPipe() }
 func (e *execCmd) StdoutPipe() (io.ReadCloser, error) { return e.cmd.StdoutPipe() }
 func (e *execCmd) StderrPipe() (io.ReadCloser, error) { return e.cmd.StderrPipe() }

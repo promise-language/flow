@@ -1,6 +1,6 @@
 // Package cli wires the program-level CLI for a flow binary. A binary's
 // main() builds a cli.App and calls cli.Run(app); the SDK dispatches
-// lease|run|release|status|grant|doctor|list against os.Args.
+// claim|run|release|status|grant|doctor|list against os.Args.
 package cli
 
 import (
@@ -96,8 +96,8 @@ func RunWithArgs(app App, args []string) int {
 		return app.cmdDoctor(ctx, rest)
 	case "list":
 		return app.cmdList(ctx, rest)
-	case "lease", "claim":
-		return app.cmdLease(ctx, rest)
+	case "claim", "lease":
+		return app.cmdClaim(ctx, rest)
 	case "release":
 		return app.cmdRelease(ctx, rest)
 	case "status":
@@ -251,10 +251,10 @@ func usage(bin string) string {
 usage:
   %[1]s doctor                       verify backend prereqs
   %[1]s list                         list eligible items
-  %[1]s lease <item-id>              acquire a lease on an item (alias: claim)
+  %[1]s claim <item-id>              acquire a claim on an item (alias: lease)
   %[1]s run [--item <id>]            advance one step
   %[1]s status [<item-id>]           read-only lifecycle checklist
   %[1]s grant <key> [--invocations N] [--cost USD] [--prompts N] [--timeout SECONDS]
                                      extend a step's budget
-  %[1]s release                      drop the lease`, bin)
+  %[1]s release                      drop the claim`, bin)
 }
