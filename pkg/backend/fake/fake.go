@@ -1,0 +1,421 @@
+// Package fake is an in-memory flow.Backend implementation used by SDK
+// tests and by flow authors who want to exercise their flow logic without
+// touching GitHub. NOT suitable for production.
+package fake
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"maps"
+	"sync"
+	"time"
+
+	"github.com/promise-language/flow"
+)
+
+// Backend is the in-memory backend.
+type Backend struct {
+	mu       sync.Mutex
+	items    map[string]*itemRecord // keyed by item.ID
+	signals  []flow.SignalDef
+	clock    func() time.Time
+	verifyOK bool // controls Worktree.Validate result
+}
+
+type itemRecord struct {
+	item        flow.Item
+	claim       *flow.Claim
+	claimedAt   time.Time
+	owner       string
+	artifacts   map[flow.ArtifactId]*flow.ArtifactRecord
+	signals     map[flow.SignalId]flow.SignalState
+	questions   []flow.Question
+	nextQID     int
+	seeded      bool
+	parkRequest *flow.ParkRequest
+}
+
+// New constructs an empty fake backend. Signals lists the SignalIds this
+// backend will report as supported.
+func New(signals ...flow.SignalDef) *Backend {
+	return &Backend{
+		items:    map[string]*itemRecord{},
+		signals:  signals,
+		clock:    time.Now,
+		verifyOK: true,
+	}
+}
+
+// SetClock overrides the backend's time source. For deterministic tests.
+func (b *Backend) SetClock(c func() time.Time) { b.clock = c }
+
+// SetVerifyOK controls what Worktree.Validate returns. Default true.
+func (b *Backend) SetVerifyOK(ok bool) { b.verifyOK = ok }
+
+// AddItem registers an item with the backend so ListEligible / Claim see it.
+func (b *Backend) AddItem(item flow.Item) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.items[item.ID] = &itemRecord{
+		item:      item,
+		artifacts: map[flow.ArtifactId]*flow.ArtifactRecord{},
+		signals:   map[flow.SignalId]flow.SignalState{},
+	}
+}
+
+// SetSignal flips a signal on an item (simulates an external observation).
+func (b *Backend) SetSignal(itemID string, sig flow.SignalId, set bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return
+	}
+	rec.signals[sig] = flow.SignalState{
+		Set:        set,
+		ObservedAt: b.clock(),
+		By:         "fake",
+	}
+}
+
+// ParkRequest returns the last park recorded for an item, or nil.
+func (b *Backend) ParkRequest(itemID string) *flow.ParkRequest {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return nil
+	}
+	return rec.parkRequest
+}
+
+func (b *Backend) Name() string { return "fake" }
+
+func (b *Backend) SupportedSignals() []flow.SignalDef { return b.signals }
+
+func (b *Backend) ListEligible(ctx context.Context) ([]flow.ItemRef, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]flow.ItemRef, 0, len(b.items))
+	for id, rec := range b.items {
+		out = append(out, flow.ItemRef{
+			BackendName: b.Name(),
+			Display:     rec.item.Title,
+			Ref:         json.RawMessage(fmt.Sprintf("%q", id)),
+		})
+	}
+	return out, nil
+}
+
+func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string) (flow.Claim, error) {
+	id, err := refID(ref)
+	if err != nil {
+		return flow.Claim{}, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[id]
+	if rec == nil {
+		return flow.Claim{}, fmt.Errorf("fake: item %q not registered", id)
+	}
+	if rec.claim != nil && rec.owner != owner {
+		return flow.Claim{}, fmt.Errorf("fake: item %q already claimed by %q", id, rec.owner)
+	}
+	now := b.clock()
+	c := flow.Claim{
+		BackendName: b.Name(),
+		ItemRef:     ref,
+		Owner:       owner,
+		ClaimedAt:   now,
+		Token:       json.RawMessage(`{}`),
+	}
+	rec.claim = &c
+	rec.claimedAt = now
+	rec.owner = owner
+	return c, nil
+}
+
+func (b *Backend) Release(ctx context.Context, claim flow.Claim) error {
+	id, err := refID(claim.ItemRef)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[id]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", id)
+	}
+	rec.claim = nil
+	rec.owner = ""
+	return nil
+}
+
+func (b *Backend) LookupClaim(ctx context.Context, ref flow.ItemRef) (*flow.ClaimInfo, error) {
+	id, err := refID(ref)
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[id]
+	if rec == nil || rec.claim == nil {
+		return nil, nil
+	}
+	return &flow.ClaimInfo{Owner: rec.owner, ClaimedAt: rec.claimedAt}, nil
+}
+
+func (b *Backend) LoadState(ctx context.Context, claim flow.Claim) (*flow.ItemState, error) {
+	id, err := refID(claim.ItemRef)
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[id]
+	if rec == nil {
+		return nil, fmt.Errorf("fake: item %q not registered", id)
+	}
+	st := &flow.ItemState{
+		Item:      rec.item,
+		Artifacts: make(map[flow.ArtifactId]flow.ArtifactRecord, len(rec.artifacts)),
+		Signals:   make(map[flow.SignalId]flow.SignalState, len(rec.signals)),
+	}
+	for k, v := range rec.artifacts {
+		st.Artifacts[k] = *v
+	}
+	maps.Copy(st.Signals, rec.signals)
+	st.Questions = append([]flow.Question(nil), rec.questions...)
+	return st, nil
+}
+
+func (b *Backend) SeedState(ctx context.Context, claim flow.Claim, specs []flow.ArtifactSpec) error {
+	id, err := refID(claim.ItemRef)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[id]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", id)
+	}
+	if rec.seeded {
+		return errors.New("fake: item already seeded; second SeedState refused")
+	}
+	for _, sp := range specs {
+		rec.artifacts[sp.Id] = &flow.ArtifactRecord{
+			Id:                          sp.Id,
+			Type:                        sp.Type,
+			Required:                    sp.Required,
+			GrantedInvocations:          sp.Budget.MaxInvocations,
+			GrantedPromptsPerInvocation: sp.Budget.MaxPromptsPerInvocation,
+			GrantedCostUSD:              sp.Budget.MaxCostUSD,
+			GrantedTimeout:              sp.Budget.Timeout,
+		}
+	}
+	rec.seeded = true
+	return nil
+}
+
+func (b *Backend) ResolveArtifact(ctx context.Context, claim flow.Claim, id flow.ArtifactId, body flow.ArtifactBody) error {
+	itemID, err := refID(claim.ItemRef)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	art := rec.artifacts[id]
+	if art == nil {
+		return fmt.Errorf("fake: artifact %q not seeded on item %q", id, itemID)
+	}
+	if body.Type != art.Type {
+		return flow.ErrTypeMismatch{Step: string(id), Expected: art.Type, Got: body.Type}
+	}
+	art.Resolved = true
+	art.Stale = false
+	art.CommitHash = body.CommitHash
+	art.Markdown = body.Markdown
+	art.JSON = body.JSON
+	art.File = body.File
+	art.Patch = body.Patch
+	art.ProducedAt = b.clock()
+	art.Version++
+	art.ResolvedBy = claim.Owner
+	art.PromptsThisInvocation = 0 // resets at successful resolve
+	return nil
+}
+
+func (b *Backend) MarkStale(ctx context.Context, claim flow.Claim, id flow.ArtifactId) error {
+	itemID, err := refID(claim.ItemRef)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	art := rec.artifacts[id]
+	if art == nil {
+		return fmt.Errorf("fake: artifact %q not seeded on item %q", id, itemID)
+	}
+	art.Stale = true
+	return nil
+}
+
+func (b *Backend) BumpInvocations(ctx context.Context, claim flow.Claim, key string) error {
+	return b.bumpField(claim, key, func(a *flow.ArtifactRecord) {
+		a.Invocations++
+		a.PromptsThisInvocation = 0
+		a.LastRunAt = b.clock()
+	})
+}
+
+func (b *Backend) BumpPrompts(ctx context.Context, claim flow.Claim, key string) error {
+	return b.bumpField(claim, key, func(a *flow.ArtifactRecord) { a.PromptsThisInvocation++ })
+}
+
+func (b *Backend) AddCost(ctx context.Context, claim flow.Claim, key string, usd float64) error {
+	return b.bumpField(claim, key, func(a *flow.ArtifactRecord) { a.CostUSDSpent += usd })
+}
+
+func (b *Backend) Grant(ctx context.Context, claim flow.Claim, key string, g flow.Grant) error {
+	return b.bumpField(claim, key, func(a *flow.ArtifactRecord) {
+		a.GrantedInvocations += g.Invocations
+		a.GrantedPromptsPerInvocation += g.PromptsPerInvocation
+		a.GrantedCostUSD += g.CostUSD
+		a.GrantedTimeout += time.Duration(g.TimeoutAdd) * time.Second
+	})
+}
+
+func (b *Backend) bumpField(claim flow.Claim, key string, mutate func(*flow.ArtifactRecord)) error {
+	itemID, err := refID(claim.ItemRef)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	art := rec.artifacts[flow.ArtifactId(key)]
+	if art == nil {
+		return fmt.Errorf("fake: artifact %q not seeded on item %q", key, itemID)
+	}
+	mutate(art)
+	return nil
+}
+
+// AskQuestions appends the given questions to the item with a backend-
+// assigned id. Returns the persisted records.
+func (b *Backend) AskQuestions(ctx context.Context, claim flow.Claim, qs []flow.AgentQuestion) ([]flow.Question, error) {
+	itemID, err := refID(claim.ItemRef)
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return nil, fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	out := make([]flow.Question, 0, len(qs))
+	for _, aq := range qs {
+		rec.nextQID++
+		q := flow.Question{
+			ID:            fmt.Sprintf("q%d", rec.nextQID),
+			AgentQuestion: aq,
+		}
+		rec.questions = append(rec.questions, q)
+		out = append(out, q)
+	}
+	return out, nil
+}
+
+// AnswerQuestion is a test helper — fills in UserAnswer.Answer on a recorded
+// question.
+func (b *Backend) AnswerQuestion(itemID, qID, answer string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	now := b.clock()
+	for i := range rec.questions {
+		if rec.questions[i].ID == qID {
+			rec.questions[i].UserAnswer = flow.UserAnswer{Answer: answer, AnsweredAt: &now}
+			return nil
+		}
+	}
+	return fmt.Errorf("fake: question %q not found on item %q", qID, itemID)
+}
+
+func (b *Backend) Park(ctx context.Context, claim flow.Claim, req flow.ParkRequest) error {
+	itemID, err := refID(claim.ItemRef)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	cp := req
+	rec.parkRequest = &cp
+	return nil
+}
+
+func (b *Backend) Worktree(ctx context.Context, claim flow.Claim) (flow.Worktree, error) {
+	return &fakeWorktree{verifyOK: b.verifyOK}, nil
+}
+
+func refID(ref flow.ItemRef) (string, error) {
+	var id string
+	if err := json.Unmarshal(ref.Ref, &id); err != nil {
+		return "", fmt.Errorf("fake: malformed ItemRef.Ref: %w", err)
+	}
+	return id, nil
+}
+
+type fakeWorktree struct {
+	verifyOK bool
+	branch   string
+}
+
+func (w *fakeWorktree) Branch(ctx context.Context, name, base string) (bool, error) {
+	created := w.branch != name
+	w.branch = name
+	return created, nil
+}
+
+func (w *fakeWorktree) CurrentBranch(ctx context.Context) (string, error) {
+	if w.branch == "" {
+		return "main", nil
+	}
+	return w.branch, nil
+}
+
+func (w *fakeWorktree) Commit(ctx context.Context, msg string) error { return nil }
+func (w *fakeWorktree) Push(ctx context.Context) error               { return nil }
+func (w *fakeWorktree) OpenPR(ctx context.Context, base, title, body string) (string, error) {
+	return "https://example.invalid/pr/1", nil
+}
+func (w *fakeWorktree) MergePR(ctx context.Context, url string) error { return nil }
+func (w *fakeWorktree) Validate(ctx context.Context) error {
+	if !w.verifyOK {
+		return errors.New("fake: validate failed")
+	}
+	return nil
+}
+func (w *fakeWorktree) CapturePatch(ctx context.Context) ([]byte, error) { return nil, nil }

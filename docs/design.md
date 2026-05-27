@@ -160,6 +160,61 @@ type SignalDef struct {
 func Signal(id SignalId, description string) SignalDef
 ```
 
+#### Questions
+
+Questions are a third kind of item-scoped durable state, distinct from
+artifacts and signals: an agent or step handler emits one or more
+`AgentQuestion`s, the backend persists them with assigned ids, and the flow
+parks until at least one is answered. Format/Options are presentation hints
+for the UI; the user can always reply with free-text "Other" regardless of
+format. Multiple questions can be asked at once — useful when several
+clarifications are needed before the next step can proceed.
+
+```go
+type QuestionFormat string
+
+const (
+    FormatText   QuestionFormat = "text"
+    FormatYesNo  QuestionFormat = "yes_no"
+    FormatChoice QuestionFormat = "choice"
+)
+
+// AgentQuestion is what a handler emits via ctx.AskQuestions.
+type AgentQuestion struct {
+    Text        string         // the full prompt
+    Header      string         // short chip/label
+    Format      QuestionFormat // presentation hint; user may always reply "Other"
+    Options     []string       // choices for FormatChoice
+    MultiSelect bool           // FormatChoice + multi-select allowed
+}
+
+// UserAnswer is the user's response. Free-form even for choice questions.
+type UserAnswer struct {
+    Answer     string
+    AnsweredAt *time.Time
+}
+
+// Question is the recorded entry on an item: backend-assigned id + the
+// agent's AgentQuestion + the user's UserAnswer (empty until answered).
+type Question struct {
+    ID string
+    AgentQuestion
+    UserAnswer
+}
+
+// Convenience constructors.
+func AskText(header, text string) AgentQuestion
+func AskYesNo(header, text string) AgentQuestion
+func AskChoice(header, text string, options ...string) AgentQuestion
+func AskMultiChoice(header, text string, options ...string) AgentQuestion
+```
+
+The handler emits questions via the sentinel `ctx.AskQuestions(qs...)`; the
+SDK forwards them to `Backend.AskQuestions(ctx, claim, qs)` which assigns
+ids and persists them. Subsequent `LoadState` returns them in
+`ItemState.Questions`; `state.PendingQuestions()` returns the unanswered
+subset.
+
 ### `flow.Flow` (registration surface)
 
 A flow is an ordered list of **lifecycle items** — steps that produce
@@ -302,7 +357,12 @@ type StepCtx interface {
     Skip(reason string) error
     MarkStale(id ArtifactId) error
     Park(req ParkRequest) error
-    AskQuestion(q Question) error
+
+    // AskQuestions surfaces one or more questions for the user. Variadic so
+    // single-question and multi-question call sites both read naturally.
+    // The SDK forwards the questions to Backend.AskQuestions, which assigns
+    // ids and persists them; the flow parks until at least one is answered.
+    AskQuestions(qs ...AgentQuestion) error
 
     // Metered agent access — the ONLY spend chokepoint. Wraps cli.App.Agent.
     Agent() Agent
@@ -400,6 +460,12 @@ type Backend interface {
 
     Park(ctx context.Context, claim Claim, req ParkRequest) error
 
+    // AskQuestions records one or more agent-asked questions. The backend
+    // assigns each a unique id and persists the AgentQuestion payload;
+    // returns the same questions populated with their assigned ids. The
+    // flow parks until at least one is answered.
+    AskQuestions(ctx context.Context, claim Claim, qs []AgentQuestion) ([]Question, error)
+
     Worktree(ctx context.Context, claim Claim) (Worktree, error)
 }
 
@@ -407,6 +473,7 @@ type ItemState struct {
     Item      Item
     Artifacts map[ArtifactId]Artifact
     Signals   map[SignalId]SignalState
+    Questions []Question        // outstanding questions; PendingQuestions() filters unanswered
 }
 
 type SignalState struct {
