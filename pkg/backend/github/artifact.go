@@ -133,20 +133,64 @@ func (b *Backend) ResolveArtifact(ctx context.Context, claim flow.Claim, id flow
 	now := nowUTC()
 
 	// Post the artifact comment (or skip for Flag — no payload).
-	var artifactURL string
-	if body.Type != flow.ArtifactFlag {
-		commentBody, err := renderArtifactComment(id, body, version, claim.Owner, now)
+	// File/Patch always spill to the orphan branch. Markdown spills only
+	// when the rendered comment would exceed cfg.MaxCommentBytes.
+	var (
+		artifactURL string
+		spillURL    string
+	)
+	switch body.Type {
+	case flow.ArtifactFlag:
+		// no payload, no spill
+	case flow.ArtifactFile:
+		filename := sanitizeFilename(body.File.Name)
+		if filename == "" {
+			filename = string(id)
+		}
+		path := artifactFilePath(issueNum, string(id), filename)
+		url, err := b.putArtifactFile(ctx, path, body.File.Content,
+			commitMessageForArtifact(issueNum, string(id), filename, spillFileType))
+		if err != nil {
+			return fmt.Errorf("spill file artifact %q: %w", id, err)
+		}
+		spillURL = url
+	case flow.ArtifactPatch:
+		path := artifactFilePath(issueNum, string(id), "patch.diff")
+		url, err := b.putArtifactFile(ctx, path, body.Patch.Diff,
+			commitMessageForArtifact(issueNum, string(id), "patch.diff", spillPatchType))
+		if err != nil {
+			return fmt.Errorf("spill patch artifact %q: %w", id, err)
+		}
+		spillURL = url
+	case flow.ArtifactMarkdown:
+		commentBody, err := renderArtifactComment(id, body, version, claim.Owner, now, "")
 		if err != nil {
 			return err
 		}
-		// Auto-spill very large markdown payloads (file/patch handle this
-		// at the caller side for now).
-		if len(commentBody) > b.cfg.MaxCommentBytes && body.Type == flow.ArtifactMarkdown {
-			truncated := body.Markdown[:b.cfg.MaxCommentBytes-512]
-			commentBody, err = renderArtifactComment(id, flow.ArtifactBody{
-				Type:     flow.ArtifactMarkdown,
-				Markdown: truncated + "\n\n[truncated; full output would have been " + intToStr(len(body.Markdown)) + " bytes — large-artifact spillover not yet implemented]",
-			}, version, claim.Owner, now)
+		if len(commentBody) > b.cfg.MaxCommentBytes {
+			path := artifactFilePath(issueNum, string(id), "body.md")
+			url, err := b.putArtifactFile(ctx, path, []byte(body.Markdown),
+				commitMessageForArtifact(issueNum, string(id), "body.md", spillMarkdownTooLarge))
+			if err != nil {
+				return fmt.Errorf("spill markdown artifact %q: %w", id, err)
+			}
+			spillURL = url
+		}
+	}
+
+	if body.Type != flow.ArtifactFlag {
+		commentBody, err := renderArtifactComment(id, body, version, claim.Owner, now, spillURL)
+		if err != nil {
+			return err
+		}
+		// Truncate markdown body for the inline preview when spilled.
+		if spillURL != "" && body.Type == flow.ArtifactMarkdown {
+			preview := body.Markdown
+			if len(preview) > 4096 {
+				preview = preview[:4096]
+			}
+			previewBody := flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: preview}
+			commentBody, err = renderArtifactComment(id, previewBody, version, claim.Owner, now, spillURL)
 			if err != nil {
 				return err
 			}
@@ -313,14 +357,19 @@ func (b *Backend) AskQuestions(ctx context.Context, claim flow.Claim, qs []flow.
 	return out, nil
 }
 
-// renderArtifactComment formats the per-artifact GitHub comment body.
-func renderArtifactComment(id flow.ArtifactId, body flow.ArtifactBody, version int, by string, ts time.Time) (string, error) {
+// renderArtifactComment formats the per-artifact GitHub comment body. When
+// `spillURL` is non-empty, the body links to the orphan-branch file instead
+// of inlining the bytes (file/patch always; markdown when too large).
+func renderArtifactComment(id flow.ArtifactId, body flow.ArtifactBody, version int, by string, ts time.Time, spillURL string) (string, error) {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%sid=%s type=%s v=%d by=%s ts=%s -->\n",
 		artifactCommentMarkerPrefix, id, artifactTypeString(body.Type), version, by, ts.UTC().Format(time.RFC3339))
 	switch body.Type {
 	case flow.ArtifactMarkdown:
 		sb.WriteString(body.Markdown)
+		if spillURL != "" {
+			fmt.Fprintf(&sb, "\n\n[truncated preview; full body at %s]\n", spillURL)
+		}
 	case flow.ArtifactCommitHash:
 		sb.WriteString("commit: `" + body.CommitHash + "`")
 	case flow.ArtifactJSON:
@@ -328,11 +377,13 @@ func renderArtifactComment(id flow.ArtifactId, body flow.ArtifactBody, version i
 		sb.Write(body.JSON)
 		sb.WriteString("\n```\n")
 	case flow.ArtifactFile:
-		fmt.Fprintf(&sb, "file: `%s` (%d bytes) — spillover to flow-artifacts branch not yet implemented\n", body.File.Name, len(body.File.Content))
+		fmt.Fprintf(&sb, "file: [`%s`](%s) (%d bytes)\n", body.File.Name, spillURL, len(body.File.Content))
 	case flow.ArtifactPatch:
-		fmt.Fprintf(&sb, "patch against %s\n```diff\n", body.Patch.BaseSHA)
-		sb.Write(body.Patch.Diff)
-		sb.WriteString("\n```\n")
+		fmt.Fprintf(&sb, "patch against `%s` — [download diff](%s) (%d bytes)\n",
+			body.Patch.BaseSHA, spillURL, len(body.Patch.Diff))
+		if body.Patch.BaseBranch != "" {
+			fmt.Fprintf(&sb, "base branch: `%s`\n", body.Patch.BaseBranch)
+		}
 	case flow.ArtifactFlag:
 		sb.WriteString("(flag set)")
 	}

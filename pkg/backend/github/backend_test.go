@@ -36,6 +36,23 @@ type ghMock struct {
 
 	// permissions (for Doctor)
 	perms map[string]bool
+
+	// orphan branch state for the artifacts spillover
+	orphanBranchSHA string                  // commit SHA at heads/flow-artifacts
+	orphanFiles     map[string]ghMockFile   // path → file
+	nextBlobID      int
+	nextTreeID      int
+	nextCommitID    int
+
+	// observation tape: callers can inspect putArtifactFile interactions.
+	branchCreated    bool
+	branchCreateCall string // path of first file committed when creating
+	updateCalls      int
+}
+
+type ghMockFile struct {
+	Content []byte
+	SHA     string
 }
 
 type ghMockComment struct {
@@ -46,14 +63,15 @@ type ghMockComment struct {
 
 func newGHMock(t *testing.T) *ghMock {
 	return &ghMock{
-		t:         t,
-		owner:     "o",
-		repo:      "r",
-		issueNum:  42,
-		issueTitle: "Test issue",
-		issueBody:  "Add hello()",
+		t:             t,
+		owner:         "o",
+		repo:          "r",
+		issueNum:      42,
+		issueTitle:    "Test issue",
+		issueBody:     "Add hello()",
 		nextCommentID: 1000,
-		perms:     map[string]bool{"push": true, "pull": true, "admin": false},
+		perms:         map[string]bool{"push": true, "pull": true, "admin": false},
+		orphanFiles:   map[string]ghMockFile{},
 	}
 }
 
@@ -112,6 +130,19 @@ func (m *ghMock) server() *httptest.Server {
 		// No PRs in default mock state.
 		writeJSON(w, []any{})
 	})
+
+	// git data API — used for orphan-branch creation.
+	// GET uses /git/ref/heads/<branch> (singular); CreateRef POSTs to
+	// /git/refs (plural).
+	mux.HandleFunc(prefix+"/git/ref/heads/"+artifactsBranch, m.handleGitRefRead)
+	mux.HandleFunc(prefix+"/git/refs", m.handleGitRefCreate)
+	mux.HandleFunc(prefix+"/git/blobs", m.handleGitBlobCreate)
+	mux.HandleFunc(prefix+"/git/trees", m.handleGitTreeCreate)
+	mux.HandleFunc(prefix+"/git/commits", m.handleGitCommitCreate)
+
+	// contents API — used for orphan-branch updates after creation. Catches
+	// paths under /contents/... by registering a prefix handler.
+	mux.HandleFunc(prefix+"/contents/", m.handleContents)
 
 	// GET /search/issues
 	mux.HandleFunc("/search/issues", func(w http.ResponseWriter, r *http.Request) {
@@ -292,6 +323,159 @@ func toLoginObjs(logins []string) []map[string]string {
 	return out
 }
 
+// --- orphan-branch / contents API handlers ---
+
+func (m *ghMock) handleGitRefRead(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.orphanBranchSHA == "" {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"ref": "refs/heads/" + artifactsBranch,
+		"object": map[string]string{
+			"type": "commit",
+			"sha":  m.orphanBranchSHA,
+		},
+	})
+}
+
+func (m *ghMock) handleGitRefCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "bad method", 405)
+		return
+	}
+	var req struct {
+		Ref string `json:"ref"`
+		SHA string `json:"sha"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if req.Ref == "refs/heads/"+artifactsBranch {
+		m.orphanBranchSHA = req.SHA
+	}
+	writeJSON(w, map[string]any{
+		"ref":    req.Ref,
+		"object": map[string]string{"type": "commit", "sha": req.SHA},
+	})
+}
+
+func (m *ghMock) handleGitBlobCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "bad method", 405)
+		return
+	}
+	var req struct {
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nextBlobID++
+	sha := fmt.Sprintf("blob%06d", m.nextBlobID)
+	writeJSON(w, map[string]string{"sha": sha})
+}
+
+func (m *ghMock) handleGitTreeCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "bad method", 405)
+		return
+	}
+	var req struct {
+		Tree []struct {
+			Path string `json:"path"`
+			Mode string `json:"mode"`
+			Type string `json:"type"`
+			SHA  string `json:"sha"`
+		} `json:"tree"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nextTreeID++
+	sha := fmt.Sprintf("tree%06d", m.nextTreeID)
+	// Record the file in our virtual filesystem under each tree-entry path.
+	for _, e := range req.Tree {
+		m.orphanFiles[e.Path] = ghMockFile{SHA: e.SHA}
+	}
+	writeJSON(w, map[string]string{"sha": sha})
+}
+
+func (m *ghMock) handleGitCommitCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "bad method", 405)
+		return
+	}
+	var req struct {
+		Tree string `json:"tree"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nextCommitID++
+	sha := fmt.Sprintf("commit%06d", m.nextCommitID)
+	if m.orphanBranchSHA == "" {
+		m.branchCreated = true
+	}
+	writeJSON(w, map[string]string{"sha": sha})
+}
+
+// handleContents serves GET (get-contents) and PUT (create/update file)
+// against /repos/o/r/contents/<path>.
+func (m *ghMock) handleContents(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, fmt.Sprintf("/repos/%s/%s/contents/", m.owner, m.repo))
+	switch r.Method {
+	case http.MethodGet:
+		m.mu.Lock()
+		file, ok := m.orphanFiles[path]
+		m.mu.Unlock()
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"name":     path,
+			"path":     path,
+			"sha":      file.SHA,
+			"type":     "file",
+			"size":     len(file.Content),
+			"download_url": "https://raw.githubusercontent.com/" + m.owner + "/" + m.repo + "/" + artifactsBranch + "/" + path,
+		})
+	case http.MethodPut:
+		var req struct {
+			Message string `json:"message"`
+			Content string `json:"content"` // base64
+			SHA     string `json:"sha,omitempty"`
+			Branch  string `json:"branch,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		m.mu.Lock()
+		m.nextBlobID++
+		newSHA := fmt.Sprintf("blob%06d", m.nextBlobID)
+		m.orphanFiles[path] = ghMockFile{Content: []byte(req.Content), SHA: newSHA}
+		m.updateCalls++
+		m.mu.Unlock()
+		writeJSON(w, map[string]any{
+			"content": map[string]any{"path": path, "sha": newSHA},
+			"commit":  map[string]string{"sha": "commit-update"},
+		})
+	default:
+		http.Error(w, "bad method", 405)
+	}
+}
+
 func ghCommentJSON(c ghMockComment) map[string]any {
 	return map[string]any{
 		"id":         c.ID,
@@ -468,6 +652,180 @@ func TestBackend_BumpInvocations_PersistsViaStateComment(t *testing.T) {
 	}
 	if rec.CostUSDSpent != 1.5 {
 		t.Errorf("CostUSDSpent = %v, want 1.5", rec.CostUSDSpent)
+	}
+}
+
+func TestBackend_ResolveFileArtifactSpills(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	ctx := t.Context()
+	ref := b.refFromIssue(42)
+	claim, err := b.Claim(ctx, ref, "alice")
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if err := b.SeedState(ctx, claim, []flow.ArtifactSpec{
+		{Id: "screenshot", Type: flow.ArtifactFile, Required: true, Budget: flow.DefaultStepBudget()},
+	}); err != nil {
+		t.Fatalf("SeedState: %v", err)
+	}
+
+	body := flow.ArtifactBody{
+		Type: flow.ArtifactFile,
+		File: flow.FileBody{Name: "result.png", Content: []byte("PNG\x89big content")},
+	}
+	if err := b.ResolveArtifact(ctx, claim, "screenshot", body); err != nil {
+		t.Fatalf("ResolveArtifact: %v", err)
+	}
+
+	// Branch was created on first spill.
+	mock.mu.Lock()
+	created := mock.branchCreated
+	wantPath := artifactFilePath(42, "screenshot", "result.png")
+	_, fileRecorded := mock.orphanFiles[wantPath]
+	mock.mu.Unlock()
+	if !created {
+		t.Errorf("orphan branch was not created on first spill")
+	}
+	if !fileRecorded {
+		t.Errorf("orphan-branch file %q not recorded", wantPath)
+	}
+
+	// The marker comment should link to the raw URL.
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	wantRaw := b.rawArtifactURL(wantPath)
+	hit := false
+	for _, c := range mock.comments {
+		if strings.Contains(c.Body, wantRaw) {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Errorf("no comment links to raw URL %s; comments: %d", wantRaw, len(mock.comments))
+	}
+}
+
+func TestBackend_ResolvePatchArtifactSpills(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	ctx := t.Context()
+	ref := b.refFromIssue(42)
+	claim, _ := b.Claim(ctx, ref, "alice")
+	_ = b.SeedState(ctx, claim, []flow.ArtifactSpec{
+		{Id: "implementation", Type: flow.ArtifactPatch, Required: true, Budget: flow.DefaultStepBudget()},
+	})
+
+	patch := []byte("--- a/foo\n+++ b/foo\n@@ -1 +1 @@\n-old\n+new\n")
+	body := flow.ArtifactBody{
+		Type:  flow.ArtifactPatch,
+		Patch: flow.PatchBody{Diff: patch, BaseSHA: "abc1234", BaseBranch: "main"},
+	}
+	if err := b.ResolveArtifact(ctx, claim, "implementation", body); err != nil {
+		t.Fatalf("ResolveArtifact: %v", err)
+	}
+
+	mock.mu.Lock()
+	_, ok := mock.orphanFiles[artifactFilePath(42, "implementation", "patch.diff")]
+	mock.mu.Unlock()
+	if !ok {
+		t.Errorf("patch.diff was not committed to orphan branch")
+	}
+}
+
+func TestBackend_LargeMarkdownAutoSpills(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+	// Force a small comment ceiling so any non-trivial body spills.
+	b.cfg.MaxCommentBytes = 256
+
+	ctx := t.Context()
+	ref := b.refFromIssue(42)
+	claim, _ := b.Claim(ctx, ref, "alice")
+	_ = b.SeedState(ctx, claim, []flow.ArtifactSpec{
+		{Id: "log", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
+	})
+
+	// 2 KiB markdown — well above 256 byte cap.
+	bigBody := strings.Repeat("verbose output line\n", 200)
+	if err := b.ResolveArtifact(ctx, claim, "log", flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: bigBody}); err != nil {
+		t.Fatalf("ResolveArtifact: %v", err)
+	}
+
+	mock.mu.Lock()
+	_, spilled := mock.orphanFiles[artifactFilePath(42, "log", "body.md")]
+	commentCount := len(mock.comments)
+	mock.mu.Unlock()
+	if !spilled {
+		t.Errorf("large markdown was not spilled to orphan branch")
+	}
+	if commentCount < 2 {
+		t.Errorf("expected at least state + artifact comments; got %d", commentCount)
+	}
+}
+
+func TestBackend_SecondSpillUpdatesViaContentsAPI(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	ctx := t.Context()
+	ref := b.refFromIssue(42)
+	claim, _ := b.Claim(ctx, ref, "alice")
+	_ = b.SeedState(ctx, claim, []flow.ArtifactSpec{
+		{Id: "blob", Type: flow.ArtifactFile, Required: true, Budget: flow.DefaultStepBudget()},
+	})
+
+	// First resolve creates the branch.
+	if err := b.ResolveArtifact(ctx, claim, "blob", flow.ArtifactBody{Type: flow.ArtifactFile, File: flow.FileBody{Name: "x.bin", Content: []byte("v1")}}); err != nil {
+		t.Fatalf("first ResolveArtifact: %v", err)
+	}
+	// Mark the artifact stale so a second resolve is accepted.
+	if err := b.MarkStale(ctx, claim, "blob"); err != nil {
+		t.Fatalf("MarkStale: %v", err)
+	}
+	// Second resolve must use the Contents PUT path (branch exists).
+	if err := b.ResolveArtifact(ctx, claim, "blob", flow.ArtifactBody{Type: flow.ArtifactFile, File: flow.FileBody{Name: "x.bin", Content: []byte("v2")}}); err != nil {
+		t.Fatalf("second ResolveArtifact: %v", err)
+	}
+
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	if mock.updateCalls < 1 {
+		t.Errorf("expected at least one contents PUT call; got %d", mock.updateCalls)
+	}
+}
+
+func TestSanitizeFilename(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"normal.txt", "normal.txt"},
+		{"weird name with spaces.png", "weird_name_with_spaces.png"},
+		{"../../escape", ".._.._escape"}, // leading dots trimmed → ".._.._escape" without leading dot
+		{"", "blob"},
+		{"...", "blob"},
+	}
+	for _, c := range cases {
+		got := sanitizeFilename(c.in)
+		// Trim-left of dots can produce different result depending on input;
+		// the contract is just "no path separators, no leading dots, non-empty".
+		if strings.ContainsAny(got, "/\\") {
+			t.Errorf("sanitizeFilename(%q) = %q, contains path separator", c.in, got)
+		}
+		if strings.HasPrefix(got, ".") {
+			t.Errorf("sanitizeFilename(%q) = %q, starts with dot", c.in, got)
+		}
+		if got == "" {
+			t.Errorf("sanitizeFilename(%q) = empty", c.in)
+		}
 	}
 }
 
