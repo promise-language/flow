@@ -2,8 +2,9 @@
 
 ## Context
 
-`github.com/promise-language/flow` is an open-source Go SDK (Apache-2.0) for
-declarative, stateless-per-step automation against task-tracking systems.
+`github.com/promise-language/flow` is an open-source Go SDK (dual-licensed
+MIT or Apache-2.0, at the user's option) for declarative, stateless-per-step
+automation against task-tracking systems.
 The flow author writes a Go binary that:
 
 - Registers **artifacts** (handler-produced durable item state: markdown,
