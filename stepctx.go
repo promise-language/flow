@@ -67,5 +67,12 @@ type StepCtx interface {
 	// returned Worktree.
 	Worktree() (Worktree, error)
 
+	// Claim returns the active claim that scoped this StepCtx. Handlers
+	// that call backend-specific helpers (typically on a concrete
+	// *Backend type captured via a closure in main) pass this through
+	// to methods that take a flow.Claim. Treat as read-only — the claim
+	// is owned by cli.RunOne for the duration of the invocation.
+	Claim() Claim
+
 	RefreshItem() error
 }

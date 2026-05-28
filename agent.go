@@ -3,10 +3,17 @@ package flow
 import "context"
 
 // AgentRequest is the spawn payload for one Agent.Run call. ResumeSessionID
-// empty means a fresh session; non-empty resumes that session id.
+// empty means "don't actively resume a specific session id" (the Agent
+// impl may still attach to whatever session the substrate has cached);
+// non-empty resumes that exact session id. FreshSession is the stronger
+// "discard any inherited session state" signal — Agent impls should
+// honor it by spawning the underlying tool from a clean slate. Useful at
+// flow-boundary turns (e.g. the plan step opens a new piece of work and
+// must never inherit the previous flow's chat history).
 type AgentRequest struct {
 	Prompt          string
 	ResumeSessionID string
+	FreshSession    bool
 	PermissionMode  string // default | acceptEdits | bypassPermissions | plan
 	Model           string
 	Effort          string // low | medium | high | max

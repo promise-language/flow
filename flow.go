@@ -183,6 +183,21 @@ func (f *Flow) Pending(s *ItemState, name string) bool {
 func (f *Flow) stepPending(state *ItemState, st *step) bool {
 	switch st.kind {
 	case stepArtifact:
+		// Operator opt-out: when the backend surfaces an ArtifactRecord
+		// for this id with Required=false AND it isn't already resolved,
+		// the operator has explicitly removed it from the checklist
+		// ("don't run this step"). Skip — DeriveNext moves on to the
+		// next step instead of dispatching a handler against an item
+		// the operator marked as not-required.
+		//
+		// A resolved record with Required=false (run completed, then
+		// operator unchecked) is also skipped from a future re-run
+		// here, but the resolved branch below would short-circuit
+		// anyway, so the opt-out check only matters for unresolved
+		// entries.
+		if rec, ok := state.Artifacts[st.artifact]; ok && !rec.Required && !rec.Resolved {
+			return false
+		}
 		rec := state.Artifact(st.artifact)
 		if !rec.Resolved {
 			return true
