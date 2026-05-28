@@ -1,6 +1,6 @@
 module github.com/promise-language/flow
 
-go 1.26.3
+go 1.26.1
 
 require (
 	github.com/google/go-github/v68 v68.0.0
