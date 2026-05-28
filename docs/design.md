@@ -1340,3 +1340,12 @@ Unit tests (table-driven, in `*_test.go`):
     can later back the `Backend` interface with object storage + a queue
     without changing the handler API. Decision: build comment-backed v1;
     revisit reactor only when a concrete use case demands it.
+11. **Gates (structured periodic checks).** Separate from the per-issue
+    flow lifecycle: gates emit a stable stdout-JSON envelope (metrics +
+    tests + completion-set) that a tracker-style orchestrator consumes for
+    ratcheting baselines and health dashboards. v1 of flow ships without
+    them; design is in
+    [docs/proposals/gates.md](proposals/gates.md). The proposed shape adds
+    a `flow/gate` subpackage + optional `cli.App.Gates` + a `gate manifest
+    | list | run` cli surface; tracker compatibility is free because the
+    wire format mirrors tracker's existing one.
