@@ -9,11 +9,19 @@ import (
 )
 
 func (app *App) cmdClaim(ctx context.Context, args []string) int {
-	if len(args) == 0 {
+	fs := app.newFlagSet("claim")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() == 0 {
 		fmt.Fprintln(app.Err, "claim: missing item id (e.g., `claim 42`)")
 		return 2
 	}
-	itemID := args[0]
+	if fs.NArg() > 1 {
+		fmt.Fprintf(app.Err, "claim: unexpected argument %q (claim takes exactly one item id)\n", fs.Arg(1))
+		return 2
+	}
+	itemID := fs.Arg(0)
 
 	// Find the ItemRef for this id by listing eligible items and matching
 	// the display string. Backends with cheaper paths can implement a

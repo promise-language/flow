@@ -20,6 +20,9 @@ type Doctor interface {
 }
 
 func (app *App) cmdDoctor(ctx context.Context, args []string) int {
+	if !app.rejectArgs("doctor", args) {
+		return 2
+	}
 	if d, ok := app.Backend.(Doctor); ok {
 		if err := d.Doctor(ctx); err != nil {
 			fmt.Fprintf(app.Err, "%s doctor: %s\n", glyphFail, err)

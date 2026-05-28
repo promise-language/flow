@@ -6,6 +6,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -264,11 +265,36 @@ usage:
   %[1]s doctor                       verify backend prereqs
   %[1]s list                         list items this flow can process
   %[1]s claim <item-id>              acquire a claim on an item (alias: lease)
-  %[1]s run-step [--item <id>]       advance ONE lifecycle item (one prompt → one artifact)
-  %[1]s status [<item-id>]           read-only lifecycle checklist
+  %[1]s run-step                     advance ONE lifecycle item (one prompt → one artifact)
+  %[1]s status                       read-only lifecycle checklist
   %[1]s grant <artifact-id> [--invocations N] [--cost USD] [--prompts N] [--timeout SECONDS]
                                      extend a parked step's budget. <artifact-id> is
                                      the id from AddStep (e.g. "plan"), NOT the step
                                      name (e.g. "write plan")
   %[1]s release                      drop the claim`, bin)
+}
+
+// newFlagSet returns a FlagSet configured for the strict-parsing convention:
+// errors print to app.Err, unknown flags are rejected. Caller registers any
+// flags, calls fs.Parse, then validates fs.NArg() against the expected
+// positional count.
+func (app *App) newFlagSet(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(app.Err)
+	return fs
+}
+
+// rejectArgs parses args for a command that takes no flags and no
+// positionals. Returns true on success; on rejection writes to app.Err and
+// returns false (caller exits with code 2).
+func (app *App) rejectArgs(name string, args []string) bool {
+	fs := app.newFlagSet(name)
+	if err := fs.Parse(args); err != nil {
+		return false
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(app.Err, "%s: unexpected argument %q (this command takes no arguments)\n", name, fs.Arg(0))
+		return false
+	}
+	return true
 }

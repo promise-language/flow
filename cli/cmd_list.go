@@ -6,6 +6,9 @@ import (
 )
 
 func (app *App) cmdList(ctx context.Context, args []string) int {
+	if !app.rejectArgs("list", args) {
+		return 2
+	}
 	refs, err := app.Backend.ListEligible(ctx)
 	if err != nil {
 		fmt.Fprintln(app.Err, "list:", err)

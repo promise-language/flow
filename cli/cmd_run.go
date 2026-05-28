@@ -7,6 +7,9 @@ import (
 )
 
 func (app *App) cmdRun(ctx context.Context, args []string) int {
+	if !app.rejectArgs("run-step", args) {
+		return 2
+	}
 	claim, err := app.Backend.LookupActiveClaim(ctx, app.Owner)
 	if err != nil {
 		fmt.Fprintln(app.Err, "run-step:", err)

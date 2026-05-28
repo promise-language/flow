@@ -6,6 +6,9 @@ import (
 )
 
 func (app *App) cmdRelease(ctx context.Context, args []string) int {
+	if !app.rejectArgs("release", args) {
+		return 2
+	}
 	claim, err := app.Backend.LookupActiveClaim(ctx, app.Owner)
 	if err != nil {
 		fmt.Fprintln(app.Err, "release:", err)
