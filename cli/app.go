@@ -1,6 +1,6 @@
 // Package cli wires the program-level CLI for a flow binary. A binary's
 // main() builds a cli.App and calls cli.Run(app); the SDK dispatches
-// claim|run|release|status|grant|doctor|list against os.Args.
+// claim|run-step|release|status|grant|doctor|list against os.Args.
 package cli
 
 import (
@@ -104,7 +104,7 @@ func RunWithArgs(app App, args []string) int {
 		return app.cmdStatus(ctx, rest)
 	case "grant":
 		return app.cmdGrant(ctx, rest)
-	case "run":
+	case "run-step":
 		return app.cmdRun(ctx, rest)
 	case "help", "--help", "-h":
 		fmt.Fprintln(app.Out, usage(app.Name))
@@ -250,11 +250,13 @@ func usage(bin string) string {
 
 usage:
   %[1]s doctor                       verify backend prereqs
-  %[1]s list                         list eligible items
+  %[1]s list                         list items this flow can process
   %[1]s claim <item-id>              acquire a claim on an item (alias: lease)
-  %[1]s run [--item <id>]            advance one step
+  %[1]s run-step [--item <id>]       advance ONE lifecycle item (one prompt → one artifact)
   %[1]s status [<item-id>]           read-only lifecycle checklist
-  %[1]s grant <key> [--invocations N] [--cost USD] [--prompts N] [--timeout SECONDS]
-                                     extend a step's budget
+  %[1]s grant <artifact-id> [--invocations N] [--cost USD] [--prompts N] [--timeout SECONDS]
+                                     extend a parked step's budget. <artifact-id> is
+                                     the id from AddStep (e.g. "plan"), NOT the step
+                                     name (e.g. "write plan")
   %[1]s release                      drop the claim`, bin)
 }

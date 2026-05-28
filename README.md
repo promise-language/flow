@@ -18,13 +18,18 @@ backend you plug in).
 [claude]: https://docs.anthropic.com/en/docs/claude-code
 
 ```
-$ ./implement claim 42       # acquire a claim on issue #42
-$ ./implement run            # advance one step (one prompt → one durable artifact)
-$ ./implement run            # next step
-$ ./implement status         # read-only lifecycle checklist
-$ ./implement grant plan --invocations 3 --cost 10
-$ ./implement release        # drop the claim
+$ ./fix claim 42             # acquire a claim on issue #42
+$ ./fix run-step             # advance ONE lifecycle item (one prompt → one durable artifact)
+$ ./fix run-step             # next lifecycle item
+$ ./fix status               # read-only lifecycle checklist
+$ ./fix grant plan --invocations 3 --cost 10
+$ ./fix release              # drop the claim
 ```
+
+Each `run-step` invocation is a single forward tick: it inspects state,
+picks the first pending lifecycle item, runs its handler, persists the
+result, and exits. A future `run-all` (and a bundled `auto` / `process`
+that wraps `claim → run-all → release` in one call) is planned.
 
 Full architecture in [docs/design.md](docs/design.md).
 
@@ -34,7 +39,7 @@ v1 in progress. The SDK foundation, the cli orchestrator, the claude
 driver, and the github backend are landed; 80 tests pass across five
 packages. The two reference example binaries
 ([`examples/verify`](examples/verify) and
-[`examples/implement`](examples/implement)) build cleanly. A `gh`-gated
+[`examples/fix`](examples/fix)) build cleanly. A `gh`-gated
 end-to-end integration test is in place but not yet wired into CI.
 
 ## Install
@@ -92,12 +97,12 @@ import (
 
 func main() {
     backend, err := ghbackend.NewBackend(ghbackend.Config{
-        BinaryName: "implement",
+        BinaryName: "fix",
         VerifyCmd:  []string{"bash", "bin/verify.sh"},
     })
     if err != nil { panic(err) }
 
-    f := flow.NewFlow("implement", []flow.ItemType{"task"})
+    f := flow.NewFlow("fix", []flow.ItemType{"task"})
     f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
         resp, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{
             Prompt: "Plan implementation of issue: " + ctx.Item().Title,
@@ -118,7 +123,8 @@ func main() {
 ```
 
 A larger contributor + maintainer flow lives at
-[examples/implement/main.go](examples/implement/main.go); a one-step
+[examples/fix/main.go](examples/fix/main.go) — two flows (`fix` and
+`merge`) in one binary, gated by `RequireSignal("pr-open")`. A one-step
 `go test ./...` flow lives at [examples/verify/main.go](examples/verify/main.go).
 
 ## CLI surface
@@ -126,12 +132,17 @@ A larger contributor + maintainer flow lives at
 | command | behavior |
 |---|---|
 | `doctor` | verify gh + repo push permissions; ✅ / ❌ on the result |
-| `list` | list issues this binary is eligible for |
+| `list` | list issues this flow can process |
 | `claim <id>` (alias `lease`) | acquire an exclusive claim; seeds the state comment |
-| `run` | advance one lifecycle item; emits an `InvocationResult` JSON |
+| `run-step` | advance ONE lifecycle item; emits an `InvocationResult` JSON. Re-run until the flow reports `done` |
 | `status [<id>]` | read-only checklist |
-| `grant <key> --invocations N --cost USD --prompts N --timeout SECONDS` | extend a step's budget after `BudgetExhausted` |
+| `grant <artifact-id> --invocations N --cost USD --prompts N --timeout SECONDS` | extend a parked step's budget. `<artifact-id>` is the id passed to `AddStep` (e.g. `plan`), NOT the human step name (`"write plan"`) |
 | `release` | drop the claim |
+
+**Planned** (not yet implemented):
+- `run-all` — loop `run-step` until the flow reports `done`, parked, or asks a question
+- `auto` / `process` (name TBD) — bundle `claim` + `run-all` + `release` into one
+  invocation; ideal for `cron`-driven runs against a queue of eligible issues
 
 All commands live in [cli/](cli/); the binary opts in by calling
 `cli.Run(cli.App{...})`.
@@ -154,7 +165,7 @@ All commands live in [cli/](cli/); the binary opts in by calling
 ├── pkg/backend/github/     GitHub-Issues-backed backend (state_comment, claim race-lock,
 │                           worktree, signal polling, orphan-branch artifact spillover)
 ├── examples/verify/        minimal one-step "run go test" flow
-├── examples/implement/     contributor + maintainer flow on one issue
+├── examples/fix/           contributor (fix) + maintainer (merge) flows on one issue
 └── docs/design.md          full architecture spec
 ```
 

@@ -13,7 +13,9 @@ The flow author writes a Go binary that:
 - Declares one or more **flows**, each an ordered list of steps that produce
   those artifacts or trigger those signals.
 - Embeds the SDK's CLI (`cli.Run`) which dispatches
-  `claim | run | release | status | grant` against the registered flows.
+  `claim | run-step | release | status | grant` against the registered
+  flows. A future `run-all` (and a bundled "claim → run-all → release"
+  command) are planned — they share the same orchestrator.
 
 The SDK is **backend-pluggable**. Two backend implementations:
 
@@ -53,9 +55,9 @@ The tracker repo then imports the SDK and adds only:
 | Signal state on the issue | Same state-comment YAML carries a signals section keyed by SignalId, written by the backend when observed. Source-of-truth is GitHub itself (PR state, labels, etc.); the comment holds the cached observation. |
 | Large artifact bytes | Orphan branch in the same repo. Committed to `flow/artifacts/issue-N/<key>/<filename>` on a `flow-artifacts` orphan branch; comments link via `raw.githubusercontent.com`. No second repo, no external blob store. |
 | GitHub auth | Shell out to `gh` CLI. Hard runtime dep on `gh`. |
-| `.flow/` worktree state | Pointer + prefetched cache. Written by `claim` (alias `lease`), kept fresh by `run`, deleted by `release`. Contains `active.json` (the serialized `Claim`), `state.yml` (the parsed `ItemState`), and `artifacts/<key>.{md,bytes,json}` (prefetched contents). Handler reads via `ctx.Markdown/File/CommitHash/JSON/Patch(key)` are zero-API. |
+| `.flow/` worktree state | Pointer + prefetched cache. Written by `claim` (alias `lease`), kept fresh by `run-step`, deleted by `release`. Contains `active.json` (the serialized `Claim`), `state.yml` (the parsed `ItemState`), and `artifacts/<key>.{md,bytes,json}` (prefetched contents). Handler reads via `ctx.Markdown/File/CommitHash/JSON/Patch(key)` are zero-API. |
 | Multi-flow per binary | **Multiple flows per binary, distinguished by `Item.Type` and `RequireSignal` preconditions.** `cli.Run` picks the first flow whose constraints match per dispatch. Replaces the earlier "one binary = one flow" rule — needed to model contributor (open PR) vs maintainer (merge PR) lifecycles on the same issue. |
-| Runner concept | Eliminated for github backend. The flow binary is self-contained; one step per `./<binary> run` invocation. |
+| Runner concept | Eliminated for github backend. The flow binary is self-contained; one lifecycle item per `./<binary> run-step` invocation. |
 
 ---
 
@@ -65,23 +67,38 @@ End user installs `gh`, authenticates once (`gh auth login`), then runs the
 project-supplied flow binary:
 
 ```
-$ ./implement doctor                 # verifies gh + auth + repo access
-$ ./implement list                   # lists eligible open issues
-$ ./implement claim 42               # assigns me + labels for this flow binary
-$ ./implement run                    # advances one step on the claimed issue
-$ ./implement run                    # advances next step
-$ ./implement status [<id>]          # read-only lifecycle checklist
-$ ./implement grant <key> ...        # extend a step's budget after BudgetExhausted
-$ ./implement release                # unassign / drop the claim
+$ ./fix doctor                       # verifies gh + auth + repo access
+$ ./fix list                         # lists open issues this flow can process
+$ ./fix claim 42                     # assigns me + labels for this flow binary
+$ ./fix run-step                     # advances ONE lifecycle item on the claimed issue
+$ ./fix run-step                     # advances the next item
+$ ./fix status [<id>]                # read-only lifecycle checklist
+$ ./fix grant <artifact-id> ...      # extend a parked step's budget
+$ ./fix release                      # unassign / drop the claim
 ```
 
-`run` without `--issue` reads `.flow/active.json` (written by `claim`); falls
+The `<artifact-id>` passed to `grant` is the id from `AddStep` (e.g.
+`plan`), NOT the human-readable step name (e.g. `"write plan"`). `run-step`
+without `--issue` reads `.flow/active.json` (written by `claim`); falls
 back to "the open issue assigned to me with label `flow:<binary>`." If
 multiple match, errors and asks for `--issue N`.
 
-The CLI commands (`claim` / alias `lease`, `run`, `release`, `status`,
+The CLI commands (`claim` / alias `lease`, `run-step`, `release`, `status`,
 `grant`, `doctor`, `list`) all live in `cli/`; the binary opts in by calling
 `cli.Run(app)`.
+
+**Planned commands (not yet implemented):**
+
+- `run-all` — loops `run-step` until the flow reports `done`, parks, or
+  asks a question. Same orchestrator, same budget enforcement, same
+  invocation result emitted per iteration; just removes the
+  one-step-per-process-spawn shell overhead.
+- A bundled `auto` / `process` command (name TBD) that wraps
+  `claim → run-all → release` so a cron-driven runner can sweep a queue of
+  eligible issues with one invocation per issue.
+
+Both build on the same `RunOne` orchestrator the current `run-step` uses;
+no shape changes to `flow.Backend` or `flow.StepCtx` are required.
 
 ---
 
@@ -396,10 +413,10 @@ type App struct {
     Flows     []*flow.Flow              // REQUIRED — at least one; order matters
 }
 
-func Run(app App) int  // dispatches claim|run|release|status|grant against os.Args[1:]
+func Run(app App) int  // dispatches claim|run-step|release|status|grant against os.Args[1:]
 ```
 
-**Flow selection.** On each `run`, `cli.App` scans `Flows` in order and picks
+**Flow selection.** On each `run-step`, `cli.App` scans `Flows` in order and picks
 the **first** flow whose `Types()` either contain `item.Type` or is empty
 (universal), whose `RequireSignal` preconditions are satisfied, and that has
 at least one pending lifecycle item. Ties resolved by registration order.
@@ -541,13 +558,12 @@ tracks claims by `(item, owner)`; a single owner holding multiple claims
 across different worktrees is legitimate. The constraint is local to the
 worktree.
 
-### Derivation (in the SDK, shared by run AND status)
+### Derivation (in the SDK, shared by run-step AND status)
 
 `Pending` / `DeriveNext` / `TerminalReason` / `IsReady` / `IsDone` live in
 the SDK on `*Flow` and read from the `*ItemState` that `Backend.LoadState`
-returns. The run/status parity guarantee ("`status` and `run` can never
-disagree about what's next") is structural — one derivation, called by both
-paths.
+returns. The parity guarantee ("`status` and `run-step` can never disagree
+about what's next") is structural — one derivation, called by both paths.
 
 ```go
 func (f *Flow) Steps() []string                       // ordered registration list
@@ -780,11 +796,11 @@ Two resolution mechanisms, transparent to the SDK:
 1. **Side-effect resolution.** `Worktree.OpenPR(...)` succeeds → backend
    immediately sets `pr-open` in the same transaction that records the PR
    URL. `Worktree.MergePR(...)` does the analog for `pr-merged`.
-2. **Polling refresh.** Every `Backend.LoadState(claim)` (one per `run`)
+2. **Polling refresh.** Every `Backend.LoadState(claim)` (one per `run-step`)
    hits `GET /repos/{o}/{r}/pulls/{n}` for the PR linked to this issue (the
    backend identifies it by claim-branch name) and reconciles all four
    signals against GitHub's reported state. No webhook plumbing required;
-   `run` IS the natural poll cadence.
+   `run-step` IS the natural poll cadence.
 
 ### Item.Type derivation
 
@@ -808,10 +824,10 @@ loop.
 
 ```
 <!-- flow:state-v1 begin owner=alice -->
-<details><summary>📋 Flow state — implement (machine-managed, do not edit)</summary>
+<details><summary>📋 Flow state — fix (machine-managed, do not edit)</summary>
 
 ```yaml
-flow: implement
+flow: fix
 schema: 1
 seeded_at: 2026-05-26T15:00:00Z
 
@@ -906,7 +922,7 @@ issues.
 #### `claim N` (alias `lease N`)
 
 `claim` is where the SDK does its heavy reads. After it completes, every
-subsequent `run` has a fully populated `.flow/` directory and can dispatch
+subsequent `run-step` has a fully populated `.flow/` directory and can dispatch
 handlers without per-artifact API calls.
 
 1. **Resolve token** — `gh auth token`, fall back to `GITHUB_TOKEN`.
@@ -943,7 +959,7 @@ handlers without per-artifact API calls.
 After claim: handlers can read any artifact / signal via `ctx.Markdown(id)`
 / `ctx.Signal(id)` / etc. with zero API cost.
 
-#### `run`
+#### `run-step`
 
 Pure function of (cached state + fresh state-comment fetch).
 
@@ -1040,16 +1056,16 @@ func main() {
     }
 
     // Contributor flow: plans, implements, opens the PR.
-    implement := flow.NewFlow("implement", []flow.ItemType{"task", "bug"})
-    implement.AddStep      ("write plan",           "plan",           stepPlan,           flow.Required)
-    implement.AddStep      ("implement the change", "implementation", stepImplementation,
-                            flow.Required,
-                            flow.MaxPromptsPerInvocation(5),
-                            flow.Timeout(60*time.Minute))
-    implement.AddStep      ("review the work",      "review",         stepReview,         flow.Required)
-    implement.AddStep      ("analyze coverage",     "coverage",       stepCoverage,       flow.Required)
-    implement.AddStep      ("verify",               "verify-impl",    stepVerify,         flow.Required)
-    implement.AddSignalStep("create pull request",  "pr-open",        stepCreatePR,       flow.Required)
+    fix := flow.NewFlow("fix", []flow.ItemType{"task", "bug"})
+    fix.AddStep      ("write plan",           "plan",           stepPlan,           flow.Required)
+    fix.AddStep      ("implement the change", "implementation", stepImplementation,
+                      flow.Required,
+                      flow.MaxPromptsPerInvocation(5),
+                      flow.Timeout(60*time.Minute))
+    fix.AddStep      ("review the work",      "review",         stepReview,         flow.Required)
+    fix.AddStep      ("analyze coverage",     "coverage",       stepCoverage,       flow.Required)
+    fix.AddStep      ("verify",               "verify-impl",    stepVerify,         flow.Required)
+    fix.AddSignalStep("create pull request",  "pr-open",        stepCreatePR,       flow.Required)
 
     // Maintainer flow: reviews + re-verifies + merges. Eligible only once PR is open.
     merge := flow.NewFlow("merge", []flow.ItemType{"task", "bug"})
@@ -1066,7 +1082,7 @@ func main() {
         Agent:     claude.New(),
         Artifacts: artifacts,
         Signals:   signals,
-        Flows:     []*flow.Flow{implement, merge},
+        Flows:     []*flow.Flow{fix, merge},
     }))
 }
 ```
@@ -1096,14 +1112,14 @@ func stepCreatePR(ctx flow.StepCtx) error {
 
 ### Selection logic walkthrough
 
-`cli.App.Flows` registered in order: `[implement, merge]`. Each `run`:
+`cli.App.Flows` registered in order: `[fix, merge]`. Each `run-step`:
 
 1. Item is `task` — both flows' types match.
-2. `implement` has no `RequireSignal` preconditions; check pending:
+2. `fix` has no `RequireSignal` preconditions; check pending:
    - If any of {`plan`, `implementation`, `review`, `coverage`,
-     `verify-impl`, `pr-open`} unresolved → `implement` active, dispatch
+     `verify-impl`, `pr-open`} unresolved → `fix` active, dispatch
      next pending.
-3. If `implement` done (all six resolved), try `merge`:
+3. If `fix` done (all six resolved), try `merge`:
    - `RequireSignal("pr-open")` satisfied.
    - If any of {`review-maint`, `verify-merge`, `pr-merged`,
      `merge-commit`} unresolved → `merge` active.
@@ -1113,7 +1129,7 @@ func stepCreatePR(ctx flow.StepCtx) error {
 
 This design covers maintainer mode (v1: user has push to upstream). Contributor
 mode (PR from a fork) changes the worktree mechanics but not the flow model
-— same `implement` flow, same signals, just `wt.OpenPR(...)` opens a
+— same `fix` flow, same signals, just `wt.OpenPR(...)` opens a
 cross-repo PR via `gh pr create --head forkowner:branch`. Deferred for v1;
 nothing in the SDK changes to support it later.
 
@@ -1152,7 +1168,7 @@ github.com/promise-language/flow/
 ├── *_test.go                           table-driven tests
 ├── cli/
 │   ├── app.go                          App struct, Run(App) int entry point, startup validation
-│   ├── cmd_run.go                      ★ orchestrator: one step per invocation, flow selection, budget enforcement
+│   ├── cmd_run.go                      ★ `run-step` orchestrator: one lifecycle item per invocation
 │   ├── cmd_claim.go                    ★ claim entry point (alias: lease); primes the local cache
 │   ├── cmd_release.go
 │   ├── cmd_status.go                   read-only checklist via LookupClaim + LoadState
@@ -1179,7 +1195,7 @@ github.com/promise-language/flow/
 ├── pkg/git/
 │   └── git.go                          local git ops via os.exec
 ├── examples/
-│   ├── implement/main.go               full contributor+maintainer example
+│   ├── fix/main.go                     full contributor+maintainer example (binary name `fix`)
 │   └── verify/main.go                  minimal "run go test" one-step flow
 └── docs/
     ├── design.md                       (this file)
@@ -1228,7 +1244,7 @@ github.com/promise-language/flow/
    the fake backend.
 3. **GitHub backend.** Land `pkg/backend/github/*`. Verify with integration
    tests gated by `GH_INTEGRATION=1` against a sandbox repo.
-4. **Examples.** `examples/implement/` and `examples/verify/` exercise the
+4. **Examples.** `examples/fix/` and `examples/verify/` exercise the
    real github backend end-to-end.
 5. **Tracker repo integration** (separate plan, in the tracker repo): the
    tracker imports this SDK, adds `pkg/backend/tracker/`, rewrites
@@ -1241,20 +1257,20 @@ github.com/promise-language/flow/
 
 End-to-end against a real repo:
 1. `gh auth login`.
-2. `cd examples/implement && go build -o implement .`
+2. `cd examples/fix && go build -o fix .`
 3. Create a private test repo; push it.
 4. Open issue with labels `type:task needs-flow`.
-5. `./implement doctor` → green.
-6. `./implement claim 1` → state comment posted; labels `flow:seeded`,
-   `flow:implement`, `flow:owner:<me>` set; assignee set; `.flow/active.json`
+5. `./fix doctor` → green.
+6. `./fix claim 1` → state comment posted; labels `flow:seeded`,
+   `flow:fix`, `flow:owner:<me>` set; assignee set; `.flow/active.json`
    present.
-7. `./implement run` ×5 → plan, implementation, review, coverage,
+7. `./fix run-step` ×5 → plan, implementation, review, coverage,
    verify-impl artifacts posted as comments.
-8. `./implement run` → PR opens via `gh pr create`; backend writes
-   `pr-open` signal; `implement` flow complete.
-9. `./implement run` → maintainer flow starts: review-maint comment posted.
-10. `./implement run` → verify-merge re-runs against merge target.
-11. `./implement run` → PR merged via `gh pr merge`; backend writes
+8. `./fix run-step` → PR opens via `gh pr create`; backend writes
+   `pr-open` signal; `fix` flow complete.
+9. `./fix run-step` → maintainer flow starts: review-maint comment posted.
+10. `./fix run-step` → verify-merge re-runs against merge target.
+11. `./fix run-step` → PR merged via `gh pr merge`; backend writes
     `pr-merged` signal; merge-commit recorded.
 12. Issue auto-closes with `state_reason: completed`.
 

@@ -1,7 +1,7 @@
-// implement is the reference contributor+maintainer flow binary. It models
-// the full lifecycle of taking a GitHub issue from triage to merged PR:
+// fix is the reference contributor+maintainer flow binary. It models the
+// full lifecycle of taking a GitHub issue from triage to merged PR:
 //
-//   contributor flow (no preconditions):
+//   fix flow (contributor, no preconditions):
 //     write plan          → plan artifact (markdown)
 //     implement the change → implementation artifact (patch)
 //     review the work     → review artifact (markdown)
@@ -9,19 +9,19 @@
 //     verify              → verify-impl artifact (markdown)
 //     create pull request → pr-open signal (handler: gh pr create)
 //
-//   maintainer flow (gated on pr-open):
+//   merge flow (maintainer, gated on pr-open):
 //     review the implementation → review-maint artifact (markdown)
 //     verify                    → verify-merge artifact (markdown)
 //     merge pull request        → pr-merged signal (handler: gh pr merge)
 //     record merge commit       → merge-commit artifact (commit hash)
 //
-// Build:   go build -o implement ./examples/implement
-// Use:     ./implement doctor
-//          ./implement claim 42
-//          ./implement run     # one step per invocation
+// Build:   go build -o fix ./examples/fix
+// Use:     ./fix doctor
+//          ./fix claim 42
+//          ./fix run-step    # one lifecycle item per invocation
 //
-// Issues must carry `type:task` (or `type:bug`) + the `flow:implement` label
-// + an assignee in order to be eligible.
+// Issues must carry `type:task` (or `type:bug`) + the `flow:fix` label +
+// an assignee for this binary to claim them.
 package main
 
 import (
@@ -37,12 +37,12 @@ import (
 
 func main() {
 	backend, err := ghbackend.NewBackend(ghbackend.Config{
-		BinaryName:  "implement",
+		BinaryName:  "fix",
 		VerifyCmd:   []string{"bash", "bin/verify.sh"},
 		DefaultType: "task",
 	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "implement: backend init:", err)
+		fmt.Fprintln(os.Stderr, "fix: backend init:", err)
 		os.Exit(1)
 	}
 
@@ -62,7 +62,7 @@ func main() {
 	}
 
 	// Contributor flow.
-	contributor := flow.NewFlow("implement", []flow.ItemType{"task", "bug"})
+	contributor := flow.NewFlow("fix", []flow.ItemType{"task", "bug"})
 	contributor.AddStep("write plan", "plan", stepPlan, flow.Required)
 	contributor.AddStep("implement the change", "implementation", stepImplementation,
 		flow.Required,
@@ -83,7 +83,7 @@ func main() {
 	maintainer.AddStep("record merge commit", "merge-commit", stepRecordMerge, flow.Required)
 
 	os.Exit(cli.Run(cli.App{
-		Name:      "implement",
+		Name:      "fix",
 		Backend:   backend,
 		Agent:     claude.New(),
 		Artifacts: artifacts,

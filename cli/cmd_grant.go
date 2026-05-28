@@ -19,7 +19,8 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 		return 2
 	}
 	if fs.NArg() < 1 {
-		fmt.Fprintln(app.Err, "grant: missing artifact key (e.g., `grant plan --invocations 3`)")
+		fmt.Fprintln(app.Err, "grant: missing artifact id (e.g., `grant plan --invocations 3`).")
+		fmt.Fprintln(app.Err, "       <artifact-id> is the id passed to AddStep, NOT the human step name.")
 		return 2
 	}
 	key := fs.Arg(0)
