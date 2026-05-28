@@ -265,14 +265,14 @@ func NewFlow(name string, types []ItemType) *Flow
 func (f *Flow) AddStep(name string, result ArtifactId, do StepHandler, opts ...StepOption)
 
 // AddSignalStep — handler does a side-effect action (typically a worktree
-// call: wt.OpenPR, wt.MergePR, wt.ApplyLabel, …) that causes the Backend
+// call: wt.Open, wt.Merge, wt.ApplyLabel, …) that causes the Backend
 // to set `signal`. The handler MUST NOT call any ctx.Resolve* — signals
 // are never handler-writable.
 //
 // Completion semantics: the step is COMPLETE when `signal` is set on the
 // item, NOT merely when the handler returned nil.
 //   - Synchronous side effect (common): Backend writes the signal as part
-//     of the worktree call (OpenPR writes pr-open atomically). Handler
+//     of the worktree call (Open writes pr-open atomically). Handler
 //     returns nil; signal is already set; completion observed in this
 //     same invocation.
 //   - Asynchronous side effect: handler returns nil but the signal lags
@@ -389,7 +389,7 @@ type StepCtx interface {
     // Worktree access — lazily acquires (and caches for the invocation)
     // the Backend's Worktree for this claim. Handlers call methods on the
     // returned Worktree directly: wt.Branch(...), wt.Commit(...),
-    // wt.OpenPR(...), wt.Validate(...), etc. No duplicate forwarders.
+    // wt.Open(...), wt.Validate(...), etc. No duplicate forwarders.
     Worktree() (Worktree, error)
 
     RefreshItem() error  // re-pull item state mid-handler if needed
@@ -530,10 +530,10 @@ type Worktree interface {
     Commit(ctx context.Context, msg string) error
     Push(ctx context.Context) error
 
-    // OpenPR / MergePR may trigger Backend-internal side effects that set
+    // Open / Merge may trigger Backend-internal side effects that set
     // signals (pr-open / pr-merged on github).
-    OpenPR(ctx context.Context, base, title, body string) (url string, err error)
-    MergePR(ctx context.Context, url string) error
+    Open(ctx context.Context, base, title, body string) (url string, err error)
+    Merge(ctx context.Context, url string) error
 
     // Validate runs the project's verify command in the worktree (typically
     // bin/verify.sh: lint + vet + full test suite + memory-leak checks).
@@ -793,9 +793,9 @@ backend contract into GitHub Issues + comments + orphan-branch operations.
 
 Two resolution mechanisms, transparent to the SDK:
 
-1. **Side-effect resolution.** `Worktree.OpenPR(...)` succeeds → backend
+1. **Side-effect resolution.** `Worktree.Open(...)` succeeds → backend
    immediately sets `pr-open` in the same transaction that records the PR
-   URL. `Worktree.MergePR(...)` does the analog for `pr-merged`.
+   URL. `Worktree.Merge(...)` does the analog for `pr-merged`.
 2. **Polling refresh.** Every `Backend.LoadState(claim)` (one per `run-step`)
    hits `GET /repos/{o}/{r}/pulls/{n}` for the PR linked to this issue (the
    backend identifies it by claim-branch name) and reconciles all four
@@ -1102,7 +1102,7 @@ func stepVerify(ctx flow.StepCtx) error {
 func stepCreatePR(ctx flow.StepCtx) error {
     wt, err := ctx.Worktree()
     if err != nil { return err }
-    _, err = wt.OpenPR(ctx.Context(),
+    _, err = wt.Open(ctx.Context(),
         "main",
         "feat: "+ctx.Item().Title,
         "Closes #"+ctx.Item().IDStr())
@@ -1129,7 +1129,7 @@ func stepCreatePR(ctx flow.StepCtx) error {
 
 This design covers maintainer mode (v1: user has push to upstream). Contributor
 mode (PR from a fork) changes the worktree mechanics but not the flow model
-— same `fix` flow, same signals, just `wt.OpenPR(...)` opens a
+— same `fix` flow, same signals, just `wt.Open(...)` opens a
 cross-repo PR via `gh pr create --head forkowner:branch`. Deferred for v1;
 nothing in the SDK changes to support it later.
 
@@ -1184,7 +1184,7 @@ github.com/promise-language/flow/
 │   ├── seed.go                         idempotent first-run seed
 │   ├── artifact.go                     ResolveArtifact, MarkStale, large-artifact spillover
 │   ├── signal.go                       PR-state polling + side-effect writes
-│   ├── worktree.go                     ★ Worktree impl: Branch/Commit/Push/OpenPR/MergePR/Validate via gh + local git
+│   ├── worktree.go                     ★ Worktree impl: Branch/Commit/Push/Open/Merge/Validate via gh + local git
 │   ├── artifacts_branch.go             commit/read files on flow-artifacts orphan branch
 │   ├── label.go                        label vocabulary helpers
 │   ├── type_derivation.go              Item.Type from `type:*` label convention

@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -103,6 +101,94 @@ func TestRunOne_SeedsAndDispatchesFirstStep(t *testing.T) {
 	}
 }
 
+func TestRunOne_PreflightSkipsBeforeFlowSelection(t *testing.T) {
+	handlerCalled := false
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			handlerCalled = true
+			return ctx.ResolveMarkdown("should not run")
+		})
+	}, &stubAgent{name: "stub"})
+
+	app.Preflight = func(ctx context.Context, state *flow.ItemState) error {
+		return errors.New("manual flag set")
+	}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "skipped" {
+		t.Errorf("status = %q, want skipped", res.Status)
+	}
+	if res.Reason != "preflight: manual flag set" {
+		t.Errorf("reason = %q, want 'preflight: manual flag set'", res.Reason)
+	}
+	if handlerCalled {
+		t.Error("handler must not run when preflight refuses")
+	}
+
+	// Budget must NOT have been consumed — the artifact isn't seeded yet
+	// (seed only happens after preflight passes), so Invocations stays 0
+	// after re-loading state.
+	state, _ := be.LoadState(context.Background(), claim)
+	if rec := state.Artifact("plan"); rec.Invocations != 0 {
+		t.Errorf("Invocations = %d, want 0 (preflight skip must not consume budget)", rec.Invocations)
+	}
+}
+
+func TestRunOne_PreflightPassThrough(t *testing.T) {
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			return ctx.ResolveMarkdown("the plan")
+		})
+	}, &stubAgent{name: "stub"})
+
+	called := 0
+	app.Preflight = func(ctx context.Context, state *flow.ItemState) error {
+		called++
+		return nil
+	}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if called != 1 {
+		t.Errorf("preflight called %d times, want 1", called)
+	}
+	if res.Status != "done" {
+		t.Errorf("status = %q, want done", res.Status)
+	}
+}
+
+func TestChainPreflight(t *testing.T) {
+	ctx := context.Background()
+	state := &flow.ItemState{Item: flow.Item{ID: "x"}}
+
+	calls := []string{}
+	a := flow.PreflightFunc(func(context.Context, *flow.ItemState) error {
+		calls = append(calls, "a")
+		return nil
+	})
+	b := flow.PreflightFunc(func(context.Context, *flow.ItemState) error {
+		calls = append(calls, "b")
+		return errors.New("b refused")
+	})
+	c := flow.PreflightFunc(func(context.Context, *flow.ItemState) error {
+		calls = append(calls, "c")
+		return nil
+	})
+
+	chain := flow.ChainPreflight(a, nil, b, c) // nil entries skipped
+	if err := chain(ctx, state); err == nil || err.Error() != "b refused" {
+		t.Errorf("err = %v, want 'b refused'", err)
+	}
+	if len(calls) != 2 || calls[0] != "a" || calls[1] != "b" {
+		t.Errorf("calls = %v, want [a b] (must short-circuit on first error)", calls)
+	}
+}
+
 func TestRunOne_ParksOnInvocationsExhaustion(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		// max 1 invocation, but handler returns error each time
@@ -190,7 +276,7 @@ func TestRunOne_ParksOnTimeout(t *testing.T) {
 func TestRunOne_SignalStepAwaitsSignal(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddSignalStep("create pr", "pr-open", func(ctx flow.StepCtx) error {
-			// Side effect: imagine OpenPR succeeded but signal lags.
+			// Side effect: imagine Open succeeded but signal lags.
 			return nil
 		})
 	}, &stubAgent{name: "stub"})
@@ -294,41 +380,6 @@ func TestRunOne_NilReturnWithoutResolveParks(t *testing.T) {
 	}
 	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkStepDidNotResolve {
 		t.Errorf("res = %+v, want parked step-did-not-resolve", res)
-	}
-}
-
-func TestActiveClaimRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
-
-	if got, err := LoadActiveClaim(); got != nil || err != nil {
-		t.Errorf("LoadActiveClaim on empty dir = (%v, %v), want (nil, nil)", got, err)
-	}
-
-	claim := flow.Claim{
-		BackendName: "fake",
-		Owner:       "alice",
-		ItemRef: flow.ItemRef{
-			BackendName: "fake",
-			Display:     "test#1",
-			Ref:         json.RawMessage(`"1"`),
-		},
-	}
-	if err := SaveActiveClaim(claim); err != nil {
-		t.Fatalf("SaveActiveClaim: %v", err)
-	}
-	got, err := LoadActiveClaim()
-	if err != nil || got == nil {
-		t.Fatalf("LoadActiveClaim: (%v, %v)", got, err)
-	}
-	if got.Owner != "alice" {
-		t.Errorf("Owner = %q, want alice", got.Owner)
-	}
-	if err := ClearActiveClaim(); err != nil {
-		t.Fatalf("ClearActiveClaim: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, ".flow", "active.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("active.json should be gone, stat err = %v", err)
 	}
 }
 

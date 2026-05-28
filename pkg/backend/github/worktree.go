@@ -71,7 +71,12 @@ func (w *worktree) Push(ctx context.Context) error {
 	return w.b.git.Push(ctx)
 }
 
-func (w *worktree) OpenPR(ctx context.Context, base, title, body string) (string, error) {
+// Request exposes the pull-request management surface. The github backend
+// supports pull requests, so this returns the worktree itself (its Open/
+// Merge methods satisfy flow.RequestManager).
+func (w *worktree) Request() flow.RequestManager { return w }
+
+func (w *worktree) Open(ctx context.Context, base, title, body string) (string, error) {
 	// Ensure the claim branch is current + pushed.
 	expected := w.b.claimBranch(w.issueNum)
 	branch, err := w.b.git.CurrentBranch(ctx)
@@ -79,7 +84,7 @@ func (w *worktree) OpenPR(ctx context.Context, base, title, body string) (string
 		return "", err
 	}
 	if branch != expected {
-		return "", fmt.Errorf("worktree.OpenPR: current branch %q != claim branch %q", branch, expected)
+		return "", fmt.Errorf("worktree.Open: current branch %q != claim branch %q", branch, expected)
 	}
 	if err := w.b.git.Push(ctx); err != nil {
 		return "", err
@@ -104,7 +109,7 @@ func (w *worktree) OpenPR(ctx context.Context, base, title, body string) (string
 	return url, nil
 }
 
-func (w *worktree) MergePR(ctx context.Context, url string) error {
+func (w *worktree) Merge(ctx context.Context, url string) error {
 	args := []string{"-C", w.b.cfg.WorktreeDir, "pr", "merge", url, "--squash", "--auto"}
 	_, stderr, err := w.b.git.runner(ctx, "gh", args...)
 	if err != nil {

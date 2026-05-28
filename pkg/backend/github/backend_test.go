@@ -488,9 +488,12 @@ func ghCommentJSON(c ghMockComment) map[string]any {
 }
 
 // newMockedBackend wires a Backend at the mock server. Uses Test mode (no
-// real network), no real gh CLI.
+// real network), no real gh CLI. Sets FLOW_DIR to a tempdir so Backend.Claim
+// (which now writes .flow/active.json via pkg/clistate) doesn't pollute
+// the package directory.
 func newMockedBackend(t *testing.T, mock *ghMock, srv *httptest.Server) *Backend {
 	t.Helper()
+	t.Setenv("FLOW_DIR", t.TempDir())
 	b := &Backend{
 		cfg: Config{
 			Owner:           mock.owner,

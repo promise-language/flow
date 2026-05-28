@@ -8,7 +8,7 @@ import (
 )
 
 func (app *App) cmdStatus(ctx context.Context, args []string) int {
-	claim, err := LoadActiveClaim()
+	claim, err := app.Backend.LookupActiveClaim(ctx, app.Owner)
 	if err != nil {
 		fmt.Fprintln(app.Err, "status:", err)
 		return 1

@@ -1,24 +1,25 @@
 // fix is the reference contributor+maintainer flow binary. It models the
 // full lifecycle of taking a GitHub issue from triage to merged PR:
 //
-//   fix flow (contributor, no preconditions):
-//     write plan          → plan artifact (markdown)
-//     implement the change → implementation artifact (patch)
-//     review the work     → review artifact (markdown)
-//     analyze coverage    → coverage artifact (markdown)
-//     verify              → verify-impl artifact (markdown)
-//     create pull request → pr-open signal (handler: gh pr create)
+//	fix flow (contributor, no preconditions):
+//	  write plan          → plan artifact (markdown)
+//	  implement the change → implementation artifact (patch)
+//	  review the work     → review artifact (markdown)
+//	  analyze coverage    → coverage artifact (markdown)
+//	  verify              → verify-impl artifact (markdown)
+//	  create pull request → pr-open signal (handler: gh pr create)
 //
-//   merge flow (maintainer, gated on pr-open):
-//     review the implementation → review-maint artifact (markdown)
-//     verify                    → verify-merge artifact (markdown)
-//     merge pull request        → pr-merged signal (handler: gh pr merge)
-//     record merge commit       → merge-commit artifact (commit hash)
+//	merge flow (maintainer, gated on pr-open):
+//	  review the implementation → review-maint artifact (markdown)
+//	  verify                    → verify-merge artifact (markdown)
+//	  merge pull request        → pr-merged signal (handler: gh pr merge)
+//	  record merge commit       → merge-commit artifact (commit hash)
 //
 // Build:   go build -o fix ./examples/fix
 // Use:     ./fix doctor
-//          ./fix claim 42
-//          ./fix run-step    # one lifecycle item per invocation
+//
+//	./fix claim 42
+//	./fix run-step    # one lifecycle item per invocation
 //
 // Issues must carry `type:task` (or `type:bug`) + the `flow:fix` label +
 // an assignee for this binary to claim them.
@@ -131,15 +132,11 @@ func stepImplementation(ctx flow.StepCtx) error {
 		return err
 	}
 
-	resp, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{
+	if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{
 		Prompt:         fmt.Sprintf("Implement this plan:\n\n%s", plan),
 		PermissionMode: "acceptEdits",
-	})
-	if err != nil {
+	}); err != nil {
 		return err
-	}
-	if resp != nil && resp.Failure != nil {
-		return fmt.Errorf("agent failed: %s", resp.Failure.Message)
 	}
 
 	patch, err := wt.CapturePatch(ctx.Context())
@@ -192,15 +189,16 @@ func stepVerify(ctx flow.StepCtx) error {
 }
 
 // stepCreatePR opens the PR. Signal pr-open is set by the backend as a
-// side-effect of wt.OpenPR succeeding.
+// side-effect of Open succeeding.
 func stepCreatePR(ctx flow.StepCtx) error {
 	wt, err := ctx.Worktree()
 	if err != nil {
 		return err
 	}
 	itemID, _ := ctx.Item().IDInt()
-	_, err = wt.OpenPR(
+	_, err = flow.Open(
 		ctx.Context(),
+		wt,
 		"main",
 		fmt.Sprintf("feat: %s", ctx.Item().Title),
 		fmt.Sprintf("Closes #%d", itemID),
@@ -222,18 +220,20 @@ func stepMaintReview(ctx flow.StepCtx) error {
 }
 
 // stepMerge squash-merges the open PR. pr-merged signal is set as a
-// side-effect of wt.MergePR succeeding.
+// side-effect of wt.Merge succeeding.
 func stepMerge(ctx flow.StepCtx) error {
 	wt, err := ctx.Worktree()
 	if err != nil {
 		return err
 	}
-	itemID, _ := ctx.Item().IDInt()
-	prURL := fmt.Sprintf("https://github.com/%s/issues/%d", ctx.Item().URL, itemID)
-	// In a real maintainer flow, we'd look up the PR URL via the backend
-	// rather than reconstruct it; for the example we trust the gh CLI's
+	branch, err := wt.CurrentBranch(ctx.Context())
+	if err != nil {
+		return err
+	}
+	// In a real maintainer flow, we'd look up the PR URL via the backend;
+	// for the example we pass the claim branch and trust gh CLI's
 	// PR-from-branch resolution.
-	return wt.MergePR(ctx.Context(), prURL)
+	return flow.Merge(ctx.Context(), wt, branch)
 }
 
 // stepRecordMerge captures the merge commit SHA. Runs after pr-merged is

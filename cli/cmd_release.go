@@ -6,7 +6,7 @@ import (
 )
 
 func (app *App) cmdRelease(ctx context.Context, args []string) int {
-	claim, err := LoadActiveClaim()
+	claim, err := app.Backend.LookupActiveClaim(ctx, app.Owner)
 	if err != nil {
 		fmt.Fprintln(app.Err, "release:", err)
 		return 1
@@ -16,10 +16,6 @@ func (app *App) cmdRelease(ctx context.Context, args []string) int {
 		return 1
 	}
 	if err := app.Backend.Release(ctx, *claim); err != nil {
-		fmt.Fprintln(app.Err, "release:", err)
-		return 1
-	}
-	if err := ClearActiveClaim(); err != nil {
 		fmt.Fprintln(app.Err, "release:", err)
 		return 1
 	}

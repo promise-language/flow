@@ -1,6 +1,37 @@
 package flow
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrRequestNotSupported — returned by flow.Open / flow.Merge when the
+// backend's Worktree.Request() returns nil. Handlers that prefer a typed
+// error over a panic on misuse call those nil-safe helpers; this is the
+// sentinel they should errors.Is against.
+var ErrRequestNotSupported = errors.New("flow: backend does not support pull request operations")
+
+// ErrResetSeedUnsupported — returned by Backend.ResetSeed when the backend
+// has no separable seed concept (e.g. a read-only backend). Callers
+// invoking ResetSeed should errors.Is against this to distinguish
+// "intentionally not supported" from a transient failure.
+var ErrResetSeedUnsupported = errors.New("flow: backend does not support ResetSeed")
+
+// ErrTransient — handler-returned sentinel for infrastructure failures
+// observed by the handler (e.g. a Worktree HTTP call against a remote
+// runner that's offline). The orchestrator translates this to:
+//
+//	InvocationResult{Status: "parked", Park: {Kind: ParkInfraTransient, ...}}
+//
+// and SKIPS the BumpInvocations call, so a flapping runner does not burn
+// the step's invocation budget. Wrap a concrete cause with fmt.Errorf
+// using %w so callers can errors.Is against ErrTransient.
+//
+// Agent-side transient failures (the dominant case — runner died mid-turn)
+// are surfaced differently: the Agent impl sets AgentResponse.Failure.Transient
+// = true, and the orchestrator applies the same skip-bump + park policy
+// without needing a handler-level sentinel.
+var ErrTransient = errors.New("flow: transient infrastructure failure")
 
 // ErrSkip — handler decided no progress is possible right now. The SDK marks
 // the invocation skipped (no budget consumed beyond the invocation count).

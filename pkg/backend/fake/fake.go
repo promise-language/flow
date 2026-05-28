@@ -17,11 +17,12 @@ import (
 
 // Backend is the in-memory backend.
 type Backend struct {
-	mu       sync.Mutex
-	items    map[string]*itemRecord // keyed by item.ID
-	signals  []flow.SignalDef
-	clock    func() time.Time
-	verifyOK bool // controls Worktree.Validate result
+	mu              sync.Mutex
+	items           map[string]*itemRecord // keyed by item.ID
+	signals         []flow.SignalDef
+	clock           func() time.Time
+	verifyOK        bool // controls Worktree.Validate result
+	supportsRequest bool // controls whether Worktree.Request() returns non-nil
 }
 
 type itemRecord struct {
@@ -41,10 +42,11 @@ type itemRecord struct {
 // backend will report as supported.
 func New(signals ...flow.SignalDef) *Backend {
 	return &Backend{
-		items:    map[string]*itemRecord{},
-		signals:  signals,
-		clock:    time.Now,
-		verifyOK: true,
+		items:           map[string]*itemRecord{},
+		signals:         signals,
+		clock:           time.Now,
+		verifyOK:        true,
+		supportsRequest: true,
 	}
 }
 
@@ -53,6 +55,11 @@ func (b *Backend) SetClock(c func() time.Time) { b.clock = c }
 
 // SetVerifyOK controls what Worktree.Validate returns. Default true.
 func (b *Backend) SetVerifyOK(ok bool) { b.verifyOK = ok }
+
+// SetSupportsRequest controls whether Worktree.Request() returns a non-nil
+// RequestManager. Default true; set to false to exercise the "backend
+// doesn't support pull requests" path.
+func (b *Backend) SetSupportsRequest(ok bool) { b.supportsRequest = ok }
 
 // AddItem registers an item with the backend so ListEligible / Claim see it.
 func (b *Backend) AddItem(item flow.Item) {
@@ -153,6 +160,21 @@ func (b *Backend) Release(ctx context.Context, claim flow.Claim) error {
 	return nil
 }
 
+// LookupActiveClaim returns the (single) active claim held by owner. The
+// fake backend tracks claims in memory keyed by item id, so this scans the
+// item map for one owned by `owner`.
+func (b *Backend) LookupActiveClaim(ctx context.Context, owner string) (*flow.Claim, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, rec := range b.items {
+		if rec.claim != nil && rec.owner == owner {
+			cp := *rec.claim
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
+
 func (b *Backend) LookupClaim(ctx context.Context, ref flow.ItemRef) (*flow.ClaimInfo, error) {
 	id, err := refID(ref)
 	if err != nil {
@@ -217,6 +239,23 @@ func (b *Backend) SeedState(ctx context.Context, claim flow.Claim, specs []flow.
 		}
 	}
 	rec.seeded = true
+	return nil
+}
+
+func (b *Backend) ResetSeed(ctx context.Context, claim flow.Claim) error {
+	itemID, err := refID(claim.ItemRef)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	rec.seeded = false
+	rec.artifacts = map[flow.ArtifactId]*flow.ArtifactRecord{}
+	rec.parkRequest = nil
 	return nil
 }
 
@@ -377,7 +416,7 @@ func (b *Backend) Park(ctx context.Context, claim flow.Claim, req flow.ParkReque
 }
 
 func (b *Backend) Worktree(ctx context.Context, claim flow.Claim) (flow.Worktree, error) {
-	return &fakeWorktree{verifyOK: b.verifyOK}, nil
+	return &fakeWorktree{verifyOK: b.verifyOK, supportsRequest: b.supportsRequest}, nil
 }
 
 func refID(ref flow.ItemRef) (string, error) {
@@ -389,8 +428,9 @@ func refID(ref flow.ItemRef) (string, error) {
 }
 
 type fakeWorktree struct {
-	verifyOK bool
-	branch   string
+	verifyOK        bool
+	supportsRequest bool
+	branch          string
 }
 
 func (w *fakeWorktree) Branch(ctx context.Context, name, base string) (bool, error) {
@@ -408,10 +448,6 @@ func (w *fakeWorktree) CurrentBranch(ctx context.Context) (string, error) {
 
 func (w *fakeWorktree) Commit(ctx context.Context, msg string) error { return nil }
 func (w *fakeWorktree) Push(ctx context.Context) error               { return nil }
-func (w *fakeWorktree) OpenPR(ctx context.Context, base, title, body string) (string, error) {
-	return "https://example.invalid/pr/1", nil
-}
-func (w *fakeWorktree) MergePR(ctx context.Context, url string) error { return nil }
 func (w *fakeWorktree) Validate(ctx context.Context) error {
 	if !w.verifyOK {
 		return errors.New("fake: validate failed")
@@ -419,3 +455,18 @@ func (w *fakeWorktree) Validate(ctx context.Context) error {
 	return nil
 }
 func (w *fakeWorktree) CapturePatch(ctx context.Context) ([]byte, error) { return nil, nil }
+
+// Request returns the worktree itself — fake exposes a request manager so
+// tests can exercise Open/Merge paths. Tests that want to exercise the
+// "backend doesn't support pull requests" path call SetSupportsRequest(false).
+func (w *fakeWorktree) Request() flow.RequestManager {
+	if !w.supportsRequest {
+		return nil
+	}
+	return w
+}
+
+func (w *fakeWorktree) Open(ctx context.Context, base, title, body string) (string, error) {
+	return "https://example.invalid/pr/1", nil
+}
+func (w *fakeWorktree) Merge(ctx context.Context, url string) error { return nil }

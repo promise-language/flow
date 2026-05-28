@@ -86,6 +86,48 @@ func (b *Backend) SeedState(ctx context.Context, claim flow.Claim, specs []flow.
 	return nil
 }
 
+// ResetSeed clears the state comment's artifact set so the next SeedState
+// pass writes a fresh artifact checklist. Operator-initiated (e.g. a UI
+// "re-seed with current flow" action); the SDK never calls this
+// automatically. The state comment's metadata is preserved; only the
+// artifact list is cleared, since artifact comments live in their own
+// per-version comments and re-deriving from those would be lossy on
+// schema change.
+func (b *Backend) ResetSeed(ctx context.Context, claim flow.Claim) error {
+	issueNum, err := b.issueNumber(claim.ItemRef)
+	if err != nil {
+		return err
+	}
+	tok, err := b.loadClaimToken(claim)
+	if err != nil {
+		return err
+	}
+	body, stateID, err := b.fetchStateComment(ctx, issueNum, tok.StateCommentID)
+	if err != nil {
+		return err
+	}
+	if body == "" || stateID == 0 {
+		// Nothing to reset — never seeded. The next SeedState will write
+		// a fresh state comment.
+		return nil
+	}
+	doc, _, found, perr := extractStateDoc(body)
+	if perr != nil {
+		return fmt.Errorf("github: malformed state comment for issue %d: %w", issueNum, perr)
+	}
+	if !found || doc == nil {
+		// State-v1 marker absent — comment exists but isn't ours to reset.
+		// Same outcome as 'never seeded': next SeedState writes fresh.
+		return nil
+	}
+	doc.Artifacts = nil
+	doc.SeededAt = nowUTC()
+	if _, err := b.updateStateComment(ctx, issueNum, stateID, *doc, claim.Owner); err != nil {
+		return fmt.Errorf("reset state comment: %w", err)
+	}
+	return nil
+}
+
 // ResolveArtifact persists a handler-produced value to the issue. The
 // canonical storage is a new "artifact comment" (per-version, append-only);
 // the state comment's resolved_by / produced_at / version pointers move to
@@ -311,6 +353,8 @@ func (b *Backend) Park(ctx context.Context, claim flow.Claim, req flow.ParkReque
 		labelToAdd = b.labels.NeedsAnswer()
 	case flow.ParkBudgetExhausted:
 		labelToAdd = b.labels.BudgetExhausted(req.Step)
+	case flow.ParkInfraTransient:
+		labelToAdd = b.labels.InfraTransient()
 	default:
 		labelToAdd = b.labels.Blocked()
 	}

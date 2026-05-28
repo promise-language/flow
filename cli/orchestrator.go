@@ -42,7 +42,10 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		return flow.InvocationResult{}, fmt.Errorf("load state: %w", err)
 	}
 
-	// Select the flow first; we need it for seeding too.
+	// Select the flow first; we need it for seeding too. The terminal-done
+	// short-circuit also has to beat Preflight so a completed item retires
+	// cleanly even when a generic preflight (e.g. "item still open on
+	// tracker") would otherwise refuse it.
 	f, nextName := SelectFlow(app, state)
 	if f == nil {
 		return flow.InvocationResult{
@@ -51,6 +54,20 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 			Status: "done",
 			Reason: "no eligible flow",
 		}, nil
+	}
+
+	// Cross-flow preflight gate. Runs AFTER LoadState (fresh state) and
+	// AFTER the terminal-done check (so completed items finalize) but
+	// BEFORE seed / handler dispatch. Non-nil error → skipped, no handler
+	// runs, no budget consumed.
+	if app.Preflight != nil {
+		if perr := app.Preflight(ctx, state); perr != nil {
+			return flow.InvocationResult{
+				Item:   claim.ItemRef.Display,
+				Status: "skipped",
+				Reason: "preflight: " + perr.Error(),
+			}, nil
+		}
 	}
 
 	// One-shot seed: zero artifacts means the backend hasn't been seeded yet.
@@ -124,25 +141,24 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	stepCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Bump invocations BEFORE dispatch so a crash still counts.
-	budgetKey := li.Result()
-	if li.Kind == flow.LifecycleArtifact {
-		if err := app.Backend.BumpInvocations(stepCtx, claim, budgetKey); err != nil {
-			return flow.InvocationResult{}, fmt.Errorf("bump invocations: %w", err)
-		}
-	}
-
 	// Build the per-invocation StepCtx.
+	budgetKey := li.Result()
 	sctx := newStepCtx(stepCtx, app, claim, f, li, state)
 
 	// Dispatch.
 	handlerErr := li.Handler(sctx)
 
-	// Timeout (deadline reached during handler).
+	// Timeout (deadline reached during handler). Counts as an invocation —
+	// the handler ran, it just didn't finish in time.
 	if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
 		// Best-effort capture — ignore errors, the patch is opportunistic.
 		if wt, e := app.Backend.Worktree(ctx, claim); e == nil {
 			_, _ = wt.CapturePatch(ctx)
+		}
+		if li.Kind == flow.LifecycleArtifact {
+			if err := app.Backend.BumpInvocations(ctx, claim, budgetKey); err != nil {
+				return flow.InvocationResult{}, fmt.Errorf("bump invocations: %w", err)
+			}
 		}
 		return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
 			Kind:   flow.ParkBudgetExhausted,
@@ -150,6 +166,27 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 			Axis:   flow.AxisTimeout,
 			Reason: fmt.Sprintf("step %q exceeded %s", nextName, timeout),
 		})
+	}
+
+	// Transient infra failure (handler returned flow.ErrTransient OR the
+	// metered agent observed AgentResponse.Failure.Transient and surfaced
+	// it through the wrapped error). Park with ParkInfraTransient and
+	// SKIP the BumpInvocations call — a flapping runner must not burn the
+	// step's invocation budget.
+	if handlerErr != nil && errors.Is(handlerErr, flow.ErrTransient) {
+		return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
+			Kind:   flow.ParkInfraTransient,
+			Step:   nextName,
+			Reason: handlerErr.Error(),
+		})
+	}
+
+	// Non-transient: the invocation produced a result (success, skip,
+	// park, or a real failure). Count it.
+	if li.Kind == flow.LifecycleArtifact {
+		if err := app.Backend.BumpInvocations(ctx, claim, budgetKey); err != nil {
+			return flow.InvocationResult{}, fmt.Errorf("bump invocations: %w", err)
+		}
 	}
 
 	return translateHandlerError(ctx, app, claim, result, li, sctx, handlerErr)
@@ -433,6 +470,16 @@ func (s *stepCtx) AskQuestions(qs ...flow.AgentQuestion) error {
 	return flow.ErrQuestion{Questions: qs}
 }
 
+func (s *stepCtx) Notify(step, detail string) {
+	if s.app.Telemetry == nil {
+		return
+	}
+	if step == "" {
+		step = s.li.Name
+	}
+	s.app.Telemetry.StepProgress(s.ctx, s.claim, step, detail)
+}
+
 func (s *stepCtx) Agent() flow.Agent { return s.agent }
 
 func (s *stepCtx) Worktree() (flow.Worktree, error) {
@@ -495,11 +542,37 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 	m.promptsThisInvocation++
 
 	resp, err := m.inner.Run(ctx, req)
-	if err == nil && resp != nil && resp.CostUSD > 0 {
+	// Skip cost accounting on transient infra failures — symmetric with
+	// the orchestrator's skip-BumpInvocations policy for ParkInfraTransient.
+	// A flapping runner must not burn the cost axis any more than it burns
+	// the invocations axis.
+	transient := resp != nil && resp.Failure != nil && resp.Failure.Transient
+	if err == nil && resp != nil && resp.CostUSD > 0 && !transient {
 		_ = m.backend.AddCost(ctx, m.claim, string(li.ArtifactId), resp.CostUSD)
 		// Update local mirror so subsequent calls see fresh cost.
 		art.CostUSDSpent += resp.CostUSD
 		m.stepCtx.state.Artifacts[li.ArtifactId] = art
 	}
+	// Surface AgentResponse.Failure through the error return so the
+	// canonical "if err != nil { return err }" pattern in handlers picks
+	// it up without forcing every handler to interrogate resp.Failure
+	// separately. If Failure.Transient is set, the returned error wraps
+	// flow.ErrTransient — the orchestrator's transient check will park
+	// the step and skip the BumpInvocations call.
+	if err == nil && resp != nil && resp.Failure != nil {
+		err = agentFailureError(resp.Failure)
+	}
 	return resp, err
+}
+
+// agentFailureError converts an AgentFailure into an error. When
+// Failure.Transient is true the error chain includes flow.ErrTransient so
+// errors.Is(err, flow.ErrTransient) returns true regardless of whether the
+// agent or the handler surfaced the transient.
+func agentFailureError(f *flow.AgentFailure) error {
+	msg := fmt.Sprintf("agent failure (%s): %s", f.Kind, f.Message)
+	if f.Transient {
+		return fmt.Errorf("%s: %w", msg, flow.ErrTransient)
+	}
+	return errors.New(msg)
 }

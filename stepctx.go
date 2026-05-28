@@ -49,6 +49,16 @@ type StepCtx interface {
 	// naturally: ctx.AskQuestions(q1) vs ctx.AskQuestions(q1, q2, q3).
 	AskQuestions(qs ...AgentQuestion) error
 
+	// Notify reports a sub-phase progress event ("running verify round 2",
+	// "capturing patch"). Forwarded to App.Telemetry.StepProgress when one
+	// is configured; otherwise a no-op. step defaults to the current
+	// lifecycle item name when empty.
+	//
+	// NOT a liveness signal — see flow.Telemetry's docstring. The SDK and
+	// downstream consumers MUST NOT derive "is this step still alive?"
+	// from Notify call density.
+	Notify(step, detail string)
+
 	// Agent returns the SDK-metered agent. The ONLY spend chokepoint.
 	Agent() Agent
 

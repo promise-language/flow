@@ -90,7 +90,7 @@ func (b *Backend) prHasApprovedReview(ctx context.Context, prNum int) (bool, err
 
 // markSignalSetOnState updates the in-memory state and the persisted state
 // comment to reflect a backend-internal side-effect signal write (e.g.,
-// OpenPR succeeded → pr-open=true).
+// Open succeeded → pr-open=true).
 func (b *Backend) markSignalSetOnState(ctx context.Context, claim flow.Claim, issueNum int, sig flow.SignalId) error {
 	tok, err := b.loadClaimToken(claim)
 	if err != nil {

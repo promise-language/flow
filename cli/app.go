@@ -37,6 +37,18 @@ type App struct {
 	// SupportedSignals().
 	Signals []flow.SignalDef
 
+	// Telemetry is the optional sink for StepCtx.Notify calls. When nil,
+	// Notify is a no-op. NOT a liveness signal — see flow.Telemetry's
+	// docstring.
+	Telemetry flow.Telemetry
+
+	// Preflight is an optional cross-flow gate run on every RunOne
+	// dispatch, AFTER Backend.LoadState and BEFORE flow selection.
+	// Returning a non-nil error short-circuits the invocation with
+	// status="skipped". See flow.PreflightFunc for the contract and
+	// flow.ChainPreflight for composing multiple checks.
+	Preflight flow.PreflightFunc
+
 	// Flows is the ordered list of flow variants. cli.App picks the first
 	// flow whose Types() match item.Type AND RequireSignal preconditions
 	// are satisfied AND has at least one pending lifecycle item.

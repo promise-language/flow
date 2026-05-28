@@ -3,6 +3,7 @@ package flow
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strconv"
 	"time"
 )
@@ -121,14 +122,42 @@ type Backend interface {
 	// (nil, nil) if unclaimed.
 	LookupClaim(ctx context.Context, ref ItemRef) (*ClaimInfo, error)
 
+	// LookupActiveClaim returns the backend-authoritative active claim held
+	// by `owner` right now, or (nil, nil) if owner holds nothing. This is
+	// the single source of truth for "what am I currently working on?"
+	// across cli.cmd_run / cmd_status / cmd_release; the CLI never falls
+	// back to a local cache. Backends choose where their lease state lives:
+	//   - GitHub backend: stores the lease in .flow/active.json (the file
+	//     IS the backend's lease store; see pkg/clistate).
+	//   - Tracker backend: queries the tracker server's lease ledger; on
+	//     server-offline, returns an error rather than reading a stale
+	//     local file.
+	LookupActiveClaim(ctx context.Context, owner string) (*Claim, error)
+
 	// LoadState returns artifacts + signals in one snapshot, with signals
 	// refreshed by backend-internal polling.
 	LoadState(ctx context.Context, claim Claim) (*ItemState, error)
 
 	// SeedState pre-loads the artifact set + budget caps. The backend MUST
 	// refuse a second seed for the same item; mid-flight items are frozen
-	// against later flow-source changes.
+	// against later flow-source changes. Use ResetSeed (an explicit,
+	// operator-initiated path) to re-seed an in-flight item against the
+	// current flow source.
 	SeedState(ctx context.Context, claim Claim, artifacts []ArtifactSpec) error
+
+	// ResetSeed clears the item's existing seed so the next SeedState call
+	// succeeds. This is the ONLY escape hatch from SeedState's "frozen
+	// after first write" contract — adding a new step to a flow definition
+	// must not retroactively re-seed every previously-processed item.
+	// ResetSeed is operator-initiated (e.g. a tracker-UI "re-seed with
+	// current flow" button); the SDK / cli.RunOne never calls it
+	// automatically.
+	//
+	// After ResetSeed the item's artifact records, budget counters, and
+	// any park state SHOULD be cleared so the next SeedState pass starts
+	// from a clean slate. Backends that have no separable seed concept
+	// (e.g. a future read-only backend) may return ErrResetSeedUnsupported.
+	ResetSeed(ctx context.Context, claim Claim) error
 
 	// ResolveArtifact writes a handler-produced artifact value. No backend
 	// method for writing signals; signals are written by backend-internal
@@ -154,9 +183,16 @@ type Backend interface {
 	Worktree(ctx context.Context, claim Claim) (Worktree, error)
 }
 
-// Worktree is the local-git + remote-PR surface the SDK exposes to handlers
-// via ctx.Worktree(). Branch/Commit/Push/OpenPR/MergePR/Validate are all
-// idempotent where they reasonably can be.
+// Worktree is the local-git surface the SDK exposes to handlers via
+// ctx.Worktree(). Branch/Commit/Push/Validate are idempotent where they
+// reasonably can be.
+//
+// Optional capabilities are exposed via accessor methods that may return
+// nil when the backend does not support them. The first such capability is
+// Request() — backends that have no pull-request concept (e.g. tracker
+// backends that commit direct to master) return nil. Use the top-level
+// nil-safe helpers (flow.Open, flow.Merge) for handlers that prefer a typed
+// error over a panic.
 type Worktree interface {
 	// Branch ensures `name` is checked out. Creates off base (or HEAD if
 	// base==""). Idempotent: no-op if already current. Errors on dirty
@@ -167,11 +203,6 @@ type Worktree interface {
 	Commit(ctx context.Context, msg string) error
 	Push(ctx context.Context) error
 
-	// OpenPR / MergePR may trigger backend-internal side effects that set
-	// signals (pr-open / pr-merged on github).
-	OpenPR(ctx context.Context, base, title, body string) (url string, err error)
-	MergePR(ctx context.Context, url string) error
-
 	// Validate runs the project's verify command in the worktree. Returns
 	// nil iff verify exits 0.
 	Validate(ctx context.Context) error
@@ -179,4 +210,57 @@ type Worktree interface {
 	// CapturePatch produces a unified diff of the current working tree for
 	// timeout / park retention.
 	CapturePatch(ctx context.Context) (patch []byte, err error)
+
+	// Request returns the backend's pull-request management surface, or nil
+	// if the backend does not support pull-request operations.
+	// Implementations that DO support this surface may return the worktree
+	// itself, a sub-struct, or a thin wrapper — callers should not assume any
+	// particular concrete type.
+	Request() RequestManager
+}
+
+// RequestManager is the optional pull-request management surface exposed
+// via Worktree.Request(). Implementations may trigger backend-internal
+// side effects that set signals (e.g. pr-open / pr-merged on github).
+type RequestManager interface {
+	Open(ctx context.Context, base, title, body string) (url string, err error)
+	Merge(ctx context.Context, url string) error
+}
+
+// Open is a nil-safe convenience: if wt.Request() returns nil (including a
+// typed-nil interface value), returns ErrRequestNotSupported instead of
+// panicking on a nil-receiver call. Handlers that want a clean typed-error
+// path use this; handlers that know their backend supports pull requests
+// can call wt.Request().Open(...) directly.
+func Open(ctx context.Context, wt Worktree, base, title, body string) (string, error) {
+	rq := wt.Request()
+	if isNilRequest(rq) {
+		return "", ErrRequestNotSupported
+	}
+	return rq.Open(ctx, base, title, body)
+}
+
+// Merge is the nil-safe counterpart to Open. See Open for usage.
+func Merge(ctx context.Context, wt Worktree, url string) error {
+	rq := wt.Request()
+	if isNilRequest(rq) {
+		return ErrRequestNotSupported
+	}
+	return rq.Merge(ctx, url)
+}
+
+// isNilRequest catches both untyped-nil interfaces and the typed-nil pitfall
+// (a non-nil interface header pointing at a nil concrete pointer), which a
+// plain `rq == nil` check misses and which would otherwise panic on the
+// method call.
+func isNilRequest(rq RequestManager) bool {
+	if rq == nil {
+		return true
+	}
+	v := reflect.ValueOf(rq)
+	switch v.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func:
+		return v.IsNil()
+	}
+	return false
 }

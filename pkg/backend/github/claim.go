@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/promise-language/flow"
+	"github.com/promise-language/flow/pkg/clistate"
 )
 
 // Claim acquires an exclusive lease on the given issue. Algorithm:
@@ -118,17 +119,27 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string) (fl
 	}
 
 	tokenJSON, _ := b.saveClaimToken(claimToken{StateCommentID: stateID, ClaimID: token})
-	return flow.Claim{
+	c := flow.Claim{
 		BackendName: b.Name(),
 		ItemRef:     ref,
 		Owner:       owner,
 		ClaimedAt:   nowUTC(),
 		Token:       tokenJSON,
-	}, nil
+	}
+	// The github backend's lease store IS the worktree-local
+	// .flow/active.json file. Write it here so LookupActiveClaim and the
+	// CLI commands that consume the active claim can find it.
+	if err := clistate.Save(c); err != nil {
+		// Best-effort rollback of the github-side ownership we just took.
+		_, _ = b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, b.labels.Owner(owner))
+		_, _, _ = b.gh.Issues.RemoveAssignees(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{owner})
+		return flow.Claim{}, fmt.Errorf("github.Claim: save active claim: %w", err)
+	}
+	return c, nil
 }
 
-// Release strips the assignee, removes the flow:owner:<me> label, leaves the
-// state comment intact.
+// Release strips the assignee, removes the flow:owner:<me> label, clears
+// the worktree-local active-claim file, leaves the state comment intact.
 func (b *Backend) Release(ctx context.Context, claim flow.Claim) error {
 	issueNum, err := b.issueNumber(claim.ItemRef)
 	if err != nil {
@@ -140,7 +151,34 @@ func (b *Backend) Release(ctx context.Context, claim flow.Claim) error {
 	if _, _, err := b.gh.Issues.RemoveAssignees(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{claim.Owner}); err != nil && !isNotFound(err) {
 		return fmt.Errorf("remove assignee: %w", err)
 	}
+	if err := clistate.Clear(); err != nil {
+		return fmt.Errorf("github.Release: clear active claim file: %w", err)
+	}
 	return nil
+}
+
+// LookupActiveClaim returns the active claim held by owner. The github
+// backend's lease store is the worktree-local .flow/active.json file; this
+// reads that file and confirms the owner matches.
+func (b *Backend) LookupActiveClaim(ctx context.Context, owner string) (*flow.Claim, error) {
+	c, err := clistate.Load()
+	if err != nil {
+		return nil, err
+	}
+	if c == nil {
+		return nil, nil
+	}
+	if c.BackendName != b.Name() {
+		// Someone else's claim file — not ours.
+		return nil, nil
+	}
+	if owner != "" && c.Owner != owner {
+		// Claim is held by a different owner on this worktree. Treat as
+		// "no claim for me" rather than an error — the CLI will prompt
+		// the user to claim afresh.
+		return nil, nil
+	}
+	return c, nil
 }
 
 // LookupClaim returns the current claim holder (if any) without taking a
@@ -188,6 +226,7 @@ func (b *Backend) otherBinaryLabel(names []string) (string, bool) {
 			rest == labelSuffixBlocked,
 			rest == labelSuffixNeedsAnswer,
 			rest == labelSuffixDisabled,
+			rest == labelSuffixInfraTransient,
 			strings.HasPrefix(rest, labelSuffixOwnerPrefix),
 			strings.HasPrefix(rest, labelSuffixClaimPrefix),
 			strings.HasPrefix(rest, labelSuffixStalePrefix),

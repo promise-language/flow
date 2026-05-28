@@ -26,8 +26,16 @@ type AgentResponse struct {
 
 // AgentFailure carries structured failure info inside AgentResponse.
 type AgentFailure struct {
-	Kind    string // no-result | killed | cancelled | exit-error | start-error
-	Message string
+	Kind string // no-result | killed | cancelled | exit-error | start-error
+	// Transient signals an infrastructure failure (remote runner died,
+	// network blip, transient 5xx) rather than a real claude-side
+	// failure. When true, the orchestrator parks the step with
+	// ParkInfraTransient and SKIPS the BumpInvocations call — a flapping
+	// runner must not burn the step's invocation budget. Agent impls
+	// (typically a backend's runner-HTTP wrapper) set this from
+	// substrate-specific signals; cli.RunOne is backend-agnostic.
+	Transient bool
+	Message   string
 }
 
 // Agent is the SDK's abstraction over an LLM CLI (the reference impl is

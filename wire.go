@@ -10,6 +10,12 @@ const (
 	ParkQuestion          ParkKind = "question"
 	ParkBudgetExhausted   ParkKind = "budget-exhausted"
 	ParkStepDidNotResolve ParkKind = "step-did-not-resolve"
+	// ParkInfraTransient — the step's failure was observed-infra (remote
+	// runner offline, transient 5xx, network timeout). The orchestrator
+	// parks the step WITHOUT consuming an invocation, so the
+	// re-dispatch path retries the same item against a healthy runner
+	// without burning budget.
+	ParkInfraTransient ParkKind = "infra-transient"
 )
 
 // BudgetAxis identifies which budget axis was exhausted (when

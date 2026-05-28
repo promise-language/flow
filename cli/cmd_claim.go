@@ -34,13 +34,8 @@ func (app *App) cmdClaim(ctx context.Context, args []string) int {
 		fmt.Fprintln(app.Err, "claim:", err)
 		return 1
 	}
-	if err := SaveActiveClaim(claim); err != nil {
-		fmt.Fprintln(app.Err, "claim:", err)
-		// Best-effort release so we don't leave a phantom claim.
-		_ = app.Backend.Release(ctx, claim)
-		return 1
-	}
 	fmt.Fprintf(app.Out, "claimed %s as %s\n", ref.Display, app.Owner)
+	_ = claim // backend persists its own lease state (see Backend.LookupActiveClaim)
 	return 0
 }
 

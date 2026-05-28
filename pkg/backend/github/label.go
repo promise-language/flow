@@ -10,6 +10,7 @@ const (
 	labelSuffixBlocked        = "blocked"
 	labelSuffixNeedsAnswer    = "needs-answer"
 	labelSuffixDisabled       = "disabled"
+	labelSuffixInfraTransient = "infra-transient"
 	labelSuffixStalePrefix    = "stale:"
 	labelSuffixClaimPrefix    = "claim:"
 	labelSuffixBudgetExhPref  = "budget-exhausted:"
@@ -36,10 +37,11 @@ func newLabels(prefix string) labels {
 func (l labels) named(suffix string) string { return l.prefix + suffix }
 
 // Static labels.
-func (l labels) Seeded() string      { return l.named(labelSuffixSeeded) }
-func (l labels) Blocked() string     { return l.named(labelSuffixBlocked) }
-func (l labels) NeedsAnswer() string { return l.named(labelSuffixNeedsAnswer) }
-func (l labels) Disabled() string    { return l.named(labelSuffixDisabled) }
+func (l labels) Seeded() string         { return l.named(labelSuffixSeeded) }
+func (l labels) Blocked() string        { return l.named(labelSuffixBlocked) }
+func (l labels) NeedsAnswer() string    { return l.named(labelSuffixNeedsAnswer) }
+func (l labels) Disabled() string       { return l.named(labelSuffixDisabled) }
+func (l labels) InfraTransient() string { return l.named(labelSuffixInfraTransient) }
 
 // Per-binary owner labels.
 func (l labels) Binary(name string) string  { return l.named(name) }
