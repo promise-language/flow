@@ -48,11 +48,26 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// tracker") would otherwise refuse it.
 	f, nextName := SelectFlow(app, state)
 	if f == nil {
+		// No step remains — the flow is complete (or the item is terminal).
+		// Finalize + release the claim if the backend supports it, so a manual
+		// run closes the item and frees the arena the same way the orchestrator
+		// does on completion (instead of leaving it un-finalized + leased).
+		reason := "no eligible flow"
+		if fz, ok := app.Backend.(flow.Finalizer); ok {
+			if err := fz.Finalize(ctx, claim); err != nil {
+				return flow.InvocationResult{
+					Item:   claim.ItemRef.Display,
+					Status: "failed",
+					Reason: "finalize: " + err.Error(),
+				}, nil
+			}
+			reason = "no eligible flow — finalized + released"
+		}
 		return flow.InvocationResult{
 			Flow:   "",
 			Item:   claim.ItemRef.Display,
 			Status: "done",
-			Reason: "no eligible flow",
+			Reason: reason,
 		}, nil
 	}
 

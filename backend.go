@@ -53,6 +53,16 @@ type RefResolver interface {
 	ResolveRef(ctx context.Context, id string) (ItemRef, error)
 }
 
+// Finalizer is an optional Backend capability: mark an item's flow run complete
+// (no more steps will run) and release its claim. cli.RunOne calls Finalize when
+// SelectFlow finds no eligible step, so a completed MANUAL run finalizes and
+// frees the arena the same way the orchestrator's auto path does on flow
+// completion — rather than leaving the item un-finalized with the lease held.
+// Backends that don't implement it just return the "no eligible flow" result.
+type Finalizer interface {
+	Finalize(ctx context.Context, claim Claim) error
+}
+
 // Claim is the credentialed handle returned by Backend.Claim. Holds the
 // backend-internal token used by subsequent write ops; the SDK serializes
 // this to .flow/active.json.
