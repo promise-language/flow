@@ -37,13 +37,16 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 	fmt.Fprintln(app.Out)
 
 	if f == nil {
-		// Show all flows' status so the user can see why none matched.
+		// Show all flows' status so the user can see why none matched. Here
+		// the per-flow header IS useful — it distinguishes the flows.
 		for _, ff := range app.Flows {
-			printFlowChecklist(app, ff, state)
+			printFlowChecklist(app, ff, state, true)
 		}
 		return 0
 	}
-	printFlowChecklist(app, f, state)
+	// Single matched flow: the "flow:" line above already names it, so skip
+	// the redundant checklist header.
+	printFlowChecklist(app, f, state, false)
 
 	if len(state.Questions) > 0 {
 		fmt.Fprintln(app.Out, "\nquestions:")
@@ -58,8 +61,10 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 	return 0
 }
 
-func printFlowChecklist(app *App, f *flow.Flow, state *flow.ItemState) {
-	fmt.Fprintf(app.Out, "%s:\n", f.Name())
+func printFlowChecklist(app *App, f *flow.Flow, state *flow.ItemState, header bool) {
+	if header {
+		fmt.Fprintf(app.Out, "%s:\n", f.Name())
+	}
 	for _, li := range f.Items() {
 		marker := "[ ]"
 		switch li.Kind {
