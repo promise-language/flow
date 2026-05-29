@@ -18,6 +18,13 @@ type Item struct {
 	Body  string
 	URL   string // backend-specific display URL
 	Flow  string // last selected flow name, when known
+
+	// Finalized marks the item's flow run as complete — the sole terminal
+	// "no more work" signal (set by Finalizer.Finalize). Optional/backend-
+	// specific: the tracker backend populates it; backends without a finalize
+	// concept leave it false. Surfaced so `status` can distinguish "finalized"
+	// from "no flow currently eligible".
+	Finalized bool
 }
 
 // IDStr is a convenience for handlers that just want the id as a string.
@@ -61,6 +68,16 @@ type RefResolver interface {
 // Backends that don't implement it just return the "no eligible flow" result.
 type Finalizer interface {
 	Finalize(ctx context.Context, claim Claim) error
+}
+
+// StateInspector is an optional Backend capability: load an item's flow state
+// (artifacts + signals + questions) READ-ONLY, addressed by ItemRef, with NO
+// claim. `status <id>` uses it to inspect any item's lifecycle checklist
+// straight from the backing store without acquiring a lease. Backends whose
+// state is resolvable from the ref alone (the tracker, where the ref IS the id)
+// implement it; backends that omit it make `status` require an active claim.
+type StateInspector interface {
+	LoadStateByRef(ctx context.Context, ref ItemRef) (*ItemState, error)
 }
 
 // Claim is the credentialed handle returned by Backend.Claim. Holds the

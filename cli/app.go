@@ -119,6 +119,8 @@ func RunWithArgs(app App, args []string) int {
 		return app.cmdGrant(ctx, rest)
 	case "run-step":
 		return app.cmdRun(ctx, rest)
+	case "resolve", "run-all":
+		return app.cmdResolve(ctx, rest)
 	case "help", "--help", "-h":
 		fmt.Fprintln(app.Out, usage(app.Name))
 		return 0
@@ -266,7 +268,10 @@ usage:
   %[1]s list                         list items this flow can process
   %[1]s claim <item-id>              acquire a claim on an item (alias: lease)
   %[1]s run-step                     advance ONE lifecycle item (one prompt → one artifact)
-  %[1]s status                       read-only lifecycle checklist
+  %[1]s resolve [<item-id>]          run ALL steps until finalized or parked (alias: run-all).
+                                     With <item-id>, claims it first; else uses the active claim.
+  %[1]s status [<item-id>]           read-only lifecycle checklist. With <item-id>, inspects
+                                     that item from the tracker without claiming it.
   %[1]s grant <artifact-id> [--invocations N] [--cost USD] [--prompts N] [--timeout SECONDS]
                                      extend a parked step's budget. <artifact-id> is
                                      the id from AddStep (e.g. "plan"), NOT the step

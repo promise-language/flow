@@ -73,13 +73,36 @@ func TestNoArgsCommands_RejectExtraPositional(t *testing.T) {
 		{"doctor", func(a *App, args []string) int { return a.cmdDoctor(context.Background(), args) }},
 		{"list", func(a *App, args []string) int { return a.cmdList(context.Background(), args) }},
 		{"release", func(a *App, args []string) int { return a.cmdRelease(context.Background(), args) }},
-		{"status", func(a *App, args []string) int { return a.cmdStatus(context.Background(), args) }},
 		{"run-step", func(a *App, args []string) int { return a.cmdRun(context.Background(), args) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			app, _, errBuf := newArgparseApp(t)
 			code := tc.run(app, []string{"oops"})
+			if code != 2 {
+				t.Errorf("exit code = %d, want 2", code)
+			}
+			if !strings.Contains(errBuf.String(), "unexpected argument") {
+				t.Errorf("err = %q, want 'unexpected argument'", errBuf.String())
+			}
+		})
+	}
+}
+
+// status and resolve take an OPTIONAL single positional (the item id), so one
+// positional is valid — but a SECOND positional must still be rejected.
+func TestOptionalPositionalCommands_RejectSecondPositional(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func(app *App, args []string) int
+	}{
+		{"status", func(a *App, args []string) int { return a.cmdStatus(context.Background(), args) }},
+		{"resolve", func(a *App, args []string) int { return a.cmdResolve(context.Background(), args) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app, _, errBuf := newArgparseApp(t)
+			code := tc.run(app, []string{"T0001", "oops"})
 			if code != 2 {
 				t.Errorf("exit code = %d, want 2", code)
 			}
