@@ -23,17 +23,9 @@ func (app *App) cmdClaim(ctx context.Context, args []string) int {
 	}
 	itemID := fs.Arg(0)
 
-	// Find the ItemRef for this id by listing eligible items and matching
-	// the display string. Backends with cheaper paths can implement a
-	// dedicated lookup hook later; for now this is enough for v1.
-	refs, err := app.Backend.ListEligible(ctx)
+	ref, err := app.resolveClaimRef(ctx, itemID)
 	if err != nil {
 		fmt.Fprintln(app.Err, "claim:", err)
-		return 1
-	}
-	ref, ok := matchItemRef(refs, itemID)
-	if !ok {
-		fmt.Fprintf(app.Err, "claim: no eligible item matching %q\n", itemID)
 		return 1
 	}
 
@@ -45,6 +37,26 @@ func (app *App) cmdClaim(ctx context.Context, args []string) int {
 	fmt.Fprintf(app.Out, "claimed %s as %s\n", ref.Display, app.Owner)
 	_ = claim // backend persists its own lease state (see Backend.LookupActiveClaim)
 	return 0
+}
+
+// resolveClaimRef turns the user-typed item id into a backend ItemRef. When
+// the backend implements flow.RefResolver (e.g. the tracker, where the ref is
+// just the id) it resolves directly — no ListEligible round-trip, and the item
+// need not be in the eligible set to be claimed. Otherwise it falls back to
+// listing eligible items and substring-matching the display string.
+func (app *App) resolveClaimRef(ctx context.Context, itemID string) (flow.ItemRef, error) {
+	if rr, ok := app.Backend.(flow.RefResolver); ok {
+		return rr.ResolveRef(ctx, itemID)
+	}
+	refs, err := app.Backend.ListEligible(ctx)
+	if err != nil {
+		return flow.ItemRef{}, err
+	}
+	ref, ok := matchItemRef(refs, itemID)
+	if !ok {
+		return flow.ItemRef{}, fmt.Errorf("no eligible item matching %q", itemID)
+	}
+	return ref, nil
 }
 
 // matchItemRef returns the first ref whose Display contains itemID as a

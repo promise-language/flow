@@ -37,6 +37,22 @@ type ItemRef struct {
 	Ref         json.RawMessage `json:"ref"`     // backend-internal addressing
 }
 
+// RefResolver is an optional Backend capability: turn a user-supplied item id
+// string directly into an ItemRef, without enumerating eligible items.
+//
+// `claim <id>` needs an ItemRef, but the id the user types is just a string.
+// The generic CLI path resolves it by listing eligible items and substring-
+// matching Display — which is wasteful and, worse, confines `claim` to items
+// currently in the eligible set (e.g. status=open). A backend whose ItemRef is
+// derivable from the id alone (the tracker, where the ref IS the id) should
+// implement RefResolver so the CLI builds the ref directly and can claim any
+// named item regardless of its current status. Backends that genuinely need a
+// lookup (github: id → owner/repo#n) omit it and keep the list-and-match
+// fallback.
+type RefResolver interface {
+	ResolveRef(ctx context.Context, id string) (ItemRef, error)
+}
+
 // Claim is the credentialed handle returned by Backend.Claim. Holds the
 // backend-internal token used by subsequent write ops; the SDK serializes
 // this to .flow/active.json.
