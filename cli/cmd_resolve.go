@@ -4,9 +4,26 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
+	"strings"
+	"time"
 
 	"github.com/promise-language/flow"
 )
+
+// isLeaseItemConflict reports whether err from Backend.Claim is the tracker
+// lease ledger's "item already leased to a different arena" refusal. The
+// signal travels as the runner's 502 body text (the runner flattens the
+// tracker's 409 into 502 Bad Gateway), so we match on the stable error
+// suffix from the tracker's ErrItemAlreadyLeased.Error() format string
+// (see lease_ledger.go: `item %q already leased to arena %q; incoming
+// arena %q refused`).
+//
+// Used by the auto-select branch to iterate to the next eligible ref on a
+// conflict instead of livelock-cycling on the same item.
+func isLeaseItemConflict(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "already leased to arena")
+}
 
 // maxResolveSteps backstops cmdResolve's loop. A healthy flow advances through
 // its steps and finalizes well under this; the cap only trips on a step that
@@ -80,11 +97,38 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 				fmt.Fprintln(app.Err, "resolve: no active claim and no eligible items")
 				return 0
 			}
-			fmt.Fprintf(app.Err, "resolve: no active claim — auto-selecting %s\n", refs[0].Display)
-			newClaim, err := app.Backend.Claim(ctx, refs[0], app.Owner)
-			if err != nil {
+			// Cheap desync: two arenas launched in lockstep would otherwise
+			// hit ListEligible + Claim at the same instant on every iteration
+			// of `do resolve --auto`. A few hundred ms of jitter staggers
+			// them. Not a correctness mechanism — the iteration below handles
+			// the conflict regardless — just throughput hygiene.
+			time.Sleep(time.Duration(rand.IntN(300)) * time.Millisecond)
+			// Multiple arenas running `do resolve --auto` see the same
+			// refs[0] from the eligibility mirror (T0451) and race on Claim.
+			// The loser must fall through to the next ref instead of
+			// livelock-cycling on the same item. Only "item already leased
+			// to another arena" is retryable — other errors (network, auth,
+			// the arena's own bijection refusal) still exit 1.
+			var newClaim flow.Claim
+			claimed := false
+			for i, ref := range refs {
+				fmt.Fprintf(app.Err, "resolve: no active claim — auto-selecting %s (%d/%d)\n", ref.Display, i+1, len(refs))
+				c, err := app.Backend.Claim(ctx, ref, app.Owner)
+				if err == nil {
+					newClaim = c
+					claimed = true
+					break
+				}
+				if isLeaseItemConflict(err) {
+					fmt.Fprintf(app.Err, "resolve: %s already leased by another arena — trying next\n", ref.Display)
+					continue
+				}
 				fmt.Fprintln(app.Err, "resolve:", err)
 				return 1
+			}
+			if !claimed {
+				fmt.Fprintln(app.Err, "resolve: every eligible item is leased to another arena — nothing to do")
+				return 0
 			}
 			claim = &newClaim
 		} else {

@@ -216,6 +216,146 @@ func TestCmdResolve_AutoSelectClaimError(t *testing.T) {
 	}
 }
 
+// conflictThenOkBackend lets ListEligible return a pre-set list of refs;
+// Claim returns the tracker lease-conflict error for any ref in
+// conflictRefs, and otherwise delegates to the inner fake backend. Lets us
+// drive the auto-select iteration-on-conflict path deterministically.
+type conflictThenOkBackend struct {
+	*fake.Backend
+	refs          []flow.ItemRef
+	conflictRefs  map[string]bool
+	claimAttempts []string
+	listErr       error
+	nonConflict   error // if set, every Claim returns this error instead
+}
+
+func (b *conflictThenOkBackend) ListEligible(ctx context.Context) ([]flow.ItemRef, error) {
+	if b.listErr != nil {
+		return nil, b.listErr
+	}
+	return b.refs, nil
+}
+
+func (b *conflictThenOkBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string) (flow.Claim, error) {
+	id := string(ref.Ref)
+	b.claimAttempts = append(b.claimAttempts, id)
+	if b.nonConflict != nil {
+		return flow.Claim{}, b.nonConflict
+	}
+	if b.conflictRefs[id] {
+		// Mirror tracker ErrItemAlreadyLeased wrapped through the runner
+		// 502 + Backend.Claim prefixes — the substring isLeaseItemConflict
+		// matches must survive all wraps.
+		return flow.Claim{}, errors.New(`tracker backend: Claim: runner POST /v1/lease: 502 Bad Gateway: lease: record manual lease on tracker: tracker 409 Conflict: item "x" already leased to arena "other"; incoming arena "self" refused`)
+	}
+	return b.Backend.Claim(ctx, ref, owner)
+}
+
+func TestCmdResolve_AutoSelectIteratesOnLeaseConflict(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "3", Type: "task", Title: "3"})
+	refs := []flow.ItemRef{
+		{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
+		{BackendName: "fake", Display: "2", Ref: json.RawMessage(`"2"`)},
+		{BackendName: "fake", Display: "3", Ref: json.RawMessage(`"3"`)},
+	}
+	be := &conflictThenOkBackend{
+		Backend:      inner,
+		refs:         refs,
+		conflictRefs: map[string]bool{`"1"`: true, `"2"`: true},
+	}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if len(be.claimAttempts) != 3 {
+		t.Errorf("Claim attempts = %v, want 3 (two conflicts + one success)", be.claimAttempts)
+	}
+	if !strings.Contains(errBuf.String(), "1 already leased by another arena") {
+		t.Errorf("expected ref 1 conflict-skip line; got %q", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "2 already leased by another arena") {
+		t.Errorf("expected ref 2 conflict-skip line; got %q", errBuf.String())
+	}
+	// Ref 3 must actually be claimed and driven through the step.
+	claim := flow.Claim{BackendName: "fake", ItemRef: refs[2], Owner: "alice", Token: json.RawMessage(`{}`)}
+	state, err := inner.LoadState(context.Background(), claim)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if rec := state.Artifact("plan"); !rec.Resolved {
+		t.Errorf("expected plan artifact resolved on ref 3, got %+v", rec)
+	}
+}
+
+func TestCmdResolve_AutoSelectAllRefsConflictExitsZero(t *testing.T) {
+	inner := fake.New()
+	refs := []flow.ItemRef{
+		{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
+		{BackendName: "fake", Display: "2", Ref: json.RawMessage(`"2"`)},
+	}
+	be := &conflictThenOkBackend{
+		Backend:      inner,
+		refs:         refs,
+		conflictRefs: map[string]bool{`"1"`: true, `"2"`: true},
+	}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (all-conflict is a clean no-op exit); err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "every eligible item is leased to another arena") {
+		t.Errorf("expected 'every eligible item is leased' message; got %q", errBuf.String())
+	}
+}
+
+func TestCmdResolve_AutoSelectNonConflictErrorExitsOne(t *testing.T) {
+	inner := fake.New()
+	refs := []flow.ItemRef{
+		{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
+		{BackendName: "fake", Display: "2", Ref: json.RawMessage(`"2"`)},
+	}
+	be := &conflictThenOkBackend{
+		Backend:     inner,
+		refs:        refs,
+		nonConflict: errors.New("dial tcp: connection refused"),
+	}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 on non-conflict Claim error; err=%q", code, errBuf.String())
+	}
+	if len(be.claimAttempts) != 1 {
+		t.Errorf("Claim attempts = %v, want 1 (non-conflict errors must NOT iterate)", be.claimAttempts)
+	}
+	if !strings.Contains(errBuf.String(), "connection refused") {
+		t.Errorf("expected non-conflict error surfaced; got %q", errBuf.String())
+	}
+}
+
+func TestIsLeaseItemConflict(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"plain conflict (raw ledger format)", errors.New(`item "T0042" already leased to arena "other"; incoming arena "self" refused`), true},
+		{"fully wrapped through runner 502 + tracker backend prefix", errors.New(`tracker backend: Claim: runner POST /v1/lease: 502 Bad Gateway: lease: record manual lease on tracker: tracker 409 Conflict: item "T0042" already leased to arena "other"; incoming arena "self" refused`), true},
+		{"unrelated error", errors.New("dial tcp: connection refused"), false},
+		{"arena bijection (a different conflict — NOT retryable per-ref)", errors.New(`arena "self" already leases item "T0099"`), false},
+	}
+	for _, c := range cases {
+		if got := isLeaseItemConflict(c.err); got != c.want {
+			t.Errorf("isLeaseItemConflict(%q) = %v, want %v", c.err, got, c.want)
+		}
+	}
+}
+
 // Regression guard: with an explicit <id>, cmdResolve must take the
 // resolveClaimRef → Claim path and NEVER call ListEligible (the auto-select
 // branch is only reached when no id is given and no claim is held).
