@@ -14,7 +14,7 @@ type AgentRequest struct {
 	Prompt          string
 	ResumeSessionID string
 	FreshSession    bool
-	PermissionMode  string // default | acceptEdits | bypassPermissions | plan
+	PermissionMode  string // default | acceptEdits | bypassPermissions | plan | auto
 	Model           string
 	Effort          string // low | medium | high | max
 	Worktree        string // cwd for the agent process
