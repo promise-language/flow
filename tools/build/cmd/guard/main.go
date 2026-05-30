@@ -17,7 +17,19 @@ var (
 	sourceHash = ""
 )
 
+const usage = `guard — Claude Code PreToolUse hook.
+
+Usage:
+  guard [-h | -help]
+
+Normally invoked by .claude/settings.json, not by hand: it reads a hook JSON
+payload on stdin and blocks dangerous commands (and, when the tools are out
+of sync, anything but recovery). Exit 2 blocks the tool call.`
+
 func main() {
+	// Help is checked before stdin so a human can run `guard -help` without
+	// piping a payload; the hook itself never passes args.
+	common.MaybeHelp(os.Args[1:], usage)
 	// Fail open on any input trouble: a guard that can't read its stdin must
 	// not wedge the agent. Real policy lives in common.Guard.
 	data, err := io.ReadAll(os.Stdin)

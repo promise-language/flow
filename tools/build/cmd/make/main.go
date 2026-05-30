@@ -15,7 +15,17 @@ import (
 	"github.com/promise-language/flow/tools/build/common"
 )
 
+const usage = `make — the meta-builder.
+
+Usage:
+  ./make [-force | --force] [-h | -help]
+
+Compiles every tool under tools/build/cmd into bin/ (stamping each with the
+tools-source hash and repo root) and wires git hooks. Skips the build when
+bin/ is already up to date; -force rebuilds regardless.`
+
 func main() {
+	common.MaybeHelp(os.Args[1:], usage)
 	force := false
 	for _, a := range os.Args[1:] {
 		if a == "-force" || a == "--force" {
