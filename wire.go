@@ -16,6 +16,14 @@ const (
 	// re-dispatch path retries the same item against a healthy runner
 	// without burning budget.
 	ParkInfraTransient ParkKind = "infra-transient"
+	// ParkRemoteUnreachable — a git remote was unreachable (SSH refused,
+	// "Could not read from remote repository", DNS, "No route to host",
+	// connection timeout). Distinct from ParkInfraTransient because the
+	// tracker's orchestrator pauses dispatch GLOBALLY and runs a probe
+	// ticker until the remote is reachable again. Like ParkInfraTransient
+	// it consumes no invocation budget; the tracker translates this kind
+	// into the typed FlowFailureRemoteUnreachable on the ledger row.
+	ParkRemoteUnreachable ParkKind = "remote-unreachable"
 )
 
 // BudgetAxis identifies which budget axis was exhausted (when
