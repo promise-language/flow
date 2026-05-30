@@ -680,6 +680,7 @@ See the forge [blueprint][forge-blueprint] for the full file layout
 | `list` | list items this flow can process |
 | `claim <id>` (alias `lease`) | acquire an exclusive claim; resolves the ref via `RefResolver` or a `ListEligible` substring match |
 | `run-step` | advance ONE lifecycle item; emit an `InvocationResult` JSON. Re-run until `done` |
+| `resolve [<id>]` (alias `run-all`) | drive the FULL lifecycle: loop `run-step` until the item finalizes or the run stops (parked, skipped, or failed). With `<id>` claims it first; with no claim and no id, auto-selects `ListEligible()[0]`. Streams each step's `InvocationResult` JSON |
 | `status [<id>]` | read-only lifecycle checklist (uses `StateInspector` when there's no claim) |
 | `grant <artifact-id> --invocations N --cost USD --prompts N --timeout SECONDS` | additively extend a parked step's budget. `<artifact-id>` is the id passed to `AddStep` (e.g. `plan`), **not** the human step name (`"write plan"`) |
 | `release` | drop the claim |
@@ -690,9 +691,7 @@ and `<bin> <command> --help` (likewise `-help` / `-h`) prints that command's
 usage and exits 0 without running it.
 
 **Planned** (share the same `RunOne` orchestrator; not yet implemented):
-- `run-all` — loop `run-step` until the flow reports `done`, parks, or asks a
-  question.
-- `auto` / `process` — bundle `claim` + `run-all` + `release` for cron-driven
+- `auto` / `process` — bundle `claim` + `resolve` + `release` for cron-driven
   sweeps over a queue of eligible items.
 
 ---
