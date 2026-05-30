@@ -684,6 +684,11 @@ See the forge [blueprint][forge-blueprint] for the full file layout
 | `grant <artifact-id> --invocations N --cost USD --prompts N --timeout SECONDS` | additively extend a parked step's budget. `<artifact-id>` is the id passed to `AddStep` (e.g. `plan`), **not** the human step name (`"write plan"`) |
 | `release` | drop the claim |
 
+`cli.Run` also handles help automatically, in both flag prefixes and the short
+form: `<bin> --help` / `-help` / `-h` (or `<bin> help`) prints the command list,
+and `<bin> <command> --help` (likewise `-help` / `-h`) prints that command's
+usage and exits 0 without running it.
+
 **Planned** (share the same `RunOne` orchestrator; not yet implemented):
 - `run-all` — loop `run-step` until the flow reports `done`, parks, or asks a
   question.

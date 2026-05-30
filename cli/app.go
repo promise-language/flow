@@ -103,6 +103,27 @@ func RunWithArgs(app App, args []string) int {
 	}
 
 	cmd, rest := args[0], args[1:]
+
+	// Top-level help: `<bin> help`, or a help flag in the command position
+	// (-h / --h / -help / --help). `<bin> help <command>` shows that command's
+	// usage, mirroring `<bin> <command> --help`.
+	if cmd == "help" || isHelpArg(cmd) {
+		if cmd == "help" && len(rest) > 0 && isKnownCommand(rest[0]) {
+			fmt.Fprintln(app.Out, commandUsage(app.Name, rest[0]))
+			return 0
+		}
+		fmt.Fprintln(app.Out, usage(app.Name))
+		return 0
+	}
+	// Per-command help: a help flag anywhere after a known command (e.g.
+	// `<bin> claim --help`) prints that command's usage and does NOT execute
+	// it. Handled centrally so every subcommand supports it uniformly; an
+	// unknown command still falls through to the dispatch error below.
+	if isKnownCommand(cmd) && wantsHelp(rest) {
+		fmt.Fprintln(app.Out, commandUsage(app.Name, cmd))
+		return 0
+	}
+
 	ctx := context.Background()
 	switch cmd {
 	case "doctor":
@@ -121,9 +142,6 @@ func RunWithArgs(app App, args []string) int {
 		return app.cmdRun(ctx, rest)
 	case "resolve", "run-all":
 		return app.cmdResolve(ctx, rest)
-	case "help", "--help", "-h":
-		fmt.Fprintln(app.Out, usage(app.Name))
-		return 0
 	default:
 		fmt.Fprintln(app.Err, "unknown command:", cmd)
 		fmt.Fprintln(app.Err, usage(app.Name))
