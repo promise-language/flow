@@ -23,9 +23,20 @@ const maxResolveSteps = 50
 // (preflight refusal, e.g. an already-finalized item), or failed.
 //
 // With an explicit <item-id> it claims that item first (idempotent re-acquire
-// if this arena already holds it); with no argument it resolves the arena's
-// active claim. Each step's result is streamed as JSON so the operator sees
-// progress live.
+// if this arena already holds it); with no argument it resumes the arena's
+// active claim. If there is no active claim AND no <item-id> was given, it
+// auto-selects refs[0] from Backend.ListEligible — the backend defines the
+// ordering. An empty eligible set is a clean exit (0), not an error — there
+// is simply no work to do. Each step's result is streamed as JSON so the
+// operator sees progress live.
+//
+// NB: the tracker backend's ListEligible currently returns
+// GET /api/items?status=open ordered by UpdatedAt DESC; it does NOT yet
+// filter deferred/manual or sort by urgency/priority the way the
+// orchestrator's selectEligibleTasks does. Until that mirrors land, the
+// auto-select policy is "most-recently-updated open item the arena can
+// claim" — fine for development, not yet ready as the production auto loop.
+// Tracked separately.
 func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("resolve")
 	if err := fs.Parse(args); err != nil {
@@ -56,10 +67,29 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			return 1
 		}
 		if c == nil {
-			fmt.Fprintln(app.Err, "resolve: no active claim (give an item id: `resolve <id>`)")
-			return 1
+			// No id given and arena holds no claim: auto-select the next
+			// eligible item. The backend's ListEligible order is the
+			// selection policy (see doc comment above) — the CLI just
+			// claims whatever it returns first.
+			refs, err := app.Backend.ListEligible(ctx)
+			if err != nil {
+				fmt.Fprintln(app.Err, "resolve:", err)
+				return 1
+			}
+			if len(refs) == 0 {
+				fmt.Fprintln(app.Err, "resolve: no active claim and no eligible items")
+				return 0
+			}
+			fmt.Fprintf(app.Err, "resolve: no active claim — auto-selecting %s\n", refs[0].Display)
+			newClaim, err := app.Backend.Claim(ctx, refs[0], app.Owner)
+			if err != nil {
+				fmt.Fprintln(app.Err, "resolve:", err)
+				return 1
+			}
+			claim = &newClaim
+		} else {
+			claim = c
 		}
-		claim = c
 	}
 
 	// Progress goes to Err so stdout stays a clean machine-readable stream of
