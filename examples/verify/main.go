@@ -3,9 +3,10 @@
 //
 // Build:   go build -o verify ./examples/verify
 // Use:     ./verify doctor
-//          ./verify list
-//          ./verify claim 42
-//          ./verify run
+//
+//	./verify list
+//	./verify claim 42
+//	./verify run
 //
 // Issues must carry a `type:task` label and `flow:verify` label (see
 // docs/design.md for the full label vocabulary).

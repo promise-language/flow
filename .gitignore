@@ -30,3 +30,6 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# forge dev tooling — bin/ holds locally-built tools, never committed
+bin/

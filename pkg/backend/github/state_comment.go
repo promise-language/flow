@@ -34,15 +34,15 @@ type stateDoc struct {
 }
 
 type stateArtifactDoc struct {
-	Id           string    `yaml:"id"`
-	Type         string    `yaml:"type"`
-	Required     bool      `yaml:"required,omitempty"`
-	Stale        bool      `yaml:"stale,omitempty"`
-	Resolved     bool      `yaml:"resolved,omitempty"`
-	ResolvedBy   string    `yaml:"resolved_by,omitempty"`
-	ProducedAt   time.Time `yaml:"produced_at,omitempty"`
-	Version      int       `yaml:"version,omitempty"`
-	ResolvedByPrincipal string `yaml:"resolved_by_principal,omitempty"`
+	Id                  string    `yaml:"id"`
+	Type                string    `yaml:"type"`
+	Required            bool      `yaml:"required,omitempty"`
+	Stale               bool      `yaml:"stale,omitempty"`
+	Resolved            bool      `yaml:"resolved,omitempty"`
+	ResolvedBy          string    `yaml:"resolved_by,omitempty"`
+	ProducedAt          time.Time `yaml:"produced_at,omitempty"`
+	Version             int       `yaml:"version,omitempty"`
+	ResolvedByPrincipal string    `yaml:"resolved_by_principal,omitempty"`
 
 	// inline value (small types) — large types (file/patch) live as
 	// follow-up comments / orphan-branch files referenced by ResolvedBy.
@@ -63,10 +63,10 @@ type stateArtifactDoc struct {
 }
 
 type stateSignalDoc struct {
-	Id           string    `yaml:"id"`
-	Set          bool      `yaml:"set"`
-	ObservedAt   time.Time `yaml:"observed_at,omitempty"`
-	ObservedVia  string    `yaml:"observed_via,omitempty"` // side-effect | poll
+	Id          string    `yaml:"id"`
+	Set         bool      `yaml:"set"`
+	ObservedAt  time.Time `yaml:"observed_at,omitempty"`
+	ObservedVia string    `yaml:"observed_via,omitempty"` // side-effect | poll
 }
 
 // extractStateDoc scans a comment body for the state-v1 markers and parses

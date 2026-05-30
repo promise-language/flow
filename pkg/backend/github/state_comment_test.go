@@ -15,18 +15,18 @@ func TestRenderStateComment_RoundTrip(t *testing.T) {
 		SeededAt: time.Date(2026, 5, 26, 15, 0, 0, 0, time.UTC),
 		Artifacts: []stateArtifactDoc{
 			{
-				Id:                 "plan",
-				Type:               "markdown",
-				Required:           true,
-				Resolved:           true,
-				ResolvedBy:         "https://github.com/o/r/issues/42#issuecomment-12345",
-				ProducedAt:         time.Date(2026, 5, 26, 15, 10, 0, 0, time.UTC),
+				Id:                  "plan",
+				Type:                "markdown",
+				Required:            true,
+				Resolved:            true,
+				ResolvedBy:          "https://github.com/o/r/issues/42#issuecomment-12345",
+				ProducedAt:          time.Date(2026, 5, 26, 15, 10, 0, 0, time.UTC),
 				ResolvedByPrincipal: "claude-opus-4-7",
-				Version:            1,
-				GrantedInvocations: 3,
-				GrantedCostUSD:     10,
-				Invocations:        1,
-				CostUSDSpent:       0.42,
+				Version:             1,
+				GrantedInvocations:  3,
+				GrantedCostUSD:      10,
+				Invocations:         1,
+				CostUSDSpent:        0.42,
 			},
 		},
 		Signals: []stateSignalDoc{
@@ -113,17 +113,17 @@ func TestArtifactTypeStringSymmetric(t *testing.T) {
 
 func TestRecordFromArtifactDoc(t *testing.T) {
 	d := stateArtifactDoc{
-		Id:                 "plan",
-		Type:               "markdown",
-		Required:           true,
-		Resolved:           true,
-		ResolvedBy:         "url1",
+		Id:                  "plan",
+		Type:                "markdown",
+		Required:            true,
+		Resolved:            true,
+		ResolvedBy:          "url1",
 		ResolvedByPrincipal: "alice",
-		Version:            2,
-		GrantedInvocations: 5,
-		GrantedCostUSD:     10,
-		Invocations:        3,
-		CostUSDSpent:       2.5,
+		Version:             2,
+		GrantedInvocations:  5,
+		GrantedCostUSD:      10,
+		Invocations:         3,
+		CostUSDSpent:        2.5,
 	}
 	rec := recordFromArtifactDoc(d)
 	if rec.Id != "plan" || rec.Type != flow.ArtifactMarkdown {

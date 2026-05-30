@@ -38,8 +38,8 @@ type ghMock struct {
 	perms map[string]bool
 
 	// orphan branch state for the artifacts spillover
-	orphanBranchSHA string                  // commit SHA at heads/flow-artifacts
-	orphanFiles     map[string]ghMockFile   // path → file
+	orphanBranchSHA string                // commit SHA at heads/flow-artifacts
+	orphanFiles     map[string]ghMockFile // path → file
 	nextBlobID      int
 	nextTreeID      int
 	nextCommitID    int
@@ -83,8 +83,8 @@ func (m *ghMock) server() *httptest.Server {
 	// GET /repos/{o}/{r}
 	mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
-			"name":       m.repo,
-			"full_name":  m.owner + "/" + m.repo,
+			"name":        m.repo,
+			"full_name":   m.owner + "/" + m.repo,
 			"permissions": m.perms,
 		})
 	})
@@ -443,11 +443,11 @@ func (m *ghMock) handleContents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, map[string]any{
-			"name":     path,
-			"path":     path,
-			"sha":      file.SHA,
-			"type":     "file",
-			"size":     len(file.Content),
+			"name":         path,
+			"path":         path,
+			"sha":          file.SHA,
+			"type":         "file",
+			"size":         len(file.Content),
 			"download_url": "https://raw.githubusercontent.com/" + m.owner + "/" + m.repo + "/" + artifactsBranch + "/" + path,
 		})
 	case http.MethodPut:

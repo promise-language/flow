@@ -15,10 +15,10 @@ import (
 // requireIntegration skips unless GH_INTEGRATION=1 AND the four required env
 // vars are set:
 //
-//   GH_INTEGRATION_OWNER=<gh-login-or-org>
-//   GH_INTEGRATION_REPO=<sandbox-repo>
-//   GH_INTEGRATION_ISSUE=<issue-number-to-exercise>
-//   GH_INTEGRATION_OWNER_LOGIN=<your-gh-login> (used as claim owner)
+//	GH_INTEGRATION_OWNER=<gh-login-or-org>
+//	GH_INTEGRATION_REPO=<sandbox-repo>
+//	GH_INTEGRATION_ISSUE=<issue-number-to-exercise>
+//	GH_INTEGRATION_OWNER_LOGIN=<your-gh-login> (used as claim owner)
 //
 // The test will mutate labels/assignees/comments on the named issue, so
 // point it at a throwaway repo + issue created for this purpose.

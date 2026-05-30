@@ -44,9 +44,9 @@ func (l labels) Disabled() string       { return l.named(labelSuffixDisabled) }
 func (l labels) InfraTransient() string { return l.named(labelSuffixInfraTransient) }
 
 // Per-binary owner labels.
-func (l labels) Binary(name string) string  { return l.named(name) }
-func (l labels) Owner(login string) string  { return l.named(labelSuffixOwnerPrefix + login) }
-func (l labels) OwnerPrefix() string        { return l.prefix + labelSuffixOwnerPrefix }
+func (l labels) Binary(name string) string { return l.named(name) }
+func (l labels) Owner(login string) string { return l.named(labelSuffixOwnerPrefix + login) }
+func (l labels) OwnerPrefix() string       { return l.prefix + labelSuffixOwnerPrefix }
 func (l labels) ClaimToken(hex string) string {
 	return l.named(labelSuffixClaimPrefix + hex)
 }
