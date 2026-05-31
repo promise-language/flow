@@ -160,6 +160,13 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	budgetKey := li.Result()
 	sctx := newStepCtx(stepCtx, app, claim, f, li, state)
 
+	// Auto-emit step entry so every step transition reaches the tracker
+	// without each handler having to call ctx.Notify. Handlers that DO call
+	// ctx.Notify with richer detail will override this baseline.
+	if app.Telemetry != nil {
+		app.Telemetry.StepProgress(stepCtx, claim, li.Name, "")
+	}
+
 	// Dispatch.
 	handlerErr := li.Handler(sctx)
 

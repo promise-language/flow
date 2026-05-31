@@ -101,6 +101,64 @@ func TestRunOne_SeedsAndDispatchesFirstStep(t *testing.T) {
 	}
 }
 
+// recordingTelemetry captures every StepProgress call for assertion.
+type recordingTelemetry struct {
+	events []telemetryEvent
+}
+
+type telemetryEvent struct {
+	Step   string
+	Detail string
+}
+
+func (r *recordingTelemetry) StepProgress(ctx context.Context, claim flow.Claim, step, detail string) {
+	r.events = append(r.events, telemetryEvent{Step: step, Detail: detail})
+}
+
+func TestRunOne_AutoEmitsStepEntry(t *testing.T) {
+	tel := &recordingTelemetry{}
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			// Handler's own Notify call should be recorded too, in order.
+			ctx.Notify("write plan", "writing")
+			return ctx.ResolveMarkdown("the plan")
+		})
+	}, &stubAgent{name: "stub"})
+	app.Telemetry = tel
+
+	if _, err := RunOne(context.Background(), app, claim); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if len(tel.events) != 2 {
+		t.Fatalf("events = %+v, want 2 (auto + handler Notify)", tel.events)
+	}
+	if tel.events[0].Step != "write plan" || tel.events[0].Detail != "" {
+		t.Errorf("auto-emit event[0] = %+v, want {step=write plan, detail=\"\"}", tel.events[0])
+	}
+	if tel.events[1].Step != "write plan" || tel.events[1].Detail != "writing" {
+		t.Errorf("handler event[1] = %+v, want {step=write plan, detail=writing}", tel.events[1])
+	}
+}
+
+func TestRunOne_AutoEmitSkipsWhenTelemetryNil(t *testing.T) {
+	// Sanity: with no telemetry installed RunOne still completes successfully.
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("noop", "plan", func(ctx flow.StepCtx) error {
+			return ctx.ResolveMarkdown("ok")
+		})
+	}, &stubAgent{name: "stub"})
+	if app.Telemetry != nil {
+		t.Fatal("test setup: expected nil telemetry")
+	}
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "done" {
+		t.Errorf("status = %q, want done", res.Status)
+	}
+}
+
 func TestRunOne_PreflightSkipsBeforeFlowSelection(t *testing.T) {
 	handlerCalled := false
 	app, be, claim := testApp(t, func(f *flow.Flow) {
