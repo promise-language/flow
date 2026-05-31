@@ -42,18 +42,12 @@ const maxResolveSteps = 50
 // With an explicit <item-id> it claims that item first (idempotent re-acquire
 // if this arena already holds it); with no argument it resumes the arena's
 // active claim. If there is no active claim AND no <item-id> was given, it
-// auto-selects refs[0] from Backend.ListEligible — the backend defines the
-// ordering. An empty eligible set is a clean exit (0), not an error — there
-// is simply no work to do. Each step's result is streamed as JSON so the
-// operator sees progress live.
-//
-// NB: the tracker backend's ListEligible currently returns
-// GET /api/items?status=open ordered by UpdatedAt DESC; it does NOT yet
-// filter deferred/manual or sort by urgency/priority the way the
-// orchestrator's selectEligibleTasks does. Until that mirrors land, the
-// auto-select policy is "most-recently-updated open item the arena can
-// claim" — fine for development, not yet ready as the production auto loop.
-// Tracked separately.
+// auto-selects refs[0] from Backend.ListEligible — the tracker backend's
+// ListEligible mirrors the orchestrator's selectEligibleTasks (same per-item
+// filter and same leased/urgency/priority sort), so the CLI picks the same
+// "next" the orchestrator would. An empty eligible set is a clean exit (0),
+// not an error — there is simply no work to do. Each step's result is
+// streamed as JSON so the operator sees progress live.
 func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("resolve")
 	if err := fs.Parse(args); err != nil {
