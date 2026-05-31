@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -156,6 +157,65 @@ func TestRunOne_AutoEmitSkipsWhenTelemetryNil(t *testing.T) {
 	}
 	if res.Status != "done" {
 		t.Errorf("status = %q, want done", res.Status)
+	}
+}
+
+// seedFailBackend forces SeedState to fail — modeling a transport/tracker
+// error while declaring the checklist.
+type seedFailBackend struct{ *fake.Backend }
+
+func (b seedFailBackend) SeedState(ctx context.Context, claim flow.Claim, specs []flow.ArtifactSpec) error {
+	return errors.New("boom: seed unavailable")
+}
+
+// noopSeedBackend models the pre-fix bug: SeedState silently no-ops, leaving
+// the item with no required-artifact checklist.
+type noopSeedBackend struct{ *fake.Backend }
+
+func (b noopSeedBackend) SeedState(ctx context.Context, claim flow.Claim, specs []flow.ArtifactSpec) error {
+	return nil
+}
+
+// TestRunOne_SeedFailureErrorsOutNoStep — when seeding fails, RunOne errors
+// out and the step handler NEVER runs. Seeding is mandatory; no fallback.
+func TestRunOne_SeedFailureErrorsOutNoStep(t *testing.T) {
+	a := &stubAgent{name: "stub"}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			t.Fatal("step handler ran despite seeding failure — must not happen")
+			return nil
+		})
+	}, a)
+	app.Backend = seedFailBackend{Backend: be}
+
+	_, err := RunOne(context.Background(), app, claim)
+	if err == nil {
+		t.Fatal("RunOne returned nil error on seed failure; want a hard error")
+	}
+	if !strings.Contains(err.Error(), "seed") {
+		t.Errorf("err = %v, want it to mention the seed failure", err)
+	}
+}
+
+// TestRunOne_UnseededAfterNoopSeedErrorsOut — if SeedState reports success but
+// the item still has no required-artifact checklist, RunOne refuses to run any
+// step and errors out (seeding is mandatory).
+func TestRunOne_UnseededAfterNoopSeedErrorsOut(t *testing.T) {
+	a := &stubAgent{name: "stub"}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			t.Fatal("step handler ran against an unseeded item — must not happen")
+			return nil
+		})
+	}, a)
+	app.Backend = noopSeedBackend{Backend: be}
+
+	_, err := RunOne(context.Background(), app, claim)
+	if err == nil {
+		t.Fatal("RunOne returned nil error for an unseeded item; want a hard error")
+	}
+	if !strings.Contains(err.Error(), "seeding is mandatory") {
+		t.Errorf("err = %v, want it to name the mandatory-seed refusal", err)
 	}
 }
 

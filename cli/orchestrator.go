@@ -85,23 +85,40 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		}
 	}
 
-	// One-shot seed: zero artifacts means the backend hasn't been seeded yet.
-	if len(state.Artifacts) == 0 {
-		if err := app.Backend.SeedState(ctx, claim, f.SeedSpec(app.artifactById)); err != nil {
+	// Mandatory seed gate. A flow that declares required artifacts runs steps
+	// ONLY against an item whose finalization checklist has been seeded (the
+	// required-artifact set). An item with no required artifact has not been
+	// seeded; seed it now. If seeding fails, OR it produces no checklist, OR
+	// no flow is derivable afterwards, the invocation errors out — the flow
+	// NEVER runs a step against an unseeded item, and there is no fallback.
+	// This binds step-selection to the seed instead of the compiled-in step
+	// list. (Signal-only flows declare no required artifacts and are exempt.)
+	seedSpecs := f.SeedSpec(app.artifactById)
+	requiresSeed := false
+	for _, s := range seedSpecs {
+		if s.Required {
+			requiresSeed = true
+			break
+		}
+	}
+	if requiresSeed && !state.HasRequiredArtifacts() {
+		if err := app.Backend.SeedState(ctx, claim, seedSpecs); err != nil {
 			return flow.InvocationResult{}, fmt.Errorf("seed state: %w", err)
 		}
 		state, err = app.Backend.LoadState(ctx, claim)
 		if err != nil {
 			return flow.InvocationResult{}, fmt.Errorf("reload after seed: %w", err)
 		}
-		// Re-derive after seed (rare: seed could change derivation).
+		if !state.HasRequiredArtifacts() {
+			return flow.InvocationResult{}, fmt.Errorf(
+				"item %s has no required-artifact checklist after seed — refusing to run any step (seeding is mandatory)",
+				claim.ItemRef.Display)
+		}
+		// Re-derive against the now-seeded state.
 		f, nextName = SelectFlow(app, state)
 		if f == nil {
-			return flow.InvocationResult{
-				Item:   claim.ItemRef.Display,
-				Status: "done",
-				Reason: "no eligible flow after seed",
-			}, nil
+			return flow.InvocationResult{}, fmt.Errorf(
+				"no eligible flow for item %s after seed — refusing to run", claim.ItemRef.Display)
 		}
 	}
 

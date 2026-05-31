@@ -133,6 +133,23 @@ func (s *ItemState) Artifact(id ArtifactId) ArtifactRecord {
 	return s.Artifacts[id]
 }
 
+// HasRequiredArtifacts reports whether the item has a seeded finalization
+// checklist — i.e. at least one artifact record marked Required. It is the
+// "is this item seeded?" predicate used by cli.RunOne's mandatory-seed gate:
+// an item with no required artifact has not been seeded and the flow must not
+// run any step against it.
+func (s *ItemState) HasRequiredArtifacts() bool {
+	if s == nil {
+		return false
+	}
+	for _, rec := range s.Artifacts {
+		if rec.Required {
+			return true
+		}
+	}
+	return false
+}
+
 // SignalSet returns true iff the named signal is set on the item.
 func (s *ItemState) SignalSet(id SignalId) bool {
 	if s == nil {
