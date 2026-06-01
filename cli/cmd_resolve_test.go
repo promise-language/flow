@@ -72,7 +72,7 @@ type failingClaimBackend struct {
 	claimErr error
 }
 
-func (b *failingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string) (flow.Claim, error) {
+func (b *failingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, force bool) (flow.Claim, error) {
 	return flow.Claim{}, b.claimErr
 }
 
@@ -135,7 +135,7 @@ func TestCmdResolve_ResumesActiveClaim(t *testing.T) {
 	// Pre-claim as app.Owner — cmdResolve must resume this claim via
 	// LookupActiveClaim and never touch ListEligible (which fails here).
 	ref := flow.ItemRef{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)}
-	if _, err := inner.Claim(context.Background(), ref, "alice"); err != nil {
+	if _, err := inner.Claim(context.Background(), ref, "alice", false); err != nil {
 		t.Fatalf("pre-claim: %v", err)
 	}
 	be := &failingListBackend{Backend: inner, err: errors.New("ListEligible must not be called on resume path")}
@@ -236,7 +236,7 @@ func (b *conflictThenOkBackend) ListEligible(ctx context.Context) ([]flow.ItemRe
 	return b.refs, nil
 }
 
-func (b *conflictThenOkBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string) (flow.Claim, error) {
+func (b *conflictThenOkBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, force bool) (flow.Claim, error) {
 	id := string(ref.Ref)
 	b.claimAttempts = append(b.claimAttempts, id)
 	if b.nonConflict != nil {
@@ -248,7 +248,7 @@ func (b *conflictThenOkBackend) Claim(ctx context.Context, ref flow.ItemRef, own
 		// matches must survive all wraps.
 		return flow.Claim{}, errors.New(`tracker backend: Claim: runner POST /v1/lease: 502 Bad Gateway: lease: record manual lease on tracker: tracker 409 Conflict: item "x" already leased to arena "other"; incoming arena "self" refused`)
 	}
-	return b.Backend.Claim(ctx, ref, owner)
+	return b.Backend.Claim(ctx, ref, owner, force)
 }
 
 func TestCmdResolve_AutoSelectIteratesOnLeaseConflict(t *testing.T) {

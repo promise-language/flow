@@ -26,7 +26,7 @@ func TestBackend_ClaimAndLookup(t *testing.T) {
 	b := fake.New()
 	b.AddItem(newItem("1"))
 
-	claim, err := b.Claim(ctx, itemRef("1"), "alice")
+	claim, err := b.Claim(ctx, itemRef("1"), "alice", false)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestBackend_SeedRefusesSecondSeed(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
 	b.AddItem(newItem("1"))
-	claim, _ := b.Claim(ctx, itemRef("1"), "alice")
+	claim, _ := b.Claim(ctx, itemRef("1"), "alice", false)
 
 	specs := []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
@@ -64,7 +64,7 @@ func TestBackend_ResolveArtifactRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
 	b.AddItem(newItem("1"))
-	claim, _ := b.Claim(ctx, itemRef("1"), "alice")
+	claim, _ := b.Claim(ctx, itemRef("1"), "alice", false)
 	_ = b.SeedState(ctx, claim, []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
 	})
@@ -94,7 +94,7 @@ func TestBackend_ResolveArtifactRejectsTypeMismatch(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
 	b.AddItem(newItem("1"))
-	claim, _ := b.Claim(ctx, itemRef("1"), "alice")
+	claim, _ := b.Claim(ctx, itemRef("1"), "alice", false)
 	_ = b.SeedState(ctx, claim, []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
 	})
@@ -109,7 +109,7 @@ func TestBackend_BudgetCountersAndGrant(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
 	b.AddItem(newItem("1"))
-	claim, _ := b.Claim(ctx, itemRef("1"), "alice")
+	claim, _ := b.Claim(ctx, itemRef("1"), "alice", false)
 	_ = b.SeedState(ctx, claim, []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactMarkdown, Budget: flow.DefaultStepBudget()},
 	})
@@ -149,7 +149,7 @@ func TestBackend_SignalSet(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New(flow.Signal("pr-open", "test"))
 	b.AddItem(newItem("1"))
-	claim, _ := b.Claim(ctx, itemRef("1"), "alice")
+	claim, _ := b.Claim(ctx, itemRef("1"), "alice", false)
 
 	b.SetSignal("1", "pr-open", true)
 	state, _ := b.LoadState(ctx, claim)
@@ -162,7 +162,7 @@ func TestBackend_AskQuestionsAssignsIDsAndAnswerFlow(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
 	b.AddItem(newItem("1"))
-	claim, _ := b.Claim(ctx, itemRef("1"), "alice")
+	claim, _ := b.Claim(ctx, itemRef("1"), "alice", false)
 
 	qs := []flow.AgentQuestion{
 		flow.AskYesNo("ship", "Ship it?"),
@@ -205,7 +205,7 @@ func TestBackend_ParkRecordsRequest(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
 	b.AddItem(newItem("1"))
-	claim, _ := b.Claim(ctx, itemRef("1"), "alice")
+	claim, _ := b.Claim(ctx, itemRef("1"), "alice", false)
 
 	req := flow.ParkRequest{
 		Kind:   flow.ParkBudgetExhausted,

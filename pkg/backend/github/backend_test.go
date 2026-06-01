@@ -554,7 +554,7 @@ func TestBackend_ClaimSeedResolveRoundTrip(t *testing.T) {
 	ref := b.refFromIssue(42)
 
 	// Claim. The race-check sees only one flow:claim:* label (ours), so we win.
-	claim, err := b.Claim(ctx, ref, "alice")
+	claim, err := b.Claim(ctx, ref, "alice", false)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -630,7 +630,7 @@ func TestBackend_BumpInvocations_PersistsViaStateComment(t *testing.T) {
 
 	ctx := t.Context()
 	ref := b.refFromIssue(42)
-	claim, err := b.Claim(ctx, ref, "alice")
+	claim, err := b.Claim(ctx, ref, "alice", false)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -666,7 +666,7 @@ func TestBackend_ResolveFileArtifactSpills(t *testing.T) {
 
 	ctx := t.Context()
 	ref := b.refFromIssue(42)
-	claim, err := b.Claim(ctx, ref, "alice")
+	claim, err := b.Claim(ctx, ref, "alice", false)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -720,7 +720,7 @@ func TestBackend_ResolvePatchArtifactSpills(t *testing.T) {
 
 	ctx := t.Context()
 	ref := b.refFromIssue(42)
-	claim, _ := b.Claim(ctx, ref, "alice")
+	claim, _ := b.Claim(ctx, ref, "alice", false)
 	_ = b.SeedState(ctx, claim, []flow.ArtifactSpec{
 		{Id: "implementation", Type: flow.ArtifactPatch, Required: true, Budget: flow.DefaultStepBudget()},
 	})
@@ -752,7 +752,7 @@ func TestBackend_LargeMarkdownAutoSpills(t *testing.T) {
 
 	ctx := t.Context()
 	ref := b.refFromIssue(42)
-	claim, _ := b.Claim(ctx, ref, "alice")
+	claim, _ := b.Claim(ctx, ref, "alice", false)
 	_ = b.SeedState(ctx, claim, []flow.ArtifactSpec{
 		{Id: "log", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
 	})
@@ -783,7 +783,7 @@ func TestBackend_SecondSpillUpdatesViaContentsAPI(t *testing.T) {
 
 	ctx := t.Context()
 	ref := b.refFromIssue(42)
-	claim, _ := b.Claim(ctx, ref, "alice")
+	claim, _ := b.Claim(ctx, ref, "alice", false)
 	_ = b.SeedState(ctx, claim, []flow.ArtifactSpec{
 		{Id: "blob", Type: flow.ArtifactFile, Required: true, Budget: flow.DefaultStepBudget()},
 	})

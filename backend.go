@@ -172,8 +172,10 @@ type Backend interface {
 	// ListEligible returns candidate items in the backend's scope.
 	ListEligible(ctx context.Context) ([]ItemRef, error)
 
-	// Claim acquires an exclusive lease on the item.
-	Claim(ctx context.Context, ref ItemRef, owner string) (Claim, error)
+	// Claim acquires an exclusive lease on the item. force overrides backend-side
+	// safety refusals (e.g. the tracker backend refuses a claim onto an arena that
+	// still holds unsaved work); backends without such a check ignore it.
+	Claim(ctx context.Context, ref ItemRef, owner string, force bool) (Claim, error)
 
 	// Release relinquishes the lease.
 	Release(ctx context.Context, claim Claim) error

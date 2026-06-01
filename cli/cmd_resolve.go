@@ -65,7 +65,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			fmt.Fprintln(app.Err, "resolve:", err)
 			return 1
 		}
-		c, err := app.Backend.Claim(ctx, ref, app.Owner)
+		c, err := app.Backend.Claim(ctx, ref, app.Owner, false)
 		if err != nil {
 			fmt.Fprintln(app.Err, "resolve:", err)
 			return 1
@@ -107,7 +107,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			claimed := false
 			for i, ref := range refs {
 				fmt.Fprintf(app.Err, "resolve: no active claim — auto-selecting %s (%d/%d)\n", ref.Display, i+1, len(refs))
-				c, err := app.Backend.Claim(ctx, ref, app.Owner)
+				c, err := app.Backend.Claim(ctx, ref, app.Owner, false)
 				if err == nil {
 					newClaim = c
 					claimed = true

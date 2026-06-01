@@ -23,7 +23,7 @@ import (
 //  4. Winner: POST self as assignee, POST flow:owner:<login>, DELETE
 //     flow:claim:<hex>.
 //  5. POST or supersede the state comment.
-func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string) (flow.Claim, error) {
+func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, force bool) (flow.Claim, error) {
 	issueNum, err := b.issueNumber(ref)
 	if err != nil {
 		return flow.Claim{}, err

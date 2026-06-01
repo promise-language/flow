@@ -116,7 +116,7 @@ func (b *Backend) ListEligible(ctx context.Context) ([]flow.ItemRef, error) {
 	return out, nil
 }
 
-func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string) (flow.Claim, error) {
+func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, force bool) (flow.Claim, error) {
 	id, err := refID(ref)
 	if err != nil {
 		return flow.Claim{}, err

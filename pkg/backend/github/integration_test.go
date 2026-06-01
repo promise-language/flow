@@ -80,7 +80,7 @@ func TestIntegration_ClaimSeedResolveCycle(t *testing.T) {
 		t.Fatalf("Doctor: %v", err)
 	}
 
-	claim, err := b.Claim(ctx, ref, ownerLogin)
+	claim, err := b.Claim(ctx, ref, ownerLogin, false)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}

@@ -10,6 +10,7 @@ import (
 
 func (app *App) cmdClaim(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("claim")
+	force := fs.Bool("force", false, "claim even if the arena worktree has unsaved work (override the clean-tree check)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -29,7 +30,7 @@ func (app *App) cmdClaim(ctx context.Context, args []string) int {
 		return 1
 	}
 
-	claim, err := app.Backend.Claim(ctx, ref, app.Owner)
+	claim, err := app.Backend.Claim(ctx, ref, app.Owner, *force)
 	if err != nil {
 		fmt.Fprintln(app.Err, "claim:", err)
 		return 1
