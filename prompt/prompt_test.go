@@ -16,9 +16,10 @@ func TestRender_FillsPartials(t *testing.T) {
 	if !strings.Contains(c.AskGuidance, "mcp__tracker__ask_user_question") {
 		t.Errorf("AskGuidance missing MCP question tool: %q", c.AskGuidance)
 	}
-	// The plan-resolution partial must carry the already-implemented branch (the
-	// stall fix) plus the blocked / not-feasible paths.
-	for _, want := range []string{"ALREADY IMPLEMENTED", "blocked_by", "wontfix", "needs-attention", "empty diff"} {
+	// The plan-resolution partial must carry the proof-gated already-implemented
+	// branch (the stall fix) with the precise terminal statuses, the ask-if-unsure
+	// path, and the not-feasible path. (BLOCKED moved to the implement step.)
+	for _, want := range []string{"ALREADY IMPLEMENTED", "PROOF", "duplicate", "cant_reproduce", "works_as_intended", "ask_user_question", "wontfix", "needs-attention"} {
 		if !strings.Contains(c.PlanStepResolution, want) {
 			t.Errorf("PlanStepResolution missing %q", want)
 		}
