@@ -48,6 +48,23 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// tracker") would otherwise refuse it.
 	f, nextName := SelectFlow(app, state)
 	if f == nil {
+		// T0481: refuse to Finalize+release when any required artifact in the
+		// loaded state is still unresolved. status=done ≠ finalized — a missing
+		// summary/inspection means finalization work is owed on this arena, and
+		// a release here would strand the operator's next hand-run `run-step`
+		// with "no active claim". This is a defensive guard against a
+		// misseeded flow / a future regression that lets SelectFlow return nil
+		// over an unfinalized item; the happy-path producer-flow already
+		// derives the next step (review/coverage/commit/push/...) for it.
+		for _, rec := range state.Artifacts {
+			if rec.Required && !rec.Resolved {
+				return flow.InvocationResult{
+					Item:   claim.ItemRef.Display,
+					Status: "failed",
+					Reason: fmt.Sprintf("no eligible flow but required artifact %q still pending — refusing premature finalize/release", rec.Id),
+				}, nil
+			}
+		}
 		// No step remains — the flow is complete (or the item is terminal).
 		// Finalize + release the claim if the backend supports it, so a manual
 		// run closes the item and frees the arena the same way the orchestrator

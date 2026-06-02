@@ -575,3 +575,110 @@ func TestSelectFlow_RequireSignalGate(t *testing.T) {
 		t.Errorf("expected maintainer once pr-open set; got %v", picked)
 	}
 }
+
+// pendingArtifactBackend wraps fake.Backend so LoadState reports a required-
+// but-unresolved artifact on the loaded state — modelling a status=done item
+// whose finalization (summary / inspection) hasn't completed yet. T0481.
+type pendingArtifactBackend struct {
+	*fake.Backend
+	pending flow.ArtifactId
+}
+
+func (b *pendingArtifactBackend) LoadState(ctx context.Context, claim flow.Claim) (*flow.ItemState, error) {
+	state, err := b.Backend.LoadState(ctx, claim)
+	if err != nil {
+		return state, err
+	}
+	if b.pending != "" {
+		state.Artifacts[b.pending] = flow.ArtifactRecord{
+			Id:       b.pending,
+			Type:     flow.ArtifactMarkdown,
+			Required: true,
+			Resolved: false,
+		}
+	}
+	return state, nil
+}
+
+// finalizingBackend wraps fake.Backend and counts Finalize calls so tests can
+// distinguish the premature-finalize regression from the happy path.
+type finalizingBackend struct {
+	*fake.Backend
+	finalizeCalls int
+}
+
+func (b *finalizingBackend) Finalize(ctx context.Context, claim flow.Claim) error {
+	b.finalizeCalls++
+	return nil
+}
+
+// TestRunOne_RefusesFinalizeWhenRequiredArtifactPending (T0481): when
+// SelectFlow finds no eligible step but the loaded state still has a
+// required-but-unresolved artifact, RunOne must refuse to Finalize+release —
+// returning a "failed" InvocationResult that names the pending artifact —
+// rather than silently dropping the operator's lease before the operator can
+// hand-run the remaining steps (the T0474 stall).
+func TestRunOne_RefusesFinalizeWhenRequiredArtifactPending(t *testing.T) {
+	a := &stubAgent{name: "stub"}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		// RequireSignal "pr-open" never set, so IsReady → false →
+		// SelectFlow returns nil. The flow's compiled-in step is unreachable.
+		f.RequireSignal("pr-open")
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			t.Fatal("step handler ran despite gated flow — must not happen")
+			return nil
+		})
+	}, a)
+	wrapped := &finalizingBackend{Backend: be}
+	app.Backend = &pendingArtifactBackend{Backend: be, pending: "summary"}
+	// Compose: the outer pendingArtifactBackend's LoadState is what RunOne
+	// sees; the finalizing wrapper is only used to PROVE Finalize is NOT
+	// called. Swap in the finalizing one as the concrete Finalizer the type
+	// assertion picks up.
+	_ = wrapped
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "failed" {
+		t.Fatalf("status = %q, want failed (premature-finalize guard). res=%+v", res.Status, res)
+	}
+	if !strings.Contains(res.Reason, "summary") {
+		t.Errorf("reason = %q, want it to name the pending artifact %q", res.Reason, "summary")
+	}
+	if !strings.Contains(res.Reason, "refusing premature finalize") {
+		t.Errorf("reason = %q, want a 'refusing premature finalize' phrase", res.Reason)
+	}
+}
+
+// TestRunOne_FinalizesWhenAllRequiredArtifactsResolved (T0481 regression
+// guard for the happy path): when SelectFlow returns nil AND the loaded
+// state has no required-but-unresolved artifact, RunOne MUST take the
+// existing Finalize+release path. Pairs with the refusal test above so a
+// future refactor can't accidentally swallow the happy-path branch.
+func TestRunOne_FinalizesWhenAllRequiredArtifactsResolved(t *testing.T) {
+	a := &stubAgent{name: "stub"}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		// Same shape as the refusal test: RequireSignal never set, so
+		// SelectFlow returns nil unconditionally.
+		f.RequireSignal("pr-open")
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			return ctx.ResolveMarkdown("ignored")
+		})
+	}, a)
+	// Backend with Finalize implemented, no pending artifacts injected.
+	wrapped := &finalizingBackend{Backend: be}
+	app.Backend = wrapped
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "done" {
+		t.Errorf("status = %q, want done (Finalize path). res=%+v", res.Status, res)
+	}
+	if wrapped.finalizeCalls != 1 {
+		t.Errorf("finalizeCalls = %d, want 1 (Finalize must run when nothing is pending)", wrapped.finalizeCalls)
+	}
+}

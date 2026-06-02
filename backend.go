@@ -70,6 +70,18 @@ type Finalizer interface {
 	Finalize(ctx context.Context, claim Claim) error
 }
 
+// ManualTakeover is an optional Backend capability: signal that the operator
+// has taken hand control of an item (typed `run-step` directly, rather than
+// the runner spawning the flow). cli.cmdRun calls this at the top of every
+// operator-driven invocation so the backend can apply its "I'm driving now"
+// side effects — e.g. the tracker backend sets Manual=true (so the
+// orchestrator stops auto-dispatching the item underneath the operator) and
+// resolves any unresolved FlowPark (the operator's run-step IS the resume).
+// Backends without a manual/park concept simply omit the interface. T0481.
+type ManualTakeover interface {
+	MarkManualTakeover(ctx context.Context, claim Claim) error
+}
+
 // StateInspector is an optional Backend capability: load an item's flow state
 // (artifacts + signals + questions) READ-ONLY, addressed by ItemRef, with NO
 // claim. `status <id>` uses it to inspect any item's lifecycle checklist
