@@ -1,0 +1,10 @@
+- Run `git status` to see the in-progress rebase and the conflicted files.
+- Resolve each conflict carefully: read the whole file, integrate BOTH sides (keep the
+  intent of your change AND the incoming changes from origin). Do NOT blindly pick one
+  side or delete code to make the markers (`<<<<<<<`/`=======`/`>>>>>>>`) go away.
+- `git add` each resolved file, then `git rebase --continue`. Repeat until the rebase is
+  fully applied (it may stop on several commits).
+- Then run `{{.VerifyCmd}}` and make it pass on the merged result — a rebase can introduce
+  SEMANTIC conflicts git did not flag.
+- Leave the worktree clean and the rebase complete. Do NOT `git push` (a later step
+  pushes) and do NOT `git rebase --abort` (that throws away the rebase progress).

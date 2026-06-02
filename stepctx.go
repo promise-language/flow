@@ -74,5 +74,11 @@ type StepCtx interface {
 	// is owned by cli.RunOne for the duration of the invocation.
 	Claim() Claim
 
+	// VerifyCmd returns the project verify command configured on the App
+	// (App.VerifyCmd), or "" if none was set. Handlers use it both to run the
+	// verify gate and to populate prompt context, so the command is defined in
+	// exactly one place. See the App.VerifyCmd docstring.
+	VerifyCmd() string
+
 	RefreshItem() error
 }

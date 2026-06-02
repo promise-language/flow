@@ -1,0 +1,11 @@
+Evaluate feasibility; for the non-actionable cases use the tracker MCP, then stop:
+- ALREADY IMPLEMENTED / DUPLICATE → if the change this item describes is already present
+  in the codebase (or it duplicates another item), do NOT produce a plan. Close this item
+  via the tracker MCP — set status wontfix with a summary naming what already covers it
+  (e.g. "already implemented" or "duplicate of <id>") and add the "needs-attention" tag —
+  then stop. Producing a plan here strands the item: the implement step finds nothing to
+  change, yields an empty diff, and fails on every retry until the item is parked.
+- BLOCKED by unfinished work → identify (or create) the blocking item, set blocked_by on
+  this item, and add the "needs-attention" tag.
+- NOT FEASIBLE as specified → set status wontfix with a clear summary, and add the
+  "needs-attention" tag.

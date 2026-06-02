@@ -368,6 +368,7 @@ func (s *stepCtx) StepName() string         { return s.li.Name }
 func (s *stepCtx) Result() flow.ArtifactId  { return s.li.ArtifactId }
 func (s *stepCtx) Item() flow.Item          { return s.state.Item }
 func (s *stepCtx) Claim() flow.Claim        { return s.claim }
+func (s *stepCtx) VerifyCmd() string        { return s.app.VerifyCmd }
 
 func (s *stepCtx) Artifact(id flow.ArtifactId) (flow.ArtifactRecord, bool) {
 	rec, ok := s.state.Artifacts[id]

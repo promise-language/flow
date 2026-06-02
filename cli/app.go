@@ -60,6 +60,14 @@ type App struct {
 	// own canonicalization (e.g., github uses the authenticated gh login).
 	Owner string
 
+	// VerifyCmd is the project's verify command (e.g. "bin/verify --wasm" or
+	// "make check"). It is the single source of truth a flow binary configures
+	// once, here, instead of hardcoding it in each step handler and prompt:
+	// handlers read it via StepCtx.VerifyCmd() to run the gate, and pass it into
+	// the prompt context so shared, project-agnostic prompt fragments can refer
+	// to it. Optional; empty means no verify command is configured.
+	VerifyCmd string
+
 	// Out / Err are the cli's output streams. nil means os.Stdout /
 	// os.Stderr respectively.
 	Out io.Writer
