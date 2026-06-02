@@ -40,6 +40,10 @@ func main() {
 	if err := json.Unmarshal(data, &in); err != nil {
 		os.Exit(0)
 	}
+	// Best-effort ai_context tracking: pushes on PreToolUse, pops on
+	// PostToolUse for work tools. Failures (no tracker, no agent identity,
+	// HTTP error) are swallowed so the tool decision is never affected.
+	common.TrackContext(in)
 	decision := common.Guard(repoRoot, sourceHash, in)
 	if decision.Allowed {
 		os.Exit(0)

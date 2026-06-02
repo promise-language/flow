@@ -6,10 +6,15 @@ import (
 	"strings"
 )
 
-// HookInput is the subset of the Claude Code PreToolUse payload the guard reads.
+// HookInput is the subset of the Claude Code Pre/PostToolUse payload the guard
+// reads. HookEventName/CWD and the per-tool ToolInput fields are used by the
+// best-effort ai_context tracker (context.go) — they are absent on PreToolUse-
+// only callers and the guard still works correctly with zero values.
 type HookInput struct {
-	ToolName  string          `json:"tool_name"`
-	ToolInput json.RawMessage `json:"tool_input"`
+	HookEventName string          `json:"hook_event_name"`
+	ToolName      string          `json:"tool_name"`
+	CWD           string          `json:"cwd"`
+	ToolInput     json.RawMessage `json:"tool_input"`
 }
 
 // GuardDecision is the guard's verdict: Allowed==true means proceed, otherwise
@@ -37,6 +42,12 @@ type GuardDecision struct {
 // via 'go run' and works no matter how stale the compiled tools are — so this
 // funnels the agent to recovery without ever trapping it.
 func Guard(repoRoot, compiledHash string, in HookInput) GuardDecision {
+	// PostToolUse is wired purely to drive ai_context pops (see context.go) — the
+	// tool already ran, so the deny path must never fire there or broadening the
+	// hook matchers would retroactively "block" completed work.
+	if in.HookEventName == "PostToolUse" {
+		return GuardDecision{Allowed: true}
+	}
 	if in.ToolName == "Bash" {
 		if reason := dangerReason(bashCommand(in.ToolInput)); reason != "" {
 			return GuardDecision{Reason: reason}
@@ -58,7 +69,11 @@ func Guard(repoRoot, compiledHash string, in HookInput) GuardDecision {
 		}
 		return GuardDecision{Reason: lockMsg("only edits under tools/build/ (to fix the tools) are allowed")}
 	default:
-		return GuardDecision{Reason: lockMsg("this action is blocked until the tools are rebuilt")}
+		// Task/Skill/mcp__* are wired so the guard can track ai_context — they
+		// are not gated by the stale lockdown. The leaf tools they invoke
+		// (Bash/Edit/Write) still go through the guard at their own call sites,
+		// so recovery is still funnelled through ./make.
+		return GuardDecision{Allowed: true}
 	}
 }
 
