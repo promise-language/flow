@@ -11,7 +11,7 @@ import (
 func (app *App) cmdClaim(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("claim")
 	force := fs.Bool("force", false, "claim even if the arena worktree has unsaved work (override the clean-tree check)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return 2
 	}
 	if fs.NArg() == 0 {

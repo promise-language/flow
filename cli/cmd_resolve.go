@@ -50,7 +50,7 @@ const maxResolveSteps = 50
 // streamed as JSON so the operator sees progress live.
 func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("resolve")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return 2
 	}
 	if fs.NArg() > 1 {

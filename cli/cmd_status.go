@@ -9,7 +9,7 @@ import (
 
 func (app *App) cmdStatus(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("status")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return 2
 	}
 	if fs.NArg() > 1 {

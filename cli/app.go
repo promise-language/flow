@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strings"
 
 	"github.com/promise-language/flow"
 )
@@ -313,6 +314,61 @@ func (app *App) newFlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(app.Err)
 	return fs
+}
+
+// parseInterspersed parses args allowing flags to appear in any position
+// relative to positionals — the convention every modern CLI uses, but one the
+// stdlib flag package deliberately does not implement. Walks args once,
+// peeling flag tokens (and their values) off into a flags slice and pushing
+// the rest into positionals, then calls fs.Parse(flags, "--", positionals...)
+// so the stdlib parser sees the only order it understands. Unknown flags fall
+// through to fs.Parse's own "flag provided but not defined" error so existing
+// strict-parsing behavior is preserved. Bool flags are detected via the
+// FlagSet's Lookup + IsBoolFlag so e.g. `claim <id> --force` is parsed
+// correctly (no slurping the next token).
+func parseInterspersed(fs *flag.FlagSet, args []string) error {
+	var flags, positionals []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			positionals = append(positionals, args[i+1:]...)
+			break
+		}
+		// Not a flag: bare "-" or anything not starting with "-" is positional.
+		if len(a) < 2 || a[0] != '-' {
+			positionals = append(positionals, a)
+			continue
+		}
+		// Strip 1 or 2 leading dashes to get the flag name.
+		name := a[1:]
+		if name[0] == '-' {
+			name = name[1:]
+		}
+		// "--name=value" is self-contained; never consume a follow-on token.
+		if strings.IndexByte(name, '=') >= 0 {
+			flags = append(flags, a)
+			continue
+		}
+		flags = append(flags, a)
+		// Peek next token only when the flag exists AND is NOT a bool flag —
+		// mirrors the stdlib's own internal logic in (*FlagSet).parseOne.
+		// Unknown flags: do not consume the next token here; let fs.Parse
+		// report the "flag provided but not defined" error itself.
+		if fl := fs.Lookup(name); fl != nil {
+			if bf, ok := fl.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
+				continue
+			}
+			if i+1 < len(args) {
+				i++
+				flags = append(flags, args[i])
+			}
+		}
+	}
+	if len(positionals) > 0 {
+		flags = append(flags, "--")
+		flags = append(flags, positionals...)
+	}
+	return fs.Parse(flags)
 }
 
 // rejectArgs parses args for a command that takes no flags and no

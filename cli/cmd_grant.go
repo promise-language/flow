@@ -13,7 +13,7 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 	prompts := fs.Int("prompts", 0, "additional prompts-per-invocation to grant")
 	cost := fs.Float64("cost", 0, "additional cost (USD) to grant")
 	timeout := fs.Int("timeout", 0, "additional timeout in seconds")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return 2
 	}
 	if fs.NArg() == 0 {
