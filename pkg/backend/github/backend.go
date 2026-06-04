@@ -109,6 +109,35 @@ func (b *Backend) SupportedSignals() []flow.SignalDef {
 	}
 }
 
+// githubSupportedArtifacts is github's canonical artifact schema. github can
+// technically store any id (as a state-doc entry + comment, with
+// File/Patch/oversize-Markdown spilled to the orphan branch), but — like the
+// tracker — it declares a closed, curated set so flows targeting it coordinate
+// on a stable (id, type) vocabulary instead of inventing artifacts ad hoc. It
+// covers the standard code-lifecycle artifacts plus github/PR-specific ones.
+var githubSupportedArtifacts = []flow.ArtifactDef{
+	// Standard code-lifecycle artifacts (shared vocabulary with the tracker).
+	flow.Artifact("plan", flow.ArtifactMarkdown).WithDoc("Implementation plan for the issue."),
+	flow.Artifact("implementation", flow.ArtifactPatch).WithDoc("The code change for the issue, captured as a diff."),
+	flow.Artifact("review", flow.ArtifactMarkdown).WithDoc("Contributor-side code-review findings."),
+	flow.Artifact("coverage", flow.ArtifactMarkdown).WithDoc("Test-coverage analysis."),
+	flow.Artifact("summary", flow.ArtifactMarkdown).WithDoc("Resolution summary for the issue."),
+	// github/PR-specific artifacts — the contributor→maintainer pull-request
+	// lifecycle this backend is built around.
+	flow.Artifact("verify-impl", flow.ArtifactMarkdown).WithDoc("Contributor-side verification (test/build) output before opening the PR."),
+	flow.Artifact("review-maint", flow.ArtifactMarkdown).WithDoc("Maintainer-side review of the PR before merge."),
+	flow.Artifact("verify-merge", flow.ArtifactMarkdown).WithDoc("Maintainer-side pre-merge verification output."),
+	flow.Artifact("merge-commit", flow.ArtifactCommitHash).WithDoc("Hash of the merge commit on the default branch after the PR merges."),
+	flow.Artifact("test-output", flow.ArtifactMarkdown).WithDoc("Captured output of a test run."),
+}
+
+// SupportedArtifacts returns github's canonical artifact schema (see
+// githubSupportedArtifacts). A flow declaring an artifact outside this set —
+// unknown id or mismatched type — is refused at cli.App startup. The
+// declared-vs-resolved type consistency for a recorded body stays a
+// resolve-time check in ResolveArtifact.
+func (b *Backend) SupportedArtifacts() []flow.ArtifactDef { return githubSupportedArtifacts }
+
 // ListEligible returns issues with the binary's flow:<name> label assigned to
 // the authenticated user.
 func (b *Backend) ListEligible(ctx context.Context) ([]flow.ItemRef, error) {

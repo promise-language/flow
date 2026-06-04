@@ -181,6 +181,23 @@ type Backend interface {
 	// at startup.
 	SupportedSignals() []SignalDef
 
+	// SupportedArtifacts returns this backend's canonical artifact schema: the
+	// closed, well-defined set of artifacts it knows how to RECORD, each with
+	// its stable id, type, and a description (ArtifactDef.Doc). cli.Run
+	// validates every declared App.Artifact against this set at startup — by id
+	// AND type — so a flow that declares an artifact this backend cannot store
+	// (unknown id, or a type that disagrees with the backend's) is refused at
+	// startup (every invocation, exit 2) rather than failing at resolve-time
+	// after the producing step has already run and burned a turn.
+	//
+	// It is a closed list (cf. SupportedSignals), not an open "supports
+	// anything" predicate: the (id, type) pair is a stable schema multiple
+	// flows — even across projects — must agree on. Owning that schema in the
+	// backend keeps it coordinated; letting each flow invent artifacts ad hoc
+	// would push schema coordination onto the flows. A backend that can
+	// technically store any id (e.g. github) still declares a curated set.
+	SupportedArtifacts() []ArtifactDef
+
 	// ListEligible returns candidate items in the backend's scope.
 	ListEligible(ctx context.Context) ([]ItemRef, error)
 

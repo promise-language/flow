@@ -60,17 +60,33 @@ type PatchBody struct {
 	Untracked  []string // names of untracked files (content NOT embedded)
 }
 
-// ArtifactDef — centralized declaration in App.Artifacts. Referenced by id
-// from any number of flows; type is resolved from here at validation time.
+// ArtifactDef — one entry in a backend's canonical artifact schema
+// (Backend.SupportedArtifacts) and in an App's declared set (App.Artifacts).
+// The (Id, Type) pair is the stable identity multiple flows — even from
+// different projects — coordinate on; Doc explains the artifact's purpose so a
+// reader (human or agent) understands it beyond the name and type.
 type ArtifactDef struct {
 	Id   ArtifactId
 	Type ArtifactType
+	// Doc is a one-line, AI-understandable description of what this artifact
+	// holds and when it is produced. Authoritative on the backend's
+	// SupportedArtifacts entries; App.Artifacts references may leave it empty.
+	Doc string
 }
 
 // Artifact returns an ArtifactDef. Convenience constructor so call sites read
-// as flow.Artifact("plan", flow.ArtifactMarkdown).
+// as flow.Artifact("plan", flow.ArtifactMarkdown). Attach a description with
+// .WithDoc(...) when declaring a backend's canonical schema.
 func Artifact(id ArtifactId, t ArtifactType) ArtifactDef {
 	return ArtifactDef{Id: id, Type: t}
+}
+
+// WithDoc returns a copy of the def with its Doc set — a one-line description
+// of the artifact's purpose. Backends document their canonical schema with it:
+// flow.Artifact("plan", flow.ArtifactMarkdown).WithDoc("Implementation plan.").
+func (d ArtifactDef) WithDoc(doc string) ArtifactDef {
+	d.Doc = doc
+	return d
 }
 
 // ArtifactSpec — what the seed phase records for each artifact: cap values

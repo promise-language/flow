@@ -516,6 +516,46 @@ func TestApp_Validate_RejectsUnknownArtifact(t *testing.T) {
 	}
 }
 
+func TestApp_Validate_RejectsUnsupportedArtifact(t *testing.T) {
+	be := fake.New()
+	// Restrict the fake to only "plan" — "report" is then unrecordable.
+	be.SetSupportedArtifacts(flow.Artifact("plan", flow.ArtifactMarkdown))
+	f := flow.NewFlow("x", []flow.ItemType{"task"})
+	f.AddStep("plan", "plan", func(flow.StepCtx) error { return nil })
+	f.AddStep("report", "report", func(flow.StepCtx) error { return nil })
+	app := App{
+		Backend: be,
+		Agent:   &stubAgent{name: "stub"},
+		Artifacts: []flow.ArtifactDef{
+			flow.Artifact("plan", flow.ArtifactMarkdown),
+			flow.Artifact("report", flow.ArtifactMarkdown),
+		},
+		Flows: []*flow.Flow{f},
+	}
+	if err := app.validate(); err == nil {
+		t.Errorf("expected validation error for artifact the backend cannot record")
+	}
+}
+
+func TestApp_Validate_RejectsArtifactTypeMismatch(t *testing.T) {
+	be := fake.New()
+	// The backend records "plan" only as Markdown; declaring it as JSON is a
+	// type the backend cannot store for that id — caught at startup, not at
+	// resolve-time.
+	be.SetSupportedArtifacts(flow.Artifact("plan", flow.ArtifactMarkdown))
+	f := flow.NewFlow("x", []flow.ItemType{"task"})
+	f.AddStep("plan", "plan", func(flow.StepCtx) error { return nil })
+	app := App{
+		Backend:   be,
+		Agent:     &stubAgent{name: "stub"},
+		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactJSON)},
+		Flows:     []*flow.Flow{f},
+	}
+	if err := app.validate(); err == nil {
+		t.Errorf("expected validation error for artifact declared with a type the backend cannot record")
+	}
+}
+
 func TestApp_Validate_RejectsUnsupportedSignal(t *testing.T) {
 	be := fake.New() // no signals supported
 	f := flow.NewFlow("x", nil)
@@ -523,7 +563,7 @@ func TestApp_Validate_RejectsUnsupportedSignal(t *testing.T) {
 	app := App{
 		Backend:   be,
 		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("dummy", flow.ArtifactFlag)},
+		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Signals:   []flow.SignalDef{flow.Signal("pr-open", "x")},
 		Flows:     []*flow.Flow{f},
 	}

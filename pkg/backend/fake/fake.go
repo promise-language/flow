@@ -23,6 +23,27 @@ type Backend struct {
 	clock           func() time.Time
 	verifyOK        bool // controls Worktree.Validate result
 	supportsRequest bool // controls whether Worktree.Request() returns non-nil
+	// supportedArtifacts is the backend's canonical artifact schema returned by
+	// SupportedArtifacts. nil (the default) means "use the standard vocabulary"
+	// (defaultSupportedArtifacts); SetSupportedArtifacts overrides it so tests
+	// can exercise cli.App's startup rejection of an unrecordable artifact.
+	supportedArtifacts []flow.ArtifactDef
+}
+
+// defaultSupportedArtifacts is the schema an unconfigured fake reports — the
+// standard flow vocabulary, enough for SDK tests that build an App without
+// caring about the artifact schema. Override per-test with
+// Backend.SetSupportedArtifacts.
+var defaultSupportedArtifacts = []flow.ArtifactDef{
+	flow.Artifact("plan", flow.ArtifactMarkdown).WithDoc("Implementation plan."),
+	flow.Artifact("implementation", flow.ArtifactPatch).WithDoc("The code change as a diff."),
+	flow.Artifact("review", flow.ArtifactMarkdown).WithDoc("Code review findings."),
+	flow.Artifact("coverage", flow.ArtifactMarkdown).WithDoc("Test-coverage analysis."),
+	flow.Artifact("commit", flow.ArtifactCommitHash).WithDoc("Local commit hash."),
+	flow.Artifact("push", flow.ArtifactCommitHash).WithDoc("Pushed commit hash."),
+	flow.Artifact("summary", flow.ArtifactMarkdown).WithDoc("Resolution summary."),
+	flow.Artifact("inspection", flow.ArtifactJSON).WithDoc("Inspection verdict."),
+	flow.Artifact("phases", flow.ArtifactJSON).WithDoc("Child task ids filed from a plan."),
 }
 
 type itemRecord struct {
@@ -101,6 +122,27 @@ func (b *Backend) ParkRequest(itemID string) *flow.ParkRequest {
 func (b *Backend) Name() string { return "fake" }
 
 func (b *Backend) SupportedSignals() []flow.SignalDef { return b.signals }
+
+// SetSupportedArtifacts overrides the backend's canonical artifact schema with
+// exactly the given defs. With no call, the fake reports the standard
+// vocabulary (defaultSupportedArtifacts). Use it to exercise cli.App's startup
+// refusal of an artifact the backend cannot record.
+func (b *Backend) SetSupportedArtifacts(defs ...flow.ArtifactDef) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.supportedArtifacts = defs
+}
+
+// SupportedArtifacts returns the backend's canonical artifact schema — the
+// configured set, or the standard vocabulary when unconfigured.
+func (b *Backend) SupportedArtifacts() []flow.ArtifactDef {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.supportedArtifacts == nil {
+		return defaultSupportedArtifacts
+	}
+	return b.supportedArtifacts
+}
 
 func (b *Backend) ListEligible(ctx context.Context) ([]flow.ItemRef, error) {
 	b.mu.Lock()

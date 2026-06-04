@@ -207,6 +207,28 @@ func (app *App) validate() error {
 		}
 	}
 
+	// Every declared artifact must be in the backend's canonical schema — by
+	// id AND type. Symmetric with the signal check above: a flow whose declared
+	// artifact the backend cannot persist (unknown id, or a type that
+	// disagrees with the backend's schema) could never finalize the step that
+	// produces it, so refuse at startup (exit 2, every invocation) instead of
+	// discovering it at resolve-time after the step has already run. The
+	// per-flow loop below guarantees every step result is in App.Artifacts, so
+	// checking the declared set here transitively covers every step result.
+	recordable := map[flow.ArtifactId]flow.ArtifactDef{}
+	for _, ad := range app.Backend.SupportedArtifacts() {
+		recordable[ad.Id] = ad
+	}
+	for _, ad := range app.Artifacts {
+		def, ok := recordable[ad.Id]
+		if !ok {
+			return fmt.Errorf("artifact %q declared but not in Backend.SupportedArtifacts() (backend %q)", ad.Id, app.Backend.Name())
+		}
+		if def.Type != ad.Type {
+			return fmt.Errorf("artifact %q declared with type %v but Backend %q records it as %v", ad.Id, ad.Type, app.Backend.Name(), def.Type)
+		}
+	}
+
 	// Per-flow validation.
 	for _, f := range app.Flows {
 		if f == nil {
