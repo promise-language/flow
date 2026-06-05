@@ -114,9 +114,12 @@ func flowForType(app *App, itemType flow.ItemType) *flow.Flow {
 
 // statusFlowLine renders the "flow:" value. A finalized item is reported as
 // finalized (its run is complete — NOT "no flow eligible", which misleadingly
-// implies unstarted/blocked). Otherwise: the currently-eligible flow's name,
-// or the type-matching flow tagged with why no step is eligible, or a no-match
-// note.
+// implies unstarted/blocked). "(finalized)" is shown ONLY when the persistent
+// finalized flag is set — never for a not-yet-seeded item (whose derived
+// Finalized() is vacuously true). Otherwise: the currently-eligible flow's
+// name; or, when no step is eligible, the type-matching flow tagged with why —
+// "(not seeded)" if its finalization checklist has not been seeded yet, else
+// "(no eligible step)"; or a no-match note.
 func statusFlowLine(state *flow.ItemState, eligible, typeFlow *flow.Flow) string {
 	if state.Item.Finalized {
 		if typeFlow != nil {
@@ -128,6 +131,9 @@ func statusFlowLine(state *flow.ItemState, eligible, typeFlow *flow.Flow) string
 		return eligible.Name()
 	}
 	if typeFlow != nil {
+		if !state.HasRequiredArtifacts() {
+			return typeFlow.Name() + " (not seeded)"
+		}
 		return typeFlow.Name() + " (no eligible step)"
 	}
 	return "(no matching flow)"
