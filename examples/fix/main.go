@@ -64,24 +64,22 @@ func main() {
 
 	// Contributor flow.
 	contributor := flow.NewFlow("fix", []flow.ItemType{"task", "bug"})
-	contributor.AddStep("write plan", "plan", stepPlan, flow.Required)
-	contributor.AddStep("implement the change", "implementation", stepImplementation,
-		flow.Required,
-		flow.MaxPromptsPerInvocation(5),
-		flow.Timeout(60*time.Minute),
-	)
-	contributor.AddStep("review the work", "review", stepReview, flow.Required)
-	contributor.AddStep("analyze coverage", "coverage", stepCoverage, flow.Required)
-	contributor.AddStep("verify", "verify-impl", stepVerify, flow.Required)
-	contributor.AddSignalStep("create pull request", "pr-open", stepCreatePR, flow.Required)
+	contributor.AddStep("write plan", "plan", stepPlan, flow.StepConfig{})
+	contributor.AddStep("implement the change", "implementation", stepImplementation, flow.StepConfig{
+		Budget: flow.StepBudget{MaxPromptsPerInvocation: 5, Timeout: 60 * time.Minute},
+	})
+	contributor.AddStep("review the work", "review", stepReview, flow.StepConfig{})
+	contributor.AddStep("analyze coverage", "coverage", stepCoverage, flow.StepConfig{})
+	contributor.AddStep("verify", "verify-impl", stepVerify, flow.StepConfig{})
+	contributor.AddSignalStep("create pull request", "pr-open", stepCreatePR, flow.StepConfig{})
 
 	// Maintainer flow — only eligible once contributor is done.
 	maintainer := flow.NewFlow("merge", []flow.ItemType{"task", "bug"})
 	maintainer.RequireSignal("pr-open")
-	maintainer.AddStep("review the implementation", "review-maint", stepMaintReview, flow.Required)
-	maintainer.AddStep("verify", "verify-merge", stepVerify, flow.Required)
-	maintainer.AddSignalStep("merge pull request", "pr-merged", stepMerge, flow.Required)
-	maintainer.AddStep("record merge commit", "merge-commit", stepRecordMerge, flow.Required)
+	maintainer.AddStep("review the implementation", "review-maint", stepMaintReview, flow.StepConfig{})
+	maintainer.AddStep("verify", "verify-merge", stepVerify, flow.StepConfig{})
+	maintainer.AddSignalStep("merge pull request", "pr-merged", stepMerge, flow.StepConfig{})
+	maintainer.AddStep("record merge commit", "merge-commit", stepRecordMerge, flow.StepConfig{})
 
 	os.Exit(cli.Run(cli.App{
 		Name:      "fix",

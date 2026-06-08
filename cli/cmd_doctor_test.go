@@ -63,7 +63,7 @@ func TestCmdDoctor_FailGlyph(t *testing.T) {
 
 func newDummyFlow(name string) *flow.Flow {
 	f := flow.NewFlow(name, nil)
-	f.AddStep("step", "plan", func(flow.StepCtx) error { return nil })
+	f.AddStep("step", "plan", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
 	return f
 }
 

@@ -6,9 +6,9 @@ func noopHandler(StepCtx) error { return nil }
 
 func TestNewFlow_AddStepRegistersInOrder(t *testing.T) {
 	f := NewFlow("implement", []ItemType{"task"})
-	f.AddStep("write plan", "plan", noopHandler)
-	f.AddStep("implement", "impl", noopHandler)
-	f.AddSignalStep("create pr", "pr-open", noopHandler)
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
+	f.AddStep("implement", "impl", noopHandler, StepConfig{})
+	f.AddSignalStep("create pr", "pr-open", noopHandler, StepConfig{})
 
 	got := f.Steps()
 	want := []string{"write plan", "implement", "create pr"}
@@ -46,8 +46,8 @@ func TestAddStep_PanicsOnDuplicateName(t *testing.T) {
 		}
 	}()
 	f := NewFlow("x", nil)
-	f.AddStep("plan", "plan-a", noopHandler)
-	f.AddStep("plan", "plan-b", noopHandler) // duplicate name
+	f.AddStep("plan", "plan-a", noopHandler, StepConfig{})
+	f.AddStep("plan", "plan-b", noopHandler, StepConfig{}) // duplicate name
 }
 
 func TestAddStep_PanicsOnDuplicateResult(t *testing.T) {
@@ -57,8 +57,8 @@ func TestAddStep_PanicsOnDuplicateResult(t *testing.T) {
 		}
 	}()
 	f := NewFlow("x", nil)
-	f.AddStep("step-a", "plan", noopHandler)
-	f.AddStep("step-b", "plan", noopHandler) // duplicate result
+	f.AddStep("step-a", "plan", noopHandler, StepConfig{})
+	f.AddStep("step-b", "plan", noopHandler, StepConfig{}) // duplicate result
 }
 
 func TestAddStep_PanicsOnNilHandler(t *testing.T) {
@@ -68,12 +68,12 @@ func TestAddStep_PanicsOnNilHandler(t *testing.T) {
 		}
 	}()
 	f := NewFlow("x", nil)
-	f.AddStep("plan", "plan", nil)
+	f.AddStep("plan", "plan", nil, StepConfig{})
 }
 
 func TestAwaitSignal_AllowsNoHandler(t *testing.T) {
 	f := NewFlow("x", nil)
-	f.AwaitSignal("wait for merge", "pr-merged") // must not panic
+	f.AwaitSignal("wait for merge", "pr-merged", StepConfig{}) // must not panic
 	if len(f.Steps()) != 1 {
 		t.Fatalf("Steps len = %d, want 1", len(f.Steps()))
 	}
@@ -94,9 +94,9 @@ func resolvedArtifact(id ArtifactId, t ArtifactType) ArtifactRecord {
 
 func TestDeriveNext_FirstUnresolved(t *testing.T) {
 	f := NewFlow("x", nil)
-	f.AddStep("write plan", "plan", noopHandler)
-	f.AddStep("implement", "impl", noopHandler)
-	f.AddStep("review", "review", noopHandler)
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
+	f.AddStep("implement", "impl", noopHandler, StepConfig{})
+	f.AddStep("review", "review", noopHandler, StepConfig{})
 
 	state := &ItemState{
 		Artifacts: map[ArtifactId]ArtifactRecord{
@@ -112,7 +112,7 @@ func TestDeriveNext_FirstUnresolved(t *testing.T) {
 
 func TestDeriveNext_StaleArtifactIsPending(t *testing.T) {
 	f := NewFlow("x", nil)
-	f.AddStep("write plan", "plan", noopHandler)
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
 
 	state := &ItemState{
 		Artifacts: map[ArtifactId]ArtifactRecord{
@@ -127,8 +127,8 @@ func TestDeriveNext_StaleArtifactIsPending(t *testing.T) {
 
 func TestDeriveNext_AllResolvedReturnsFalse(t *testing.T) {
 	f := NewFlow("x", nil)
-	f.AddStep("write plan", "plan", noopHandler)
-	f.AddStep("implement", "impl", noopHandler)
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
+	f.AddStep("implement", "impl", noopHandler, StepConfig{})
 
 	state := &ItemState{
 		Artifacts: map[ArtifactId]ArtifactRecord{
@@ -143,8 +143,8 @@ func TestDeriveNext_AllResolvedReturnsFalse(t *testing.T) {
 
 func TestDeriveNext_SignalStepPendingUntilSet(t *testing.T) {
 	f := NewFlow("x", nil)
-	f.AddStep("write plan", "plan", noopHandler)
-	f.AddSignalStep("create pr", "pr-open", noopHandler)
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
+	f.AddSignalStep("create pr", "pr-open", noopHandler, StepConfig{})
 
 	state := &ItemState{
 		Artifacts: map[ArtifactId]ArtifactRecord{
@@ -166,7 +166,7 @@ func TestDeriveNext_SignalStepPendingUntilSet(t *testing.T) {
 
 func TestAwaitSignal_PendingUntilSet(t *testing.T) {
 	f := NewFlow("observe", nil)
-	f.AwaitSignal("await merge", "pr-merged")
+	f.AwaitSignal("await merge", "pr-merged", StepConfig{})
 
 	state := &ItemState{Signals: map[SignalId]SignalState{}}
 	next, ok := f.DeriveNext(state)
@@ -183,7 +183,7 @@ func TestAwaitSignal_PendingUntilSet(t *testing.T) {
 func TestIsReady_RequireSignal(t *testing.T) {
 	f := NewFlow("merge", nil)
 	f.RequireSignal("pr-open")
-	f.AddStep("merge-step", "merge-commit", noopHandler)
+	f.AddStep("merge-step", "merge-commit", noopHandler, StepConfig{})
 
 	state := &ItemState{Signals: map[SignalId]SignalState{}}
 	if f.IsReady(state) {
@@ -197,8 +197,8 @@ func TestIsReady_RequireSignal(t *testing.T) {
 
 func TestIsDone_AllRequiredResolved(t *testing.T) {
 	f := NewFlow("x", nil)
-	f.AddStep("required", "req", noopHandler)
-	f.AddStep("optional", "opt", noopHandler, Optional)
+	f.AddStep("required", "req", noopHandler, StepConfig{})
+	f.AddStep("optional", "opt", noopHandler, StepConfig{Optional: true})
 
 	state := &ItemState{Artifacts: map[ArtifactId]ArtifactRecord{}}
 	if f.IsDone(state) {
@@ -212,12 +212,10 @@ func TestIsDone_AllRequiredResolved(t *testing.T) {
 
 func TestStepBudget_AppliesOptions(t *testing.T) {
 	f := NewFlow("x", nil)
-	f.AddStep("with-overrides", "art", noopHandler,
-		MaxInvocations(5),
-		MaxPromptsPerInvocation(3),
-		MaxCostUSD(50),
-	)
-	f.AddStep("with-defaults", "def", noopHandler)
+	f.AddStep("with-overrides", "art", noopHandler, StepConfig{
+		Budget: StepBudget{MaxInvocations: 5, MaxPromptsPerInvocation: 3, MaxCostUSD: 50},
+	})
+	f.AddStep("with-defaults", "def", noopHandler, StepConfig{})
 
 	got, ok := f.StepBudget("with-overrides")
 	if !ok {
@@ -238,8 +236,8 @@ func TestStepBudget_AppliesOptions(t *testing.T) {
 
 func TestSeedSpec_ResolvedBudget(t *testing.T) {
 	f := NewFlow("x", nil)
-	f.AddStep("a", "art-a", noopHandler, MaxInvocations(2))
-	f.AddSignalStep("sig", "pr-open", noopHandler) // signal steps not in seed
+	f.AddStep("a", "art-a", noopHandler, StepConfig{Budget: StepBudget{MaxInvocations: 2}})
+	f.AddSignalStep("sig", "pr-open", noopHandler, StepConfig{}) // signal steps not in seed
 
 	defs := map[ArtifactId]ArtifactDef{
 		"art-a": {Id: "art-a", Type: ArtifactMarkdown},
@@ -263,7 +261,7 @@ func TestSeedSpec_ResolvedBudget(t *testing.T) {
 func TestTerminalReason(t *testing.T) {
 	f := NewFlow("merge", nil)
 	f.RequireSignal("pr-open")
-	f.AddStep("merge-step", "merge-commit", noopHandler)
+	f.AddStep("merge-step", "merge-commit", noopHandler, StepConfig{})
 
 	state := &ItemState{Signals: map[SignalId]SignalState{}}
 	if r := f.TerminalReason(state); r != "awaiting-preconditions" {

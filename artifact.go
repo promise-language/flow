@@ -90,7 +90,7 @@ func (d ArtifactDef) WithDoc(doc string) ArtifactDef {
 }
 
 // ArtifactSpec — what the seed phase records for each artifact: cap values
-// pre-loaded from StepOption (or defaults), required flag, type.
+// pre-loaded from StepConfig (or defaults), required flag, type.
 type ArtifactSpec struct {
 	Id       ArtifactId
 	Type     ArtifactType
@@ -131,7 +131,7 @@ type ArtifactRecord struct {
 	Version    int
 	ResolvedBy string
 
-	// Budget caps — pre-loaded at SeedState from the flow's StepOption
+	// Budget caps — pre-loaded at SeedState from the flow's StepConfig
 	// values (or package defaults). User grants ADD to these directly.
 	GrantedInvocations          int
 	GrantedPromptsPerInvocation int

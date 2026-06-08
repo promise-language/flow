@@ -55,7 +55,7 @@ func (f *Flow) RequireSignals() []SignalId {
 // AddStep registers a handler-produced artifact step. The handler MUST call
 // the matching ctx.Resolve* (per the artifact's ArtifactType in App.Artifacts)
 // before returning nil. Duplicate name or duplicate result panics.
-func (f *Flow) AddStep(name string, result ArtifactId, do StepHandler, opts ...StepOption) {
+func (f *Flow) AddStep(name string, result ArtifactId, do StepHandler, cfg StepConfig) {
 	if name == "" {
 		panic("flow.AddStep: empty step name")
 	}
@@ -71,25 +71,20 @@ func (f *Flow) AddStep(name string, result ArtifactId, do StepHandler, opts ...S
 	if _, dup := f.stepByResult[string(result)]; dup {
 		panic(fmt.Sprintf("flow.AddStep: duplicate result %q in flow %q", result, f.name))
 	}
-	s := &step{
+	f.appendStep(&step{
 		kind:     stepArtifact,
 		name:     name,
 		artifact: result,
 		handler:  do,
-		required: true, // default — Optional overrides via StepOption
-	}
-	for _, o := range opts {
-		o(s)
-	}
-	f.steps = append(f.steps, s)
-	f.stepByName[name] = s
-	f.stepByResult[string(result)] = s
+		required: !cfg.Optional, // Required by default; StepConfig.Optional opts out
+		budget:   cfg.Budget,
+	}, string(result))
 }
 
 // AddSignalStep registers a side-effect step that completes when `signal` is
 // set on the item. The handler MUST NOT call any ctx.Resolve* — signals are
 // never handler-writable. Duplicate name or duplicate signal panics.
-func (f *Flow) AddSignalStep(name string, signal SignalId, do StepHandler, opts ...StepOption) {
+func (f *Flow) AddSignalStep(name string, signal SignalId, do StepHandler, cfg StepConfig) {
 	if name == "" {
 		panic("flow.AddSignalStep: empty step name")
 	}
@@ -105,25 +100,20 @@ func (f *Flow) AddSignalStep(name string, signal SignalId, do StepHandler, opts 
 	if _, dup := f.stepByResult[string(signal)]; dup {
 		panic(fmt.Sprintf("flow.AddSignalStep: duplicate result %q in flow %q", signal, f.name))
 	}
-	s := &step{
+	f.appendStep(&step{
 		kind:     stepSignal,
 		name:     name,
 		signal:   signal,
 		handler:  do,
-		required: true,
-	}
-	for _, o := range opts {
-		o(s)
-	}
-	f.steps = append(f.steps, s)
-	f.stepByName[name] = s
-	f.stepByResult[string(signal)] = s
+		required: !cfg.Optional,
+		budget:   cfg.Budget,
+	}, string(signal))
 }
 
 // AwaitSignal registers a pure wait — no handler. The lifecycle item
 // completes when `signal` is set on the item by any means (another flow's
 // AddSignalStep, or an external event the backend observes).
-func (f *Flow) AwaitSignal(name string, signal SignalId, opts ...StepOption) {
+func (f *Flow) AwaitSignal(name string, signal SignalId, cfg StepConfig) {
 	if name == "" {
 		panic("flow.AwaitSignal: empty step name")
 	}
@@ -136,18 +126,20 @@ func (f *Flow) AwaitSignal(name string, signal SignalId, opts ...StepOption) {
 	if _, dup := f.stepByResult[string(signal)]; dup {
 		panic(fmt.Sprintf("flow.AwaitSignal: duplicate result %q in flow %q", signal, f.name))
 	}
-	s := &step{
+	f.appendStep(&step{
 		kind:     stepAwait,
 		name:     name,
 		signal:   signal,
-		required: true,
-	}
-	for _, o := range opts {
-		o(s)
-	}
+		required: !cfg.Optional,
+	}, string(signal))
+}
+
+// appendStep records a fully-built step in registration order and indexes it
+// by name and result. Shared tail of AddStep / AddSignalStep / AwaitSignal.
+func (f *Flow) appendStep(s *step, resultKey string) {
 	f.steps = append(f.steps, s)
-	f.stepByName[name] = s
-	f.stepByResult[string(signal)] = s
+	f.stepByName[s.name] = s
+	f.stepByResult[resultKey] = s
 }
 
 // RequireSignal adds an eligibility precondition. The flow is only selected
@@ -205,9 +197,7 @@ func (f *Flow) stepPending(state *ItemState, st *step) bool {
 		if rec.Stale {
 			return true
 		}
-		// StaleAfter / StaleOnCommit comparisons happen here once the SDK
-		// has produced-at timestamps for the dependency artifacts. The
-		// minimum derivation is: if Stale is set on the record, retry.
+		// Resolved and not flagged stale by the backend → nothing to do.
 		return false
 	case stepSignal, stepAwait:
 		return !state.SignalSet(st.signal)
@@ -338,7 +328,7 @@ func (f *Flow) TerminalReason(s *ItemState) string {
 }
 
 // SeedSpec returns the ArtifactSpec slice the backend should pre-load at seed
-// time. Reads the per-step StepOption values (merged with defaults).
+// time. Reads the per-step StepConfig values (merged with defaults).
 func (f *Flow) SeedSpec(artifactDefs map[ArtifactId]ArtifactDef) []ArtifactSpec {
 	out := make([]ArtifactSpec, 0, len(f.steps))
 	for _, st := range f.steps {
@@ -361,7 +351,7 @@ func (f *Flow) SeedSpec(artifactDefs map[ArtifactId]ArtifactDef) []ArtifactSpec 
 }
 
 // StepBudget returns the resolved budget for the named step, merging
-// StepOption values with package defaults.
+// StepConfig values with package defaults.
 func (f *Flow) StepBudget(name string) (StepBudget, bool) {
 	st, ok := f.stepByName[name]
 	if !ok {

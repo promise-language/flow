@@ -35,7 +35,8 @@ func TestCmdRun_ManualSetsManualAndClearsPark(t *testing.T) {
 	app, be, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 			return ctx.ResolveMarkdown("the plan")
-		})
+		}, flow.StepConfig{})
+
 	}, a)
 	wrapped := &takeoverBackend{Backend: be}
 	app.Backend = wrapped
@@ -63,7 +64,8 @@ func TestCmdRun_OrchestratedSkipsTakeover(t *testing.T) {
 	app, be, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 			return ctx.ResolveMarkdown("the plan")
-		})
+		}, flow.StepConfig{})
+
 	}, a)
 	wrapped := &takeoverBackend{Backend: be}
 	app.Backend = wrapped
@@ -87,7 +89,8 @@ func TestCmdRun_TakeoverFailureDoesNotBlockStep(t *testing.T) {
 	app, be, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 			return ctx.ResolveMarkdown("the plan")
-		})
+		}, flow.StepConfig{})
+
 	}, a)
 	wrapped := &takeoverBackend{Backend: be, failWith: errors.New("tracker unreachable")}
 	app.Backend = wrapped

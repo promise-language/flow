@@ -19,7 +19,8 @@ func grantTestSetup(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer, func() fl
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 			return ctx.ResolveMarkdown("the plan")
-		})
+		}, flow.StepConfig{})
+
 	}, a)
 
 	if err := be.SeedState(context.Background(), claim, []flow.ArtifactSpec{

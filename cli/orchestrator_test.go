@@ -81,7 +81,8 @@ func TestRunOne_SeedsAndDispatchesFirstStep(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 			return ctx.ResolveMarkdown("the plan")
-		})
+		}, flow.StepConfig{})
+
 	}, a)
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -120,10 +121,11 @@ func TestRunOne_AutoEmitsStepEntry(t *testing.T) {
 	tel := &recordingTelemetry{}
 	app, _, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			// Handler's own Notify call should be recorded too, in order.
+
 			ctx.Notify("write plan", "writing")
 			return ctx.ResolveMarkdown("the plan")
-		})
+		}, flow.StepConfig{})
+
 	}, &stubAgent{name: "stub"})
 	app.Telemetry = tel
 
@@ -146,7 +148,8 @@ func TestRunOne_AutoEmitSkipsWhenTelemetryNil(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("noop", "plan", func(ctx flow.StepCtx) error {
 			return ctx.ResolveMarkdown("ok")
-		})
+		}, flow.StepConfig{})
+
 	}, &stubAgent{name: "stub"})
 	if app.Telemetry != nil {
 		t.Fatal("test setup: expected nil telemetry")
@@ -184,7 +187,8 @@ func TestRunOne_SeedFailureErrorsOutNoStep(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 			t.Fatal("step handler ran despite seeding failure — must not happen")
 			return nil
-		})
+		}, flow.StepConfig{})
+
 	}, a)
 	app.Backend = seedFailBackend{Backend: be}
 
@@ -206,7 +210,8 @@ func TestRunOne_UnseededAfterNoopSeedErrorsOut(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 			t.Fatal("step handler ran against an unseeded item — must not happen")
 			return nil
-		})
+		}, flow.StepConfig{})
+
 	}, a)
 	app.Backend = noopSeedBackend{Backend: be}
 
@@ -225,7 +230,8 @@ func TestRunOne_PreflightSkipsBeforeFlowSelection(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 			handlerCalled = true
 			return ctx.ResolveMarkdown("should not run")
-		})
+		}, flow.StepConfig{})
+
 	}, &stubAgent{name: "stub"})
 
 	app.Preflight = func(ctx context.Context, state *flow.ItemState) error {
@@ -259,7 +265,8 @@ func TestRunOne_PreflightPassThrough(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 			return ctx.ResolveMarkdown("the plan")
-		})
+		}, flow.StepConfig{})
+
 	}, &stubAgent{name: "stub"})
 
 	called := 0
@@ -312,7 +319,7 @@ func TestRunOne_ParksOnInvocationsExhaustion(t *testing.T) {
 		// max 1 invocation, but handler returns error each time
 		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) error {
 			return errors.New("boom")
-		}, flow.MaxInvocations(1))
+		}, flow.StepConfig{Budget: flow.StepBudget{MaxInvocations: 1}})
 	}, &stubAgent{name: "stub"})
 
 	// First run consumes the only invocation and returns "failed".
@@ -353,10 +360,11 @@ func TestRunOne_RespectsPromptsBudget(t *testing.T) {
 			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1"}); err != nil {
 				return err
 			}
-			// Second call must exhaust the prompts axis (default 1).
+
 			_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p2"})
 			return err
-		})
+		}, flow.StepConfig{})
+
 	}, a)
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -379,7 +387,7 @@ func TestRunOne_ParksOnTimeout(t *testing.T) {
 		f.AddStep("slow", "plan", func(ctx flow.StepCtx) error {
 			<-ctx.Context().Done()
 			return ctx.Context().Err()
-		}, flow.Timeout(50*time.Millisecond))
+		}, flow.StepConfig{Budget: flow.StepBudget{Timeout: 50 * time.Millisecond}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -394,9 +402,10 @@ func TestRunOne_ParksOnTimeout(t *testing.T) {
 func TestRunOne_SignalStepAwaitsSignal(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddSignalStep("create pr", "pr-open", func(ctx flow.StepCtx) error {
-			// Side effect: imagine Open succeeded but signal lags.
+
 			return nil
-		})
+		}, flow.StepConfig{})
+
 	}, &stubAgent{name: "stub"})
 
 	// First run dispatches the handler (returns nil). The signal isn't
@@ -427,7 +436,7 @@ func TestRunOne_SignalStepAwaitsSignal(t *testing.T) {
 
 func TestRunOne_AwaitSignalSkipsHandlerless(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AwaitSignal("await merge", "pr-open")
+		f.AwaitSignal("await merge", "pr-open", flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -452,7 +461,8 @@ func TestRunOne_QuestionsPersistedAndPark(t *testing.T) {
 				flow.AskYesNo("ship", "Ship it?"),
 				flow.AskChoice("lib", "Which?", "a", "b"),
 			)
-		})
+		}, flow.StepConfig{})
+
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -473,7 +483,8 @@ func TestRunOne_WrongResolveReturnsTypeMismatch(t *testing.T) {
 		// Declared markdown, handler calls ResolveCommitHash.
 		f.AddStep("wrong", "plan", func(ctx flow.StepCtx) error {
 			return ctx.ResolveCommitHash("deadbeef")
-		})
+		}, flow.StepConfig{})
+
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -488,8 +499,9 @@ func TestRunOne_WrongResolveReturnsTypeMismatch(t *testing.T) {
 func TestRunOne_NilReturnWithoutResolveParks(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("forgetful", "plan", func(ctx flow.StepCtx) error {
-			return nil // forgot to resolve
-		})
+			return nil
+		}, flow.StepConfig{})
+
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -504,7 +516,7 @@ func TestRunOne_NilReturnWithoutResolveParks(t *testing.T) {
 func TestApp_Validate_RejectsUnknownArtifact(t *testing.T) {
 	be := fake.New()
 	f := flow.NewFlow("x", nil)
-	f.AddStep("step", "missing-artifact", func(flow.StepCtx) error { return nil })
+	f.AddStep("step", "missing-artifact", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
 	app := App{
 		Backend:   be,
 		Agent:     &stubAgent{name: "stub"},
@@ -521,8 +533,8 @@ func TestApp_Validate_RejectsUnsupportedArtifact(t *testing.T) {
 	// Restrict the fake to only "plan" — "report" is then unrecordable.
 	be.SetSupportedArtifacts(flow.Artifact("plan", flow.ArtifactMarkdown))
 	f := flow.NewFlow("x", []flow.ItemType{"task"})
-	f.AddStep("plan", "plan", func(flow.StepCtx) error { return nil })
-	f.AddStep("report", "report", func(flow.StepCtx) error { return nil })
+	f.AddStep("plan", "plan", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
+	f.AddStep("report", "report", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
 	app := App{
 		Backend: be,
 		Agent:   &stubAgent{name: "stub"},
@@ -544,7 +556,7 @@ func TestApp_Validate_RejectsArtifactTypeMismatch(t *testing.T) {
 	// resolve-time.
 	be.SetSupportedArtifacts(flow.Artifact("plan", flow.ArtifactMarkdown))
 	f := flow.NewFlow("x", []flow.ItemType{"task"})
-	f.AddStep("plan", "plan", func(flow.StepCtx) error { return nil })
+	f.AddStep("plan", "plan", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
 	app := App{
 		Backend:   be,
 		Agent:     &stubAgent{name: "stub"},
@@ -559,7 +571,7 @@ func TestApp_Validate_RejectsArtifactTypeMismatch(t *testing.T) {
 func TestApp_Validate_RejectsUnsupportedSignal(t *testing.T) {
 	be := fake.New() // no signals supported
 	f := flow.NewFlow("x", nil)
-	f.AddSignalStep("sig", "pr-open", func(flow.StepCtx) error { return nil })
+	f.AddSignalStep("sig", "pr-open", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
 	app := App{
 		Backend:   be,
 		Agent:     &stubAgent{name: "stub"},
@@ -575,10 +587,10 @@ func TestApp_Validate_RejectsUnsupportedSignal(t *testing.T) {
 func TestSelectFlow_RequireSignalGate(t *testing.T) {
 	be := fake.New(flow.Signal("pr-open", "x"))
 	a := flow.NewFlow("contributor", []flow.ItemType{"task"})
-	a.AddStep("plan", "plan", func(flow.StepCtx) error { return nil })
+	a.AddStep("plan", "plan", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
 	b := flow.NewFlow("maintainer", []flow.ItemType{"task"})
 	b.RequireSignal("pr-open")
-	b.AddStep("merge", "commit", func(flow.StepCtx) error { return nil })
+	b.AddStep("merge", "commit", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
 
 	app := &App{
 		Backend:   be,
@@ -667,7 +679,8 @@ func TestRunOne_RefusesFinalizeWhenRequiredArtifactPending(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 			t.Fatal("step handler ran despite gated flow — must not happen")
 			return nil
-		})
+		}, flow.StepConfig{})
+
 	}, a)
 	wrapped := &finalizingBackend{Backend: be}
 	app.Backend = &pendingArtifactBackend{Backend: be, pending: "summary"}
@@ -705,7 +718,8 @@ func TestRunOne_FinalizesWhenAllRequiredArtifactsResolved(t *testing.T) {
 		f.RequireSignal("pr-open")
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 			return ctx.ResolveMarkdown("ignored")
-		})
+		}, flow.StepConfig{})
+
 	}, a)
 	// Backend with Finalize implemented, no pending artifacts injected.
 	wrapped := &finalizingBackend{Backend: be}

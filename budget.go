@@ -3,7 +3,7 @@ package flow
 import "time"
 
 // StepBudget is the resolved set of caps for one step, computed by combining
-// StepOption values with package defaults.
+// StepConfig values with package defaults.
 type StepBudget struct {
 	MaxInvocations          int
 	MaxPromptsPerInvocation int

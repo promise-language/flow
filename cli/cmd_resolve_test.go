@@ -32,7 +32,8 @@ func resolveTestApp(t *testing.T, be flow.Backend) (*App, *bytes.Buffer, *bytes.
 	f := flow.NewFlow("implement", []flow.ItemType{"task"})
 	f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 		return ctx.ResolveMarkdown("the plan")
-	})
+	}, flow.StepConfig{})
+
 	app.Flows = []*flow.Flow{f}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)

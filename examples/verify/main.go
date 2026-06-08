@@ -36,10 +36,9 @@ func main() {
 	}
 
 	verifyFlow := flow.NewFlow("verify", []flow.ItemType{"task"})
-	verifyFlow.AddStep("run go test", "test-output", stepRunTests,
-		flow.Required,
-		flow.Timeout(5*time.Minute),
-	)
+	verifyFlow.AddStep("run go test", "test-output", stepRunTests, flow.StepConfig{
+		Budget: flow.StepBudget{Timeout: 5 * time.Minute},
+	})
 
 	os.Exit(cli.Run(cli.App{
 		Name:    "verify",
