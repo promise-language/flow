@@ -578,7 +578,7 @@ type RequestManager interface { // pull-request operations
 ```
 
 Backends with no pull-request concept (e.g. one that commits straight to
-master) return `nil` from `Request()`. Handlers use the nil-safe helpers
+main) return `nil` from `Request()`. Handlers use the nil-safe helpers
 `flow.Open(ctx, wt, …)` / `flow.Merge(ctx, wt, …)`, which return
 `ErrRequestNotSupported` instead of panicking.
 
@@ -639,7 +639,7 @@ Scaffold it once into your project:
 ```bash
 go run github.com/promise-language/forge/cmd/init@latest
 ./make          # compiles every cmd/<tool> (your flow binary included) into bin/
-bin/verify      # the master quality gate
+bin/verify      # the main quality gate
 ```
 
 The pattern, and why it fits flow:
