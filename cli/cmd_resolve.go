@@ -138,17 +138,18 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	// after.
 	fmt.Fprintf(app.Err, "resolve: driving %s to completion (until finalized or parked)…\n", claim.ItemRef.Display)
 	enc := json.NewEncoder(app.Out)
-	step := 0
 	for range maxResolveSteps {
-		step++
 		// Best-effort peek so we can name the step we're about to run. RunOne
 		// re-derives this itself; the peek is purely for the progress line and
 		// never gates execution (a transient read error just skips the label).
+		// We name the step rather than number it: a positional counter ("[step
+		// 1]") collides with the flow's own named steps (plan/implement/…) and
+		// misreads as "flow step 1" when it really means "resolve iteration 1".
 		if st, serr := app.Backend.LoadState(ctx, *claim); serr == nil {
 			if f, next := SelectFlow(app, st); f != nil {
-				fmt.Fprintf(app.Err, "resolve: [step %d] running %q…\n", step, next)
+				fmt.Fprintf(app.Err, "resolve: running %q…\n", next)
 			} else {
-				fmt.Fprintf(app.Err, "resolve: [step %d] no step eligible — finalizing…\n", step)
+				fmt.Fprintf(app.Err, "resolve: no step eligible — finalizing…\n")
 			}
 		}
 
@@ -163,7 +164,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		if label == "" {
 			label = "(finalize)"
 		}
-		outcome := fmt.Sprintf("resolve: [step %d] %s → %s", step, label, res.Status)
+		outcome := fmt.Sprintf("resolve: %s → %s", label, res.Status)
 		if res.Reason != "" {
 			outcome += " — " + res.Reason
 		}
