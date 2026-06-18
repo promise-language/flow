@@ -2,8 +2,10 @@
 
 **Status:** draft, not yet implemented
 **Author:** initial sketch
-**Related:** [docs/design.md](../design.md), tracker's `gates.go` /
-`store.go` /`health.go`
+**Related:** [docs/design.md](../design.md); the tracker's `gates.go` /
+`store.go` / `health.go`; and the consuming superproject's gate-system doc
+(promise: `docs/gate-system.md`), whose `bin/gate` **GateOutput** envelope this
+wire format mirrors.
 
 ## Goal
 
@@ -53,7 +55,7 @@ type Gate struct {
     Arena          *GateArenaConfig        // sandboxed-execution provisioning
     Env            map[string]string       // creds, redacted from output
     Axes           []MetricAxis            // chart axis groupings
-    BackfillPasses bool                    // implicit pass on clean runs with empty tests array
+    BackfillPasses bool                    // implicit pass on clean runs with empty files array
 }
 
 type MetricConfig struct {
@@ -63,36 +65,74 @@ type MetricConfig struct {
 }
 ```
 
-### Tracker stdout JSON contract
+### Orchestrator stdout JSON contract
+
+The format an orchestrator ingests (the promise superproject emits it from
+`bin/gate`; see its gate-system doc) groups tests **by file** under a **single
+target** stamped once at the top of the envelope:
 
 ```jsonc
 {
-  "metrics": {
-    "build_seconds": 42.7,
-    "tests_passed": 87,
-    "tests_failed": 0,
-    "lint_warnings": 3
+  "target": "linux-amd64",           // single-target invariant: stamped ONCE, never per record
+  "metrics": {                        // derived by counting records — always agree with `files`
+    "host_test_count":     6133,
+    "host_test_failures":  0,
+    "host_leak_count":     0,
+    "host_timeout_count":  0,
+    "host_memory_count":   0,
+    "host_excluded_count": 0,
+    "host_not_run_count":  0
   },
-  "tests": [
+  "files": [                          // tests grouped by their source file
     {
-      "test_set": "promise",          // optional ID of the test enumeration
-      "target":   "pkg/foo",
-      "file":     "pkg/foo/foo_test.go",
-      "test":     "TestBar",
-      "outcome":  "pass",             // "pass" | "FAIL" | "TIMEOUT" | "LEAK"
-      "elapsed":  0.42,
-      "context":  ""                  // failure message when not pass
-    }
+      "file": "tests/std/bool_test.pr",            // repo-relative, forward slashes
+      "tests": [
+        { "test": "test_and", "status": "pass", "elapsed": 0.001 },
+        { "test": "test_or",  "status": "fail", "elapsed": 0.002,
+          "context": "panic: assertion failed: ..." }   // bounded detail when not pass
+      ]
+    },
+    { "file": "tests/e2e/hello.pr",
+      "tests": [ { "test": "main", "status": "pass", "elapsed": 0.02 } ] }
   ],
-  "complete": "promise"               // optional: this gate run fully enumerated test set "promise"
+  "complete": "promise-tests"        // optional: this run fully enumerated the named test set
 }
 ```
 
-The tracker parses this from stdout. `metrics` drives ratcheting baselines;
-`tests` feeds the per-test health ledger; `complete` lets the ledger credit
-implicit passes to non-listed tests in the named set (so "the gate enumerates
-EVERY promise test" is a recordable fact). Non-zero exit code = gate failed;
-metrics still parsed if present.
+Four properties the SDK adopts verbatim:
+
+- **Single-target invariant.** One gate invocation reports exactly one target,
+  stamped once at the top — never per record. A host test gate reports the host
+  (e.g. `linux-amd64`); a wasm gate reports `wasm32-wasi`. Wasm is a *separate*
+  single-target gate, never a flag on the host gate.
+- **Tests grouped by file.** `files[]` each carries a repo-relative `file` and a
+  `tests[]` of `{test, status, elapsed, context?}`. Identity is the pair
+  **(`file`, `test`)** and is **stable across runs** — it never varies with
+  outcome, so a test that flips pass↔fail keeps its identity. `test` is the
+  function name for batch tests or the literal `"main"` for e2e/snapshot files;
+  for Go tests `file` is the repo-relative package dir and `test` is the Go
+  test-function name (subtests as `TestFoo/sub`).
+- **Status vocabulary** (lower-case): `pass`, `fail`, `timeout`, `leak`,
+  `memory` (per-test memory limit tripped), `excluded` (a `test(exclude:
+  <target>)` test compiled but not run for this target), and `not-run` (never
+  ran because an earlier test aborted the process). Tests excluded from
+  compilation by a declaration annotation produce **no record**. The `not-run`
+  status is how the format **captures the tests that did not run**: an
+  aborted-process tail is still enumerated, attributed from the file's
+  compile-time roster — a `memory` abort marks the first un-resulted roster test
+  `memory` and every later one `not-run`; a hard crash marks the first unseen
+  `fail` (with crash context) and the rest `not-run`.
+- **Metrics derived by counting records.** Each metric counts records of one
+  status (`<p>_test_count`=pass, `<p>_test_failures`=fail, `<p>_leak_count`,
+  `<p>_timeout_count`, `<p>_memory_count`, `<p>_excluded_count`,
+  `<p>_not_run_count`, prefixed by the target family `host_`/`wasm_`). The full
+  set is always present even when a count is zero, so the consumer (the ratchet
+  gate) uses the reported values directly rather than re-counting.
+
+`metrics` drives ratcheting baselines; `files` feeds the per-test health ledger;
+`complete` lets the ledger credit implicit passes to non-listed tests in the
+named set (so "the gate enumerates EVERY test in the set" is a recordable fact).
+Non-zero exit code = gate failed; metrics still parsed if present.
 
 ## Proposed SDK pieces
 
@@ -104,18 +144,22 @@ copies the tracker's tested shape so existing tracker tooling works
 unchanged. The contract:
 
 ```jsonc
-// flow:gate-output-v1
+// flow:gate-output-v2
 {
-  "schema": 1,                                  // versioning
-  "metrics": { "<name>": <number>, ... },       // optional
-  "tests":   [ <TestEntry>, ... ],              // optional
+  "schema": 2,                                  // envelope versioning (SDK addition)
+  "target": "<single target, stamped once>",    // required for test gates (single-target invariant)
+  "metrics": { "<name>": <number>, ... },       // optional; derived by counting records
+  "files":   [ <FileEntry>, ... ],              // optional; tests grouped by file
   "complete": "<test-set-id>",                  // optional
   "infra_error": false,                         // optional: "gate didn't really run; ignore"
   "error": "<short reason>"                     // optional: error string
 }
 ```
 
-Test entry shape matches tracker's `GateTestEntry`. Stable across orchestrators.
+The core fields (`target`, `metrics`, `files`, `complete`) are identical to the
+orchestrator's `bin/gate` **GateOutput**; `schema` / `infra_error` / `error` are
+optional SDK envelope additions. `FileEntry` / `TestEntry` shapes match the
+orchestrator's records (see above). Stable across orchestrators.
 
 [1]: ../state-block-spec.md
 
@@ -129,33 +173,42 @@ zero transitive deps.
 package gate
 
 // Output is the stdout JSON envelope a gate writes on exit. Matches
-// flow:gate-output-v1 (see docs/proposals/gates.md).
+// flow:gate-output-v2 (see docs/proposals/gates.md). The core fields mirror the
+// orchestrator's bin/gate GateOutput.
 type Output struct {
-    Schema     int                `json:"schema"`               // 1
-    Metrics    map[string]float64 `json:"metrics,omitempty"`
-    Tests      []TestEntry        `json:"tests,omitempty"`
+    Schema     int                `json:"schema"`               // 2
+    Target     string             `json:"target,omitempty"`     // single-target invariant
+    Metrics    map[string]float64 `json:"metrics,omitempty"`    // derived by counting records
+    Files      []FileEntry        `json:"files,omitempty"`      // tests grouped by file
     Complete   string             `json:"complete,omitempty"`
     InfraError bool               `json:"infra_error,omitempty"`
     Error      string             `json:"error,omitempty"`
 }
 
-type TestEntry struct {
-    TestSet string  `json:"test_set,omitempty"`
-    Target  string  `json:"target"`
-    File    string  `json:"file,omitempty"`
-    Test    string  `json:"test,omitempty"`
-    Outcome Outcome `json:"outcome"`
-    Elapsed float64 `json:"elapsed,omitempty"`  // seconds
-    Context string  `json:"context,omitempty"`
+// FileEntry groups the test records for one source file. A test's identity is
+// the pair (File, TestEntry.Test) and is stable across runs.
+type FileEntry struct {
+    File  string      `json:"file"`   // repo-relative path, forward slashes
+    Tests []TestEntry `json:"tests"`
 }
 
-type Outcome string
+type TestEntry struct {
+    Test    string  `json:"test"`               // function name, or "main" for e2e/snapshot
+    Status  Status  `json:"status"`
+    Elapsed float64 `json:"elapsed,omitempty"`  // seconds
+    Context string  `json:"context,omitempty"`  // bounded failure detail when not pass
+}
+
+type Status string
 
 const (
-    OutcomePass    Outcome = "pass"
-    OutcomeFail    Outcome = "FAIL"
-    OutcomeTimeout Outcome = "TIMEOUT"
-    OutcomeLeak    Outcome = "LEAK"
+    StatusPass     Status = "pass"
+    StatusFail     Status = "fail"
+    StatusTimeout  Status = "timeout"
+    StatusLeak     Status = "leak"
+    StatusMemory   Status = "memory"   // per-test memory limit tripped (process aborted)
+    StatusExcluded Status = "excluded" // test(exclude: <target>) — compiled, not run for this target
+    StatusNotRun   Status = "not-run"  // never ran; an earlier test aborted the process
 )
 
 // Emit writes out to stdout as a single JSON line and returns the
@@ -305,12 +358,12 @@ func runBuildTimeGate(ctx context.Context) (gate.Output, error) {
     cmd := exec.CommandContext(ctx, "go", "build", "./...")
     if err := cmd.Run(); err != nil {
         return gate.Output{
-            Schema:  1,
+            Schema:  2,
             Error:   "build failed: " + err.Error(),
         }, nil
     }
     return gate.Output{
-        Schema:  1,
+        Schema:  2,
         Metrics: map[string]float64{"build_seconds": time.Since(start).Seconds()},
     }, nil
 }
@@ -337,7 +390,8 @@ func runBuildTimeGate(ctx context.Context) (gate.Output, error) {
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
+  "target": "linux-amd64",
   "metrics": {"build_seconds": 42.7}
 }
 ```
@@ -355,9 +409,9 @@ ratchets or flags regression.
 
 2. **Test-set semantics.** Tracker's `complete` field is subtle — it
    means "this gate enumerated every test in the named set". When the
-   tests array is empty AND `complete: "promise"` is set, every test
-   previously seen in that set gets credited an implicit pass. The SDK
-   should adopt the field verbatim but document it carefully.
+   `files` array is empty AND `complete` is set, every test previously
+   seen in that set gets credited an implicit pass. The SDK should adopt
+   the field verbatim but document it carefully.
 
 3. **Concurrency caps.** Tracker has per-host + global concurrency caps.
    Those belong in the orchestrator, not the SDK. The SDK's `gate run`
