@@ -23,14 +23,14 @@ item (a GitHub Issue out of the box, or any backend you plug in).
 [claude]: https://docs.anthropic.com/en/docs/claude-code
 
 ```
-$ ./fix doctor               # verify backend prerequisites
-$ ./fix list                 # list items this flow can process
-$ ./fix claim 42             # acquire a claim on item #42
-$ ./fix run-step             # advance ONE lifecycle item (one prompt → one durable artifact)
-$ ./fix run-step             # next lifecycle item
-$ ./fix status               # read-only lifecycle checklist
-$ ./fix grant plan --invocations 3 --cost 10
-$ ./fix release              # drop the claim
+$ ./issue doctor             # verify backend prerequisites
+$ ./issue list               # list items this flow can process
+$ ./issue claim 42           # acquire a claim on item #42
+$ ./issue run-step           # advance ONE lifecycle item (one prompt → one durable artifact)
+$ ./issue run-step           # next lifecycle item
+$ ./issue status             # read-only lifecycle checklist
+$ ./issue grant plan --invocations 3 --cost 10
+$ ./issue release            # drop the claim
 ```
 
 Each `run-step` is a single forward tick: inspect state, pick the first
@@ -154,7 +154,7 @@ import (
 
 func main() {
     backend, err := ghbackend.NewBackend(ghbackend.Config{
-        BinaryName: "fix",
+        BinaryName: "issue",
         VerifyCmd:  []string{"bash", "bin/verify.sh"}, // your project's gate
     })
     if err != nil {
@@ -173,7 +173,7 @@ func main() {
     })
 
     os.Exit(cli.Run(cli.App{
-        Name:      "fix",
+        Name:      "issue",
         Backend:   backend,
         Agent:     claude.New(),
         Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
@@ -182,8 +182,8 @@ func main() {
 }
 ```
 
-Build it (`go build -o fix .`), then `./fix doctor`, `./fix claim <id>`,
-`./fix run-step`.
+Build it (`go build -o issue .`), then `./issue doctor`, `./issue claim <id>`,
+`./issue run-step`.
 
 ### 2. The `cli.App` you assemble
 
@@ -266,7 +266,7 @@ func (f *Flow) RequireSignal(signal flow.SignalId)
 Multiple flows can live in one binary, distinguished by `Item.Type` and
 `RequireSignal`. The canonical example is a contributor flow (plan → … → open
 PR) and a maintainer flow (`RequireSignal("pr-open")` → review → merge) on the
-same item — see [examples/fix/main.go](examples/fix/main.go).
+same item — see [examples/issue/main.go](examples/issue/main.go).
 
 ### `StepHandler` and `StepCtx`
 
@@ -645,7 +645,7 @@ bin/verify      # the main quality gate
 The pattern, and why it fits flow:
 
 1. **One `./make`, all tools.** `./make` discovers each `cmd/<tool>/main.go`
-   (including `cmd/fix/` — your flow binary) and compiles it into `bin/`.
+   (including `cmd/issue/` — your flow binary) and compiles it into `bin/`.
    No per-tool config; discovery is by directory convention.
 2. **Hash-based staleness = "updatable" binaries.** `./make` hashes each
    tool's source (FNV-128a) and recompiles **only** when it changed, so the
@@ -717,7 +717,7 @@ usage and exits 0 without running it.
 ├── pkg/backend/fake/       in-memory backend for SDK tests (read this first when writing your own)
 ├── pkg/backend/github/     GitHub-Issues backend: state-comment index, claim race-lock, worktree, signal polling, orphan-branch artifact spillover
 ├── examples/verify/        minimal one-step "run go test" flow
-├── examples/fix/           contributor (fix) + maintainer (merge) flows on one issue
+├── examples/issue/         contributor (fix) + maintainer (merge) flows on one issue
 └── docs/design.md          full architecture spec
 ```
 

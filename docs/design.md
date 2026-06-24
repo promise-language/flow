@@ -67,14 +67,14 @@ End user installs `gh`, authenticates once (`gh auth login`), then runs the
 project-supplied flow binary:
 
 ```
-$ ./fix doctor                       # verifies gh + auth + repo access
-$ ./fix list                         # lists open issues this flow can process
-$ ./fix claim 42                     # assigns me + labels for this flow binary
-$ ./fix run-step                     # advances ONE lifecycle item on the claimed issue
-$ ./fix run-step                     # advances the next item
-$ ./fix status [<id>]                # read-only lifecycle checklist
-$ ./fix grant <artifact-id> ...      # extend a parked step's budget
-$ ./fix release                      # unassign / drop the claim
+$ ./issue doctor                       # verifies gh + auth + repo access
+$ ./issue list                         # lists open issues this flow can process
+$ ./issue claim 42                     # assigns me + labels for this flow binary
+$ ./issue run-step                     # advances ONE lifecycle item on the claimed issue
+$ ./issue run-step                     # advances the next item
+$ ./issue status [<id>]                # read-only lifecycle checklist
+$ ./issue grant <artifact-id> ...      # extend a parked step's budget
+$ ./issue release                      # unassign / drop the claim
 ```
 
 The `<artifact-id>` passed to `grant` is the id from `AddStep` (e.g.
@@ -824,10 +824,10 @@ loop.
 
 ```
 <!-- flow:state-v1 begin owner=alice -->
-<details><summary>📋 Flow state — fix (machine-managed, do not edit)</summary>
+<details><summary>📋 Flow state — issue (machine-managed, do not edit)</summary>
 
 ```yaml
-flow: fix
+flow: issue
 schema: 1
 seeded_at: 2026-05-26T15:00:00Z
 
@@ -1195,7 +1195,7 @@ github.com/promise-language/flow/
 ├── pkg/git/
 │   └── git.go                          local git ops via os.exec
 ├── examples/
-│   ├── fix/main.go                     full contributor+maintainer example (binary name `fix`)
+│   ├── issue/main.go                   full contributor+maintainer example (binary name `issue`)
 │   └── verify/main.go                  minimal "run go test" one-step flow
 └── docs/
     ├── design.md                       (this file)
@@ -1244,7 +1244,7 @@ github.com/promise-language/flow/
    the fake backend.
 3. **GitHub backend.** Land `pkg/backend/github/*`. Verify with integration
    tests gated by `GH_INTEGRATION=1` against a sandbox repo.
-4. **Examples.** `examples/fix/` and `examples/verify/` exercise the
+4. **Examples.** `examples/issue/` and `examples/verify/` exercise the
    real github backend end-to-end.
 5. **Tracker repo integration** (separate plan, in the tracker repo): the
    tracker imports this SDK, adds `pkg/backend/tracker/`, rewrites
@@ -1257,20 +1257,20 @@ github.com/promise-language/flow/
 
 End-to-end against a real repo:
 1. `gh auth login`.
-2. `cd examples/fix && go build -o fix .`
+2. `cd examples/issue && go build -o issue .`
 3. Create a private test repo; push it.
 4. Open issue with labels `type:task needs-flow`.
-5. `./fix doctor` → green.
-6. `./fix claim 1` → state comment posted; labels `flow:seeded`,
-   `flow:fix`, `flow:owner:<me>` set; assignee set; `.flow/active.json`
+5. `./issue doctor` → green.
+6. `./issue claim 1` → state comment posted; labels `flow:seeded`,
+   `flow:issue`, `flow:owner:<me>` set; assignee set; `.flow/active.json`
    present.
-7. `./fix run-step` ×5 → plan, implementation, review, coverage,
+7. `./issue run-step` ×5 → plan, implementation, review, coverage,
    verify-impl artifacts posted as comments.
-8. `./fix run-step` → PR opens via `gh pr create`; backend writes
+8. `./issue run-step` → PR opens via `gh pr create`; backend writes
    `pr-open` signal; `fix` flow complete.
-9. `./fix run-step` → maintainer flow starts: review-maint comment posted.
-10. `./fix run-step` → verify-merge re-runs against merge target.
-11. `./fix run-step` → PR merged via `gh pr merge`; backend writes
+9. `./issue run-step` → maintainer flow starts: review-maint comment posted.
+10. `./issue run-step` → verify-merge re-runs against merge target.
+11. `./issue run-step` → PR merged via `gh pr merge`; backend writes
     `pr-merged` signal; merge-commit recorded.
 12. Issue auto-closes with `state_reason: completed`.
 

@@ -1,4 +1,4 @@
-// fix is the reference contributor+maintainer flow binary. It models the
+// issue is the reference contributor+maintainer flow binary. It models the
 // full lifecycle of taking a GitHub issue from triage to merged PR:
 //
 //	fix flow (contributor, no preconditions):
@@ -15,13 +15,13 @@
 //	  merge pull request        → pr-merged signal (handler: gh pr merge)
 //	  record merge commit       → merge-commit artifact (commit hash)
 //
-// Build:   go build -o fix ./examples/fix
-// Use:     ./fix doctor
+// Build:   go build -o issue ./examples/issue
+// Use:     ./issue doctor
 //
-//	./fix claim 42
-//	./fix run-step    # one lifecycle item per invocation
+//	./issue claim 42
+//	./issue run-step    # one lifecycle item per invocation
 //
-// Issues must carry `type:task` (or `type:bug`) + the `flow:fix` label +
+// Issues must carry `type:task` (or `type:bug`) + the `flow:issue` label +
 // an assignee for this binary to claim them.
 package main
 
@@ -38,12 +38,12 @@ import (
 
 func main() {
 	backend, err := ghbackend.NewBackend(ghbackend.Config{
-		BinaryName:  "fix",
+		BinaryName:  "issue",
 		VerifyCmd:   []string{"bash", "bin/verify.sh"},
 		DefaultType: "task",
 	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "fix: backend init:", err)
+		fmt.Fprintln(os.Stderr, "issue: backend init:", err)
 		os.Exit(1)
 	}
 
@@ -82,7 +82,7 @@ func main() {
 	maintainer.AddStep("record merge commit", "merge-commit", stepRecordMerge, flow.StepConfig{})
 
 	os.Exit(cli.Run(cli.App{
-		Name:      "fix",
+		Name:      "issue",
 		Backend:   backend,
 		Agent:     claude.New(),
 		Artifacts: artifacts,
