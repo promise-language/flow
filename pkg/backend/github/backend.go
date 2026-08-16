@@ -249,6 +249,7 @@ func (b *Backend) LoadState(ctx context.Context, claim flow.Claim) (*flow.ItemSt
 			for _, sd := range doc.Signals {
 				state.Signals[flow.SignalId(sd.Id)] = signalStateFromDoc(sd)
 			}
+			state.Park = parkRequestFromDoc(doc.Park)
 		}
 	}
 	b.mu.Lock()

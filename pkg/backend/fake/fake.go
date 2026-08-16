@@ -252,6 +252,10 @@ func (b *Backend) LoadState(ctx context.Context, claim flow.Claim) (*flow.ItemSt
 	}
 	maps.Copy(st.Signals, rec.signals)
 	st.Questions = append([]flow.Question(nil), rec.questions...)
+	if rec.parkRequest != nil {
+		cp := *rec.parkRequest
+		st.Park = &cp
+	}
 	return st, nil
 }
 
@@ -330,6 +334,12 @@ func (b *Backend) ResolveArtifact(ctx context.Context, claim flow.Claim, id flow
 	art.Version++
 	art.ResolvedBy = claim.Owner
 	art.PromptsThisInvocation = 0 // resets at successful resolve
+	// A park recorded against this step is obsolete the moment the step
+	// resolves — keeping it would make LoadState report a reason that no
+	// longer holds.
+	if rec.parkRequest != nil && rec.parkRequest.Step == string(id) {
+		rec.parkRequest = nil
+	}
 	return nil
 }
 
@@ -368,13 +378,31 @@ func (b *Backend) AddCost(ctx context.Context, claim flow.Claim, key string, usd
 	return b.bumpField(claim, key, func(a *flow.ArtifactRecord) { a.CostUSDSpent += usd })
 }
 
+// Grant adds budget to the artifact record and clears a ParkBudgetExhausted
+// park that the grant actually satisfies (see the Backend.Grant contract).
 func (b *Backend) Grant(ctx context.Context, claim flow.Claim, key string, g flow.Grant) error {
-	return b.bumpField(claim, key, func(a *flow.ArtifactRecord) {
-		a.GrantedInvocations += g.Invocations
-		a.GrantedPromptsPerInvocation += g.PromptsPerInvocation
-		a.GrantedCostUSD += g.CostUSD
-		a.GrantedTimeout += time.Duration(g.TimeoutAdd) * time.Second
-	})
+	itemID, err := refID(claim.ItemRef)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	art := rec.artifacts[flow.ArtifactId(key)]
+	if art == nil {
+		return fmt.Errorf("fake: artifact %q not seeded on item %q", key, itemID)
+	}
+	art.GrantedInvocations += g.Invocations
+	art.GrantedPromptsPerInvocation += g.PromptsPerInvocation
+	art.GrantedCostUSD += g.CostUSD
+	art.GrantedTimeout += time.Duration(g.TimeoutAdd) * time.Second
+	if flow.GrantClearsPark(rec.parkRequest, key, *art, g) {
+		rec.parkRequest = nil
+	}
+	return nil
 }
 
 func (b *Backend) bumpField(claim flow.Claim, key string, mutate func(*flow.ArtifactRecord)) error {

@@ -136,3 +136,61 @@ func TestRecordFromArtifactDoc(t *testing.T) {
 		t.Errorf("budget fields lost: %+v", rec)
 	}
 }
+
+// The park field is the machine-readable copy LoadState returns, so it has to
+// survive a render/extract round trip through the state comment.
+func TestRenderStateComment_ParkRoundTrip(t *testing.T) {
+	doc := stateDoc{
+		Flow:     "implement",
+		Schema:   stateSchemaVersion,
+		SeededAt: time.Date(2026, 5, 26, 15, 0, 0, 0, time.UTC),
+		Artifacts: []stateArtifactDoc{
+			{Id: "plan", Type: "markdown", Required: true, GrantedInvocations: 3, Invocations: 3},
+		},
+		Park: parkDocFromRequest(flow.ParkRequest{
+			Kind:   flow.ParkBudgetExhausted,
+			Step:   "plan",
+			Axis:   flow.AxisInvocations,
+			Reason: `ran 3 times without resolving "plan"`,
+		}, time.Date(2026, 5, 26, 15, 20, 0, 0, time.UTC)),
+	}
+
+	body, err := renderStateComment("alice", doc)
+	if err != nil {
+		t.Fatalf("renderStateComment: %v", err)
+	}
+	got, _, found, err := extractStateDoc(body)
+	if err != nil || !found {
+		t.Fatalf("extractStateDoc: found=%v err=%v", found, err)
+	}
+	req := parkRequestFromDoc(got.Park)
+	if req == nil {
+		t.Fatal("park did not survive the round trip")
+	}
+	if req.Kind != flow.ParkBudgetExhausted || req.Step != "plan" || req.Axis != flow.AxisInvocations {
+		t.Errorf("park = %+v, want budget-exhausted on plan/invocations", req)
+	}
+	if req.Reason == "" {
+		t.Error("park reason was dropped")
+	}
+}
+
+// An unparked item carries no park key at all, and reads back as nil rather
+// than a zero-valued park.
+func TestRenderStateComment_NoParkIsNil(t *testing.T) {
+	doc := stateDoc{Flow: "implement", Schema: stateSchemaVersion}
+	body, err := renderStateComment("alice", doc)
+	if err != nil {
+		t.Fatalf("renderStateComment: %v", err)
+	}
+	if strings.Contains(body, "park:") {
+		t.Errorf("body carries a park key with no park: %s", body)
+	}
+	got, _, _, err := extractStateDoc(body)
+	if err != nil {
+		t.Fatalf("extractStateDoc: %v", err)
+	}
+	if parkRequestFromDoc(got.Park) != nil {
+		t.Errorf("park = %+v, want nil", got.Park)
+	}
+}

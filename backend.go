@@ -117,7 +117,22 @@ type ItemState struct {
 	Artifacts map[ArtifactId]ArtifactRecord
 	Signals   map[SignalId]SignalState
 	Questions []Question
+
+	// Park is the item's current park record, or nil when it is not parked.
+	// Populated by Backend.LoadState so a caller can see WHY an item stopped
+	// (which step, which budget axis) instead of inferring it. `grant` with no
+	// arguments reads this to top up exactly the axis that parked the step.
+	//
+	// Optional/backend-specific: backends with no park store leave it nil, and
+	// the CLI degrades to explicit `grant <step-id>` / `grant --all`. A backend
+	// that DOES populate it must also clear it per the Backend.Grant contract —
+	// a park record that outlives the condition that caused it is worse than no
+	// park record at all, because every reader then acts on a stale reason.
+	Park *ParkRequest
 }
+
+// Parked reports whether the item currently carries a park record.
+func (s *ItemState) Parked() bool { return s != nil && s.Park != nil }
 
 // PendingQuestions returns the subset of Questions that have not yet been
 // answered (UserAnswer.Answer is empty). The flow parks while this is
@@ -260,6 +275,20 @@ type Backend interface {
 	BumpInvocations(ctx context.Context, claim Claim, key string) error
 	BumpPrompts(ctx context.Context, claim Claim, key string) error
 	AddCost(ctx context.Context, claim Claim, key string, usd float64) error
+
+	// Grant adds budget to the artifact record named by key (an ArtifactId as
+	// a string — signal steps own no budget record and are never grantable).
+	//
+	// Grant MUST clear a ParkBudgetExhausted park when the grant raises the
+	// parked step's offending axis above its consumption — use GrantClearsPark
+	// so every backend applies the same rule. Parks of any other kind, and
+	// grants too small to clear the cap, MUST be left in place: reporting an
+	// item as unparked when the next dispatch would re-park it immediately is
+	// the failure mode this contract exists to prevent.
+	//
+	// Clearing belongs here rather than in the CLI because Grant is not reached
+	// only through the CLI — an operator granting from a backend's own UI must
+	// drop the park (and any park label) the same way.
 	Grant(ctx context.Context, claim Claim, key string, g Grant) error
 
 	Park(ctx context.Context, claim Claim, req ParkRequest) error

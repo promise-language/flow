@@ -40,11 +40,48 @@ const (
 // ParkRequest is what handlers (via ctx.Park) or the SDK pass to
 // Backend.Park to mark a step blocked / waiting on input / exhausted.
 type ParkRequest struct {
-	Kind    ParkKind   `json:"kind"`
-	Step    string     `json:"step,omitempty"` // lifecycle item name
+	Kind ParkKind `json:"kind"`
+	// Step is the step's ID — its ArtifactId (or SignalId), NOT the human
+	// label passed as AddStep's first argument. The id is what identifies a
+	// step everywhere else (it keys the budget record, and it is the only
+	// thing `grant` accepts), so a park that named the label could not be
+	// matched to the record whose budget caused it. The SDK fills this in
+	// from LifecycleItem.Result() when a handler leaves it empty.
+	Step    string     `json:"step,omitempty"`
 	Axis    BudgetAxis `json:"axis,omitempty"` // set when Kind==ParkBudgetExhausted
 	Reason  string     `json:"reason,omitempty"`
 	Details string     `json:"details,omitempty"`
+}
+
+// GrantClearsPark reports whether a grant against budget key `key` — producing
+// the post-grant record `post` — satisfies the park in `park` and so must
+// clear it. Backends call this from Grant so the rule is identical everywhere
+// (see the Backend.Grant contract).
+//
+// Only a ParkBudgetExhausted park on this very step can be cleared, and only
+// when the offending axis now has headroom: granting $0.01 against a step that
+// is $2.40 over clears nothing, and saying otherwise would report an item as
+// resumable when the next dispatch would re-park it.
+func GrantClearsPark(park *ParkRequest, key string, post ArtifactRecord, g Grant) bool {
+	if park == nil || park.Kind != ParkBudgetExhausted || park.Step != key {
+		return false
+	}
+	switch park.Axis {
+	case AxisInvocations:
+		return post.GrantedInvocations > post.Invocations
+	case AxisCost:
+		return post.GrantedCostUSD > post.CostUSDSpent
+	case AxisPrompts:
+		return post.GrantedPromptsPerInvocation > post.PromptsThisInvocation
+	case AxisTimeout:
+		// Timeout is a per-run duration, not a meter that fills up: there is no
+		// "consumed" value to clear. Any added time is what lets the step run
+		// again, so a positive TimeoutAdd — and nothing else — clears it.
+		return g.TimeoutAdd > 0
+	}
+	// Budget-exhausted with no axis recorded: nothing to reason about, so
+	// leave the park in place rather than guess it away.
+	return false
 }
 
 // QuestionFormat is the presentation hint an agent attaches to a question:

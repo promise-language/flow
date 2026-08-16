@@ -2,7 +2,6 @@ package github
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -88,25 +87,32 @@ func (b *Backend) prHasApprovedReview(ctx context.Context, prNum int) (bool, err
 	return false, nil
 }
 
-// markSignalSetOnState updates the in-memory state and the persisted state
-// comment to reflect a backend-internal side-effect signal write (e.g.,
-// Open succeeded → pr-open=true).
-func (b *Backend) markSignalSetOnState(ctx context.Context, claim flow.Claim, issueNum int, sig flow.SignalId) error {
-	tok, err := b.loadClaimToken(claim)
-	if err != nil {
-		return err
-	}
-	state, err := b.LoadState(ctx, claim)
-	if err != nil {
-		return err
-	}
-	state.Signals[sig] = flow.SignalState{Set: true, ObservedAt: nowUTC(), By: "side-effect"}
-	doc := docFromState(state.Item.Flow, state, nowUTC())
-	if tok.StateCommentID == 0 {
-		return errors.New("github: cannot mark signal — no state comment id on claim")
-	}
-	_, err = b.updateStateComment(ctx, issueNum, tok.StateCommentID, doc, claim.Owner)
-	return err
+// markSignalSetOnState records a backend-internal side-effect signal write
+// (e.g. Open succeeded → pr-open=true) in the persisted state comment.
+// It edits the existing document in place rather than rebuilding one from an
+// ItemState snapshot: a rebuild carries only what ItemState models, so it would
+// silently drop everything else the document holds — the park record among
+// them, which would let opening a PR quietly unpark a budget-exhausted item.
+// It also no longer refuses when the claim token carries no state-comment id:
+// fetchStateComment resolves the comment by scanning the issue in that case,
+// which is how every other mutator already behaves.
+func (b *Backend) markSignalSetOnState(ctx context.Context, claim flow.Claim, sig flow.SignalId) error {
+	return b.mutateStateDoc(ctx, claim, "markSignalSetOnState", func(doc *stateDoc) error {
+		entry := stateSignalDoc{
+			Id:          string(sig),
+			Set:         true,
+			ObservedAt:  nowUTC(),
+			ObservedVia: "side-effect",
+		}
+		for i := range doc.Signals {
+			if doc.Signals[i].Id == string(sig) {
+				doc.Signals[i] = entry
+				return nil
+			}
+		}
+		doc.Signals = append(doc.Signals, entry)
+		return nil
+	})
 }
 
 // observedAt is a helper used by tests to provide deterministic timestamps

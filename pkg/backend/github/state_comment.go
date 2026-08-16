@@ -31,6 +31,46 @@ type stateDoc struct {
 	SeededAt  time.Time          `yaml:"seeded_at"`
 	Artifacts []stateArtifactDoc `yaml:"artifacts,omitempty"`
 	Signals   []stateSignalDoc   `yaml:"signals,omitempty"`
+	// Park is the item's current park, or nil when it is not parked. The
+	// park label and the timeline comment Park() also writes are for humans
+	// and for history; THIS is the machine-readable copy LoadState returns,
+	// and it lives here — in the one comment LoadState already fetches — so
+	// reading it costs no extra API call and a new park supersedes the old
+	// one instead of accumulating.
+	Park *stateParkDoc `yaml:"park,omitempty"`
+}
+
+type stateParkDoc struct {
+	Kind     string    `yaml:"kind"`
+	Step     string    `yaml:"step,omitempty"` // step ID (artifact/signal id)
+	Axis     string    `yaml:"axis,omitempty"`
+	Reason   string    `yaml:"reason,omitempty"`
+	Details  string    `yaml:"details,omitempty"`
+	ParkedAt time.Time `yaml:"parked_at,omitempty"`
+}
+
+func parkDocFromRequest(req flow.ParkRequest, at time.Time) *stateParkDoc {
+	return &stateParkDoc{
+		Kind:     string(req.Kind),
+		Step:     req.Step,
+		Axis:     string(req.Axis),
+		Reason:   req.Reason,
+		Details:  req.Details,
+		ParkedAt: at,
+	}
+}
+
+func parkRequestFromDoc(d *stateParkDoc) *flow.ParkRequest {
+	if d == nil {
+		return nil
+	}
+	return &flow.ParkRequest{
+		Kind:    flow.ParkKind(d.Kind),
+		Step:    d.Step,
+		Axis:    flow.BudgetAxis(d.Axis),
+		Reason:  d.Reason,
+		Details: d.Details,
+	}
 }
 
 type stateArtifactDoc struct {
@@ -122,54 +162,10 @@ func renderStateComment(owner string, doc stateDoc) (string, error) {
 	return sb.String(), nil
 }
 
-// docFromState builds a stateDoc from a flow.ItemState snapshot. Used when
-// the backend wants to persist a freshly-observed state.
-func docFromState(flowName string, state *flow.ItemState, seededAt time.Time) stateDoc {
-	doc := stateDoc{
-		Flow:     flowName,
-		Schema:   stateSchemaVersion,
-		SeededAt: seededAt,
-	}
-	for id, rec := range state.Artifacts {
-		doc.Artifacts = append(doc.Artifacts, artifactDocFromRecord(id, rec))
-	}
-	for id, sig := range state.Signals {
-		doc.Signals = append(doc.Signals, stateSignalDoc{
-			Id:          string(id),
-			Set:         sig.Set,
-			ObservedAt:  sig.ObservedAt,
-			ObservedVia: sig.By,
-		})
-	}
-	return doc
-}
-
-func artifactDocFromRecord(id flow.ArtifactId, rec flow.ArtifactRecord) stateArtifactDoc {
-	d := stateArtifactDoc{
-		Id:                          string(id),
-		Type:                        artifactTypeString(rec.Type),
-		Required:                    rec.Required,
-		Stale:                       rec.Stale,
-		Resolved:                    rec.Resolved,
-		ResolvedBy:                  rec.ResolvedBy,
-		ProducedAt:                  rec.ProducedAt,
-		Version:                     rec.Version,
-		ResolvedByPrincipal:         rec.ResolvedBy, // duplicated for human-readable column
-		CommitHash:                  rec.CommitHash,
-		GrantedInvocations:          rec.GrantedInvocations,
-		GrantedPromptsPerInvocation: rec.GrantedPromptsPerInvocation,
-		GrantedCostUSD:              rec.GrantedCostUSD,
-		GrantedTimeout:              rec.GrantedTimeout,
-		Invocations:                 rec.Invocations,
-		PromptsThisInvocation:       rec.PromptsThisInvocation,
-		CostUSDSpent:                rec.CostUSDSpent,
-		LastRunAt:                   rec.LastRunAt,
-	}
-	if rec.Type == flow.ArtifactJSON && len(rec.JSON) > 0 {
-		d.JSONInline = string(rec.JSON)
-	}
-	return d
-}
+// NOTE: there is deliberately no docFromState/artifactDocFromRecord pair here.
+// Rebuilding the document from a flow.ItemState carries only what ItemState
+// models and silently drops the rest — the park record most importantly — so
+// every write path edits the loaded document in place via mutateStateDoc.
 
 // recordFromArtifactDoc inflates an ArtifactRecord from the YAML doc. The
 // File / Patch payloads aren't inlined; the backend fetches them on demand

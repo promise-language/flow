@@ -258,6 +258,22 @@ func (f *Flow) Item(name string) (LifecycleItem, bool) {
 	return toLifecycleItem(st), true
 }
 
+// ItemByResult returns the LifecycleItem whose Result() (ArtifactId or
+// SignalId, as a string) equals key. ok==false if no step produces that
+// result.
+//
+// The result id is a step's identity — it keys the budget record and it is the
+// only name `grant` accepts — so callers resolving an operator-supplied or
+// park-recorded id look it up here rather than through Item (which is keyed by
+// the human label).
+func (f *Flow) ItemByResult(key string) (LifecycleItem, bool) {
+	st, ok := f.stepByResult[key]
+	if !ok {
+		return LifecycleItem{}, false
+	}
+	return toLifecycleItem(st), true
+}
+
 // Items returns the ordered slice of LifecycleItems. Stable; safe to range.
 func (f *Flow) Items() []LifecycleItem {
 	out := make([]LifecycleItem, len(f.steps))

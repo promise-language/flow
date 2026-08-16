@@ -16,6 +16,12 @@ import (
 // Encodes the id/type/version + metadata so the backend can locate it later.
 const artifactCommentMarkerPrefix = "<!-- flow:artifact "
 
+// errNoStateComment — the issue carries no state-v1 comment, so there is no
+// document to mutate. A sentinel rather than a string so callers that tolerate
+// it (Park, which can fire before an item is seeded) match on identity instead
+// of on message text.
+var errNoStateComment = errors.New("no state comment")
+
 // SeedState writes the initial state comment with the artifact checklist +
 // budget caps. Refuses if the issue already has a state comment.
 func (b *Backend) SeedState(ctx context.Context, claim flow.Claim, specs []flow.ArtifactSpec) error {
@@ -122,9 +128,15 @@ func (b *Backend) ResetSeed(ctx context.Context, claim flow.Claim) error {
 	}
 	doc.Artifacts = nil
 	doc.SeededAt = nowUTC()
+	// The park belongs to the cleared checklist — a park naming a step that no
+	// longer has a budget record would survive the reset and misreport the item
+	// as blocked forever. (fake.ResetSeed clears its park for the same reason.)
+	clearedLabel := parkLabel(b.labels, parkRequestFromDoc(doc.Park))
+	doc.Park = nil
 	if _, err := b.updateStateComment(ctx, issueNum, stateID, *doc, claim.Owner); err != nil {
 		return fmt.Errorf("reset state comment: %w", err)
 	}
+	b.removeParkLabel(ctx, claim, clearedLabel)
 	return nil
 }
 
@@ -259,11 +271,21 @@ func (b *Backend) ResolveArtifact(ctx context.Context, claim flow.Claim, id flow
 		a.JSONInline = string(body.JSON)
 	}
 
+	// A park recorded against this step is obsolete once the step resolves —
+	// drop it (and its label) rather than let LoadState keep reporting a
+	// reason that no longer holds.
+	clearedLabel := ""
+	if doc.Park != nil && doc.Park.Step == string(id) {
+		clearedLabel = parkLabel(b.labels, parkRequestFromDoc(doc.Park))
+		doc.Park = nil
+	}
+
 	_ = owner // we patch as the current user (state comment author); owner stays as-is
 
 	if _, err := b.updateStateComment(ctx, issueNum, stateID, *doc, claim.Owner); err != nil {
 		return err
 	}
+	b.removeParkLabel(ctx, claim, clearedLabel)
 	return nil
 }
 
@@ -295,19 +317,71 @@ func (b *Backend) AddCost(ctx context.Context, claim flow.Claim, key string, usd
 	})
 }
 
+// Grant adds budget to the artifact's caps and clears a ParkBudgetExhausted
+// park the grant actually satisfies — the state-doc field AND the
+// flow:budget-exhausted:<step-id> label, so neither outlives the condition
+// (see the Backend.Grant contract).
 func (b *Backend) Grant(ctx context.Context, claim flow.Claim, key string, g flow.Grant) error {
-	return b.mutateArtifact(ctx, claim, key, func(a *stateArtifactDoc) {
+	var clearedLabel string
+	err := b.mutateStateDoc(ctx, claim, "Grant", func(doc *stateDoc) error {
+		a := findArtifactDoc(doc, key)
+		if a == nil {
+			return fmt.Errorf("github: artifact %q not found in state doc", key)
+		}
 		a.GrantedInvocations += g.Invocations
 		a.GrantedPromptsPerInvocation += g.PromptsPerInvocation
 		a.GrantedCostUSD += g.CostUSD
 		a.GrantedTimeout += time.Duration(g.TimeoutAdd) * time.Second
+		if flow.GrantClearsPark(parkRequestFromDoc(doc.Park), key, recordFromArtifactDoc(*a), g) {
+			clearedLabel = parkLabel(b.labels, parkRequestFromDoc(doc.Park))
+			doc.Park = nil
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	b.removeParkLabel(ctx, claim, clearedLabel)
+	return nil
+}
+
+// removeParkLabel drops a park label once the park it advertises is gone.
+//
+// Best-effort ON PURPOSE: the state doc is the source of truth and has already
+// been written by the time this runs. Grant is NOT idempotent — it adds to the
+// caps — so failing the call over a leftover label would invite a retry that
+// grants the budget a second time. A stale label is cosmetic; a double grant
+// is not.
+func (b *Backend) removeParkLabel(ctx context.Context, claim flow.Claim, label string) {
+	if label == "" {
+		return
+	}
+	issueNum, err := b.issueNumber(claim.ItemRef)
+	if err != nil {
+		return
+	}
+	_, _ = b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, label)
+}
+
+// mutateArtifact applies a mutation to one artifact entry of the state doc.
+// Centralizes the load-modify-store cycle used by the per-axis bumpers.
+func (b *Backend) mutateArtifact(ctx context.Context, claim flow.Claim, key string, mutate func(*stateArtifactDoc)) error {
+	return b.mutateStateDoc(ctx, claim, "mutateArtifact", func(doc *stateDoc) error {
+		a := findArtifactDoc(doc, key)
+		if a == nil {
+			return fmt.Errorf("github: artifact %q not found in state doc", key)
+		}
+		mutate(a)
+		return nil
 	})
 }
 
-// mutateArtifact loads the state comment, applies the mutation, and writes
-// the comment back. Centralizes the load-modify-store cycle used by the
-// per-axis bumpers and Grant.
-func (b *Backend) mutateArtifact(ctx context.Context, claim flow.Claim, key string, mutate func(*stateArtifactDoc)) error {
+// mutateStateDoc loads the state comment, applies mutate to the whole
+// document, and writes it back. Whole-document rather than per-artifact
+// because a single grant can touch both an artifact's caps and the park
+// field, and those must land in ONE comment update — two writes would leave a
+// window where the budget is raised but the item still reads as parked.
+func (b *Backend) mutateStateDoc(ctx context.Context, claim flow.Claim, op string, mutate func(*stateDoc) error) error {
 	issueNum, err := b.issueNumber(claim.ItemRef)
 	if err != nil {
 		return err
@@ -321,51 +395,77 @@ func (b *Backend) mutateArtifact(ctx context.Context, claim flow.Claim, key stri
 		return err
 	}
 	if body == "" {
-		return errors.New("github: mutateArtifact: no state comment")
+		return fmt.Errorf("github: %s: %w", op, errNoStateComment)
 	}
 	doc, _, _, err := extractStateDoc(body)
 	if err != nil {
 		return err
 	}
-	for i := range doc.Artifacts {
-		if doc.Artifacts[i].Id == key {
-			mutate(&doc.Artifacts[i])
-			_, err := b.updateStateComment(ctx, issueNum, stateID, *doc, claim.Owner)
-			return err
-		}
+	if err := mutate(doc); err != nil {
+		return err
 	}
-	return fmt.Errorf("github: artifact %q not found in state doc", key)
+	_, err = b.updateStateComment(ctx, issueNum, stateID, *doc, claim.Owner)
+	return err
 }
 
-// Park records a park via the state comment's "park" field (not yet in the
-// schema) plus a flow:blocked / flow:needs-answer / flow:budget-exhausted:<id>
-// label so consumers can spot parked issues at a glance.
+// findArtifactDoc returns a pointer to the doc's entry for key, or nil.
+func findArtifactDoc(doc *stateDoc, key string) *stateArtifactDoc {
+	for i := range doc.Artifacts {
+		if doc.Artifacts[i].Id == key {
+			return &doc.Artifacts[i]
+		}
+	}
+	return nil
+}
+
+// parkLabel returns the label that advertises a park of this kind. Adding and
+// removing go through the same function so a park can never be labelled by one
+// rule and unlabelled by another.
+func parkLabel(l labels, req *flow.ParkRequest) string {
+	if req == nil {
+		return ""
+	}
+	switch req.Kind {
+	case flow.ParkQuestion:
+		return l.NeedsAnswer()
+	case flow.ParkBudgetExhausted:
+		return l.BudgetExhausted(req.Step)
+	case flow.ParkInfraTransient:
+		return l.InfraTransient()
+	default:
+		return l.Blocked()
+	}
+}
+
+// Park records a park in the state comment's "park" field — the machine-
+// readable copy LoadState returns — plus a flow:blocked / flow:needs-answer /
+// flow:budget-exhausted:<step-id> label and a timeline comment, so a human
+// scanning the issue list sees it too.
 func (b *Backend) Park(ctx context.Context, claim flow.Claim, req flow.ParkRequest) error {
 	issueNum, err := b.issueNumber(claim.ItemRef)
 	if err != nil {
 		return err
 	}
-	var labelToAdd string
-	switch req.Kind {
-	case flow.ParkBlocked:
-		labelToAdd = b.labels.Blocked()
-	case flow.ParkQuestion:
-		labelToAdd = b.labels.NeedsAnswer()
-	case flow.ParkBudgetExhausted:
-		labelToAdd = b.labels.BudgetExhausted(req.Step)
-	case flow.ParkInfraTransient:
-		labelToAdd = b.labels.InfraTransient()
-	default:
-		labelToAdd = b.labels.Blocked()
-	}
-	if _, _, err := b.gh.Issues.AddLabelsToIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{labelToAdd}); err != nil {
+	if _, _, err := b.gh.Issues.AddLabelsToIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{parkLabel(b.labels, &req)}); err != nil {
 		return fmt.Errorf("add park label: %w", err)
 	}
 	// Post a comment with the park reason so the timeline carries a record.
 	parkBody, _ := json.Marshal(req)
 	body := "<!-- flow:park -->\n```json\n" + string(parkBody) + "\n```"
-	_, _, err = b.gh.Issues.CreateComment(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, &github.IssueComment{Body: &body})
-	return err
+	if _, _, err := b.gh.Issues.CreateComment(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, &github.IssueComment{Body: &body}); err != nil {
+		return err
+	}
+	// Record it in the state doc. An item can be parked before it is seeded
+	// (a preflight refusal, say), and there is no state comment to write to
+	// then — the label and timeline comment above still carry the record, so
+	// that is not an error.
+	if err := b.mutateStateDoc(ctx, claim, "Park", func(doc *stateDoc) error {
+		doc.Park = parkDocFromRequest(req, nowUTC())
+		return nil
+	}); err != nil && !errors.Is(err, errNoStateComment) {
+		return err
+	}
+	return nil
 }
 
 // AskQuestions persists the agent's questions as a single comment with the

@@ -96,3 +96,103 @@ func TestAgentRequestResponse_JSONShape(t *testing.T) {
 		t.Errorf("AgentResponse marshal: %v", err)
 	}
 }
+
+// GrantClearsPark is the single rule every backend applies in Grant. The cases
+// that matter: only a budget park on THIS step clears, and only when the axis
+// actually has room afterwards — a token grant must leave the park standing.
+func TestGrantClearsPark(t *testing.T) {
+	budgetPark := func(step string, axis BudgetAxis) *ParkRequest {
+		return &ParkRequest{Kind: ParkBudgetExhausted, Step: step, Axis: axis}
+	}
+	tests := []struct {
+		name string
+		park *ParkRequest
+		key  string
+		post ArtifactRecord
+		g    Grant
+		want bool
+	}{
+		{
+			name: "no park",
+			key:  "plan",
+			want: false,
+		},
+		{
+			name: "question park is never cleared by budget",
+			park: &ParkRequest{Kind: ParkQuestion, Step: "plan"},
+			key:  "plan",
+			post: ArtifactRecord{GrantedInvocations: 99},
+			g:    Grant{Invocations: 99},
+			want: false,
+		},
+		{
+			name: "park on a different step",
+			park: budgetPark("implementation", AxisInvocations),
+			key:  "plan",
+			post: ArtifactRecord{Invocations: 3, GrantedInvocations: 4},
+			g:    Grant{Invocations: 1},
+			want: false,
+		},
+		{
+			name: "invocations now have headroom",
+			park: budgetPark("plan", AxisInvocations),
+			key:  "plan",
+			post: ArtifactRecord{Invocations: 3, GrantedInvocations: 4},
+			g:    Grant{Invocations: 1},
+			want: true,
+		},
+		{
+			name: "invocations still at the cap",
+			park: budgetPark("plan", AxisInvocations),
+			key:  "plan",
+			post: ArtifactRecord{Invocations: 4, GrantedInvocations: 4},
+			g:    Grant{Invocations: 1},
+			want: false,
+		},
+		{
+			name: "cost grant too small to clear the cap",
+			park: budgetPark("plan", AxisCost),
+			key:  "plan",
+			post: ArtifactRecord{CostUSDSpent: 12.40, GrantedCostUSD: 10.01},
+			g:    Grant{CostUSD: 0.01},
+			want: false,
+		},
+		{
+			name: "cost grant clears the cap",
+			park: budgetPark("plan", AxisCost),
+			key:  "plan",
+			post: ArtifactRecord{CostUSDSpent: 12.40, GrantedCostUSD: 22.40},
+			g:    Grant{CostUSD: 12.39},
+			want: true,
+		},
+		{
+			name: "timeout clears on any added time",
+			park: budgetPark("plan", AxisTimeout),
+			key:  "plan",
+			g:    Grant{TimeoutAdd: 60},
+			want: true,
+		},
+		{
+			name: "timeout park with no added time",
+			park: budgetPark("plan", AxisTimeout),
+			key:  "plan",
+			g:    Grant{Invocations: 5},
+			want: false,
+		},
+		{
+			name: "budget park with no axis recorded",
+			park: &ParkRequest{Kind: ParkBudgetExhausted, Step: "plan"},
+			key:  "plan",
+			post: ArtifactRecord{GrantedInvocations: 9},
+			g:    Grant{Invocations: 9},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := GrantClearsPark(tt.park, tt.key, tt.post, tt.g); got != tt.want {
+				t.Errorf("GrantClearsPark() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

@@ -144,15 +144,19 @@ func TestCmdGrant_DoubleDashTerminator(t *testing.T) {
 	}
 }
 
-// Flag-only invocation (no positional) must still error cleanly.
-func TestCmdGrant_MissingArtifactId(t *testing.T) {
+// Flag-only invocation with nothing parked: park mode has no park to act on,
+// so it refuses (rather than silently sweeping every step) and points at the
+// two explicit forms.
+func TestCmdGrant_NoPark_RefusesWithRemedy(t *testing.T) {
 	app, _, errBuf, _ := grantTestSetup(t)
 
 	code := app.cmdGrant(context.Background(), []string{"--invocations", "3"})
 	if code != 2 {
 		t.Fatalf("cmdGrant = %d, want 2", code)
 	}
-	if !strings.Contains(errBuf.String(), "missing artifact id") {
-		t.Errorf("stderr = %q, want 'missing artifact id'", errBuf.String())
+	for _, want := range []string{"no park recorded", "grant --all", "grant <step-id>"} {
+		if !strings.Contains(errBuf.String(), want) {
+			t.Errorf("stderr = %q, want %q", errBuf.String(), want)
+		}
 	}
 }

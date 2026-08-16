@@ -221,3 +221,96 @@ func TestBackend_ParkRecordsRequest(t *testing.T) {
 		t.Errorf("ParkRequest = %+v, want budget-exhausted/invocations", got)
 	}
 }
+
+// parkedItem seeds an item whose "plan" step has burned its 3 invocations and
+// parked on the invocations axis — the state a `grant` acts on.
+func parkedItem(t *testing.T, b *fake.Backend) flow.Claim {
+	t.Helper()
+	ctx := context.Background()
+	b.AddItem(newItem("1"))
+	claim, err := b.Claim(ctx, itemRef("1"), "alice", false)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if err := b.SeedState(ctx, claim, []flow.ArtifactSpec{
+		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true,
+			Budget: flow.StepBudget{MaxInvocations: 3, MaxCostUSD: 10}},
+	}); err != nil {
+		t.Fatalf("SeedState: %v", err)
+	}
+	for range 3 {
+		if err := b.BumpInvocations(ctx, claim, "plan"); err != nil {
+			t.Fatalf("BumpInvocations: %v", err)
+		}
+	}
+	if err := b.Park(ctx, claim, flow.ParkRequest{
+		Kind: flow.ParkBudgetExhausted, Step: "plan", Axis: flow.AxisInvocations,
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+	return claim
+}
+
+// LoadState surfaces the park so a caller can see WHY the item stopped.
+func TestBackend_LoadStateSurfacesPark(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	claim := parkedItem(t, b)
+
+	st, err := b.LoadState(ctx, claim)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if !st.Parked() {
+		t.Fatal("ItemState.Park = nil, want the recorded park")
+	}
+	if st.Park.Step != "plan" || st.Park.Axis != flow.AxisInvocations {
+		t.Errorf("park = %+v, want plan/invocations", st.Park)
+	}
+}
+
+// The Backend.Grant contract: a grant that gives the parked axis headroom
+// clears the park; one that does not, leaves it.
+func TestBackend_GrantClearsParkOnlyWhenSatisfied(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	claim := parkedItem(t, b)
+
+	// Cost is not the parked axis — the park must survive.
+	if err := b.Grant(ctx, claim, "plan", flow.Grant{CostUSD: 50}); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	if b.ParkRequest("1") == nil {
+		t.Fatal("park cleared by a grant on an unrelated axis")
+	}
+
+	if err := b.Grant(ctx, claim, "plan", flow.Grant{Invocations: 1}); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	if p := b.ParkRequest("1"); p != nil {
+		t.Errorf("park = %+v, want cleared once invocations had headroom", p)
+	}
+	st, err := b.LoadState(ctx, claim)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if st.Parked() {
+		t.Error("LoadState still reports a park after it was cleared")
+	}
+}
+
+// Resolving the parked step makes its park obsolete; keeping it would make
+// LoadState report a reason that no longer holds.
+func TestBackend_ResolveClearsParkForThatStep(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	claim := parkedItem(t, b)
+
+	if err := b.ResolveArtifact(ctx, claim, "plan",
+		flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "done"}); err != nil {
+		t.Fatalf("ResolveArtifact: %v", err)
+	}
+	if p := b.ParkRequest("1"); p != nil {
+		t.Errorf("park = %+v, want cleared by the resolve", p)
+	}
+}

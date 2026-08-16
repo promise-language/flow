@@ -29,7 +29,7 @@ $ ./issue claim 42           # acquire a claim on item #42
 $ ./issue run-step           # advance ONE lifecycle item (one prompt → one durable artifact)
 $ ./issue run-step           # next lifecycle item
 $ ./issue status             # read-only lifecycle checklist
-$ ./issue grant plan --invocations 3 --cost 10
+$ ./issue grant              # item parked on a budget cap? top up that axis
 $ ./issue release            # drop the claim
 ```
 
@@ -359,6 +359,13 @@ Other options: `Required` / `Optional` (cardinality for `IsDone`),
 or HEAD changes). Unspecified axes inherit the package defaults
 `{3, 1, $10, 30m}` (`flow.DefaultStepBudget()`).
 
+A park records the step by its **result id** (`plan`), not its label (`"write
+plan"`), and `Backend.LoadState` surfaces it as `ItemState.Park` — that is what
+lets `grant` with no arguments top up exactly the axis that parked the step.
+`Backend.Grant` must clear a budget park once the grant gives that axis
+headroom (see `flow.GrantClearsPark`); a grant too small to clear the cap
+leaves the park in place and says so.
+
 **Budgets are seeded once and frozen.** `SeedState` records the caps on the
 item the first time it's processed; bumping `MaxInvocations` in your source
 does **not** retroactively re-budget items already in flight. The only
@@ -682,8 +689,30 @@ See the forge [blueprint][forge-blueprint] for the full file layout
 | `run-step` | advance ONE lifecycle item; emit an `InvocationResult` JSON. Re-run until `done` |
 | `resolve [<id>]` (alias `run-all`) | drive the FULL lifecycle: loop `run-step` until the item finalizes or the run stops (parked, skipped, or failed). With `<id>` claims it first; with no claim and no id, auto-selects `ListEligible()[0]`. Streams each step's `InvocationResult` JSON |
 | `status [<id>]` | read-only lifecycle checklist (uses `StateInspector` when there's no claim) |
-| `grant <artifact-id> --invocations N --cost USD --prompts N --timeout SECONDS` | additively extend a parked step's budget. `<artifact-id>` is the id passed to `AddStep` (e.g. `plan`), **not** the human step name (`"write plan"`) |
+| `grant` | read the item's park and top up **exactly** the axis that parked it. Refuses (writing nothing) when the park is not a budget cap — a question park is cleared by answering, not by granting |
+| `grant --all [--invocations N] [--cost USD] [--prompts N]` | sweep every pending step, raising each axis to at least *consumed + headroom*. Steps that already have headroom are not written at all |
+| `grant <step-id> --invocations N --cost USD --prompts N --timeout SECONDS` | additively extend one step's budget. `<step-id>` is the id passed to `AddStep` (e.g. `plan`) — the first column of `status`. The human label (`"write plan"`) is **refused**, as is a signal id (signal steps own no budget) |
 | `release` | drop the claim |
+
+`grant` validates its target against the item's flow before writing anything:
+an unknown id, a label, a signal id, or an unseeded step is rejected with exit
+2 and the list of legal ids. `--dry-run` prints the plan and writes nothing.
+
+### Output modes
+
+`status`, `list`, and `grant` render **human-readable text on a terminal and
+JSON when stdout is piped or redirected** — so a tool driving a flow binary
+never parses text meant for a person. `--json` / `--human` force one for a
+single command; `FLOW_OUTPUT=json|human` forces it for the process. `run-step`
+and `resolve` always emit `InvocationResult` JSON on stdout (their human
+progress goes to stderr), and errors are always plain text on stderr with the
+exit code as the signal.
+
+`status --json` is the machine view of the checklist: each step carries its
+`id`, `label`, `kind` (`artifact|signal|await`), `state`
+(`pending|resolved|stale|skipped`), and either a `budget` object or `null` —
+`null` being the machine-readable "not a grant target". The item's `park`, when
+set, names the step and axis, which is exactly what bare `grant` acts on.
 
 `cli.Run` also handles help automatically, in both flag prefixes and the short
 form: `<bin> --help` / `-help` / `-h` (or `<bin> help`) prints the command list,

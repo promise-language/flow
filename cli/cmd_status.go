@@ -3,17 +3,23 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/promise-language/flow"
 )
 
 func (app *App) cmdStatus(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("status")
+	of := addOutputFlags(fs)
 	if err := parseInterspersed(fs, args); err != nil {
 		return 2
 	}
 	if fs.NArg() > 1 {
 		fmt.Fprintf(app.Err, "status: unexpected argument %q (status takes an optional item id)\n", fs.Arg(1))
+		return 2
+	}
+	mode, ok := of.mode(app, "status")
+	if !ok {
 		return 2
 	}
 
@@ -76,28 +82,43 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 	if owner == "" {
 		owner = "(unclaimed)"
 	}
-	fmt.Fprintf(app.Out, "item:  %s\n", display)
-	fmt.Fprintf(app.Out, "owner: %s\n", owner)
-	fmt.Fprintf(app.Out, "flow:  %s\n", statusFlowLine(state, f, typeFlow))
-	fmt.Fprintln(app.Out)
 
-	// Only the type-matching flow's checklist. The "flow:" line names it, so no
-	// redundant header. If no flow handles this item's type, there's nothing.
-	if typeFlow != nil {
-		printFlowChecklist(app, typeFlow, state, false)
+	payload := statusPayload{
+		Item:      display,
+		Owner:     owner,
+		Flow:      flowName(f, typeFlow),
+		FlowState: statusFlowState(state, f, typeFlow),
+		Finalized: state.Item.Finalized,
+		Park:      parkPayloadOf(state.Park),
+		Steps:     stepPayloads(typeFlow, state),
+		Questions: questionPayloads(state),
 	}
 
-	if len(state.Questions) > 0 {
-		fmt.Fprintln(app.Out, "\nquestions:")
-		for _, q := range state.Questions {
-			marker := "[ ]"
-			if q.Answer != "" {
-				marker = "[x]"
-			}
-			fmt.Fprintf(app.Out, "  %s %s — %s\n", marker, q.ID, q.Text)
+	return app.emit(mode, payload, func() {
+		fmt.Fprintf(app.Out, "item:  %s\n", payload.Item)
+		fmt.Fprintf(app.Out, "owner: %s\n", payload.Owner)
+		fmt.Fprintf(app.Out, "flow:  %s\n", statusFlowLine(state, f, typeFlow))
+		fmt.Fprintln(app.Out)
+
+		// Only the type-matching flow's checklist. The "flow:" line names it, so
+		// no redundant header. If no flow handles this item's type, there's
+		// nothing.
+		printChecklist(app, payload.Steps)
+
+		if payload.Park != nil {
+			fmt.Fprintf(app.Out, "\nparked: %s\n", parkLine(payload.Park))
 		}
-	}
-	return 0
+		if len(payload.Questions) > 0 {
+			fmt.Fprintln(app.Out, "\nquestions:")
+			for _, q := range payload.Questions {
+				marker := "[ ]"
+				if q.Answered {
+					marker = "[x]"
+				}
+				fmt.Fprintf(app.Out, "  %s %s — %s\n", marker, q.ID, q.Text)
+			}
+		}
+	})
 }
 
 // flowForType returns the flow that handles itemType (the first whose
@@ -110,6 +131,36 @@ func flowForType(app *App, itemType flow.ItemType) *flow.Flow {
 		}
 	}
 	return nil
+}
+
+// flowName is the bare flow name for the payload: the eligible flow, else the
+// type-matching one, else empty.
+func flowName(eligible, typeFlow *flow.Flow) string {
+	if eligible != nil {
+		return eligible.Name()
+	}
+	if typeFlow != nil {
+		return typeFlow.Name()
+	}
+	return ""
+}
+
+// statusFlowState is the machine-readable counterpart of statusFlowLine: the
+// same decision, as a closed enum instead of a rendered string.
+func statusFlowState(state *flow.ItemState, eligible, typeFlow *flow.Flow) string {
+	if state.Item.Finalized {
+		return flowStateFinalized
+	}
+	if eligible != nil {
+		return flowStateEligible
+	}
+	if typeFlow != nil {
+		if !state.HasRequiredArtifacts() {
+			return flowStateNotSeeded
+		}
+		return flowStateNoEligibleStep
+	}
+	return flowStateNoMatchingFlow
 }
 
 // statusFlowLine renders the "flow:" value. A finalized item is reported as
@@ -139,31 +190,153 @@ func statusFlowLine(state *flow.ItemState, eligible, typeFlow *flow.Flow) string
 	return "(no matching flow)"
 }
 
-func printFlowChecklist(app *App, f *flow.Flow, state *flow.ItemState, header bool) {
-	if header {
-		fmt.Fprintf(app.Out, "%s:\n", f.Name())
+// stepPayloads projects a flow's lifecycle items onto the state. Returns an
+// empty (non-nil) slice when no flow handles the item's type, so the JSON
+// carries [] rather than null.
+func stepPayloads(f *flow.Flow, state *flow.ItemState) []stepPayload {
+	if f == nil {
+		return []stepPayload{}
 	}
-	for _, li := range f.Items() {
-		marker := "[ ]"
+	items := f.Items()
+	out := make([]stepPayload, 0, len(items))
+	for _, li := range items {
+		sp := stepPayload{
+			ID:       li.Result(),
+			Label:    li.Name,
+			Required: li.Required,
+		}
 		switch li.Kind {
 		case flow.LifecycleArtifact:
 			rec := state.Artifact(li.ArtifactId)
-			if rec.Resolved && !rec.Stale {
-				marker = "[x]"
-			} else if rec.Stale {
-				marker = "[~]"
+			sp.Kind = kindArtifact
+			sp.State = artifactState(state, li.ArtifactId)
+			sp.Budget = &budgetPayload{
+				Invocations:          intAxis{Used: rec.Invocations, Granted: rec.GrantedInvocations},
+				CostUSD:              costAxis{Used: rec.CostUSDSpent, Granted: rec.GrantedCostUSD},
+				PromptsPerInvocation: intAxis{Used: rec.PromptsThisInvocation, Granted: rec.GrantedPromptsPerInvocation},
+				TimeoutSeconds:       grantedOnly{Granted: int(rec.GrantedTimeout.Seconds())},
 			}
-			fmt.Fprintf(app.Out, "  %s %s (%s)\n", marker, li.Name, li.ArtifactId)
-		case flow.LifecycleSignal:
+		case flow.LifecycleSignal, flow.LifecycleAwait:
+			if li.Kind == flow.LifecycleSignal {
+				sp.Kind = kindSignal
+			} else {
+				sp.Kind = kindAwait
+			}
+			sp.State = statePending
 			if state.SignalSet(li.SignalId) {
-				marker = "[x]"
+				sp.State = stateResolved
 			}
-			fmt.Fprintf(app.Out, "  %s %s → %s\n", marker, li.Name, li.SignalId)
-		case flow.LifecycleAwait:
-			if state.SignalSet(li.SignalId) {
-				marker = "[x]"
-			}
-			fmt.Fprintf(app.Out, "  %s await %s\n", marker, li.SignalId)
+			// Budget stays nil: signal steps own no budget record, which is
+			// exactly what makes them invalid grant targets.
+		}
+		out = append(out, sp)
+	}
+	return out
+}
+
+// artifactState mirrors Flow.stepPending's view of one artifact record.
+func artifactState(state *flow.ItemState, id flow.ArtifactId) string {
+	rec, seeded := state.Artifacts[id]
+	// Operator opt-out: a seeded record marked not-required and not resolved
+	// has been struck off the checklist.
+	if seeded && !rec.Required && !rec.Resolved {
+		return stateSkipped
+	}
+	switch {
+	case rec.Stale:
+		return stateStale
+	case rec.Resolved:
+		return stateResolved
+	}
+	return statePending
+}
+
+func questionPayloads(state *flow.ItemState) []questionPayload {
+	out := make([]questionPayload, 0, len(state.Questions))
+	for _, q := range state.Questions {
+		out = append(out, questionPayload{ID: q.ID, Text: q.Text, Answered: q.Answer != ""})
+	}
+	return out
+}
+
+func parkPayloadOf(p *flow.ParkRequest) *parkPayload {
+	if p == nil {
+		return nil
+	}
+	return &parkPayload{
+		Kind:   string(p.Kind),
+		Step:   p.Step,
+		Axis:   string(p.Axis),
+		Reason: p.Reason,
+	}
+}
+
+// parkLine renders a park for humans: "budget-exhausted on "implementation"
+// (invocations) — ran 3 times without resolving "implementation"".
+func parkLine(p *parkPayload) string {
+	var b strings.Builder
+	b.WriteString(p.Kind)
+	if p.Step != "" {
+		fmt.Fprintf(&b, " on %q", p.Step)
+	}
+	if p.Axis != "" {
+		fmt.Fprintf(&b, " (%s)", p.Axis)
+	}
+	if p.Reason != "" {
+		fmt.Fprintf(&b, " — %s", p.Reason)
+	}
+	return b.String()
+}
+
+// printChecklist renders the lifecycle checklist ID-FIRST: the id is the
+// step's identity (it keys the budget record and it is the only name `grant`
+// accepts), so it leads the line and the human label trails it. Steps that own
+// no budget say so, which is what makes the listing sufficient on its own to
+// know what can be granted.
+func printChecklist(app *App, steps []stepPayload) {
+	width := 0
+	for _, s := range steps {
+		if len(s.ID) > width {
+			width = len(s.ID)
 		}
 	}
+	for _, s := range steps {
+		fmt.Fprintf(app.Out, "  %s %-*s  %s", stepMarker(s.State), width, s.ID, s.Label)
+		if note := budgetNote(s); note != "" {
+			fmt.Fprintf(app.Out, "  %s", note)
+		}
+		fmt.Fprintln(app.Out)
+	}
+}
+
+func stepMarker(state string) string {
+	switch state {
+	case stateResolved:
+		return "[x]"
+	case stateStale:
+		return "[~]"
+	case stateSkipped:
+		return "[-]"
+	}
+	return "[ ]"
+}
+
+// budgetNote is the trailing column: consumption for artifact steps that have
+// any, and the "not a grant target" tag for signal steps.
+func budgetNote(s stepPayload) string {
+	if s.Budget == nil {
+		return "(signal — no budget)"
+	}
+	b := s.Budget
+	if b.Invocations.Used == 0 && b.CostUSD.Used == 0 {
+		return ""
+	}
+	parts := make([]string, 0, 2)
+	if b.Invocations.Granted > 0 || b.Invocations.Used > 0 {
+		parts = append(parts, fmt.Sprintf("%d/%d inv", b.Invocations.Used, b.Invocations.Granted))
+	}
+	if b.CostUSD.Granted > 0 || b.CostUSD.Used > 0 {
+		parts = append(parts, fmt.Sprintf("$%.2f/$%.2f", b.CostUSD.Used, b.CostUSD.Granted))
+	}
+	return strings.Join(parts, " · ")
 }

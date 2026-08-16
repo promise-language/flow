@@ -1,6 +1,6 @@
 # Proposal: step identity, validated grants, and park-driven top-up
 
-**Status:** draft, not yet implemented
+**Status:** implemented
 **Author:** initial sketch
 **Related:** [docs/design.md](../design.md),
 [docs/proposals/gates.md](gates.md) (the TTY→JSON output convention this
@@ -219,6 +219,45 @@ still parked: $12.40 spent exceeds the $10.01 cap — grant at least $2.40 more 
 with `"unparked": false` in the JSON payload. Park-driven mode (§4) satisfies
 the condition by construction.
 
+### Implementation note: `ParkRequest.Step` carries the id
+
+Found while implementing, and worth stating because it is a wire-format
+change: `ParkRequest.Step` was documented as the "lifecycle item name" and the
+orchestrator filled it with the **label**. A backend cannot map a label back to
+the artifact record whose budget caused the park — it has no flow definition —
+so `Grant` could not have decided whether a park was satisfied.
+
+`ParkRequest.Step` is now the step **id** (`LifecycleItem.Result()`), which is
+the same principle this proposal applies everywhere else. Consequences:
+
+- the github park label is now `flow:budget-exhausted:plan` rather than
+  `flow:budget-exhausted:write plan` (no spaces — an improvement on its own);
+- a park written by an older version recorded the label, so the CLI accepts a
+  label in `park.Step` too and maps it to the id, rather than stranding items
+  parked across the upgrade;
+- backends that render `park.Step` in a UI (the closed tracker) will show the
+  id — which is also what an operator has to type into `grant`.
+
+`InvocationResult.Step` is unchanged: it is a progress/result field, not an
+identity used to look anything up.
+
+### Implementation note: state-doc writes must edit in place
+
+Also found while implementing. The github backend had a `docFromState` helper
+that rebuilt the whole state document from a `flow.ItemState` snapshot, and
+`markSignalSetOnState` (the pr-open / pr-merged side-effect writer) used it.
+A rebuild carries only what `ItemState` models — so the moment `park` joined
+the document, opening a PR would have silently erased the park of a
+budget-exhausted item.
+
+Every write path now edits the loaded document in place through
+`mutateStateDoc`, and the rebuild helpers are deleted rather than left as a
+trap for the next writer. Two consequences worth noting: signal writes now
+resolve the state comment by scanning when the claim token carries no comment
+id (as every other mutator already did, instead of failing), and park-label
+removal is best-effort — `Grant` is not idempotent, so failing it over a
+leftover label would invite a retry that grants the budget twice.
+
 ### Note on what "unpark" does and does not mean
 
 No dispatch path gates on park. `RunOne`'s budget gate re-reads
@@ -426,7 +465,8 @@ CLI better than it is now.
 | [backend.go](../../backend.go) | `ItemState.Park`; `Backend.Grant` contract amendment |
 | [flow.go](../../flow.go) | `Flow.ItemByResult` |
 | [pkg/backend/github/artifact.go](../../pkg/backend/github/artifact.go) | park in the state doc; `Grant` clears park + label |
-| [pkg/backend/github/state_comment.go](../../pkg/backend/github/state_comment.go) | `park` field in the state doc schema |
+| [pkg/backend/github/state_comment.go](../../pkg/backend/github/state_comment.go) | `park` field in the state doc schema; lossy rebuild helpers removed |
+| [pkg/backend/github/signal.go](../../pkg/backend/github/signal.go) | signal writes edit the doc in place so they cannot erase the park |
 | [pkg/backend/fake/fake.go](../../pkg/backend/fake/fake.go) | surface park in `LoadState`; clear on `Grant` |
 | [cli/cmd_grant.go](../../cli/cmd_grant.go) | validation, three modes, `--dry-run` |
 | [cli/cmd_status.go](../../cli/cmd_status.go) | id-first checklist, budget column, park line |

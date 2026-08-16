@@ -161,13 +161,15 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	}
 
 	// Pre-dispatch budget gate (artifact steps only — signal steps don't
-	// own an artifact record yet on the first invocation).
+	// own an artifact record yet on the first invocation). Parks name the
+	// step by its RESULT ID (not the label) so `grant` can act on the record
+	// whose budget caused the park — see ParkRequest.Step.
 	if li.Kind == flow.LifecycleArtifact {
 		art := state.Artifact(li.ArtifactId)
 		if art.GrantedInvocations > 0 && art.Invocations >= art.GrantedInvocations {
 			return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
 				Kind:   flow.ParkBudgetExhausted,
-				Step:   nextName,
+				Step:   li.Result(),
 				Axis:   flow.AxisInvocations,
 				Reason: fmt.Sprintf("ran %d times without resolving %q", art.Invocations, li.ArtifactId),
 			})
@@ -175,7 +177,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		if art.GrantedCostUSD > 0 && art.CostUSDSpent >= art.GrantedCostUSD {
 			return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
 				Kind:   flow.ParkBudgetExhausted,
-				Step:   nextName,
+				Step:   li.Result(),
 				Axis:   flow.AxisCost,
 				Reason: fmt.Sprintf("spent $%.2f without resolving %q", art.CostUSDSpent, li.ArtifactId),
 			})
@@ -218,7 +220,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		}
 		return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
 			Kind:   flow.ParkBudgetExhausted,
-			Step:   nextName,
+			Step:   li.Result(),
 			Axis:   flow.AxisTimeout,
 			Reason: fmt.Sprintf("step %q exceeded %s", nextName, timeout),
 		})
@@ -232,7 +234,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	if handlerErr != nil && errors.Is(handlerErr, flow.ErrTransient) {
 		return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
 			Kind:   flow.ParkInfraTransient,
-			Step:   nextName,
+			Step:   li.Result(),
 			Reason: handlerErr.Error(),
 		})
 	}
@@ -266,7 +268,7 @@ func translateHandlerError(
 		if li.Kind == flow.LifecycleArtifact && !sctx.resolved {
 			return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
 				Kind:   flow.ParkStepDidNotResolve,
-				Step:   li.Name,
+				Step:   li.Result(),
 				Reason: fmt.Sprintf("handler returned nil without calling ctx.Resolve* on %q", li.ArtifactId),
 			})
 		}
@@ -285,7 +287,7 @@ func translateHandlerError(
 	if errors.As(handlerErr, &park) {
 		req := park.Req
 		if req.Step == "" {
-			req.Step = li.Name
+			req.Step = li.Result()
 		}
 		return parkAndReturn(ctx, app, claim, result, req)
 	}
@@ -294,14 +296,14 @@ func translateHandlerError(
 		if _, err := app.Backend.AskQuestions(ctx, claim, question.Questions); err != nil {
 			return flow.InvocationResult{}, fmt.Errorf("backend.AskQuestions: %w", err)
 		}
-		req := flow.ParkRequest{Kind: flow.ParkQuestion, Step: li.Name, Reason: questionReason(question.Questions)}
+		req := flow.ParkRequest{Kind: flow.ParkQuestion, Step: li.Result(), Reason: questionReason(question.Questions)}
 		return parkAndReturn(ctx, app, claim, result, req)
 	}
 	var budget flow.ErrBudgetExhausted
 	if errors.As(handlerErr, &budget) {
 		return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
 			Kind:   flow.ParkBudgetExhausted,
-			Step:   li.Name,
+			Step:   li.Result(),
 			Axis:   budget.Axis,
 			Reason: budget.Error(),
 		})
@@ -580,16 +582,18 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 		return m.inner.Run(ctx, req)
 	}
 	art := m.stepCtx.state.Artifact(li.ArtifactId)
+	// Both caps name the step by result id: the message tells the operator
+	// exactly what to pass to `grant`.
 	if art.GrantedPromptsPerInvocation > 0 && m.promptsThisInvocation >= art.GrantedPromptsPerInvocation {
 		return nil, flow.ErrBudgetExhausted{
-			Step: li.Name,
+			Step: li.Result(),
 			Axis: flow.AxisPrompts,
 			Cap:  fmt.Sprintf("%d", art.GrantedPromptsPerInvocation),
 		}
 	}
 	if art.GrantedCostUSD > 0 && art.CostUSDSpent >= art.GrantedCostUSD {
 		return nil, flow.ErrBudgetExhausted{
-			Step: li.Name,
+			Step: li.Result(),
 			Axis: flow.AxisCost,
 			Cap:  fmt.Sprintf("$%.2f", art.GrantedCostUSD),
 		}

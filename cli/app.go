@@ -74,6 +74,13 @@ type App struct {
 	Out io.Writer
 	Err io.Writer
 
+	// Output selects how command results are rendered. The zero value
+	// (OutputAuto) decides per invocation: JSON when stdout is piped or
+	// redirected, human text on a terminal — so a tool driving this binary
+	// never has to parse text meant for a person. --json / --human override it
+	// for one command; $FLOW_OUTPUT overrides it for the process.
+	Output OutputMode
+
 	// resolved at startup
 	artifactById map[flow.ArtifactId]flow.ArtifactDef
 	signalById   map[flow.SignalId]flow.SignalDef
@@ -321,11 +328,16 @@ usage:
                                      With <item-id>, claims it first; else uses the active claim.
   %[1]s status [<item-id>]           read-only lifecycle checklist. With <item-id>, inspects
                                      that item from the tracker without claiming it.
-  %[1]s grant <artifact-id> [--invocations N] [--cost USD] [--prompts N] [--timeout SECONDS]
-                                     extend a parked step's budget. <artifact-id> is
-                                     the id from AddStep (e.g. "plan"), NOT the step
-                                     name (e.g. "write plan")
-  %[1]s release                      drop the claim`, bin)
+  %[1]s grant                        top up the parked step's parked axis (the usual case)
+  %[1]s grant --all                  top up every pending step over its consumption
+  %[1]s grant <step-id> [--invocations N] [--cost USD] [--prompts N] [--timeout SECONDS]
+                                     additively extend one step's budget. <step-id> is the
+                                     id from AddStep (e.g. "plan") — the first column of
+                                     "status" — never the label (e.g. "write plan")
+  %[1]s release                      drop the claim
+
+status, list, and grant print human-readable text on a terminal and JSON when
+piped or redirected; --json / --human (or FLOW_OUTPUT=json|human) force one.`, bin)
 }
 
 // newFlagSet returns a FlagSet configured for the strict-parsing convention:

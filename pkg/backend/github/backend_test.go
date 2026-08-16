@@ -840,3 +840,127 @@ func contains(s []string, want string) bool {
 	}
 	return false
 }
+
+// End-to-end park lifecycle against the mocked API: Park writes the state-doc
+// field AND the label, LoadState surfaces it, and Grant clears both — but only
+// when the grant actually gives the parked axis headroom.
+func TestBackend_ParkSurvivesLoadAndClearsOnGrant(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	ctx := t.Context()
+	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if err := b.SeedState(ctx, claim, []flow.ArtifactSpec{
+		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true,
+			Budget: flow.StepBudget{MaxInvocations: 2, MaxCostUSD: 10}},
+	}); err != nil {
+		t.Fatalf("SeedState: %v", err)
+	}
+	for range 2 {
+		if err := b.BumpInvocations(ctx, claim, "plan"); err != nil {
+			t.Fatalf("BumpInvocations: %v", err)
+		}
+	}
+	if err := b.Park(ctx, claim, flow.ParkRequest{
+		Kind: flow.ParkBudgetExhausted, Step: "plan", Axis: flow.AxisInvocations,
+		Reason: `ran 2 times without resolving "plan"`,
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+
+	state, err := b.LoadState(ctx, claim)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if !state.Parked() {
+		t.Fatal("LoadState did not surface the park")
+	}
+	if state.Park.Step != "plan" || state.Park.Axis != flow.AxisInvocations {
+		t.Errorf("park = %+v, want plan/invocations", state.Park)
+	}
+	parkLabelName := b.labels.BudgetExhausted("plan")
+	if !hasLabel(mock.labelNames(), parkLabelName) {
+		t.Errorf("labels = %v, want %q", mock.labelNames(), parkLabelName)
+	}
+
+	// A cost grant does not clear an invocations park.
+	if err := b.Grant(ctx, claim, "plan", flow.Grant{CostUSD: 5}); err != nil {
+		t.Fatalf("Grant (cost): %v", err)
+	}
+	state, _ = b.LoadState(ctx, claim)
+	if !state.Parked() {
+		t.Error("park cleared by a grant on an unrelated axis")
+	}
+	if !hasLabel(mock.labelNames(), parkLabelName) {
+		t.Error("park label removed by a grant on an unrelated axis")
+	}
+
+	// One more invocation puts the parked axis back in the black.
+	if err := b.Grant(ctx, claim, "plan", flow.Grant{Invocations: 1}); err != nil {
+		t.Fatalf("Grant (invocations): %v", err)
+	}
+	state, _ = b.LoadState(ctx, claim)
+	if state.Parked() {
+		t.Errorf("park = %+v, want cleared", state.Park)
+	}
+	if hasLabel(mock.labelNames(), parkLabelName) {
+		t.Errorf("labels = %v, want %q removed", mock.labelNames(), parkLabelName)
+	}
+	if rec := state.Artifacts["plan"]; rec.GrantedInvocations != 3 || rec.GrantedCostUSD != 15 {
+		t.Errorf("record = inv %d / cost %v, want 3 / 15", rec.GrantedInvocations, rec.GrantedCostUSD)
+	}
+}
+
+// A side-effect signal write edits the document in place, so it must not take
+// the park down with it (the bug a rebuild-from-ItemState would have).
+func TestBackend_SignalWritePreservesPark(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	ctx := t.Context()
+	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if err := b.SeedState(ctx, claim, []flow.ArtifactSpec{
+		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
+	}); err != nil {
+		t.Fatalf("SeedState: %v", err)
+	}
+	if err := b.Park(ctx, claim, flow.ParkRequest{
+		Kind: flow.ParkBudgetExhausted, Step: "plan", Axis: flow.AxisCost,
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+	if err := b.markSignalSetOnState(ctx, claim, "pr-open"); err != nil {
+		t.Fatalf("markSignalSetOnState: %v", err)
+	}
+
+	state, err := b.LoadState(ctx, claim)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if !state.Parked() {
+		t.Fatal("the signal write erased the park")
+	}
+	if state.Park.Axis != flow.AxisCost {
+		t.Errorf("park axis = %q, want cost", state.Park.Axis)
+	}
+	if rec := state.Artifacts["plan"]; rec.GrantedInvocations != flow.DefaultStepBudget().MaxInvocations {
+		t.Errorf("the signal write disturbed the budget: %+v", rec)
+	}
+}
+
+// labelNames returns the issue's current labels.
+func (m *ghMock) labelNames() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.issueLabels...)
+}

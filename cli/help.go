@@ -67,8 +67,24 @@ var perCommandUsage = map[string]cmdHelp{
 		detail: "Advances exactly ONE lifecycle item against the active claim\n(one prompt → one artifact). Requires an active claim; takes no arguments."},
 	"resolve": {name: "resolve", aliases: []string{"run-all"}, syntax: "[<item-id>]", summary: "run all steps to completion",
 		detail: "Runs ALL steps until the item is finalized or parked. With <item-id>,\nclaims it first; otherwise uses the active claim."},
-	"grant": {name: "grant", syntax: "<artifact-id> [--invocations N] [--prompts N] [--cost USD] [--timeout SECONDS]", summary: "extend a parked step's budget",
-		detail: "Extends a parked step's budget. <artifact-id> is the id passed to AddStep\n(e.g. \"plan\"), NOT the human step name. At least one flag must be set,\nand all values must be >= 0."},
+	"grant": {name: "grant", syntax: "[<step-id>] [--all] [--invocations N] [--prompts N] [--cost USD] [--timeout SECONDS] [--dry-run]", summary: "top up a step's budget",
+		detail: `With no arguments: reads why the item parked and tops up exactly the axis
+that parked it. This is the common case — grant is almost always a reaction
+to a budget park — and it refuses (without writing) when the item is parked
+on anything else, since granting budget would not unpark it.
+
+  grant                     top up the parked step's parked axis
+  grant --all               sweep every pending step to headroom over consumption
+  grant <step-id> --cost 5  additive grant to one step
+
+<step-id> is a step's ID — the artifact id from AddStep (e.g. "plan"), which
+is what "status" lists first. The human label ("write plan") is not an
+identity and is refused. Signal steps own no budget and cannot be granted.
+
+With no id, --invocations/--cost/--prompts/--timeout state the HEADROOM to
+leave above what the step has consumed; with an id they are added to the
+current caps. All values must be >= 0. --dry-run prints the plan and writes
+nothing.`},
 }
 
 // commandUsage returns help for a single subcommand. For an unrecognized

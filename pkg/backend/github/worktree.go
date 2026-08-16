@@ -101,7 +101,7 @@ func (w *worktree) Open(ctx context.Context, base, title, body string) (string, 
 	url := strings.TrimSpace(string(stdout))
 
 	// Side-effect: backend marks pr-open in the state comment.
-	if err := w.b.markSignalSetOnState(ctx, w.claim, w.issueNum, "pr-open"); err != nil {
+	if err := w.b.markSignalSetOnState(ctx, w.claim, "pr-open"); err != nil {
 		// Non-fatal — the LoadState poll will pick up the signal on the
 		// next run.
 		_ = err
@@ -115,7 +115,7 @@ func (w *worktree) Merge(ctx context.Context, url string) error {
 	if err != nil {
 		return fmt.Errorf("gh pr merge: %w (stderr=%s)", err, strings.TrimSpace(string(stderr)))
 	}
-	if err := w.b.markSignalSetOnState(ctx, w.claim, w.issueNum, "pr-merged"); err != nil {
+	if err := w.b.markSignalSetOnState(ctx, w.claim, "pr-merged"); err != nil {
 		_ = err
 	}
 	return nil
