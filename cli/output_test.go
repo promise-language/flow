@@ -89,7 +89,7 @@ func TestStatusJSON_Schema(t *testing.T) {
 	}
 	m := decode(t, env.out)
 
-	for _, key := range []string{"item", "owner", "flow", "flow_state", "finalized", "park", "steps", "questions"} {
+	for _, key := range []string{"item", "title", "owner", "flow", "flow_state", "finalized", "park", "steps", "questions"} {
 		if _, ok := m[key]; !ok {
 			t.Errorf("payload missing %q: %v", key, m)
 		}

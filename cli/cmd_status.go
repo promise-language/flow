@@ -85,6 +85,7 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 
 	payload := statusPayload{
 		Item:      display,
+		Title:     state.Item.Title,
 		Owner:     owner,
 		Flow:      flowName(f, typeFlow),
 		FlowState: statusFlowState(state, f, typeFlow),
@@ -96,6 +97,12 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 
 	return app.emit(mode, payload, func() {
 		fmt.Fprintf(app.Out, "item:  %s\n", payload.Item)
+		// Right under the id, where "which task IS this?" is actually asked.
+		// Dropped entirely when the backend has no title, so the header never
+		// carries an empty field.
+		if line := titleLine(payload.Title); line != "" {
+			fmt.Fprintf(app.Out, "title: %s\n", line)
+		}
 		fmt.Fprintf(app.Out, "owner: %s\n", payload.Owner)
 		fmt.Fprintf(app.Out, "flow:  %s\n", statusFlowLine(state, f, typeFlow))
 		fmt.Fprintln(app.Out)
@@ -286,6 +293,31 @@ func parkLine(p *parkPayload) string {
 		fmt.Fprintf(&b, " — %s", p.Reason)
 	}
 	return b.String()
+}
+
+// statusTitleMax bounds the human "title:" line, in runes. Item.Title is free
+// prose the backend supplies — a pasted paragraph or a 300-char sentence would
+// swamp the three-line header the operator actually reads and wrap it across
+// the terminal. JSON carries the title unclipped, so nothing that needs the
+// whole string loses it.
+const statusTitleMax = 72
+
+// titleLine renders a title as ONE bounded line: every whitespace run
+// (newlines and tabs included) collapses to a single space so a multi-line
+// title cannot break the header block, and the result is clipped to
+// statusTitleMax RUNES — not bytes, which would split a multi-byte character
+// mid-sequence and print a replacement glyph. Returns "" for a title that is
+// empty or all whitespace; the caller drops the line entirely.
+func titleLine(title string) string {
+	s := strings.Join(strings.Fields(title), " ")
+	if s == "" {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= statusTitleMax {
+		return s
+	}
+	return string(r[:statusTitleMax]) + "…"
 }
 
 // printChecklist renders the lifecycle checklist ID-FIRST: the id is the

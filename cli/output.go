@@ -145,7 +145,13 @@ const (
 )
 
 type statusPayload struct {
-	Item      string            `json:"item"`
+	Item string `json:"item"`
+	// Title is Item.Title VERBATIM — free backend prose, unclipped and
+	// possibly multi-line. Only the human rendering bounds it (titleLine);
+	// a tool reading JSON gets the whole string. Always present (no
+	// omitempty): a stable key set is the machine contract, so an item with
+	// no title reports "" rather than dropping the field.
+	Title     string            `json:"title"`
 	Owner     string            `json:"owner"`
 	Flow      string            `json:"flow"`
 	FlowState string            `json:"flow_state"`
