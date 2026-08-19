@@ -567,3 +567,171 @@ func TestGrant_DryRunPredictsUnparkWithoutClaimingIt(t *testing.T) {
 		t.Errorf("stdout = %q, must not claim the item was unparked", out)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Collateral top-up: bare `grant` must clear every axis that would re-park the
+// step at once, not just the one named in the park.
+// ---------------------------------------------------------------------------
+
+// The ping-pong case. A timed-out run burns an invocation on its way out, so a
+// timeout park typically arrives with the invocations axis flat too. Granting
+// time alone buys a dispatch that never reaches the handler.
+func TestGrantPark_TimeoutParkAlsoTopsUpExhaustedInvocations(t *testing.T) {
+	env := newParkGrantEnv(t)
+	ctx := context.Background()
+	for range 3 { // burn all 3 seeded invocations
+		if err := env.be.BumpInvocations(ctx, env.claim, "plan"); err != nil {
+			t.Fatalf("BumpInvocations: %v", err)
+		}
+	}
+	env.park(t, budgetExhausted("plan", flow.AxisTimeout))
+
+	if code := env.grant(); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	rec := env.rec(t, "plan")
+	if rec.GrantedTimeout != time.Hour {
+		t.Errorf("GrantedTimeout = %v, want 1h (30m seeded + 30m granted)", rec.GrantedTimeout)
+	}
+	if rec.GrantedInvocations != 4 {
+		t.Errorf("GrantedInvocations = %d, want 4 (3 used + 1 headroom)", rec.GrantedInvocations)
+	}
+	if p := env.parked(t); p != nil {
+		t.Errorf("park = %+v, want cleared", p)
+	}
+}
+
+// Both pre-dispatch gates flat at once: the parked axis plus the other two.
+func TestGrantPark_TimeoutParkAlsoTopsUpExhaustedCost(t *testing.T) {
+	env := newParkGrantEnv(t)
+	ctx := context.Background()
+	for range 3 {
+		if err := env.be.BumpInvocations(ctx, env.claim, "plan"); err != nil {
+			t.Fatalf("BumpInvocations: %v", err)
+		}
+	}
+	if err := env.be.AddCost(ctx, env.claim, "plan", 12); err != nil {
+		t.Fatalf("AddCost: %v", err)
+	}
+	env.park(t, budgetExhausted("plan", flow.AxisTimeout))
+
+	if code := env.grant(); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	rec := env.rec(t, "plan")
+	if rec.GrantedTimeout != time.Hour {
+		t.Errorf("GrantedTimeout = %v, want 1h", rec.GrantedTimeout)
+	}
+	if rec.GrantedInvocations != 4 {
+		t.Errorf("GrantedInvocations = %d, want 4", rec.GrantedInvocations)
+	}
+	// spent(12) + the step's own $10 cap = 22.
+	if rec.GrantedCostUSD != 22 {
+		t.Errorf("GrantedCostUSD = %v, want 22", rec.GrantedCostUSD)
+	}
+}
+
+// An axis with headroom is left alone: the top-up is targeted, not a sweep.
+func TestGrantPark_LeavesAxesWithHeadroomAlone(t *testing.T) {
+	env := newParkGrantEnv(t)
+	env.park(t, budgetExhausted("plan", flow.AxisTimeout))
+
+	if code := env.grant(); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	rec := env.rec(t, "plan")
+	if rec.GrantedTimeout != time.Hour {
+		t.Errorf("GrantedTimeout = %v, want 1h", rec.GrantedTimeout)
+	}
+	if rec.GrantedInvocations != 3 {
+		t.Errorf("GrantedInvocations = %d, want 3 (untouched — none used)", rec.GrantedInvocations)
+	}
+	if rec.GrantedCostUSD != 10 {
+		t.Errorf("GrantedCostUSD = %v, want 10 (untouched)", rec.GrantedCostUSD)
+	}
+	if rec.GrantedPromptsPerInvocation != 1 {
+		t.Errorf("GrantedPromptsPerInvocation = %d, want 1 (untouched)", rec.GrantedPromptsPerInvocation)
+	}
+}
+
+// A flag naming a collateral axis is now in scope — it sets that axis's
+// headroom instead of being refused.
+func TestGrantPark_FlagSetsCollateralAxisHeadroom(t *testing.T) {
+	env := newParkGrantEnv(t)
+	ctx := context.Background()
+	for range 3 {
+		if err := env.be.BumpInvocations(ctx, env.claim, "plan"); err != nil {
+			t.Fatalf("BumpInvocations: %v", err)
+		}
+	}
+	env.park(t, budgetExhausted("plan", flow.AxisTimeout))
+
+	if code := env.grant("--invocations", "5"); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	if got := env.rec(t, "plan").GrantedInvocations; got != 8 {
+		t.Errorf("GrantedInvocations = %d, want 8 (3 used + 5 headroom)", got)
+	}
+}
+
+// ...but an axis that is neither parked nor blocked is still refused.
+func TestGrantPark_RejectsFlagForUnblockedAxis(t *testing.T) {
+	env := newParkGrantEnv(t)
+	env.park(t, budgetExhausted("plan", flow.AxisTimeout))
+
+	if code := env.grant("--cost", "5"); code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	if !strings.Contains(env.err.String(), "does not apply") {
+		t.Errorf("stderr = %q, want 'does not apply'", env.err.String())
+	}
+	if got := env.rec(t, "plan").GrantedCostUSD; got != 10 {
+		t.Errorf("GrantedCostUSD = %v, want 10 (unchanged)", got)
+	}
+}
+
+// An explicit zero on a collateral axis is refused rather than silently
+// producing a grant that re-parks on that axis.
+func TestGrantPark_RejectsExplicitZeroOnCollateralAxis(t *testing.T) {
+	env := newParkGrantEnv(t)
+	ctx := context.Background()
+	for range 3 {
+		if err := env.be.BumpInvocations(ctx, env.claim, "plan"); err != nil {
+			t.Fatalf("BumpInvocations: %v", err)
+		}
+	}
+	env.park(t, budgetExhausted("plan", flow.AxisTimeout))
+
+	if code := env.grant("--invocations", "0"); code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	if !strings.Contains(env.err.String(), "would grant nothing") {
+		t.Errorf("stderr = %q, want 'would grant nothing'", env.err.String())
+	}
+	if got := env.rec(t, "plan").GrantedTimeout; got != 30*time.Minute {
+		t.Errorf("GrantedTimeout = %v, want 30m (unchanged — the refusal writes nothing)", got)
+	}
+}
+
+// Grants are carried in whole seconds, so the headroom for a step budget below
+// one second must be floored rather than truncated: a grant of zero would
+// report success and leave the step parked at the same deadline.
+func TestTimeoutHeadroom_FloorsSubSecondAndUnsetBudgets(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		budget time.Duration
+		want   int64
+	}{
+		{"unset", 0, minTimeoutHeadroom},
+		{"sub-second", 50 * time.Millisecond, minTimeoutHeadroom},
+		{"whole second", time.Second, 1},
+		{"typical step", 30 * time.Minute, 1800},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := timeoutHeadroom(flow.StepBudget{Timeout: tc.budget})
+			if got != tc.want {
+				t.Errorf("timeoutHeadroom(%v) = %d, want %d", tc.budget, got, tc.want)
+			}
+		})
+	}
+}

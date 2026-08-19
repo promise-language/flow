@@ -22,6 +22,11 @@ const (
 	// minCostHeadroom floors the cost top-up for a step whose configured cap
 	// is zero/unset, so `grant` on a cost park always buys SOME room.
 	minCostHeadroom = 1.0
+	// minTimeoutHeadroom floors the timeout top-up for the same reason, and
+	// also catches truncation: grants are carried in whole seconds, so a step
+	// budget under 1s would otherwise round to a grant of zero and report
+	// success while buying nothing.
+	minTimeoutHeadroom = 1
 )
 
 // plannedGrant is one step's computed budget delta, before it is applied.
@@ -252,30 +257,107 @@ func (app *App) planPark(f *flow.Flow, state *flow.ItemState, display string, a 
 	if rec.Resolved && !rec.Stale {
 		return nothingToDo(fmt.Sprintf("park on %q is stale — the step has resolved since; nothing to grant", id))
 	}
-	// Flags may only name the axis that actually parked the step. Granting an
-	// axis nobody asked for is how a tool ends up "topping up" a step that then
-	// re-parks on the axis it was blocked on.
+	// The axes this grant will touch: the one that parked the step, plus any
+	// other already at its cap. See parkIncrement for why the second group is
+	// not optional.
+	axes := parkTopUpAxes(park.Axis, rec)
+	// Flags may only name an axis in that set. Granting an axis nobody is
+	// blocked on is how a tool ends up "topping up" a step that then re-parks
+	// on the axis it was blocked on.
 	// Fixed order, not map order: with two wrong flags the message must always
 	// name the same one.
 	for _, name := range axisFlagNames {
-		if a.set[name] && axisForFlag[name] != park.Axis {
-			fmt.Fprintf(app.Err, "grant: --%s does not apply — %q is parked on the %s axis. Use --%s, or name the step explicitly.\n",
-				name, id, park.Axis, park.Axis)
+		if a.set[name] && !containsAxis(axes, axisForFlag[name]) {
+			fmt.Fprintf(app.Err, "grant: --%s does not apply — %q is parked on the %s axis and has headroom on %s. Use --%s, or name the step explicitly.\n",
+				name, id, park.Axis, axisForFlag[name], park.Axis)
 			return refuse()
 		}
 	}
-	// An explicit zero on the parked axis asks for a grant that grants nothing.
-	// Reporting that as "already has headroom" would be a lie about the step.
-	if a.zeroOn(park.Axis) {
-		fmt.Fprintf(app.Err, "grant: --%s 0 would grant nothing on a step parked for lack of it\n", park.Axis)
+	// An explicit zero on an axis the step is blocked on asks for a grant that
+	// grants nothing. Reporting that as "already has headroom" would be a lie
+	// about the step.
+	for _, axis := range axes {
+		if !a.zeroOn(axis) {
+			continue
+		}
+		if axis == park.Axis {
+			fmt.Fprintf(app.Err, "grant: --%s 0 would grant nothing on a step parked for lack of it\n", axis)
+		} else {
+			fmt.Fprintf(app.Err, "grant: --%s 0 would grant nothing — %q is also out of %s and would re-park at once\n", axis, id, axis)
+		}
 		return refuse()
 	}
 
-	g := grantIncrement(park.Axis, rec, stepBudgetFor(f, id), a)
+	g := parkIncrement(axes, rec, stepBudgetFor(f, id), a)
 	if g == (flow.Grant{}) {
 		return nothingToDo(fmt.Sprintf("%q already has headroom on the %s axis — park is stale; nothing to grant", id, park.Axis))
 	}
 	return planned(plannedGrant{id: id, grant: g, before: rec})
+}
+
+// parkTopUpAxes is the axis set bare `grant` acts on: the parked axis first,
+// then every other axis that is already at its cap.
+func parkTopUpAxes(parked flow.BudgetAxis, rec flow.ArtifactRecord) []flow.BudgetAxis {
+	axes := []flow.BudgetAxis{parked}
+	for _, axis := range blockingAxes(rec) {
+		if axis != parked {
+			axes = append(axes, axis)
+		}
+	}
+	return axes
+}
+
+// blockingAxes reports the axes that would park the step on its very NEXT
+// dispatch, mirroring RunOne's pre-dispatch gates exactly — a step whose
+// record trips one of these never reaches its handler.
+//
+// Prompts and timeout are absent by design, and not by oversight. Prompts is a
+// per-invocation cap whose counter resets on every invocation, so a fresh
+// dispatch always gets its first prompt through; timeout is a per-run duration
+// that kills a run already under way rather than blocking one from starting.
+// Neither can re-park a step the instant it restarts, so neither belongs in a
+// collateral top-up — they are granted only when they are the parked axis.
+func blockingAxes(rec flow.ArtifactRecord) []flow.BudgetAxis {
+	var out []flow.BudgetAxis
+	if rec.GrantedInvocations > 0 && rec.Invocations >= rec.GrantedInvocations {
+		out = append(out, flow.AxisInvocations)
+	}
+	if rec.GrantedCostUSD > 0 && rec.CostUSDSpent >= rec.GrantedCostUSD {
+		out = append(out, flow.AxisCost)
+	}
+	return out
+}
+
+func containsAxis(axes []flow.BudgetAxis, want flow.BudgetAxis) bool {
+	for _, a := range axes {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+// parkIncrement computes the delta that actually gets the step moving again:
+// every axis in `axes`, merged into ONE grant so the backend does a single
+// write and the park clears once.
+//
+// Topping up only the parked axis is what made a timeout park unrecoverable: a
+// timed-out run burns an invocation on its way out, so by the time the operator
+// sees the timeout park the invocations axis is usually flat too. Granting time
+// alone bought one dispatch that re-parked on invocations before the handler
+// ran, and granting invocations alone bought one that died at the same
+// deadline — the item ping-ponged between the two axes forever. Each axis is
+// computed at most once, so summing the per-axis grants cannot double up.
+func parkIncrement(axes []flow.BudgetAxis, rec flow.ArtifactRecord, budget flow.StepBudget, a grantAmounts) flow.Grant {
+	var g flow.Grant
+	for _, axis := range axes {
+		inc := grantIncrement(axis, rec, budget, a)
+		g.Invocations += inc.Invocations
+		g.PromptsPerInvocation += inc.PromptsPerInvocation
+		g.CostUSD += inc.CostUSD
+		g.TimeoutAdd += inc.TimeoutAdd
+	}
+	return g
 }
 
 // stepBudgetFor returns the step's configured budget, falling back to the
@@ -355,7 +437,7 @@ func grantIncrement(axis flow.BudgetAxis, rec flow.ArtifactRecord, budget flow.S
 		}
 	case flow.AxisTimeout:
 		// Likewise a duration, not a meter: add one more run's worth.
-		h := int64(budget.Timeout.Seconds())
+		h := timeoutHeadroom(budget)
 		if a.set["timeout"] {
 			h = int64(a.timeout)
 		}
@@ -404,6 +486,16 @@ func costHeadroom(budget flow.StepBudget) float64 {
 		return budget.MaxCostUSD
 	}
 	return minCostHeadroom
+}
+
+// timeoutHeadroom is the timeout counterpart, in whole seconds: one more run's
+// worth, floored so an unset — or sub-second — step budget still buys time
+// rather than truncating to a grant of nothing.
+func timeoutHeadroom(budget flow.StepBudget) int64 {
+	if s := int64(budget.Timeout.Seconds()); s > 0 {
+		return s
+	}
+	return minTimeoutHeadroom
 }
 
 // resolveGrantTarget turns an operator-supplied argument into a step id, or

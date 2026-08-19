@@ -68,12 +68,14 @@ var perCommandUsage = map[string]cmdHelp{
 	"resolve": {name: "resolve", aliases: []string{"run-all"}, syntax: "[<item-id>]", summary: "run all steps to completion",
 		detail: "Runs ALL steps until the item is finalized or parked. With <item-id>,\nclaims it first; otherwise uses the active claim."},
 	"grant": {name: "grant", syntax: "[<step-id>] [--all] [--invocations N] [--prompts N] [--cost USD] [--timeout SECONDS] [--dry-run]", summary: "top up a step's budget",
-		detail: `With no arguments: reads why the item parked and tops up exactly the axis
-that parked it. This is the common case — grant is almost always a reaction
-to a budget park — and it refuses (without writing) when the item is parked
-on anything else, since granting budget would not unpark it.
+		detail: `With no arguments: reads why the item parked and tops up the axis that
+parked it, plus any other axis already at its cap — a step out of both time
+and invocations needs both to run again, and topping up one alone just
+re-parks on the other. This is the common case — grant is almost always a
+reaction to a budget park — and it refuses (without writing) when the item
+is parked on anything else, since granting budget would not unpark it.
 
-  grant                     top up the parked step's parked axis
+  grant                     top up the parked step's blocked axes
   grant --all               sweep every pending step to headroom over consumption
   grant <step-id> --cost 5  additive grant to one step
 

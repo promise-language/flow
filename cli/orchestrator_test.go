@@ -788,3 +788,58 @@ func TestRunOne_GrantedTimeoutOverridesStepBudget(t *testing.T) {
 		t.Errorf("deadlines = %v, want the second run to get more time than the first", deadlines)
 	}
 }
+
+// End-to-end on the ping-pong loop: a real timeout park, a real bare `grant`,
+// and a rerun that reaches the handler. The timeout kill bumps invocations on
+// its way out, so this only passes if grant tops up BOTH axes and the
+// orchestrator reads the granted timeout back off the record.
+func TestRunOne_BareGrantRecoversAStepOutOfTimeAndInvocations(t *testing.T) {
+	var runs int
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("slow", "plan", func(ctx flow.StepCtx) error {
+			runs++
+			select {
+			case <-ctx.Context().Done():
+				return ctx.Context().Err()
+			case <-time.After(150 * time.Millisecond):
+			}
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{Budget: flow.StepBudget{
+			MaxInvocations: 1,
+			Timeout:        50 * time.Millisecond,
+		}})
+	}, &stubAgent{name: "stub"})
+
+	ctx := context.Background()
+	res, err := RunOne(ctx, app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "parked" || res.Park == nil || res.Park.Axis != flow.AxisTimeout {
+		t.Fatalf("first run = %+v, want parked/timeout", res)
+	}
+	// The kill consumed the step's only invocation, so both axes are flat.
+	st, err := be.LoadState(ctx, claim)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if rec := st.Artifact("plan"); rec.Invocations != rec.GrantedInvocations {
+		t.Fatalf("invocations = %d/%d, want the axis exhausted by the timeout kill",
+			rec.Invocations, rec.GrantedInvocations)
+	}
+
+	if code := app.cmdGrant(ctx, nil); code != 0 {
+		t.Fatalf("grant exit = %d, want 0", code)
+	}
+
+	res, err = RunOne(ctx, app, claim)
+	if err != nil {
+		t.Fatalf("RunOne after grant: %v", err)
+	}
+	if res.Status != "done" {
+		t.Fatalf("second run = %+v, want done", res)
+	}
+	if runs != 2 {
+		t.Errorf("handler ran %d times, want 2 (a grant that re-parks pre-dispatch never reaches it)", runs)
+	}
+}
