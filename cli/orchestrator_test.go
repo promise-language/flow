@@ -736,3 +736,55 @@ func TestRunOne_FinalizesWhenAllRequiredArtifactsResolved(t *testing.T) {
 		t.Errorf("finalizeCalls = %d, want 1 (Finalize must run when nothing is pending)", wrapped.finalizeCalls)
 	}
 }
+
+// A granted timeout on the artifact record must win over the step's
+// compiled-in budget — otherwise `grant --timeout` is write-only and a
+// timeout-parked step re-parks forever at the same deadline.
+func TestRunOne_GrantedTimeoutOverridesStepBudget(t *testing.T) {
+	var deadlines []time.Duration
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("slow", "plan", func(ctx flow.StepCtx) error {
+			dl, ok := ctx.Context().Deadline()
+			if !ok {
+				t.Error("handler context has no deadline")
+				return nil
+			}
+			deadlines = append(deadlines, time.Until(dl))
+			// Outruns the 50ms step budget, fits inside the granted second.
+			select {
+			case <-ctx.Context().Done():
+				return ctx.Context().Err()
+			case <-time.After(150 * time.Millisecond):
+			}
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{Budget: flow.StepBudget{Timeout: 50 * time.Millisecond}})
+	}, &stubAgent{name: "stub"})
+
+	ctx := context.Background()
+	res, err := RunOne(ctx, app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "parked" || res.Park == nil || res.Park.Axis != flow.AxisTimeout {
+		t.Fatalf("first run = %+v, want parked/timeout", res)
+	}
+
+	// Grant a second of extra wall-clock, as `do grant --timeout 1` does.
+	if err := be.Grant(ctx, claim, "plan", flow.Grant{TimeoutAdd: 1}); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+
+	res, err = RunOne(ctx, app, claim)
+	if err != nil {
+		t.Fatalf("RunOne after grant: %v", err)
+	}
+	if res.Status != "done" {
+		t.Fatalf("second run = %+v, want done (granted timeout ignored?)", res)
+	}
+	if len(deadlines) != 2 {
+		t.Fatalf("handler ran %d times, want 2", len(deadlines))
+	}
+	if deadlines[1] <= deadlines[0] {
+		t.Errorf("deadlines = %v, want the second run to get more time than the first", deadlines)
+	}
+}

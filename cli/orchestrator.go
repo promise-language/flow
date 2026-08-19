@@ -164,8 +164,8 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// own an artifact record yet on the first invocation). Parks name the
 	// step by its RESULT ID (not the label) so `grant` can act on the record
 	// whose budget caused the park — see ParkRequest.Step.
+	art := state.Artifact(li.ArtifactId)
 	if li.Kind == flow.LifecycleArtifact {
-		art := state.Artifact(li.ArtifactId)
 		if art.GrantedInvocations > 0 && art.Invocations >= art.GrantedInvocations {
 			return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
 				Kind:   flow.ParkBudgetExhausted,
@@ -184,8 +184,16 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		}
 	}
 
-	// Wrap a context for this invocation. Use the step's resolved timeout.
+	// Wrap a context for this invocation. All three budget axes resolve from
+	// the persisted record so that grants actually land: the record's granted
+	// timeout wins when set (`grant --timeout` raises it), otherwise fall back
+	// to the step's compiled-in budget and then the package default. A signal
+	// step owns no record yet, so Artifact returns the zero record and the
+	// flow definition applies.
 	timeout := li.Budget.Timeout
+	if art.GrantedTimeout > 0 {
+		timeout = art.GrantedTimeout
+	}
 	if timeout <= 0 {
 		timeout = flow.DefaultStepBudget().Timeout
 	}
