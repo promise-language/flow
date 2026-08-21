@@ -574,7 +574,7 @@ type Worktree interface {
     Commit(ctx, msg string) error
     Push(ctx) error
     Validate(ctx) error                  // run the project verify command; nil iff it passes
-    CapturePatch(ctx) (patch []byte, err error)
+    CapturePatch(ctx) (patch []byte, err error) // handler-driven; never called on a timeout park
     Request() RequestManager             // optional PR surface; nil if unsupported
 }
 

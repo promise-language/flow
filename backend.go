@@ -327,8 +327,11 @@ type Worktree interface {
 	// nil iff verify exits 0.
 	Validate(ctx context.Context) error
 
-	// CapturePatch produces a unified diff of the current working tree for
-	// timeout / park retention.
+	// CapturePatch produces a unified diff of the current working tree.
+	// Handlers call it to attach work they have already verified; the
+	// orchestrator does NOT call it when a step's deadline fires — a timeout
+	// park carries no verify-green signal, and a step that commits before a
+	// long verify has an empty diff to capture anyway.
 	CapturePatch(ctx context.Context) (patch []byte, err error)
 
 	// Request returns the backend's pull-request management surface, or nil

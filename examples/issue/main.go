@@ -141,6 +141,9 @@ func stepImplementation(ctx flow.StepCtx) error {
 	if err != nil {
 		return err
 	}
+	if len(patch) == 0 {
+		return fmt.Errorf("agent made no changes — nothing to attach")
+	}
 	return ctx.ResolvePatch(flow.PatchBody{
 		Diff:       patch,
 		BaseSHA:    "HEAD~1", // placeholder; the github backend records the commit when it lands

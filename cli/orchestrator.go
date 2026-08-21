@@ -217,10 +217,14 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// Timeout (deadline reached during handler). Counts as an invocation —
 	// the handler ran, it just didn't finish in time.
 	if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
-		// Best-effort capture — ignore errors, the patch is opportunistic.
-		if wt, e := app.Backend.Worktree(ctx, claim); e == nil {
-			_, _ = wt.CapturePatch(ctx)
-		}
+		// No patch is captured here. A deadline kill says nothing about the
+		// state of the worktree: verify never went green (that is what the
+		// step ran out of time doing), so an attached diff is unverified
+		// work that a resume would apply on top of a broken tree. And the
+		// common shape — a step that commits and then runs a long verify —
+		// leaves `git diff HEAD` empty, so the capture uploaded a zero-byte
+		// patch carrying no diagnostic value at all. Park only; the work
+		// stays in the worktree where the rerun picks it up.
 		if li.Kind == flow.LifecycleArtifact {
 			if err := app.Backend.BumpInvocations(ctx, claim, budgetKey); err != nil {
 				return flow.InvocationResult{}, fmt.Errorf("bump invocations: %w", err)
@@ -512,6 +516,13 @@ func (s *stepCtx) ResolveFile(name string, content []byte) error {
 func (s *stepCtx) ResolvePatch(body flow.PatchBody) error {
 	if err := s.resolveGuard(flow.ArtifactPatch); err != nil {
 		return err
+	}
+	// A zero-byte diff is never worth uploading: the record carries no
+	// content, and on a rerun it would replace whatever the previous
+	// invocation attached. A handler reaching here with nothing to show has
+	// a bug — surface it instead of writing an empty patch.
+	if len(body.Diff) == 0 && len(body.Untracked) == 0 {
+		return fmt.Errorf("step %q resolved %q with an empty patch (no diff, no untracked files)", s.li.Name, s.li.ArtifactId)
 	}
 	return s.writeResolve(flow.ArtifactBody{Type: flow.ArtifactPatch, Patch: body})
 }

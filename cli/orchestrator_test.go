@@ -44,6 +44,7 @@ func testApp(t *testing.T, configure func(*flow.Flow), agent flow.Agent) (*App, 
 		Artifacts: []flow.ArtifactDef{
 			flow.Artifact("plan", flow.ArtifactMarkdown),
 			flow.Artifact("commit", flow.ArtifactCommitHash),
+			flow.Artifact("implementation", flow.ArtifactPatch),
 		},
 		Signals: []flow.SignalDef{
 			flow.Signal("pr-open", "test"),
@@ -396,6 +397,73 @@ func TestRunOne_ParksOnTimeout(t *testing.T) {
 	}
 	if res.Status != "parked" || res.Park == nil || res.Park.Axis != flow.AxisTimeout {
 		t.Errorf("res = %+v, want parked/timeout", res)
+	}
+}
+
+// countingPatchBackend hands out worktrees that count CapturePatch calls, so a
+// test can assert the park path never captures.
+type countingPatchBackend struct {
+	*fake.Backend
+	wt *countingPatchWorktree
+}
+
+func (b *countingPatchBackend) Worktree(ctx context.Context, claim flow.Claim) (flow.Worktree, error) {
+	inner, err := b.Backend.Worktree(ctx, claim)
+	if err != nil {
+		return nil, err
+	}
+	b.wt.Worktree = inner
+	return b.wt, nil
+}
+
+type countingPatchWorktree struct {
+	flow.Worktree
+	captures int
+}
+
+func (w *countingPatchWorktree) CapturePatch(ctx context.Context) ([]byte, error) {
+	w.captures++
+	return w.Worktree.CapturePatch(ctx)
+}
+
+// A timeout park must NOT capture a patch. The deadline kill carries no
+// verify-green signal, and the common shape — a step that commits and then
+// runs a long verify — has an empty `git diff HEAD`, so the old opportunistic
+// capture uploaded a zero-byte patch. The park itself is unchanged: same kind,
+// axis, and invocation accounting.
+func TestRunOne_TimeoutParkDoesNotCapturePatch(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("slow", "plan", func(ctx flow.StepCtx) error {
+			// Commit first, so the worktree is clean when the deadline fires
+			// — exactly the merged-land shape from the bug report.
+			wt, err := ctx.Worktree()
+			if err != nil {
+				return err
+			}
+			if err := wt.Commit(ctx.Context(), "work"); err != nil {
+				return err
+			}
+			<-ctx.Context().Done()
+			return ctx.Context().Err()
+		}, flow.StepConfig{Budget: flow.StepBudget{Timeout: 50 * time.Millisecond}})
+	}, &stubAgent{name: "stub"})
+
+	counting := &countingPatchBackend{Backend: be, wt: &countingPatchWorktree{}}
+	app.Backend = counting
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkBudgetExhausted || res.Park.Axis != flow.AxisTimeout {
+		t.Errorf("res = %+v, want parked with kind=budget-exhausted axis=timeout", res)
+	}
+	if counting.wt.captures != 0 {
+		t.Errorf("CapturePatch called %d times on a timeout park, want 0", counting.wt.captures)
+	}
+	state, _ := be.LoadState(context.Background(), claim)
+	if rec := state.Artifact("plan"); rec.Invocations != 1 {
+		t.Errorf("Invocations = %d, want 1 (timeout still counts as an invocation)", rec.Invocations)
 	}
 }
 
@@ -841,5 +909,49 @@ func TestRunOne_BareGrantRecoversAStepOutOfTimeAndInvocations(t *testing.T) {
 	}
 	if runs != 2 {
 		t.Errorf("handler ran %d times, want 2 (a grant that re-parks pre-dispatch never reaches it)", runs)
+	}
+}
+
+// An empty patch is refused rather than uploaded — including on a rerun,
+// where writing it would replace a previous non-empty attachment.
+func TestResolvePatch_RefusesEmptyDiff(t *testing.T) {
+	var resolveErr error
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("attach", "implementation", func(ctx flow.StepCtx) error {
+			resolveErr = ctx.ResolvePatch(flow.PatchBody{BaseBranch: "main"})
+			return resolveErr
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	if _, err := RunOne(context.Background(), app, claim); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if resolveErr == nil || !strings.Contains(resolveErr.Error(), "empty patch") {
+		t.Fatalf("ResolvePatch error = %v, want an empty-patch refusal", resolveErr)
+	}
+	state, _ := be.LoadState(context.Background(), claim)
+	if rec := state.Artifact("implementation"); rec.Resolved {
+		t.Errorf("implementation artifact = %+v, want unresolved (nothing uploaded)", rec)
+	}
+}
+
+// A non-empty diff still resolves normally.
+func TestResolvePatch_AcceptsNonEmptyDiff(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("attach", "implementation", func(ctx flow.StepCtx) error {
+			return ctx.ResolvePatch(flow.PatchBody{Diff: []byte("diff --git a/x b/x\n"), BaseBranch: "main"})
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "done" {
+		t.Fatalf("res = %+v, want done", res)
+	}
+	state, _ := be.LoadState(context.Background(), claim)
+	if rec := state.Artifact("implementation"); !rec.Resolved || len(rec.Patch.Diff) == 0 {
+		t.Errorf("implementation artifact = %+v, want resolved with a non-empty diff", rec)
 	}
 }

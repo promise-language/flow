@@ -541,7 +541,10 @@ type Worktree interface {
     // in origin without verify passing.
     Validate(ctx context.Context) error
 
-    CapturePatch(ctx context.Context) (patch []byte, err error)  // for timeout/park
+    // Unified diff of the working tree, for a handler that wants to attach
+    // verified work as a patch artifact. NOT called from the timeout/park
+    // path — see "Park on exhaustion".
+    CapturePatch(ctx context.Context) (patch []byte, err error)
 }
 ```
 
@@ -692,9 +695,10 @@ func (f *Flow) runOnce(ctx context.Context, b Backend, claim Claim) error {
     err := f.dispatch(stepCtx, b, claim, next)
 
     if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
-        if wt, e := b.Worktree(ctx, claim); e == nil {
-            _, _ = wt.CapturePatch(ctx)           // retain spent work
-        }
+        // No patch capture: verify never went green, so the diff is
+        // unverified; and a step that commits before a long verify leaves
+        // `git diff HEAD` empty anyway. Park only — the work stays in the
+        // worktree for the rerun.
         return b.Park(ctx, claim, ParkRequest{Kind: BudgetExhausted, Axis: "timeout", ...})
     }
     return f.translateSentinel(err, b, claim)
@@ -724,8 +728,15 @@ func (m *meteredAgent) Run(ctx context.Context, req AgentRequest) (*AgentRespons
 #### Park on exhaustion + grant flow
 
 `ParkKind=BudgetExhausted`; `ParkRequest.Axis ∈ {"invocations","prompts","cost","timeout"}`.
-**Timeout captures patch** via `Worktree.CapturePatch` before parking,
-retaining spent work.
+**Timeout does NOT capture a patch.** A deadline kill carries no verify-green
+signal, so any diff it could attach is unverified work; and the common shape —
+a step that commits and then runs a long verify — leaves `git diff HEAD` empty,
+which used to upload a zero-byte patch with no diagnostic value. The park
+retains spent work by leaving it in the worktree — the worktree is a durable
+path (`Config.WorktreeDir`, default `.`), so the rerun picks the work up where
+the kill left it. `Worktree.CapturePatch` stays available to handlers, which
+are the only place a patch artifact is attached and are expected to attach one
+only once verify is green.
 
 **Grant UI:** OSS variant uses `./<flow> grant <key> --invocations 3 --cost 10`
 CLI + GitHub Issue command-comment form (`/flow grant key=plan invocations=3`)
@@ -1281,8 +1292,9 @@ Budget enforcement (regression for the runaway-loop class):
   returns `ErrBudgetExhausted{Axis="prompts"}`.
 - Mock `AgentResponse.CostUSD=$4`, `MaxCostUSD($10)`: 3rd successful turn
   (total $12) refused with `Axis=cost`.
-- `Timeout(1*time.Second)` on a 2s-sleeping handler: deadline fires;
-  `Worktree.CapturePatch` writes a patch artifact; park with `Axis=timeout`.
+- `Timeout(1*time.Second)` on a 2s-sleeping handler: deadline fires; park with
+  `Axis=timeout` and NO patch artifact written (`Worktree.CapturePatch` is not
+  called from the park path).
 - `grant` flow clears the park and unblocks the next dispatch.
 
 Unit tests (table-driven, in `*_test.go`):
