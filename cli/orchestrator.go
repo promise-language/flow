@@ -517,13 +517,15 @@ func (s *stepCtx) ResolvePatch(body flow.PatchBody) error {
 	if err := s.resolveGuard(flow.ArtifactPatch); err != nil {
 		return err
 	}
-	// A zero-byte diff is never worth uploading: the record carries no
-	// content, and on a rerun it would replace whatever the previous
-	// invocation attached. A handler reaching here with nothing to show has
-	// a bug — surface it instead of writing an empty patch.
-	if len(body.Diff) == 0 && len(body.Untracked) == 0 {
-		return fmt.Errorf("step %q resolved %q with an empty patch (no diff, no untracked files)", s.li.Name, s.li.ArtifactId)
-	}
+	// An EMPTY PatchBody is legal and must reach the backend. Backends whose
+	// patches live server-side attach the diff out-of-band (their
+	// Worktree.CapturePatch returns no bytes by design) and the handler calls
+	// ResolvePatch with a zero body purely to say "I'm done — verify the side
+	// effect"; the same is true when the work is already committed, where
+	// `git diff HEAD` is empty by definition. Only the backend knows where
+	// the evidence lives, so emptiness is ITS call: ResolveArtifact either
+	// confirms the attachment or fails with a message that names what is
+	// missing. Rejecting a zero body here made both shapes unrepresentable.
 	return s.writeResolve(flow.ArtifactBody{Type: flow.ArtifactPatch, Patch: body})
 }
 

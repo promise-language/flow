@@ -141,6 +141,10 @@ func stepImplementation(ctx flow.StepCtx) error {
 	if err != nil {
 		return err
 	}
+	// This backend captures the diff client-side, so no bytes here means the
+	// agent genuinely changed nothing — a handler-level judgment, not an SDK
+	// rule. Backends that attach out-of-band legitimately capture no bytes
+	// and resolve with an empty PatchBody; ResolvePatch allows that.
 	if len(patch) == 0 {
 		return fmt.Errorf("agent made no changes — nothing to attach")
 	}

@@ -574,7 +574,7 @@ type Worktree interface {
     Commit(ctx, msg string) error
     Push(ctx) error
     Validate(ctx) error                  // run the project verify command; nil iff it passes
-    CapturePatch(ctx) (patch []byte, err error) // handler-driven; never called on a timeout park
+    CapturePatch(ctx) (patch []byte, err error) // handler-driven; see below
     Request() RequestManager             // optional PR surface; nil if unsupported
 }
 
@@ -588,6 +588,17 @@ Backends with no pull-request concept (e.g. one that commits straight to
 main) return `nil` from `Request()`. Handlers use the nil-safe helpers
 `flow.Open(ctx, wt, …)` / `flow.Merge(ctx, wt, …)`, which return
 `ErrRequestNotSupported` instead of panicking.
+
+`CapturePatch` is called by handlers only — the orchestrator never captures a
+patch when a step's deadline fires, so a timeout park writes no patch artifact
+(the spent work stays in the worktree for the rerun). Returning **no bytes is
+legal**: a backend whose patches live server-side attaches the diff out-of-band
+and has nothing client-side to return, and a tree whose work is already
+committed has an empty `git diff HEAD` by definition. Those handlers still
+resolve their patch artifact, passing an **empty `PatchBody`** — the SDK hands
+it straight to `Backend.ResolveArtifact`, which verifies the evidence wherever
+it actually lives and fails with its own message when it is missing. `cli`
+never second-guesses an empty body.
 
 ### The `Agent` surface
 

@@ -268,6 +268,16 @@ type Backend interface {
 	// ResolveArtifact writes a handler-produced artifact value. No backend
 	// method for writing signals; signals are written by backend-internal
 	// side effects (worktree actions) or the LoadState poll path.
+	//
+	// An EMPTY body is a legal call, not a client-side error, and the SDK
+	// passes it through untouched. It is the side-effect-artifact pattern:
+	// the content was already attached out-of-band (a runner-captured patch,
+	// a commit) and the handler is saying "I'm done — record me as resolved".
+	// A backend that stores such content elsewhere MUST decide emptiness
+	// itself: verify the side effect happened and fail with a message naming
+	// what is missing. Backends that carry the bytes in the body may likewise
+	// reject an empty one — either way the judgment is the backend's, because
+	// only it knows where the evidence lives.
 	ResolveArtifact(ctx context.Context, claim Claim, id ArtifactId, body ArtifactBody) error
 	MarkStale(ctx context.Context, claim Claim, id ArtifactId) error
 
@@ -332,6 +342,13 @@ type Worktree interface {
 	// orchestrator does NOT call it when a step's deadline fires — a timeout
 	// park carries no verify-green signal, and a step that commits before a
 	// long verify has an empty diff to capture anyway.
+	//
+	// Returning no bytes is legal and does not mean failure. A backend whose
+	// patches live server-side attaches the diff out-of-band and has nothing
+	// client-side to hand back; so does a tree whose work is already
+	// committed. Such a handler still resolves its patch artifact — with an
+	// EMPTY PatchBody, which ResolveArtifact validates against wherever the
+	// evidence actually lives (see ResolveArtifact).
 	CapturePatch(ctx context.Context) (patch []byte, err error)
 
 	// Request returns the backend's pull-request management surface, or nil

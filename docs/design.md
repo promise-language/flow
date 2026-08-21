@@ -543,7 +543,8 @@ type Worktree interface {
 
     // Unified diff of the working tree, for a handler that wants to attach
     // verified work as a patch artifact. NOT called from the timeout/park
-    // path — see "Park on exhaustion".
+    // path — see "Park on exhaustion". May legally return no bytes when the
+    // backend attaches out-of-band, or when the work is already committed.
     CapturePatch(ctx context.Context) (patch []byte, err error)
 }
 ```
@@ -737,6 +738,16 @@ path (`Config.WorktreeDir`, default `.`), so the rerun picks the work up where
 the kill left it. `Worktree.CapturePatch` stays available to handlers, which
 are the only place a patch artifact is attached and are expected to attach one
 only once verify is green.
+
+**An empty `PatchBody` is legal.** `ctx.ResolvePatch(flow.PatchBody{})` is the
+side-effect-artifact shape: the diff is already attached out-of-band (a
+runner-captured patch on a backend whose patches live server-side, whose
+`Worktree.CapturePatch` returns no bytes by design) or the work is already
+committed, so `git diff HEAD` is empty by definition. The handler is saying
+"I'm done — verify the side effect". `cli` passes the empty body through
+untouched; `Backend.ResolveArtifact` is the layer that checks the evidence is
+really on the item and fails with a message naming what is missing. Emptiness
+is never judged client-side — only the backend knows where the bytes live.
 
 **Grant UI:** OSS variant uses `./<flow> grant <key> --invocations 3 --cost 10`
 CLI + GitHub Issue command-comment form (`/flow grant key=plan invocations=3`)

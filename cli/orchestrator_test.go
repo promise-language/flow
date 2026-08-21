@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -912,26 +913,102 @@ func TestRunOne_BareGrantRecoversAStepOutOfTimeAndInvocations(t *testing.T) {
 	}
 }
 
-// An empty patch is refused rather than uploaded — including on a rerun,
-// where writing it would replace a previous non-empty attachment.
-func TestResolvePatch_RefusesEmptyDiff(t *testing.T) {
+// outOfBandPatchBackend models a backend whose patches live server-side: its
+// Worktree.CapturePatch returns no bytes (the runner attaches the diff to the
+// item itself), and ResolveArtifact validates that the evidence is really
+// there instead of writing body content. `evidence` says whether the
+// out-of-band attachment happened.
+type outOfBandPatchBackend struct {
+	*fake.Backend
+	evidence bool
+}
+
+func (b *outOfBandPatchBackend) ResolveArtifact(ctx context.Context, claim flow.Claim, id flow.ArtifactId, body flow.ArtifactBody) error {
+	if body.Type == flow.ArtifactPatch && !b.evidence {
+		return fmt.Errorf("backend: ResolveArtifact %q: no implementation evidence on item", id)
+	}
+	return b.Backend.ResolveArtifact(ctx, claim, id, body)
+}
+
+func (b *outOfBandPatchBackend) Worktree(ctx context.Context, claim flow.Claim) (flow.Worktree, error) {
+	inner, err := b.Backend.Worktree(ctx, claim)
+	if err != nil {
+		return nil, err
+	}
+	return &nilCapturingWorktree{Worktree: inner}, nil
+}
+
+// nilCapturingWorktree returns no patch bytes by design — the diff is attached
+// out-of-band, so there is nothing client-side to hand back.
+type nilCapturingWorktree struct{ flow.Worktree }
+
+func (w *nilCapturingWorktree) CapturePatch(ctx context.Context) ([]byte, error) { return nil, nil }
+
+// An EMPTY PatchBody is legal. A backend that attaches the diff out-of-band
+// has nothing to put in the body: the handler resolves with a zero body to say
+// "I'm done — verify the side effect", and the backend confirms it. cli must
+// pass that through rather than rejecting it one step before the check that
+// actually knows where the evidence lives.
+func TestResolvePatch_EmptyBodyResolvesForOutOfBandBackend(t *testing.T) {
 	var resolveErr error
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("attach", "implementation", func(ctx flow.StepCtx) error {
-			resolveErr = ctx.ResolvePatch(flow.PatchBody{BaseBranch: "main"})
+			// Same shape as an out-of-band handler: capture yields no bytes,
+			// resolve with an empty body anyway.
+			wt, err := ctx.Worktree()
+			if err != nil {
+				return err
+			}
+			patch, err := wt.CapturePatch(ctx.Context())
+			if err != nil {
+				return err
+			}
+			if len(patch) != 0 {
+				t.Errorf("CapturePatch returned %d bytes, want 0 for an out-of-band backend", len(patch))
+			}
+			resolveErr = ctx.ResolvePatch(flow.PatchBody{})
 			return resolveErr
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
+	app.Backend = &outOfBandPatchBackend{Backend: be, evidence: true}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if resolveErr != nil {
+		t.Fatalf("ResolvePatch(empty body) = %v, want nil (out-of-band attachment is legal)", resolveErr)
+	}
+	if res.Status != "done" {
+		t.Fatalf("res = %+v, want done", res)
+	}
+	state, _ := be.LoadState(context.Background(), claim)
+	if rec := state.Artifact("implementation"); !rec.Resolved {
+		t.Errorf("implementation artifact = %+v, want resolved", rec)
+	}
+}
+
+// The backend — not cli — decides an empty body is wrong, and its message is
+// the one the handler sees.
+func TestResolvePatch_BackendRejectsMissingEvidence(t *testing.T) {
+	var resolveErr error
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("attach", "implementation", func(ctx flow.StepCtx) error {
+			resolveErr = ctx.ResolvePatch(flow.PatchBody{})
+			return resolveErr
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	app.Backend = &outOfBandPatchBackend{Backend: be, evidence: false}
 
 	if _, err := RunOne(context.Background(), app, claim); err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
-	if resolveErr == nil || !strings.Contains(resolveErr.Error(), "empty patch") {
-		t.Fatalf("ResolvePatch error = %v, want an empty-patch refusal", resolveErr)
+	if resolveErr == nil || !strings.Contains(resolveErr.Error(), "no implementation evidence") {
+		t.Fatalf("ResolvePatch error = %v, want the backend's own evidence message", resolveErr)
 	}
 	state, _ := be.LoadState(context.Background(), claim)
 	if rec := state.Artifact("implementation"); rec.Resolved {
-		t.Errorf("implementation artifact = %+v, want unresolved (nothing uploaded)", rec)
+		t.Errorf("implementation artifact = %+v, want unresolved", rec)
 	}
 }
 
