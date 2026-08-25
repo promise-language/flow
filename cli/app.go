@@ -44,10 +44,12 @@ type App struct {
 	// docstring.
 	Telemetry flow.Telemetry
 
-	// Preflight is an optional cross-flow gate run on every RunOne
-	// dispatch, AFTER Backend.LoadState and BEFORE flow selection.
-	// Returning a non-nil error short-circuits the invocation with
-	// status="skipped". See flow.PreflightFunc for the contract and
+	// Preflight is an optional cross-flow gate run on every RunOne dispatch,
+	// AFTER Backend.LoadState and the terminal-done short-circuit, and BEFORE
+	// seed / handler dispatch. Returning a non-nil error short-circuits the
+	// invocation with status="skipped"; an error wrapping flow.ErrBlocked
+	// reports status="blocked" instead, which the CLI exits non-zero on. See
+	// flow.PreflightFunc and flow.ErrBlocked for the contract, and
 	// flow.ChainPreflight for composing multiple checks.
 	Preflight flow.PreflightFunc
 

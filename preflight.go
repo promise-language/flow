@@ -1,6 +1,28 @@
 package flow
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrBlocked marks a preflight refusal that a human has to clear, as opposed
+// to a condition that will pass on its own next cycle.
+//
+// A bare preflight error means "not now" — the item is skipped, the invocation
+// reports success, and the scheduler is expected to come back. That is right
+// for a transient gate (an operator flag, a mid-flight close) but wrong for a
+// gate that will still be shut on every future run until somebody does
+// something: a step waiting on an answer that nobody has written yet reports
+// success forever, and the run that was supposed to surface the request looks
+// like a no-op.
+//
+// A preflight error wrapping ErrBlocked reports Status "blocked" instead, and
+// the CLI exits non-zero, so an operator (or CI) sees that the run stopped and
+// why. It consumes no budget and runs no handler — the only difference from a
+// plain skip is the verdict.
+//
+//	return fmt.Errorf("answer needed on %q: %w", step, flow.ErrBlocked)
+var ErrBlocked = errors.New("blocked: needs human action")
 
 // PreflightFunc is an optional cross-flow gate run by cli.RunOne on every
 // dispatch, AFTER Backend.LoadState and the terminal-done short-circuit
@@ -22,6 +44,9 @@ import "context"
 // For per-flow preconditions, use Flow.RequireSignal. For per-step
 // preconditions, check inside the handler. Preflight is the right hook
 // only for cross-flow, binary-wide gates.
+//
+// A preflight that must stop the run until a human acts wraps ErrBlocked; see
+// its docstring for why that is a distinct verdict from a plain skip.
 //
 // Preflight is NOT a place to decide "this item is terminal." Terminal
 // detection is owned by cli.SelectFlow (which already returns Status:

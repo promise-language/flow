@@ -330,8 +330,31 @@ type Worktree interface {
 	Branch(ctx context.Context, name string, base string) (created bool, err error)
 	CurrentBranch(ctx context.Context) (string, error)
 
+	// Stage adds every change in the tree, including untracked files, to the
+	// index without committing.
+	//
+	// It exists so a caller can capture a COMPLETE diff. CapturePatch is a diff
+	// against HEAD, which does not see untracked files, while Commit stages
+	// everything — so capturing before Commit silently omits every file the
+	// change added, and capturing after it sees a clean tree and returns
+	// nothing. Staging first makes the added files visible to the capture.
+	Stage(ctx context.Context) error
+
 	Commit(ctx context.Context, msg string) error
 	Push(ctx context.Context) error
+
+	// RevParse resolves a revision ("HEAD", a branch name, a SHA) to a commit
+	// SHA.
+	//
+	// Callers need it to tell whether a branch actually carries work. Commit is
+	// a deliberate no-op when nothing is staged, so its nil return does NOT
+	// mean anything was recorded, and comparing HEAD before and after only
+	// covers the invocation that made the commit. Comparing the branch against
+	// its BASE answers the question that matters — is there anything here to
+	// open a pull request from — for a fresh branch and a resumed one alike.
+	// Without it, an empty branch travels all the way to "No commits between
+	// ...", long past the point where the real cause could have been named.
+	RevParse(ctx context.Context, rev string) (string, error)
 
 	// Validate runs the project's verify command in the worktree. Returns
 	// nil iff verify exits 0.
@@ -403,4 +426,39 @@ func isNilRequest(rq RequestManager) bool {
 		return v.IsNil()
 	}
 	return false
+}
+
+// Answer is one human reply to a question a flow asked.
+//
+// It lives in the flow package rather than in a consumer because backends
+// produce it and recipe libraries consume it: a type declared in either one
+// would force the other to import it, and Go's method sets are nominal, so a
+// look-alike struct would not satisfy the reader interface.
+//
+// The field set matches the tracker's wire.Question subset, so a step body
+// reads the same on either backend. Author has no tracker analogue but is
+// kept: "the reporter answered" and "a passer-by answered" are different facts
+// to whoever reads the thread next.
+type Answer struct {
+	QuestionID string
+	Text       string // the question that was asked
+	Answer     string
+	Author     string // e.g. github login
+	AnsweredAt time.Time
+}
+
+// RepoPermissions is what the authenticated principal may do on the item's
+// repository. Backends that have no permission model at all (a tracker where
+// the runner holds full rights by construction) do not implement the probe
+// that returns it; consumers requiring a role must be configured explicitly.
+//
+// The flags are cumulative as GitHub reports them — an admin also carries
+// maintain/push/triage/pull — so decide a role by testing from the most
+// privileged flag down, not by expecting exactly one to be set.
+type RepoPermissions struct {
+	Admin    bool
+	Maintain bool
+	Push     bool
+	Triage   bool
+	Pull     bool
 }

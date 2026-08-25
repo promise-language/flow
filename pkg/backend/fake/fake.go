@@ -28,6 +28,9 @@ type Backend struct {
 	// (defaultSupportedArtifacts); SetSupportedArtifacts overrides it so tests
 	// can exercise cli.App's startup rejection of an unrecordable artifact.
 	supportedArtifacts []flow.ArtifactDef
+	// worktrees is one checkout per item; see Worktree.
+	worktrees       map[string]*fakeWorktree
+	nothingToCommit bool
 }
 
 // defaultSupportedArtifacts is the schema an unconfigured fake reports — the
@@ -486,7 +489,39 @@ func (b *Backend) Park(ctx context.Context, claim flow.Claim, req flow.ParkReque
 }
 
 func (b *Backend) Worktree(ctx context.Context, claim flow.Claim) (flow.Worktree, error) {
-	return &fakeWorktree{verifyOK: b.verifyOK, supportsRequest: b.supportsRequest}, nil
+	id, err := refID(claim.ItemRef)
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	// One worktree PER ITEM, kept across calls. A real checkout keeps its
+	// branch and its commits between invocations, which callers comparing a
+	// branch against its base depend on — and it does NOT share them with
+	// another item, which a single backend-wide worktree would.
+	if b.worktrees == nil {
+		b.worktrees = map[string]*fakeWorktree{}
+	}
+	wt := b.worktrees[id]
+	if wt == nil {
+		wt = &fakeWorktree{branches: map[string]bool{}}
+		b.worktrees[id] = wt
+	}
+	wt.verifyOK = b.verifyOK
+	wt.supportsRequest = b.supportsRequest
+	wt.nothingToCommit = b.nothingToCommit
+	return wt, nil
+}
+
+// SetNothingToCommit makes Worktree.Commit a no-op, as git is when nothing is
+// staged. Use it to exercise a caller's "did anything actually land?" guard.
+func (b *Backend) SetNothingToCommit(v bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.nothingToCommit = v
+	for _, wt := range b.worktrees {
+		wt.nothingToCommit = v
+	}
 }
 
 func refID(ref flow.ItemRef) (string, error) {
@@ -498,15 +533,33 @@ func refID(ref flow.ItemRef) (string, error) {
 }
 
 type fakeWorktree struct {
+	// commits counts landed commits so RevParse("HEAD") advances, letting a
+	// caller distinguish a commit that recorded work from one that was a no-op.
+	commits int
+	// nothingToCommit makes Commit the no-op git performs with nothing staged.
+	nothingToCommit bool
+	// branches records which branches exist, so Branch can report `created`
+	// truthfully across invocations.
+	branches        map[string]bool
 	verifyOK        bool
 	supportsRequest bool
 	branch          string
 }
 
 func (w *fakeWorktree) Branch(ctx context.Context, name, base string) (bool, error) {
-	created := w.branch != name
 	w.branch = name
-	return created, nil
+	// created means the branch did not EXIST — not merely that we were on a
+	// different one. Callers use it to tell "there is no work here" from
+	// "switching back to work that is already here", and conflating the two
+	// makes every re-checkout look like a fresh start.
+	if w.branches == nil {
+		w.branches = map[string]bool{}
+	}
+	if w.branches[name] {
+		return false, nil
+	}
+	w.branches[name] = true
+	return true, nil
 }
 
 func (w *fakeWorktree) CurrentBranch(ctx context.Context) (string, error) {
@@ -516,8 +569,29 @@ func (w *fakeWorktree) CurrentBranch(ctx context.Context) (string, error) {
 	return w.branch, nil
 }
 
-func (w *fakeWorktree) Commit(ctx context.Context, msg string) error { return nil }
-func (w *fakeWorktree) Push(ctx context.Context) error               { return nil }
+// Commit is a no-op when SetNothingToCommit(true) — the real git behavior when
+// nothing is staged, and the case a caller's "did anything land?" guard exists
+// for.
+func (w *fakeWorktree) Stage(ctx context.Context) error { return nil }
+
+func (w *fakeWorktree) Commit(ctx context.Context, msg string) error {
+	if w.nothingToCommit {
+		return nil
+	}
+	w.commits++
+	return nil
+}
+func (w *fakeWorktree) Push(ctx context.Context) error { return nil }
+
+// RevParse models a branch that advances only when a commit lands, so a caller
+// can tell recorded work from a no-op commit — the distinction the real
+// interface exists for. Any rev other than HEAD resolves to the base.
+func (w *fakeWorktree) RevParse(ctx context.Context, rev string) (string, error) {
+	if rev != "HEAD" {
+		return "sha-0", nil
+	}
+	return fmt.Sprintf("sha-%d", w.commits), nil
+}
 func (w *fakeWorktree) Validate(ctx context.Context) error {
 	if !w.verifyOK {
 		return errors.New("fake: validate failed")

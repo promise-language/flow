@@ -129,6 +129,11 @@ var githubSupportedArtifacts = []flow.ArtifactDef{
 	flow.Artifact("verify-merge", flow.ArtifactMarkdown).WithDoc("Maintainer-side pre-merge verification output."),
 	flow.Artifact("merge-commit", flow.ArtifactCommitHash).WithDoc("Hash of the merge commit on the default branch after the PR merges."),
 	flow.Artifact("test-output", flow.ArtifactMarkdown).WithDoc("Captured output of a test run."),
+	// Maintainer-side structured verdict. JSON rather than markdown-with-a-
+	// fenced-block: the body is machine-read (verdict / quality / completeness
+	// / suggestions), and this backend already stores JSON inline on the state
+	// doc, so a consumer gets json.RawMessage instead of parsing prose.
+	flow.Artifact("inspection", flow.ArtifactJSON).WithDoc("Maintainer-side structured inspection verdict."),
 }
 
 // SupportedArtifacts returns github's canonical artifact schema (see
@@ -256,6 +261,18 @@ func (b *Backend) LoadState(ctx context.Context, claim flow.Claim) (*flow.ItemSt
 	b.stateCommentCache[issueNum] = stateID
 	b.mu.Unlock()
 
+	// The state comment is an index, not a store: markdown bodies live in
+	// their own comments. Without this a resolved artifact loads with an empty
+	// body, and a step reading it proceeds on nothing with no error to show.
+	//
+	// NOT best-effort. Silently loading empty bodies would let an API outage
+	// present as "the plan is empty", which the caller then reports as the
+	// cause — after dispatching a step and spending an invocation on it. A
+	// failure here says what actually went wrong, and costs nothing.
+	if err := b.hydrateMarkdownBodies(ctx, issueNum, state); err != nil {
+		return nil, err
+	}
+
 	// Poll PR signals (best-effort — never fatal).
 	if err := b.refreshPRSignals(ctx, issueNum, state); err != nil {
 		// Surface as a non-fatal in the item's Type field — but for now,
@@ -337,15 +354,58 @@ func deriveBinaryNameFromArgv() string {
 
 // Doctor probes gh + git + repo permissions. Implements cli.Doctor.
 func (b *Backend) Doctor(ctx context.Context) error {
-	repo, _, err := b.gh.Repositories.Get(ctx, b.cfg.Owner, b.cfg.Repo)
+	perms, err := b.RepoPermissions(ctx)
 	if err != nil {
-		return fmt.Errorf("repository %s/%s: %w", b.cfg.Owner, b.cfg.Repo, err)
+		return err
 	}
-	perms := repo.GetPermissions()
-	if !perms["push"] {
+	if !perms.Push {
 		return fmt.Errorf("authenticated user lacks push on %s/%s", b.cfg.Owner, b.cfg.Repo)
 	}
 	return nil
+}
+
+// RepoPermissions reports what the authenticated user may do on the repo.
+//
+// GitHub returns these as a bag of booleans that are cumulative in practice —
+// an admin also carries maintain/push/triage/pull — so callers deciding a role
+// should test from the most privileged flag down rather than expecting exactly
+// one to be set. Doctor uses it as a health check; the issue package uses it to
+// pick a step set (see issue.RoleProber).
+func (b *Backend) RepoPermissions(ctx context.Context) (flow.RepoPermissions, error) {
+	repo, _, err := b.gh.Repositories.Get(ctx, b.cfg.Owner, b.cfg.Repo)
+	if err != nil {
+		return flow.RepoPermissions{}, fmt.Errorf("repository %s/%s: %w", b.cfg.Owner, b.cfg.Repo, err)
+	}
+	p := repo.GetPermissions()
+	return flow.RepoPermissions{
+		Admin:    p["admin"],
+		Maintain: p["maintain"],
+		Push:     p["push"],
+		Triage:   p["triage"],
+		Pull:     p["pull"],
+	}, nil
+}
+
+// DefaultBranch reports the repository's default branch ("main", "master",
+// "trunk", ...). Callers that cut a working branch need it: there is no safe
+// literal, and a branch cut from the wrong base is not discovered until the PR
+// is opened against it.
+func (b *Backend) DefaultBranch(ctx context.Context) (string, error) {
+	repo, _, err := b.gh.Repositories.Get(ctx, b.cfg.Owner, b.cfg.Repo)
+	if err != nil {
+		return "", fmt.Errorf("repository %s/%s: %w", b.cfg.Owner, b.cfg.Repo, err)
+	}
+	if br := repo.GetDefaultBranch(); br != "" {
+		return br, nil
+	}
+	return "", fmt.Errorf("repository %s/%s reports no default branch", b.cfg.Owner, b.cfg.Repo)
+}
+
+// Login returns the authenticated principal this backend acts as. The issue
+// package needs it to tell the flow's own comments apart from a human's when
+// scanning an issue thread for answers.
+func (b *Backend) Login(ctx context.Context) (string, error) {
+	return resolveLogin(ctx)
 }
 
 // strclamp truncates s to n bytes for safe log messages.

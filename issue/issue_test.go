@@ -1,0 +1,796 @@
+package issue
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/promise-language/flow"
+)
+
+// ---------------------------------------------------------------------------
+// Role selection.
+// ---------------------------------------------------------------------------
+
+func TestRoleFromPermissions(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   flow.RepoPermissions
+		want Role
+	}{
+		// GitHub reports these cumulatively, so an admin also carries push.
+		// Testing push first would call every admin a contributor.
+		{"admin carries push too", flow.RepoPermissions{Admin: true, Maintain: true, Push: true, Triage: true, Pull: true}, RoleMaintainer},
+		{"maintain", flow.RepoPermissions{Maintain: true, Push: true, Pull: true}, RoleMaintainer},
+		{"push only", flow.RepoPermissions{Push: true, Pull: true}, RoleContributor},
+		{"triage without push", flow.RepoPermissions{Triage: true, Pull: true}, RoleContributor},
+		{"read only", flow.RepoPermissions{Pull: true}, RoleContributor},
+		{"nothing", flow.RepoPermissions{}, RoleContributor},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := roleFromPermissions(tc.in); got != tc.want {
+				t.Errorf("roleFromPermissions(%+v) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// stubBackend implements just enough of flow.Backend to be passed around; the
+// capability interfaces are what the tests actually exercise.
+type stubBackend struct {
+	flow.Backend // nil — these tests never call the base methods
+	perms        flow.RepoPermissions
+	permsErr     error
+	branch       string
+	branchErr    error
+	answers      []flow.Answer
+	answersErr   error
+	sawSince     time.Time
+	sawSelf      string
+}
+
+func (s *stubBackend) RepoPermissions(context.Context) (flow.RepoPermissions, error) {
+	return s.perms, s.permsErr
+}
+func (s *stubBackend) DefaultBranch(context.Context) (string, error) {
+	return s.branch, s.branchErr
+}
+func (s *stubBackend) ReadAnswers(_ context.Context, _ flow.Item, since time.Time, self string) ([]flow.Answer, error) {
+	s.sawSince, s.sawSelf = since, self
+	return s.answers, s.answersErr
+}
+
+// bareBackend implements none of the optional capabilities.
+type bareBackend struct{ flow.Backend }
+
+func TestResolveRole_ExplicitConfigWins(t *testing.T) {
+	// A maintainer deliberately running their own change through the
+	// contributor set is the case this exists for: the probe would say
+	// maintainer, and the operator's choice has to beat it.
+	be := &stubBackend{perms: flow.RepoPermissions{Admin: true}}
+	got, err := resolveRole(context.Background(), Config{Role: RoleContributor}, be)
+	if err != nil {
+		t.Fatalf("resolveRole: %v", err)
+	}
+	if got != RoleContributor {
+		t.Errorf("role = %q, want %q — explicit config must beat the probe", got, RoleContributor)
+	}
+}
+
+func TestResolveRole_DetectsFromBackend(t *testing.T) {
+	be := &stubBackend{perms: flow.RepoPermissions{Maintain: true, Push: true}}
+	got, err := resolveRole(context.Background(), Config{}, be)
+	if err != nil {
+		t.Fatalf("resolveRole: %v", err)
+	}
+	if got != RoleMaintainer {
+		t.Errorf("role = %q, want %q", got, RoleMaintainer)
+	}
+}
+
+func TestResolveRole_RefusesWhenUndetectable(t *testing.T) {
+	// Guessing here would route a contributor into merge steps they cannot
+	// perform, and the failure would not surface until the merge call.
+	_, err := resolveRole(context.Background(), Config{}, &bareBackend{})
+	if err == nil {
+		t.Fatal("want an error when the backend cannot report permissions")
+	}
+	if !strings.Contains(err.Error(), "Config.Role") {
+		t.Errorf("error = %q, want it to name the field that fixes it", err)
+	}
+}
+
+func TestResolveRole_RejectsUnknownRole(t *testing.T) {
+	_, err := resolveRole(context.Background(), Config{Role: "admin"}, &stubBackend{})
+	if err == nil || !strings.Contains(err.Error(), "unknown Config.Role") {
+		t.Errorf("err = %v, want an unknown-role refusal", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Base branch.
+// ---------------------------------------------------------------------------
+
+func TestResolveBaseBranch(t *testing.T) {
+	t.Run("config wins", func(t *testing.T) {
+		be := &stubBackend{branch: "main"}
+		got, err := resolveBaseBranch(context.Background(), Config{BaseBranch: "develop"}, be)
+		if err != nil || got != "develop" {
+			t.Errorf("got (%q, %v), want develop", got, err)
+		}
+	})
+	t.Run("detects non-main defaults", func(t *testing.T) {
+		// The whole point: "main" is not a safe literal.
+		be := &stubBackend{branch: "trunk"}
+		got, err := resolveBaseBranch(context.Background(), Config{}, be)
+		if err != nil || got != "trunk" {
+			t.Errorf("got (%q, %v), want trunk", got, err)
+		}
+	})
+	t.Run("refuses when undetectable", func(t *testing.T) {
+		_, err := resolveBaseBranch(context.Background(), Config{}, &bareBackend{})
+		if err == nil || !strings.Contains(err.Error(), "Config.BaseBranch") {
+			t.Errorf("err = %v, want a refusal naming the field that fixes it", err)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Prompt seam — the reason this package exists.
+// ---------------------------------------------------------------------------
+
+func TestRenderPrompt_ProjectBodyBeatsDefault(t *testing.T) {
+	cfg := Config{Prompts: map[PromptID]string{
+		PromptPlan: "project-specific: {{.ItemTitle}}",
+	}}
+	pc := PromptContext{}
+	pc.ItemTitle = "widget is broken"
+
+	got, err := renderPrompt(cfg, PromptPlan, pc)
+	if err != nil {
+		t.Fatalf("renderPrompt: %v", err)
+	}
+	if got != "project-specific: widget is broken" {
+		t.Errorf("got %q, want the project's body rendered", got)
+	}
+}
+
+func TestRenderPrompt_FallsBackToDefault(t *testing.T) {
+	got, err := renderPrompt(Config{}, PromptReview, PromptContext{})
+	if err != nil {
+		t.Fatalf("renderPrompt: %v", err)
+	}
+	if !strings.Contains(got, "PASS or FAIL") {
+		t.Errorf("got %q, want the library default", got)
+	}
+}
+
+func TestRenderPrompt_EmptyProjectBodyFallsBack(t *testing.T) {
+	// Whitespace is not a prompt. Treating it as an override would silently
+	// send the agent an empty instruction.
+	cfg := Config{Prompts: map[PromptID]string{PromptReview: "   \n  "}}
+	got, err := renderPrompt(cfg, PromptReview, PromptContext{})
+	if err != nil {
+		t.Fatalf("renderPrompt: %v", err)
+	}
+	if !strings.Contains(got, "PASS or FAIL") {
+		t.Errorf("got %q, want the default to fill in for a blank override", got)
+	}
+}
+
+func TestRenderPrompt_SurfacesTemplateErrors(t *testing.T) {
+	cfg := Config{Prompts: map[PromptID]string{PromptPlan: "{{.NoSuchField}}"}}
+	if _, err := renderPrompt(cfg, PromptPlan, PromptContext{}); err == nil {
+		t.Fatal("want an error for a template referencing an unknown field")
+	}
+}
+
+func TestPromptContext_PriorDiscriminatesType(t *testing.T) {
+	// The reason Prior carries records rather than strings: a body must not be
+	// able to interpolate a patch into a markdown slot.
+	pc := PromptContext{Prior: map[StepID]flow.ArtifactRecord{
+		StepPlan:      {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "the plan"},
+		StepImplement: {Resolved: true, Type: flow.ArtifactPatch, Patch: flow.PatchBody{Diff: []byte("diff")}},
+	}}
+
+	if body, ok := pc.PriorMarkdown(StepPlan); !ok || body != "the plan" {
+		t.Errorf("PriorMarkdown(plan) = (%q, %v), want the plan", body, ok)
+	}
+	if _, ok := pc.PriorMarkdown(StepImplement); ok {
+		t.Error("PriorMarkdown must refuse a patch artifact")
+	}
+	if _, ok := pc.PriorPatch(StepPlan); ok {
+		t.Error("PriorPatch must refuse a markdown artifact")
+	}
+	if p, ok := pc.PriorPatch(StepImplement); !ok || string(p.Diff) != "diff" {
+		t.Errorf("PriorPatch(implementation) = (%v, %v), want the diff", p, ok)
+	}
+}
+
+func TestPromptContext_PriorSkipsUnresolved(t *testing.T) {
+	// A seeded-but-unresolved step has a record with no body. Handing its
+	// empty string to a template would read as "the plan is blank".
+	pc := PromptContext{Prior: map[StepID]flow.ArtifactRecord{
+		StepPlan: {Resolved: false, Type: flow.ArtifactMarkdown},
+	}}
+	if _, ok := pc.PriorMarkdown(StepPlan); ok {
+		t.Error("PriorMarkdown must not report an unresolved artifact as present")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Park-for-answer.
+// ---------------------------------------------------------------------------
+
+func TestQuestionMarkerRoundTrip(t *testing.T) {
+	at := time.Date(2026, 8, 25, 14, 30, 0, 0, time.UTC)
+	park := &flow.ParkRequest{Details: MarkQuestionAsked(at)}
+	if got := QuestionAskedAt(park); !got.Equal(at) {
+		t.Errorf("questionAskedAt = %v, want %v", got, at)
+	}
+}
+
+func TestQuestionAskedAt_MissingMarkerIsZero(t *testing.T) {
+	// Failing to the zero time reads every comment, which can only
+	// over-report answers. Over-reporting resumes a step that asks again;
+	// under-reporting strands it forever. Fail toward the recoverable one.
+	if got := QuestionAskedAt(&flow.ParkRequest{Details: "something-else=1"}); !got.IsZero() {
+		t.Errorf("got %v, want the zero time when no marker is present", got)
+	}
+	if got := QuestionAskedAt(&flow.ParkRequest{Details: "asked-at=not-a-timestamp"}); !got.IsZero() {
+		t.Errorf("got %v, want the zero time for an unparsable marker", got)
+	}
+}
+
+func TestAnswerGate_IgnoresNonQuestionParks(t *testing.T) {
+	gate := answerGate(&stubBackend{}, self("flowbot"))
+	// A budget park is the budget system's business; this gate must not touch it.
+	state := &flow.ItemState{Park: &flow.ParkRequest{Kind: flow.ParkBudgetExhausted, Step: "plan"}}
+	if err := gate(context.Background(), state); err != nil {
+		t.Errorf("gate returned %v on a budget park, want nil", err)
+	}
+	if err := gate(context.Background(), &flow.ItemState{}); err != nil {
+		t.Errorf("gate returned %v on an unparked item, want nil", err)
+	}
+}
+
+func TestAnswerGate_BlocksWhenUnanswered(t *testing.T) {
+	gate := answerGate(&stubBackend{answers: nil}, self("flowbot"))
+	state := &flow.ItemState{Park: &flow.ParkRequest{
+		Kind: flow.ParkQuestion, Step: "plan", Reason: "which database?",
+	}}
+	err := gate(context.Background(), state)
+	if err == nil {
+		t.Fatal("want a refusal when nobody has answered")
+	}
+	// It must be ErrBlocked, not a bare error: a plain preflight error is a
+	// skip, which exits 0 and reads as "nothing to do" to whoever re-ran it.
+	if !errors.Is(err, flow.ErrBlocked) {
+		t.Errorf("err = %v, want it to wrap flow.ErrBlocked", err)
+	}
+	if !strings.Contains(err.Error(), "which database?") {
+		t.Errorf("err = %q, want it to carry the question", err)
+	}
+}
+
+func TestAnswerGate_PassesOnceAnswered(t *testing.T) {
+	be := &stubBackend{answers: []flow.Answer{{Answer: "postgres", Author: "maintainer"}}}
+	gate := answerGate(be, self("flowbot"))
+	asked := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	state := &flow.ItemState{Park: &flow.ParkRequest{
+		Kind: flow.ParkQuestion, Step: "plan", Details: MarkQuestionAsked(asked),
+	}}
+	if err := gate(context.Background(), state); err != nil {
+		t.Fatalf("gate = %v, want nil once answered", err)
+	}
+	if !be.sawSince.Equal(asked) {
+		t.Errorf("reader saw since=%v, want the ask time %v", be.sawSince, asked)
+	}
+	if be.sawSelf != "flowbot" {
+		t.Errorf("reader saw self=%q, want the flow principal", be.sawSelf)
+	}
+}
+
+func TestAnswerGate_BlocksWhenAnswersUnreadable(t *testing.T) {
+	// Neither guess is safe, so refuse to guess: "unanswered" strands a step
+	// somebody already answered, "answered" burns an invocation re-asking.
+	be := &stubBackend{answersErr: errors.New("api down")}
+	gate := answerGate(be, self("flowbot"))
+	state := &flow.ItemState{Park: &flow.ParkRequest{Kind: flow.ParkQuestion, Step: "plan"}}
+	err := gate(context.Background(), state)
+	if err == nil || !errors.Is(err, flow.ErrBlocked) {
+		t.Fatalf("err = %v, want a blocked refusal", err)
+	}
+	if !strings.Contains(err.Error(), "api down") {
+		t.Errorf("err = %q, want it to surface the underlying cause", err)
+	}
+}
+
+func TestAnswerGate_NilWhenBackendCannotRead(t *testing.T) {
+	// A gate here would strand every question park permanently, since such a
+	// backend can never observe the answer that would clear it.
+	if gate := answerGate(&bareBackend{}, self("")); gate != nil {
+		t.Error("want no gate when the backend cannot read answers")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Verify tail.
+// ---------------------------------------------------------------------------
+
+func TestVerifyTail_KeepsTheEnd(t *testing.T) {
+	// A build log's useful part is the failure at the end; the head is setup
+	// noise that would crowd the real error out of the re-prompt.
+	var b strings.Builder
+	for i := 0; i < verifyTailLines*2; i++ {
+		fmt.Fprintf(&b, "line %d\n", i)
+	}
+	got := verifyTail(errors.New(b.String()))
+	lines := strings.Split(got, "\n")
+	if len(lines) != verifyTailLines {
+		t.Fatalf("kept %d lines, want %d", len(lines), verifyTailLines)
+	}
+	if !strings.HasSuffix(got, fmt.Sprintf("line %d", verifyTailLines*2-1)) {
+		t.Errorf("tail ends %q, want the last line", got[len(got)-20:])
+	}
+}
+
+func TestVerifyTail_ShortOutputUnchanged(t *testing.T) {
+	if got := verifyTail(errors.New("boom")); got != "boom" {
+		t.Errorf("got %q, want %q", got, "boom")
+	}
+	if got := verifyTail(nil); got != "" {
+		t.Errorf("got %q, want empty for a nil error", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BuildApp.
+// ---------------------------------------------------------------------------
+
+func TestBuildApp_RequiresVerifyCmd(t *testing.T) {
+	// Without a gate the implement step's loop has nothing to loop against,
+	// which quietly turns it back into a one-shot draft.
+	_, err := BuildApp(context.Background(), Config{Role: RoleContributor, BaseBranch: "main"},
+		Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
+	if err == nil || !strings.Contains(err.Error(), "VerifyCmd") {
+		t.Errorf("err = %v, want a refusal naming VerifyCmd", err)
+	}
+}
+
+// The maintainer step set refuses at DISPATCH, not at construction. Failing
+// BuildApp would take status / list / grant / doctor down with it — the
+// commands a maintainer most needs to see what a contributor's run left.
+func TestBuildApp_MaintainerBuildsButRefusesOnDispatch(t *testing.T) {
+	app, err := BuildApp(context.Background(), Config{
+		Role: RoleMaintainer, BaseBranch: "main", VerifyCmd: []string{"true"},
+	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
+	if err != nil {
+		t.Fatalf("BuildApp = %v, want an app that still serves read-only commands", err)
+	}
+	if len(app.Flows) != 1 {
+		t.Fatalf("got %d flows, want the stand-in", len(app.Flows))
+	}
+	// Silently running the contributor set would have a maintainer opening a
+	// pull request against their own review, so the step must refuse.
+	li, ok := app.Flows[0].Item("review the implementation")
+	if !ok {
+		t.Fatal("stand-in flow has no maintainer step")
+	}
+	err = li.Handler(nil)
+	if err == nil || !strings.Contains(err.Error(), "not implemented yet") {
+		t.Errorf("handler err = %v, want an explicit not-yet-implemented refusal", err)
+	}
+}
+
+func TestBuildApp_ContributorSliceWiresUp(t *testing.T) {
+	app, err := BuildApp(context.Background(), Config{
+		BinaryName: "issue",
+		VerifyCmd:  []string{"bin/verify", "--wasm"},
+		Role:       RoleContributor,
+		BaseBranch: "main",
+	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
+	if err != nil {
+		t.Fatalf("BuildApp: %v", err)
+	}
+	if len(app.Flows) != 1 {
+		t.Fatalf("got %d flows, want 1", len(app.Flows))
+	}
+	if app.VerifyCmd != "bin/verify --wasm" {
+		t.Errorf("VerifyCmd = %q, want the joined display form", app.VerifyCmd)
+	}
+	// The answer gate must be wired, or park-for-answer is inert.
+	if app.Preflight == nil {
+		t.Error("Preflight is nil — the answer gate was not wired")
+	}
+	wantArtifacts := []flow.ArtifactId{"plan", "implementation", "review", "coverage", "verify-impl"}
+	if len(app.Artifacts) != len(wantArtifacts) {
+		t.Fatalf("got %d artifacts, want %d", len(app.Artifacts), len(wantArtifacts))
+	}
+	for i, want := range wantArtifacts {
+		if app.Artifacts[i].Id != want {
+			t.Errorf("artifact[%d] = %q, want %q", i, app.Artifacts[i].Id, want)
+		}
+	}
+}
+
+type stubAgent struct{}
+
+func (stubAgent) Name() string { return "stub" }
+func (stubAgent) Run(context.Context, flow.AgentRequest) (*flow.AgentResponse, error) {
+	return &flow.AgentResponse{LastText: "ok"}, nil
+}
+
+// ---------------------------------------------------------------------------
+// The ask side: without it every reader-side piece is machinery with no writer.
+// ---------------------------------------------------------------------------
+
+func TestDetectQuestion(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		in         string
+		wantHeader string
+		wantBody   string
+		wantOK     bool
+	}{
+		{"plain", "I looked at this.\nNEEDS-ANSWER: Cache or new store?", "Cache or new store?", "Cache or new store?", true},
+		{"trailing whitespace", "NEEDS-ANSWER:   Which one?   ", "Which one?", "Which one?", true},
+		{"no sentinel", "All done, no questions.", "", "", false},
+		// An agent that reasons about the mechanism before using it must not
+		// trip it; the operative line is its last word on the matter.
+		{
+			"last occurrence wins",
+			"I could emit NEEDS-ANSWER: something vague\nbut instead:\nNEEDS-ANSWER: the real question",
+			"the real question", "the real question", true,
+		},
+		// A bare token asks nothing — parking on it would strand the step on a
+		// question nobody can answer.
+		{"bare token ignored", "NEEDS-ANSWER:", "", "", false},
+		{"bare token then real one", "NEEDS-ANSWER:\nNEEDS-ANSWER: a real one", "a real one", "a real one", true},
+		// Matched at line start, so prose mentioning it inline does not trip.
+		{"mid-line mention", "the convention is to write NEEDS-ANSWER: at line start", "", "", false},
+		{"case sensitive", "needs-answer: lowercase", "", "", false},
+		// Column zero only. A prompt body shows the agent an INDENTED example
+		// of the convention; the agent echoing that example back must not park
+		// the flow on a placeholder question.
+		{"indented example does not trip", "    NEEDS-ANSWER: <the decision needed>", "", "", false},
+		{
+			"indented example ignored, real one honored",
+			"    NEEDS-ANSWER: <placeholder from the prompt>\nNEEDS-ANSWER: the real one",
+			"the real one", "the real one", true,
+		},
+
+		// The evidence block: a choice is unanswerable without what it rests on.
+		{
+			"fenced evidence becomes the body",
+			"NEEDS-ANSWER: amend, adjust, or reject?\n```\n§3 states: \"No macros.\"\nRecommendation: reject.\n```",
+			"amend, adjust, or reject?",
+			"§3 states: \"No macros.\"\nRecommendation: reject.",
+			true,
+		},
+		{
+			"blank lines before the fence are tolerated",
+			"NEEDS-ANSWER: which?\n\n\n```\nevidence\n```",
+			"which?", "evidence", true,
+		},
+		{
+			"language tag on the fence",
+			"NEEDS-ANSWER: which?\n```text\nevidence\n```",
+			"which?", "evidence", true,
+		},
+		// Losing the evidence is the failure that matters; a few extra lines
+		// cost nothing next to an unanswerable question.
+		{
+			"unterminated fence keeps the remainder",
+			"NEEDS-ANSWER: which?\n```\nevidence that never closes",
+			"which?", "evidence that never closes", true,
+		},
+		// Prose after the question means the agent moved on — not a block.
+		{
+			"prose before a fence is not a block",
+			"NEEDS-ANSWER: which?\nsome trailing prose\n```\nnot evidence\n```",
+			"which?", "which?", true,
+		},
+		{
+			"empty fence falls back to the header",
+			"NEEDS-ANSWER: which?\n```\n```",
+			"which?", "which?", true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			header, body, ok := detectQuestion(tc.in)
+			if ok != tc.wantOK || header != tc.wantHeader || body != tc.wantBody {
+				t.Errorf("detectQuestion(%q) = (%q, %q, %v), want (%q, %q, %v)",
+					tc.in, header, body, ok, tc.wantHeader, tc.wantBody, tc.wantOK)
+			}
+		})
+	}
+}
+
+// The sentinel has to survive a round trip through the whole contract: agent
+// text -> question park (stamped by the SDK) -> gate reads the marker.
+func TestAskAndGateComposeEndToEnd(t *testing.T) {
+	header, body, ok := detectQuestion(
+		"NEEDS-ANSWER: amend the doc, adjust the item, or reject?\n" +
+			"```\n§3 forbids macros; this item asks for them.\n```")
+	if !ok {
+		t.Fatal("sentinel not detected")
+	}
+	if body == header {
+		t.Fatal("evidence block was dropped — the question is unanswerable without it")
+	}
+	asked := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC)
+	park := &flow.ParkRequest{
+		Kind:    flow.ParkQuestion,
+		Step:    "plan",
+		Reason:  header,
+		Details: MarkQuestionAsked(asked),
+	}
+
+	// Unanswered: blocked, and the question travels with the refusal.
+	gate := answerGate(&stubBackend{}, self("flowbot"))
+	err := gate(context.Background(), &flow.ItemState{Park: park})
+	if !errors.Is(err, flow.ErrBlocked) {
+		t.Fatalf("err = %v, want blocked", err)
+	}
+	if !strings.Contains(err.Error(), "amend the doc") {
+		t.Errorf("err = %q, want it to carry the question", err)
+	}
+
+	// Answered: passes, and the reader is scoped to after the ask.
+	be := &stubBackend{answers: []flow.Answer{{Answer: "amend the doc", Author: "reporter"}}}
+	if err := answerGate(be, self("flowbot"))(context.Background(), &flow.ItemState{Park: park}); err != nil {
+		t.Fatalf("gate = %v, want nil once answered", err)
+	}
+	if !be.sawSince.Equal(asked) {
+		t.Errorf("reader scoped to %v, want the ask time %v", be.sawSince, asked)
+	}
+}
+
+// self adapts a fixed login to the resolver answerGate takes. The resolver is a
+// function so BuildApp does not have to make a network call before every
+// command — including the one meant to diagnose network failures.
+func self(login string) func(context.Context) string {
+	return func(context.Context) string { return login }
+}
+
+// ---------------------------------------------------------------------------
+// Regressions from the review. Each of these shipped broken once.
+// ---------------------------------------------------------------------------
+
+// DefaultType names what an UNTYPED item becomes. It is not the set of types
+// the flow accepts, and conflating the two drops every item carrying a third
+// type — with the run reporting success having selected no flow at all.
+func TestItemTypes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want []flow.ItemType
+	}{
+		{"default set", Config{}, []flow.ItemType{"task", "bug"}},
+		// DefaultType names what an UNTYPED item becomes; it must not replace
+		// the accepted set, or every item of some third type is dropped with
+		// the run reporting success.
+		{"default type is folded in, not substituted", Config{DefaultType: "chore"},
+			[]flow.ItemType{"task", "bug", "chore"}},
+		{"no duplicate when it repeats one", Config{DefaultType: "bug"},
+			[]flow.ItemType{"task", "bug"}},
+		{"explicit set wins", Config{ItemTypes: []string{"feature", "task"}},
+			[]flow.ItemType{"feature", "task"}},
+		{"explicit set plus default type", Config{ItemTypes: []string{"feature"}, DefaultType: "task"},
+			[]flow.ItemType{"feature", "task"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := itemTypes(tc.cfg)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("got %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// The library's prompt defaults must not carry tracker-specific instructions.
+//
+// The shared AskGuidance partial tells the agent to call
+// mcp__tracker__ask_user_question "(never ask in plain text)". On this backend
+// that tool does not exist, and the instruction contradicts the one signal
+// detectQuestion can see — an agent obeying it would ask into the void and the
+// step would resolve as though nothing had been asked.
+func TestPromptOverridesAreNotTrackerSpecific(t *testing.T) {
+	pc := PromptContext{}
+	pc.AskGuidance = askGuidancePartial
+	pc.PlanStepResolution = planResolutionPartial
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for name, body := range map[string]string{
+		"AskGuidance":        pc.AskGuidance,
+		"PlanStepResolution": pc.PlanStepResolution,
+	} {
+		if strings.Contains(body, "mcp__tracker") {
+			t.Errorf("%s still names a tracker MCP tool this backend has no access to", name)
+		}
+		if strings.Contains(body, "works_as_intended") || strings.Contains(body, "wontfix") {
+			t.Errorf("%s still sets tracker statuses the GitHub backend has no concept of", name)
+		}
+	}
+	if !strings.Contains(pc.AskGuidance, AskSentinel) {
+		t.Error("AskGuidance must teach the sentinel that detectQuestion actually enforces")
+	}
+	// The illustration has to be indented, or the agent's echo of it parks the
+	// flow on a placeholder question.
+	for _, line := range strings.Split(pc.AskGuidance, "\n") {
+		if strings.HasPrefix(line, AskSentinel) {
+			t.Errorf("AskGuidance shows the sentinel at column zero: %q — an echo would self-trigger", line)
+		}
+	}
+}
+
+// Every default prompt must render against a bare context. A default that
+// referenced a field the library does not populate would fail at run time on
+// the one path meant to work before a project writes its own bodies.
+func TestDefaultPromptsRender(t *testing.T) {
+	pc := PromptContext{Prior: map[StepID]flow.ArtifactRecord{}}
+	pc.VerifyCmd = "make check"
+	pc.VerifyOutput = "FAIL"
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for id := range defaultPrompts {
+		t.Run(string(id), func(t *testing.T) {
+			if _, err := renderPrompt(Config{}, id, pc); err != nil {
+				t.Errorf("default prompt %q does not render: %v", id, err)
+			}
+		})
+	}
+}
+
+// Every prompt slot the canonical steps request must have a default, or a
+// binary with no project prompts fails at dispatch rather than at startup.
+func TestEveryPromptSlotHasADefault(t *testing.T) {
+	for _, id := range []PromptID{
+		PromptPlan, PromptImplement, PromptImplementFix,
+		PromptReview, PromptCoverage, PromptVerifyImpl,
+	} {
+		if _, ok := defaultPrompts[id]; !ok {
+			t.Errorf("no library default for %q", id)
+		}
+	}
+}
+
+// The answers have to reach the prompt, or park-for-answer never converges:
+// the resumed step renders a byte-identical prompt, re-asks, and re-parks with
+// a fresh timestamp that excludes the answer just given.
+func TestAnswersReachEveryResumableDefaultPrompt(t *testing.T) {
+	pc := PromptContext{
+		Prior: map[StepID]flow.ArtifactRecord{},
+		Answers: []Answer{{
+			Answer: "amend the document",
+			Author: "maintainer",
+		}},
+	}
+	pc.VerifyCmd = "make check"
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	// Every slot a canonical step can park from, derived rather than listed:
+	// this test named the exact failure it guards against and then omitted the
+	// verify-impl slot, which parks like any other.
+	//
+	// The fix re-prompt is the one exclusion: it runs inside a single implement
+	// invocation, where the answer already reached that session's opening
+	// prompt.
+	for id := range defaultPrompts {
+		if id == PromptImplementFix {
+			continue
+		}
+		t.Run(string(id), func(t *testing.T) {
+			got, err := renderPrompt(Config{}, id, pc)
+			if err != nil {
+				t.Fatalf("renderPrompt: %v", err)
+			}
+			if !strings.Contains(got, "amend the document") {
+				t.Errorf("default prompt %q does not render the answer — a resumed step would re-ask it", id)
+			}
+		})
+	}
+}
+
+func TestAnswersBlock(t *testing.T) {
+	t.Run("empty when nothing was answered", func(t *testing.T) {
+		if got := (PromptContext{}).AnswersBlock(); got != "" {
+			t.Errorf("got %q, want empty on a first run", got)
+		}
+	})
+	t.Run("names the authors and carries the question", func(t *testing.T) {
+		pc := PromptContext{Answers: []Answer{
+			{Answer: "postgres", Author: "alice", Text: "which database?"},
+			{Answer: "and use the existing pool", Author: "bob"},
+		}}
+		got := pc.AnswersBlock()
+		for _, want := range []string{"alice", "postgres", "bob", "existing pool"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("AnswersBlock() = %q, want it to contain %q", got, want)
+			}
+		}
+		// The question travels with the replies: nothing correlates a comment
+		// to a question, so the agent is the only thing that can judge whether
+		// a reply actually answers — and it cannot judge without the question.
+		if !strings.Contains(got, "which database?") {
+			t.Errorf("AnswersBlock() = %q, want it to restate the question", got)
+		}
+		// It must not assert the reply IS the decision: a "+1" reaches this
+		// block too, and re-asking is the available correction.
+		if !strings.Contains(got, "ask again") {
+			t.Errorf("AnswersBlock() = %q, want it to permit re-asking", got)
+		}
+	})
+	t.Run("survives a missing author", func(t *testing.T) {
+		got := PromptContext{Answers: []Answer{{Answer: "yes"}}}.AnswersBlock()
+		if !strings.Contains(got, "yes") {
+			t.Errorf("got %q, want the answer even with no author", got)
+		}
+	})
+}
+
+// GitHub links and auto-closes on "Closes #123" and does nothing at all with a
+// bare id. This backend implements no Finalizer, so the pull request body is
+// the only thing that closes the issue.
+func TestClosesRefUsesGitHubSyntax(t *testing.T) {
+	if got := closesRef("123"); got != "Closes #123" {
+		t.Errorf("closesRef = %q, want %q", got, "Closes #123")
+	}
+}
+
+// The maintainer stand-in must not SEED the item. Seeding is one-shot, so a
+// required maintainer artifact would permanently checklist the issue with a
+// step set that does not exist — and switching to the contributor role
+// afterwards would never re-seed, leaving every step dead on "not seeded".
+func TestMaintainerStandInDoesNotSeed(t *testing.T) {
+	app, err := BuildApp(context.Background(), Config{
+		Role: RoleMaintainer, BaseBranch: "main", VerifyCmd: []string{"true"},
+	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
+	if err != nil {
+		t.Fatalf("BuildApp: %v", err)
+	}
+	for _, spec := range app.Flows[0].SeedSpec(nil) {
+		if spec.Required {
+			t.Errorf("stand-in seeds required artifact %q — this permanently "+
+				"checklists the issue for a step set that does not exist", spec.Id)
+		}
+	}
+}
+
+// A misspelled prompt key compiles (PromptID is a string type) and would
+// silently fall back to the generic library default — running the one thing
+// this package exists to let a project replace.
+func TestBuildApp_RejectsUnknownPromptKey(t *testing.T) {
+	_, err := BuildApp(context.Background(), Config{
+		Role: RoleContributor, BaseBranch: "main", VerifyCmd: []string{"true"},
+		Prompts: map[PromptID]string{"implementaion": "oops"},
+	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
+	if err == nil || !strings.Contains(err.Error(), "implementaion") {
+		t.Errorf("err = %v, want a refusal naming the bad key", err)
+	}
+}
+
+func TestBuildApp_AcceptsEveryRealPromptKey(t *testing.T) {
+	prompts := map[PromptID]string{}
+	for id := range defaultPrompts {
+		prompts[id] = "body"
+	}
+	if _, err := BuildApp(context.Background(), Config{
+		Role: RoleContributor, BaseBranch: "main", VerifyCmd: []string{"true"},
+		Prompts: prompts,
+	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}}); err != nil {
+		t.Errorf("BuildApp = %v, want every real slot accepted", err)
+	}
+}

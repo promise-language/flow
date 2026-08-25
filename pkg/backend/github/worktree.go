@@ -139,3 +139,9 @@ func (w *worktree) Validate(ctx context.Context) error {
 func (w *worktree) CapturePatch(ctx context.Context) ([]byte, error) {
 	return w.b.git.CapturePatch(ctx)
 }
+
+func (w *worktree) RevParse(ctx context.Context, rev string) (string, error) {
+	return w.b.git.RevParse(ctx, rev)
+}
+
+func (w *worktree) Stage(ctx context.Context) error { return w.b.git.StageAll(ctx) }

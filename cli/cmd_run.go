@@ -58,7 +58,10 @@ func (app *App) cmdRun(ctx context.Context, args []string) int {
 		return 1
 	}
 	switch res.Status {
-	case "failed":
+	// "blocked" is a stop that needs a human, not a failure of the run — but
+	// it must not exit 0, or a caller waiting on the flow to progress would
+	// read "nothing to do" and keep re-running it forever.
+	case "failed", "blocked":
 		return 1
 	default:
 		return 0

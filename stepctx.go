@@ -28,6 +28,15 @@ type StepCtx interface {
 	// Signal read surface — handlers cannot write signals.
 	Signal(id SignalId) bool
 
+	// ParkedOn returns the park record this invocation is resuming from, or
+	// nil when the item was not parked.
+	//
+	// It reads the state the orchestrator already loaded for this dispatch. A
+	// handler that needs it — to pick up the answers to a question it asked
+	// last time, say — would otherwise have to re-load the whole item just to
+	// see a field that was already in memory.
+	ParkedOn() *ParkRequest
+
 	// Artifact write surface — one Resolve* per ArtifactType.
 	ResolveFlag() error
 	ResolveCommitHash(sha string) error

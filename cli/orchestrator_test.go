@@ -1034,3 +1034,120 @@ func TestResolvePatch_AcceptsNonEmptyDiff(t *testing.T) {
 		t.Errorf("implementation artifact = %+v, want resolved with a non-empty diff", rec)
 	}
 }
+
+// A preflight that wraps flow.ErrBlocked reports "blocked", not "skipped".
+// The distinction is the whole point: a skip claims the next cycle might pass,
+// and exits 0, so a caller waiting on the flow reads "nothing to do" and
+// re-runs forever against a gate only a human can clear.
+func TestRunOne_PreflightErrBlockedReportsBlocked(t *testing.T) {
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("never runs", "plan", func(ctx flow.StepCtx) error {
+			t.Fatal("handler must not run when preflight refuses")
+			return nil
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	app.Preflight = func(context.Context, *flow.ItemState) error {
+		return fmt.Errorf("answer needed on %q: %w", "plan", flow.ErrBlocked)
+	}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "blocked" {
+		t.Errorf("status = %q, want blocked", res.Status)
+	}
+	if !strings.Contains(res.Reason, "answer needed") {
+		t.Errorf("reason = %q, want it to carry the preflight's message", res.Reason)
+	}
+}
+
+// A plain preflight error keeps the existing "skipped" behavior — the new
+// verdict must not reclassify every gate.
+func TestRunOne_PlainPreflightErrorStillSkips(t *testing.T) {
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("never runs", "plan", func(ctx flow.StepCtx) error { return nil }, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	app.Preflight = func(context.Context, *flow.ItemState) error {
+		return errors.New("operator set the manual flag")
+	}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "skipped" {
+		t.Errorf("status = %q, want skipped", res.Status)
+	}
+}
+
+// A park reason is a one-line field. The question goes in Header and its
+// supporting evidence in Text, so a reason built from Text would splice a
+// multi-line block into every status line and blocked message that shows it.
+func TestQuestionReason_PrefersHeaderOverEvidence(t *testing.T) {
+	q := flow.AgentQuestion{
+		Header: "amend the doc, adjust the item, or reject?",
+		Text:   "§3 states:\n\"No macros.\"\nThis item asks for a macro system.",
+	}
+	got := questionReason([]flow.AgentQuestion{q})
+	if !strings.Contains(got, "amend the doc") {
+		t.Errorf("reason = %q, want the question", got)
+	}
+	if strings.Contains(got, "\n") {
+		t.Errorf("reason = %q, want a single line", got)
+	}
+}
+
+func TestQuestionReason_FallsBackToTextWithoutHeader(t *testing.T) {
+	got := questionReason([]flow.AgentQuestion{{Text: "which database?"}})
+	if !strings.Contains(got, "which database?") {
+		t.Errorf("reason = %q, want the text when there is no header", got)
+	}
+}
+
+// A question park raised through ctx.Park must carry the ask time, exactly as
+// the ctx.AskQuestions route does. Without it a reader scanning for answers has
+// no boundary and takes every comment already on the item — including ones
+// written long before the question — for a reply.
+func TestRunOne_HandlerQuestionParkCarriesAskTime(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("asks", "plan", func(ctx flow.StepCtx) error {
+			return ctx.Park(flow.ParkRequest{
+				Kind:   flow.ParkQuestion,
+				Reason: "which database?",
+			})
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkQuestion {
+		t.Fatalf("res = %+v, want a question park", res)
+	}
+	if flow.QuestionAskedAt(res.Park).IsZero() {
+		t.Errorf("Details = %q, want an asked-at marker", res.Park.Details)
+	}
+	if flow.QuestionAskedAt(be.ParkRequest("1")).IsZero() {
+		t.Error("the marker did not reach the backend")
+	}
+}
+
+// A non-question park must not be stamped: the marker means "a question was
+// asked at this time", and putting it on a budget park would be a lie.
+func TestRunOne_NonQuestionParkIsNotStamped(t *testing.T) {
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("blocks", "plan", func(ctx flow.StepCtx) error {
+			return ctx.Park(flow.ParkRequest{Kind: flow.ParkBlocked, Reason: "waiting on infra"})
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if !flow.QuestionAskedAt(res.Park).IsZero() {
+		t.Errorf("Details = %q, want no ask marker on a non-question park", res.Park.Details)
+	}
+}

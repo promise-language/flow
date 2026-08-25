@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -492,8 +495,15 @@ func (b *Backend) AskQuestions(ctx context.Context, claim flow.Claim, qs []flow.
 		out = append(out, flow.Question{ID: id, AgentQuestion: q})
 	}
 	body := sb.String()
-	if _, _, err := b.gh.Issues.CreateComment(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, &github.IssueComment{Body: &body}); err != nil {
+	// Keep the created comment: its server-side CreatedAt is the only clock
+	// that can be compared against the answers' timestamps. See Question.AskedAt.
+	created, _, err := b.gh.Issues.CreateComment(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, &github.IssueComment{Body: &body})
+	if err != nil {
 		return nil, fmt.Errorf("post questions comment: %w", err)
+	}
+	askedAt := created.GetCreatedAt().Time
+	for i := range out {
+		out[i].AskedAt = askedAt
 	}
 	if _, _, err := b.gh.Issues.AddLabelsToIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{b.labels.NeedsAnswer()}); err != nil {
 		return nil, fmt.Errorf("add needs-answer label: %w", err)
@@ -512,7 +522,7 @@ func renderArtifactComment(id flow.ArtifactId, body flow.ArtifactBody, version i
 	case flow.ArtifactMarkdown:
 		sb.WriteString(body.Markdown)
 		if spillURL != "" {
-			fmt.Fprintf(&sb, "\n\n[truncated preview; full body at %s]\n", spillURL)
+			fmt.Fprintf(&sb, "\n\n%s full body at %s]\n", spillNoticePrefix, spillURL)
 		}
 	case flow.ArtifactCommitHash:
 		sb.WriteString("commit: `" + body.CommitHash + "`")
@@ -535,3 +545,227 @@ func renderArtifactComment(id flow.ArtifactId, body flow.ArtifactBody, version i
 }
 
 func intToStr(n int) string { return fmt.Sprintf("%d", n) }
+
+// ReadAnswers returns human replies posted on the issue after `since`.
+//
+// This is the read half of park-for-answer: AskQuestions posts the question as
+// a comment and parks, and nothing resumes until somebody replies in the
+// thread and an operator re-runs. There is no separate answer store — the issue
+// thread IS the store, which is the point of asking where the humans already
+// are.
+//
+// Exclusion is by MARKER, not by author, and `self` is deliberately unused
+// here. Every comment this backend writes carries a machine marker (state,
+// artifact, question), so markers separate the flow's writing from a human's
+// exactly. Author does not: the common case is a human running the flow under
+// their own token, so excluding that login would discard the answer they then
+// wrote by hand and strand the step forever with nobody able to clear it.
+//
+// `self` stays in the interface for backends that cannot mark their own
+// writes and have no finer instrument.
+func (b *Backend) ReadAnswers(ctx context.Context, item flow.Item, since time.Time, _ string) ([]flow.Answer, error) {
+	issueNum, err := strconv.Atoi(item.ID)
+	if err != nil {
+		return nil, fmt.Errorf("github: non-numeric item id %q", item.ID)
+	}
+	opts := &github.IssueListCommentsOptions{
+		ListOptions: github.ListOptions{PerPage: 100},
+	}
+	if !since.IsZero() {
+		opts.Since = github.Ptr(since)
+	}
+	var out []flow.Answer
+	for {
+		comments, resp, err := b.gh.Issues.ListComments(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, opts)
+		if err != nil {
+			return nil, fmt.Errorf("list comments on #%d: %w", issueNum, err)
+		}
+		for _, c := range comments {
+			author := c.GetUser().GetLogin()
+			body := c.GetBody()
+			if isFlowMachineComment(body) {
+				continue
+			}
+			if strings.TrimSpace(body) == "" {
+				continue
+			}
+			// `since` is the moment the question was asked; GitHub's Since
+			// filter is inclusive to the second, so drop anything at or before
+			// it rather than let the question's own second leak through.
+			at := c.GetCreatedAt().Time
+			if !since.IsZero() && !at.After(since) {
+				continue
+			}
+			out = append(out, flow.Answer{
+				Answer:     body,
+				Author:     author,
+				AnsweredAt: at,
+			})
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return out, nil
+}
+
+// flowMarkerPrefix opens every HTML comment this backend writes for its own
+// bookkeeping — state, artifact, question, park.
+const flowMarkerPrefix = "<!-- flow:"
+
+// isFlowMachineComment reports whether a comment is one the SDK wrote for its
+// own bookkeeping rather than prose a human meant as an answer.
+//
+// It matches the shared prefix rather than enumerating known markers. An
+// enumeration is a list that silently rots: the park marker was missing from
+// one, and because Park posts its comment moments AFTER a question is stamped,
+// every question park read as its own answer — the gate cleared itself on the
+// next run, the step re-asked, and park-for-answer could never hold. Matching
+// the prefix means a marker added later cannot reintroduce that.
+func isFlowMachineComment(body string) bool {
+	// Line-start, not anywhere in the body. GitHub's "Quote reply" prefixes
+	// every quoted line with "> ", so a human answering that way carries a
+	// copy of the question's own marker inside their reply — and a substring
+	// match would discard exactly the answer the flow is waiting for, blocking
+	// the item permanently with nothing to show why.
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, flowMarkerPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// artifactCommentRe matches the marker line an artifact comment opens with,
+// capturing the id, the type, and the version.
+var artifactCommentRe = regexp.MustCompile(
+	`^<!-- flow:artifact id=(\S+) type=(\S+) v=(\d+) [^>]*-->\n?`)
+
+// hydrateMarkdownBodies fills in the Markdown of every resolved markdown
+// artifact by reading the comments that hold them.
+//
+// The state comment is an INDEX: it records that an artifact resolved, its
+// version and its budget, but not its bytes, which live in a comment of their
+// own. Without this pass every markdown artifact loads with an empty body while
+// still reporting Resolved — so a step reading an upstream artifact gets
+// ("", true) and silently proceeds on nothing. An implement step reads no plan
+// and writes code against a blank one, with no error anywhere to say so.
+//
+// One extra listing per load, and only when something is actually there to
+// hydrate. Later versions win: comments arrive in chronological order and a
+// re-resolved artifact posts a fresh one.
+func (b *Backend) hydrateMarkdownBodies(ctx context.Context, issueNum int, state *flow.ItemState) error {
+	want := map[flow.ArtifactId]bool{}
+	for id, rec := range state.Artifacts {
+		if rec.Resolved && rec.Type == flow.ArtifactMarkdown && rec.Markdown == "" {
+			want[id] = true
+		}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	opts := &github.IssueListCommentsOptions{ListOptions: github.ListOptions{PerPage: 100}}
+	seen := map[flow.ArtifactId]int{}
+	for {
+		comments, resp, err := b.gh.Issues.ListComments(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, opts)
+		if err != nil {
+			// Fatal, deliberately. Degrading to empty bodies would make an API
+			// outage indistinguishable from an artifact that genuinely has no
+			// content: the caller reports the wrong cause, and — because the
+			// step still dispatched — burns an invocation doing it. Three
+			// blips would exhaust the default budget and park the item on a
+			// budget message for a network problem.
+			return fmt.Errorf("list comments on #%d: %w", issueNum, err)
+		}
+		for _, c := range comments {
+			body := c.GetBody()
+			m := artifactCommentRe.FindStringSubmatch(body)
+			if m == nil {
+				continue
+			}
+			id := flow.ArtifactId(m[1])
+			if !want[id] || m[2] != artifactTypeString(flow.ArtifactMarkdown) {
+				continue
+			}
+			version, _ := strconv.Atoi(m[3])
+			if version < seen[id] {
+				continue
+			}
+			seen[id] = version
+			text := strings.TrimPrefix(body, m[0])
+			// A markdown artifact larger than MaxCommentBytes keeps only a
+			// PREVIEW in its comment and spills the rest to the orphan branch.
+			// Loading the preview as though it were the body hands a caller a
+			// plan cut off mid-sentence that still reads as complete, so the
+			// full text is fetched instead.
+			if hasSpillNotice(text) {
+				full, ferr := b.readArtifactFile(ctx, artifactFilePath(issueNum, string(id), "body.md"))
+				if ferr != nil {
+					// Fatal, for the same reason the listing failure above is:
+					// leaving the body empty makes a transient blip on the
+					// artifacts branch indistinguishable from an artifact that
+					// genuinely has no content, and the caller then reports the
+					// wrong cause after spending an invocation on it.
+					return fmt.Errorf("artifact %q spilled to the %s branch and could not be read: %w",
+						id, artifactsBranch, ferr)
+				}
+				text = full
+			}
+			rec := state.Artifacts[id]
+			rec.Markdown = text
+			state.Artifacts[id] = rec
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return nil
+}
+
+// spillNoticePrefix opens the notice appended to a markdown artifact comment
+// whose body was too large to inline. Readers key off it to know the comment
+// holds a preview rather than the artifact.
+const spillNoticePrefix = "[truncated preview;"
+
+// hasSpillNotice reports whether a comment body ends in the notice that its
+// markdown was too large to inline.
+//
+// Line-anchored, not a substring scan: an artifact whose own text quotes the
+// notice — a review discussing this very code, say — would otherwise be taken
+// for a preview, sending the loader after a spill file that does not exist.
+func hasSpillNotice(text string) bool {
+	// The notice is a TRAILER — appended after the preview — so only the last
+	// non-empty line can be one. Scanning every line would take an artifact
+	// that merely quotes the notice (a review discussing this code, say) for a
+	// preview, sending the loader after a spill file that does not exist and
+	// leaving the body empty.
+	lines := strings.Split(text, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimRight(lines[i], " \t\r")
+		if line == "" {
+			continue
+		}
+		return strings.HasPrefix(line, spillNoticePrefix)
+	}
+	return false
+}
+
+// readArtifactFile reads a file back from the flow-artifacts orphan branch.
+func (b *Backend) readArtifactFile(ctx context.Context, path string) (string, error) {
+	// DownloadContents, not GetContents: the latter inlines the bytes and caps
+	// at 1MB, which a spilled artifact can exceed — spilling is what happens to
+	// the large ones. This follows the download URL instead.
+	rc, _, err := b.gh.Repositories.DownloadContents(ctx, b.cfg.Owner, b.cfg.Repo, path,
+		&github.RepositoryContentGetOptions{Ref: artifactsBranch})
+	if err != nil {
+		return "", fmt.Errorf("download %s@%s: %w", path, artifactsBranch, err)
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		return "", fmt.Errorf("read %s@%s: %w", path, artifactsBranch, err)
+	}
+	return string(body), nil
+}

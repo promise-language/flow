@@ -174,6 +174,12 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		case "failed":
 			fmt.Fprintf(app.Err, "resolve: %s stopped on a failed step\n", claim.ItemRef.Display)
 			return 1
+		case "blocked":
+			// A gate only a human can clear. Looping would re-run it to the
+			// runaway guard, paying a full state load and comment scan each
+			// time, and then report the guard rather than the real reason.
+			fmt.Fprintf(app.Err, "resolve: %s is blocked — %s\n", claim.ItemRef.Display, res.Reason)
+			return 1
 		case "parked", "skipped":
 			// Parked (question/budget/timeout) or skipped (preflight refusal,
 			// e.g. an already-finalized item). Stop and let the operator act.

@@ -1,0 +1,271 @@
+package issue
+
+import (
+	"fmt"
+	"strings"
+	"text/template"
+
+	"github.com/promise-language/flow"
+	"github.com/promise-language/flow/prompt"
+)
+
+// PromptContext is what a project's prompt template is executed against.
+//
+// It embeds prompt.Context, so a body can reference the shared partials
+// ({{.ItemHeader}}, {{.AskGuidance}}, {{.PlanStepResolution}}, ...) alongside
+// its own project-specific text, and can override any partial by pre-setting
+// it. See the prompt package for that model.
+type PromptContext struct {
+	prompt.Context
+
+	// Role is the step set being run, so a body can say something different to
+	// a maintainer than to a contributor without needing two templates.
+	Role Role
+
+	// Answers carries human replies to questions this step previously asked.
+	// Non-empty ONLY on a resume after a park-for-answer; a first run sees nil.
+	Answers []Answer
+
+	// VerifyOutput is the tail of the failing verify output. Non-empty ONLY
+	// when rendering PromptImplementFix.
+	VerifyOutput string
+
+	// Prior carries upstream artifacts as records rather than strings, so a
+	// body cannot silently interpolate a patch into a markdown slot. Read them
+	// through PriorMarkdown / PriorPatch / PriorJSON.
+	Prior map[StepID]flow.ArtifactRecord
+}
+
+// PriorMarkdown returns an upstream markdown artifact's body. ok is false when
+// the step did not run, did not resolve, or resolved as another type.
+func (c PromptContext) PriorMarkdown(id StepID) (string, bool) {
+	rec, ok := c.Prior[id]
+	if !ok || !rec.Resolved || rec.Type != flow.ArtifactMarkdown {
+		return "", false
+	}
+	return rec.Markdown, true
+}
+
+// PriorPatch returns an upstream patch artifact's body. Note that a resolved
+// patch can legitimately carry no bytes — a backend storing diffs server-side
+// attaches them out of band — so ok=true does not imply a non-empty diff.
+func (c PromptContext) PriorPatch(id StepID) (flow.PatchBody, bool) {
+	rec, ok := c.Prior[id]
+	if !ok || !rec.Resolved || rec.Type != flow.ArtifactPatch {
+		return flow.PatchBody{}, false
+	}
+	return rec.Patch, true
+}
+
+// PriorJSON returns an upstream JSON artifact's body.
+func (c PromptContext) PriorJSON(id StepID) ([]byte, bool) {
+	rec, ok := c.Prior[id]
+	if !ok || !rec.Resolved || rec.Type != flow.ArtifactJSON {
+		return nil, false
+	}
+	return rec.JSON, true
+}
+
+// newPromptContext builds the context for one prompt render from the live step.
+func newPromptContext(ctx flow.StepCtx, cfg Config, role Role, prior []StepID) (PromptContext, error) {
+	item := ctx.Item()
+	pc := PromptContext{
+		Context: prompt.Context{
+			ItemID:          item.ID,
+			ItemType:        string(item.Type),
+			ItemTitle:       item.Title,
+			ItemDescription: item.Body,
+			VerifyCmd:       strings.Join(cfg.VerifyCmd, " "),
+		},
+		Role:  role,
+		Prior: map[StepID]flow.ArtifactRecord{},
+	}
+	for _, id := range prior {
+		if rec, ok := ctx.Artifact(flow.ArtifactId(id)); ok {
+			pc.Prior[id] = rec
+		}
+	}
+	// Pre-set the partials whose shared versions are written for a tracker
+	// backend. Render leaves a non-empty field alone, so this is the prompt
+	// package's own override mechanism, not a workaround.
+	//
+	// This matters more than it looks. The shared AskGuidance tells the agent
+	// to call mcp__tracker__ask_user_question "(never ask in plain text)" — a
+	// tool that does not exist on this path, and an instruction that directly
+	// contradicts the NEEDS-ANSWER sentinel that is the only thing this package
+	// can detect. An agent following it would ask into the void and the step
+	// would resolve as though nothing had been asked. PlanStepResolution
+	// likewise closes items through tracker statuses the GitHub backend has no
+	// concept of.
+	pc.AskGuidance = askGuidancePartial
+	pc.PlanStepResolution = planResolutionPartial
+
+	// Render fills only the partials still empty, so both the overrides above
+	// and a project's own survive.
+	if err := pc.Context.Render(); err != nil {
+		return PromptContext{}, fmt.Errorf("render shared partials: %w", err)
+	}
+	return pc, nil
+}
+
+// askGuidancePartial is this package's AskGuidance: the sentinel contract,
+// stated in the terms detectQuestion actually enforces.
+//
+// The example is INDENTED on purpose. Detection requires the token at column
+// zero precisely so that an agent echoing this illustration back cannot park
+// the flow on a placeholder question — see AskSentinel.
+const askGuidancePartial = `If you need a decision from a human, do not guess and do not work around it.
+End your final message with the question flush against the left margin, with no
+indentation, optionally followed by a fenced block giving the evidence behind
+the decision. The shape (shown indented here; write yours flush left):
+
+    NEEDS-ANSWER: <the decision needed, on one line>
+    ` + "```" + `
+    <what the decision rests on, and your recommendation>
+    ` + "```" + `
+
+The fenced block is what makes the question answerable: whoever reads it cannot
+choose between options without seeing what they are choosing about. Ask only
+when you genuinely cannot proceed — it stops the flow until a human replies.`
+
+// planResolutionPartial is this package's PlanStepResolution.
+//
+// The shared version resolves an unnecessary item by setting tracker statuses
+// (duplicate / cant_reproduce / works_as_intended / wontfix) through the
+// tracker MCP. None of that exists here, so the same decisions route through
+// the sentinel instead — a human closes the issue, which is the correct
+// authority for it on a GitHub repository anyway.
+const planResolutionPartial = `Producing a plan is the expected outcome: assume the work is real and needed.
+
+If you conclude it is NOT — the change is already present in the tree, the bug
+provably no longer reproduces, the current behavior already matches the request,
+or the item is not feasible as specified — do not quietly plan around it and do
+not close anything yourself. Say so as a question, with the proof in the block:
+the exact code, commit, or issue that makes the case. A human decides whether
+the item closes.`
+
+// renderPrompt executes the project's body for one slot, falling back to the
+// library default when the project supplied none.
+//
+// The fallback is intentionally generic. It exists so a half-configured binary
+// runs at all — useful for bring-up and for the reference shim — not so a
+// project can ship without writing its own. A default that tried to be good
+// would be a prompt this package cannot possibly write well, because the
+// project-specific part is exactly the part it does not know.
+func renderPrompt(cfg Config, id PromptID, pc PromptContext) (string, error) {
+	src, ok := cfg.Prompts[id]
+	if !ok || strings.TrimSpace(src) == "" {
+		src, ok = defaultPrompts[id]
+		if !ok {
+			return "", fmt.Errorf("no prompt for %q and no library default", id)
+		}
+	}
+	tmpl, err := template.New(string(id)).Parse(src)
+	if err != nil {
+		return "", fmt.Errorf("parse prompt %q: %w", id, err)
+	}
+	var b strings.Builder
+	if err := tmpl.Execute(&b, pc); err != nil {
+		return "", fmt.Errorf("execute prompt %q: %w", id, err)
+	}
+	out := strings.TrimSpace(b.String())
+	if out == "" {
+		return "", fmt.Errorf("prompt %q rendered empty", id)
+	}
+	return out, nil
+}
+
+// defaultPrompts are the generic fallbacks. See renderPrompt for why they are
+// deliberately thin.
+var defaultPrompts = map[PromptID]string{
+	PromptPlan: `{{.ItemHeader}}
+
+Produce an implementation plan as concise markdown.
+
+{{.AnswersBlock}}
+
+{{.PlanStepResolution}}
+
+{{.AskGuidance}}`,
+
+	PromptImplement: `{{.ItemHeader}}
+
+Implement this plan:
+
+{{.PlanBody}}
+
+Make {{.VerifyCmd}} pass. {{.DeferCommit}}
+
+{{.AnswersBlock}}
+
+{{.AskGuidance}}`,
+
+	PromptImplementFix: `The verify command ({{.VerifyCmd}}) is still failing. Its output ends:
+
+` + "```" + `
+{{.VerifyOutput}}
+` + "```" + `
+
+Fix the cause. Do not change tests to make them pass unless the test is itself
+wrong, and say so explicitly if you conclude that.`,
+
+	PromptReview: `Review the diff on the current branch. Flag correctness bugs, surprising
+behavior, missed edge cases, and unnecessary complexity. Be specific, and cite
+file:line. End with PASS or FAIL.
+
+{{.AnswersBlock}}`,
+
+	PromptCoverage: `Analyze test coverage of the changes on the current branch. List uncovered
+paths and recommend whether more tests are required.
+
+{{.AnswersBlock}}`,
+
+	PromptVerifyImpl: `Summarize the verification run for the pull request body: what was run, what
+passed, and anything a reviewer should still check by hand.
+
+{{.AnswersBlock}}`,
+}
+
+// AnswersBlock renders the human replies this step is resuming on, or "" when
+// there are none.
+//
+// A method rather than leaving `{{range .Answers}}` to every project: this text
+// is what closes the park-for-answer loop, and a body that forgets to render it
+// re-asks the question it was just answered, re-parks with a fresh timestamp
+// that excludes the answer, and stalls forever. Making it one field to
+// interpolate is what makes that easy to get right.
+func (c PromptContext) AnswersBlock() string {
+	if len(c.Answers) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	// Deliberately "replied", not "answered": nothing correlates a comment to
+	// the question, so a passing remark on the issue reaches this block too.
+	// Asking the agent to judge is the only correction available — and it is a
+	// real one, since re-asking re-parks past the irrelevant comment.
+	b.WriteString("Someone replied on the item after you asked your question. " +
+		"If a reply answers it, treat that as the decision and proceed without " +
+		"asking again. If none of them do, ask again.\n")
+	if q := strings.TrimSpace(c.Answers[0].Text); q != "" {
+		fmt.Fprintf(&b, "\nYou asked: %s\n", q)
+	}
+	for _, a := range c.Answers {
+		b.WriteString("\n")
+		if a.Author != "" {
+			fmt.Fprintf(&b, "%s replied: ", a.Author)
+		} else {
+			b.WriteString("reply: ")
+		}
+		b.WriteString(strings.TrimSpace(a.Answer))
+		b.WriteString("\n")
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// PlanBody is referenced by the default implement prompt. It is a method rather
+// than a field so the default template has something to call without every
+// project having to populate a field it may not use.
+func (c PromptContext) PlanBody() string {
+	body, _ := c.PriorMarkdown(StepPlan)
+	return body
+}

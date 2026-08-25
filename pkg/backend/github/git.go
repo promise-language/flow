@@ -123,9 +123,17 @@ func (g *gitOps) BranchExists(ctx context.Context, name string) (bool, error) {
 
 // Commit stages everything and commits with the given message. Returns nil
 // if there's nothing to commit (idempotent).
+// StageAll adds every change, untracked files included, to the index.
+func (g *gitOps) StageAll(ctx context.Context) error {
+	if _, stderr, err := g.run(ctx, "add", "-A"); err != nil {
+		return fmt.Errorf("git add -A: %w (%s)", err, string(stderr))
+	}
+	return nil
+}
+
 func (g *gitOps) Commit(ctx context.Context, msg string) error {
-	if _, _, err := g.run(ctx, "add", "-A"); err != nil {
-		return fmt.Errorf("git add -A: %w", err)
+	if err := g.StageAll(ctx); err != nil {
+		return err
 	}
 	// Detect "nothing to commit" without erroring out.
 	dirty, err := g.HasStaged(ctx)
@@ -177,7 +185,15 @@ func (g *gitOps) CapturePatch(ctx context.Context) ([]byte, error) {
 	return stdout, nil
 }
 
-// HeadSHA returns the current HEAD commit SHA.
+// RevParse resolves any revision ("HEAD", a branch, a SHA) to a commit SHA.
+func (g *gitOps) RevParse(ctx context.Context, rev string) (string, error) {
+	stdout, stderr, err := g.run(ctx, "rev-parse", rev)
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse %s: %w (%s)", rev, err, string(stderr))
+	}
+	return strings.TrimSpace(string(stdout)), nil
+}
+
 func (g *gitOps) HeadSHA(ctx context.Context) (string, error) {
 	stdout, _, err := g.run(ctx, "rev-parse", "HEAD")
 	if err != nil {

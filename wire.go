@@ -2,6 +2,7 @@ package flow
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -119,6 +120,66 @@ func NewAxisReport(axis BudgetAxis, used, granted float64) AxisReport {
 	}
 }
 
+// questionMarkerLayout is the timestamp format carried in a question park's
+// Details. RFC3339 so it round-trips through the state document as plain text.
+const questionMarkerLayout = time.RFC3339
+
+const questionMarkerPrefix = "asked-at="
+
+// LocalClockSkewAllowance is subtracted when an ask time can only be taken
+// from the local clock.
+//
+// The two failure directions are not symmetric. An ask time slightly EARLY
+// sweeps in a few minutes of comments that predate the question — the agent
+// sees they do not answer it and asks again, costing one invocation. An ask
+// time slightly LATE discards the real answer, and since a comment's timestamp
+// never changes, no amount of answering can ever clear it. So a clock that
+// might be wrong is pushed backwards, never forwards.
+const LocalClockSkewAllowance = 5 * time.Minute
+
+// MarkQuestionAskedLocal is MarkQuestionAsked for a caller with no backend
+// timestamp available, backing the mark off by LocalClockSkewAllowance.
+func MarkQuestionAskedLocal(now time.Time) string {
+	return MarkQuestionAsked(now.Add(-LocalClockSkewAllowance))
+}
+
+// MarkQuestionAsked builds the ParkRequest.Details value recording WHEN a
+// question was asked.
+//
+// Without it, a reader scanning for answers cannot tell a reply from the
+// question itself, or from any comment that predates the question — so it must
+// either treat everything as an answer (resuming a step that just asks again)
+// or nothing (stranding the step forever). The timestamp is what makes "later
+// than the question" expressible.
+func MarkQuestionAsked(at time.Time) string {
+	return questionMarkerPrefix + at.UTC().Format(questionMarkerLayout)
+}
+
+// QuestionAskedAt recovers the timestamp MarkQuestionAsked recorded, or the
+// zero time when the park carries no usable marker.
+//
+// Falling back to the zero time reads every comment on the item, which can only
+// over-report answers. That is the recoverable direction: an over-report
+// resumes a step that asks again, while an under-report strands it with nobody
+// watching.
+func QuestionAskedAt(park *ParkRequest) time.Time {
+	if park == nil {
+		return time.Time{}
+	}
+	for _, field := range strings.Split(park.Details, ";") {
+		field = strings.TrimSpace(field)
+		if !strings.HasPrefix(field, questionMarkerPrefix) {
+			continue
+		}
+		ts, err := time.Parse(questionMarkerLayout, strings.TrimPrefix(field, questionMarkerPrefix))
+		if err != nil {
+			return time.Time{}
+		}
+		return ts
+	}
+	return time.Time{}
+}
+
 // GrantClearsPark reports whether a grant against budget key `key` — producing
 // the post-grant record `post` — satisfies the park in `park` and so must
 // clear it. Backends call this from Grant so the rule is identical everywhere
@@ -187,6 +248,16 @@ type Question struct {
 	ID string `json:"id"`
 	AgentQuestion
 	UserAnswer
+
+	// AskedAt is when the backend recorded the question, on the BACKEND's
+	// clock. Optional; zero when a backend has no server-side timestamp.
+	//
+	// It exists because "answered after the question" is decided by comparing
+	// this against reply timestamps that also come from the backend. Stamping
+	// it locally instead compares two different clocks, and a runner running
+	// even slightly fast would silently discard every answer — a stall with no
+	// diagnostic, since the reply's own timestamp never changes.
+	AskedAt time.Time `json:"asked_at,omitempty"`
 }
 
 // AskText is a convenience constructor for a free-text question.
@@ -224,7 +295,7 @@ type InvocationResult struct {
 	InvocationID string       `json:"invocation_id"`
 	Item         string       `json:"item"`
 	Step         string       `json:"step"`
-	Status       string       `json:"status"` // done | skipped | failed | parked
+	Status       string       `json:"status"` // done | skipped | failed | parked | blocked
 	Reason       string       `json:"reason,omitempty"`
 	Park         *ParkRequest `json:"park,omitempty"`
 }

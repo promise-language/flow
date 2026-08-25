@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/promise-language/flow"
@@ -94,9 +95,16 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// runs, no budget consumed.
 	if app.Preflight != nil {
 		if perr := app.Preflight(ctx, state); perr != nil {
+			// A gate that a human has to clear is reported as "blocked", not
+			// "skipped": a skip claims the next cycle might pass, and this one
+			// will not until somebody acts. See flow.ErrBlocked.
+			status := "skipped"
+			if errors.Is(perr, flow.ErrBlocked) {
+				status = "blocked"
+			}
 			return flow.InvocationResult{
 				Item:   claim.ItemRef.Display,
-				Status: "skipped",
+				Status: status,
 				Reason: "preflight: " + perr.Error(),
 			}, nil
 		}
@@ -301,14 +309,44 @@ func translateHandlerError(
 		if req.Step == "" {
 			req.Step = li.Result()
 		}
+		// A question park needs the ask time whichever route produced it.
+		// Without it, a reader scanning for answers has no boundary and takes
+		// every comment already on the item — including ones written long
+		// before the question — for a reply.
+		//
+		// This route has no backend timestamp to use (the handler parked
+		// directly rather than going through Backend.AskQuestions), so the mark
+		// is backed off the local clock. A local time recorded as-is would be
+		// compared against the backend's, and a runner running even slightly
+		// fast would discard every answer permanently.
+		if req.Kind == flow.ParkQuestion && flow.QuestionAskedAt(&req).IsZero() {
+			req.Details = strings.TrimPrefix(
+				strings.TrimSpace(req.Details+";"+flow.MarkQuestionAskedLocal(time.Now())), ";")
+		}
 		return parkAndReturn(ctx, app, claim, result, req)
 	}
 	var question flow.ErrQuestion
 	if errors.As(handlerErr, &question) {
-		if _, err := app.Backend.AskQuestions(ctx, claim, question.Questions); err != nil {
+		recorded, err := app.Backend.AskQuestions(ctx, claim, question.Questions)
+		if err != nil {
 			return flow.InvocationResult{}, fmt.Errorf("backend.AskQuestions: %w", err)
 		}
-		req := flow.ParkRequest{Kind: flow.ParkQuestion, Step: li.Result(), Reason: questionReason(question.Questions)}
+		// Stamp WHEN the question was asked — a reader scanning the item for
+		// answers has no other way to tell a reply from the question itself.
+		// Prefer the backend's own clock: the replies it later reports are
+		// stamped by that same clock, and mixing in the local one means a
+		// runner running fast discards answers it can never get back.
+		marker := flow.MarkQuestionAskedLocal(time.Now())
+		if len(recorded) > 0 && !recorded[0].AskedAt.IsZero() {
+			// The backend's own clock — the one the answers will be stamped by.
+			marker = flow.MarkQuestionAsked(recorded[0].AskedAt)
+		}
+		req := flow.ParkRequest{
+			Kind:    flow.ParkQuestion,
+			Step:    li.Result(),
+			Reason:  questionReason(question.Questions),
+			Details: marker,
+		}
 		return parkAndReturn(ctx, app, claim, result, req)
 	}
 	var budget flow.ErrBudgetExhausted
@@ -418,9 +456,34 @@ func questionReason(qs []flow.AgentQuestion) string {
 		return "question pending"
 	}
 	if len(qs) == 1 {
-		return "question: " + qs[0].Text
+		return "question: " + questionSummary(qs[0])
 	}
-	return fmt.Sprintf("%d questions pending (first: %s)", len(qs), qs[0].Text)
+	return fmt.Sprintf("%d questions pending (first: %s)", len(qs), questionSummary(qs[0]))
+}
+
+// questionSummary is the one-line form of a question, for a park reason, a
+// status line, or a blocked message.
+//
+// Header first: it is the short scannable form, and Text may be a multi-line
+// block of supporting evidence. A reason built from Text would splice that
+// whole block into a field every reader expects to be one line.
+func questionSummary(q flow.AgentQuestion) string {
+	if s := strings.TrimSpace(q.Header); s != "" {
+		return firstLine(s)
+	}
+	// Header is optional, so this path is reachable from any handler calling
+	// ctx.AskQuestions directly — and Text is exactly where a multi-line body
+	// belongs. Taking the first line keeps the one-line invariant that made
+	// this helper necessary.
+	return firstLine(strings.TrimSpace(q.Text))
+}
+
+// firstLine reduces a possibly-multi-line string to its first line.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return s
 }
 
 // invocationID returns a coarse-grained id for the current invocation.
@@ -625,6 +688,15 @@ func (s *stepCtx) AskQuestions(qs ...flow.AgentQuestion) error {
 		return errors.New("ctx.AskQuestions called with no questions")
 	}
 	return flow.ErrQuestion{Questions: qs}
+}
+
+// ParkedOn reports the park this dispatch is resuming from, from the state
+// already loaded for it.
+func (s *stepCtx) ParkedOn() *flow.ParkRequest {
+	if s.state == nil {
+		return nil
+	}
+	return s.state.Park
 }
 
 func (s *stepCtx) Notify(step, detail string) {
