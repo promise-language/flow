@@ -32,6 +32,8 @@ type fakeWorktree struct {
 	validates   int
 	verifyAfter int
 	staged      bool
+	revsAsked   []string
+	strictRevs  map[string]bool // when set, any other revision errors
 	pushed      bool
 	opened      bool
 	openBody    string
@@ -78,6 +80,13 @@ func (w *fakeWorktree) CapturePatch(context.Context) ([]byte, error) {
 	return w.captured, nil
 }
 func (w *fakeWorktree) RevParse(_ context.Context, rev string) (string, error) {
+	w.revsAsked = append(w.revsAsked, rev)
+	// A backend that cannot resolve a revision must error rather than fall
+	// back to HEAD, or a caller comparing a branch against its base gets the
+	// same SHA twice and concludes the branch is empty.
+	if w.strictRevs != nil && !w.strictRevs[rev] {
+		return "", fmt.Errorf("fake: cannot resolve %q", rev)
+	}
 	if rev == "HEAD" {
 		return w.head, nil
 	}
@@ -514,5 +523,27 @@ func TestStepImplement_AttachesACompletePatch(t *testing.T) {
 	}
 	if !strings.Contains(string(ctx.resolved.Patch.Diff), "new.go") {
 		t.Errorf("diff = %q, want the added file", ctx.resolved.Patch.Diff)
+	}
+}
+
+// The canonical steps must stay inside the guaranteed RevParse set — "HEAD"
+// and the item's base branch. A backend that cannot resolve arbitrary
+// revisions is required to error rather than guess, so a step reaching outside
+// that pair is a step that will not run on every backend.
+func TestStepsOnlyRevParseTheGuaranteedRevisions(t *testing.T) {
+	wt := newFakeWorktree()
+	wt.strictRevs = map[string]bool{"HEAD": true, "main": true}
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	if err := testBuilder(t).stepImplement(ctx); err != nil {
+		t.Fatalf("stepImplement: %v", err)
+	}
+	for _, rev := range wt.revsAsked {
+		if !wt.strictRevs[rev] {
+			t.Errorf("resolved %q, outside the guaranteed {HEAD, base} set", rev)
+		}
+	}
+	if len(wt.revsAsked) == 0 {
+		t.Error("no revisions resolved — the empty-branch guard did not run")
 	}
 }

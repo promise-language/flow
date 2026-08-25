@@ -330,30 +330,41 @@ type Worktree interface {
 	Branch(ctx context.Context, name string, base string) (created bool, err error)
 	CurrentBranch(ctx context.Context) (string, error)
 
-	// Stage adds every change in the tree, including untracked files, to the
-	// index without committing.
+	// Stage makes every change in the tree, untracked files included, visible
+	// to the next CapturePatch — without committing it.
 	//
-	// It exists so a caller can capture a COMPLETE diff. CapturePatch is a diff
-	// against HEAD, which does not see untracked files, while Commit stages
-	// everything — so capturing before Commit silently omits every file the
-	// change added, and capturing after it sees a clean tree and returns
-	// nothing. Staging first makes the added files visible to the capture.
+	// The contract is that OUTCOME, not a particular mechanism. It exists
+	// because a git-shaped CapturePatch diffs against HEAD, which cannot see
+	// untracked files, while Commit stages everything: capturing before the
+	// commit silently omits every file the change added, and capturing after it
+	// sees a clean tree and returns nothing. Staging between the two is what
+	// makes the diff complete.
+	//
+	// A backend whose CapturePatch already accounts for untracked content —
+	// server-side capture, say — legitimately implements this as a no-op. That
+	// is not a stub: the guarantee callers depend on already holds.
 	Stage(ctx context.Context) error
 
 	Commit(ctx context.Context, msg string) error
 	Push(ctx context.Context) error
 
-	// RevParse resolves a revision ("HEAD", a branch name, a SHA) to a commit
-	// SHA.
+	// RevParse resolves a revision to a commit SHA.
 	//
-	// Callers need it to tell whether a branch actually carries work. Commit is
-	// a deliberate no-op when nothing is staged, so its nil return does NOT
-	// mean anything was recorded, and comparing HEAD before and after only
-	// covers the invocation that made the commit. Comparing the branch against
-	// its BASE answers the question that matters — is there anything here to
-	// open a pull request from — for a fresh branch and a resumed one alike.
-	// Without it, an empty branch travels all the way to "No commits between
-	// ...", long past the point where the real cause could have been named.
+	// Every implementation MUST answer "HEAD" and the item's base branch.
+	// Anything beyond those two is best-effort, and a backend that cannot
+	// resolve arbitrary revisions MUST return an error naming the limitation
+	// rather than fall back to HEAD — a caller comparing a branch against its
+	// base would otherwise be handed the same SHA twice and conclude the branch
+	// is empty. Callers should stay inside the guaranteed set; a step that
+	// needs more than that is a step that will not run on every backend.
+	//
+	// The guaranteed pair is what tells a branch carrying work from an empty
+	// one. Commit is a deliberate no-op when nothing is staged, so its nil
+	// return is not evidence anything was recorded, and comparing HEAD before
+	// and after only covers the invocation that made the commit. Comparing the
+	// branch against its base covers a fresh branch and a resumed one alike —
+	// without it an empty branch travels all the way to "No commits between
+	// ...", long past where the real cause could have been named.
 	RevParse(ctx context.Context, rev string) (string, error)
 
 	// Validate runs the project's verify command in the worktree. Returns
