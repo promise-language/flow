@@ -66,7 +66,11 @@ func main() {
 	contributor := flow.NewFlow("fix", []flow.ItemType{"task", "bug"})
 	contributor.AddStep("write plan", "plan", stepPlan, flow.StepConfig{})
 	contributor.AddStep("implement the change", "implementation", stepImplementation, flow.StepConfig{
-		Budget: flow.StepBudget{MaxPromptsPerInvocation: 5, Timeout: 60 * time.Minute},
+		// Only the timeout is worth overriding here. The prompt cap used to be
+		// raised to 5 to clear the old default of 1; the default is now well
+		// above that, and re-stating it would cap the flow's heaviest agent
+		// step below every other step.
+		Budget: flow.StepBudget{Timeout: 60 * time.Minute},
 	})
 	contributor.AddStep("review the work", "review", stepReview, flow.StepConfig{})
 	contributor.AddStep("analyze coverage", "coverage", stepCoverage, flow.StepConfig{})

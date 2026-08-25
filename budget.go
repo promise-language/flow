@@ -12,11 +12,21 @@ type StepBudget struct {
 }
 
 // defaultStepBudget is the package-level default applied to any axis the flow
-// author did not override. {3 invocations, 1 prompt/invocation, $10, 30m}.
+// author did not override. {3 invocations, 50 prompts/invocation, $20, 30m}.
+//
+// The prompt cap is a runaway backstop, not a budget. What a step actually
+// costs is gated by MaxCostUSD and what it actually occupies is gated by
+// Timeout; the number of prompts it takes to get there moves neither. Capping
+// prompts at 1 therefore bought no protection the other two axes did not
+// already provide, while making a prompts park the normal outcome for any
+// step that talks to the agent twice — and each of those cost an operator a
+// round-trip to raise, repeatedly, on the same steps. 50 sits far above any
+// legitimate step so the cap only fires on a genuine loop, which is the one
+// thing the other two axes are slow to catch.
 var defaultStepBudget = StepBudget{
 	MaxInvocations:          3,
-	MaxPromptsPerInvocation: 1,
-	MaxCostUSD:              10,
+	MaxPromptsPerInvocation: 50,
+	MaxCostUSD:              20,
 	Timeout:                 30 * time.Minute,
 }
 

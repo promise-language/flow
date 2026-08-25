@@ -83,6 +83,16 @@ is parked on anything else, since granting budget would not unpark it.
 is what "status" lists first. The human label ("write plan") is not an
 identity and is refused. Signal steps own no budget and cannot be granted.
 
+"status" prints every axis under a budget park, tagging the flat ones:
+
+  parked: budget-exhausted on "push" (cost) — spent $11.18 ...
+    axes: 3/3 inv (flat) · 2/2 prompts (flat) · $11.18/$10.00 (flat) · 0s/3h0m0s
+
+Any axis tagged "(flat)" can be named by a flag; an axis with headroom is
+refused, since granting it would not unpark anything. Bare "grant" tops up
+the flat axes that block the next dispatch on its own — prompts and timeout
+reset per invocation, so those two are only granted when asked for.
+
 With no id, --invocations/--cost/--prompts/--timeout state the HEADROOM to
 leave above what the step has consumed; with an id they are added to the
 current caps. All values must be >= 0. --dry-run prints the plan and writes

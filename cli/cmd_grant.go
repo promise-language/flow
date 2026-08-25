@@ -16,9 +16,14 @@ import (
 // watching a runaway wants the next attempt to be observable, not a blank
 // cheque. The cost and timeout defaults come from the step's own configured
 // budget (one more run's worth) — see grantIncrement.
+//
+// Prompts is not stingy, because it is not a spend gate: cost and timeout
+// bound what a step can actually consume, and the number of prompts it takes
+// to get there moves neither. A one-prompt top-up just re-parks the step on
+// the same axis, which is the loop this value exists to avoid.
 const (
 	defaultInvocationHeadroom = 1
-	defaultPromptHeadroom     = 1
+	defaultPromptHeadroom     = 25
 	// minCostHeadroom floors the cost top-up for a step whose configured cap
 	// is zero/unset, so `grant` on a cost park always buys SOME room.
 	minCostHeadroom = 1.0
@@ -257,20 +262,40 @@ func (app *App) planPark(f *flow.Flow, state *flow.ItemState, display string, a 
 	if rec.Resolved && !rec.Stale {
 		return nothingToDo(fmt.Sprintf("park on %q is stale — the step has resolved since; nothing to grant", id))
 	}
-	// The axes this grant will touch: the one that parked the step, plus any
-	// other already at its cap. See parkIncrement for why the second group is
-	// not optional.
-	axes := parkTopUpAxes(park.Axis, rec)
-	// Flags may only name an axis in that set. Granting an axis nobody is
-	// blocked on is how a tool ends up "topping up" a step that then re-parks
-	// on the axis it was blocked on.
+	// The axes a bare `grant` tops up on its own: the one that parked the step,
+	// plus any other already at its cap. See parkIncrement for why the second
+	// group is not optional.
+	auto := parkTopUpAxes(park.Axis, rec)
+	// The axes a FLAG may name: the automatic set, plus any axis the park
+	// itself reported flat. The two differ because the live record cannot
+	// always tell: PromptsThisInvocation resets on the invocation bump, so a
+	// step whose run burned every prompt reads as 0/N by the time the operator
+	// gets here. The park's snapshot is the only record of it. Refusing
+	// --prompts against an axis the park just printed as "(flat)" would make
+	// the report unactionable — which is the whole point of printing it.
+	grantable := grantableAxes(auto, park)
+	// A flag naming anything outside that set is still refused. Granting an
+	// axis nobody is blocked on is how a tool ends up "topping up" a step that
+	// then re-parks on the axis it was blocked on.
 	// Fixed order, not map order: with two wrong flags the message must always
 	// name the same one.
 	for _, name := range axisFlagNames {
-		if a.set[name] && !containsAxis(axes, axisForFlag[name]) {
+		if a.set[name] && !containsAxis(grantable, axisForFlag[name]) {
 			fmt.Fprintf(app.Err, "grant: --%s does not apply — %q is parked on the %s axis and has headroom on %s. Use --%s, or name the step explicitly.\n",
 				name, id, park.Axis, axisForFlag[name], park.Axis)
 			return refuse()
+		}
+	}
+	// An explicitly flagged axis joins the grant even when it is not in the
+	// automatic set — the operator read the report and asked for it. An axis
+	// the report merely flagged is NOT granted without a flag: prompts and
+	// timeout cannot block the next dispatch, so topping them up unasked would
+	// spend budget nobody requested.
+	axes := append([]flow.BudgetAxis(nil), auto...)
+	for _, name := range axisFlagNames {
+		axis := axisForFlag[name]
+		if a.set[name] && !containsAxis(axes, axis) {
+			axes = append(axes, axis)
 		}
 	}
 	// An explicit zero on an axis the step is blocked on asks for a grant that
@@ -280,10 +305,13 @@ func (app *App) planPark(f *flow.Flow, state *flow.ItemState, display string, a 
 		if !a.zeroOn(axis) {
 			continue
 		}
-		if axis == park.Axis {
+		switch {
+		case axis == park.Axis:
 			fmt.Fprintf(app.Err, "grant: --%s 0 would grant nothing on a step parked for lack of it\n", axis)
-		} else {
+		case containsAxis(auto, axis):
 			fmt.Fprintf(app.Err, "grant: --%s 0 would grant nothing — %q is also out of %s and would re-park at once\n", axis, id, axis)
+		default:
+			fmt.Fprintf(app.Err, "grant: --%s 0 would grant nothing on %q\n", axis, id)
 		}
 		return refuse()
 	}
@@ -293,6 +321,22 @@ func (app *App) planPark(f *flow.Flow, state *flow.ItemState, display string, a 
 		return nothingToDo(fmt.Sprintf("%q already has headroom on the %s axis — park is stale; nothing to grant", id, park.Axis))
 	}
 	return planned(plannedGrant{id: id, grant: g, before: rec})
+}
+
+// grantableAxes widens the automatic set with every axis the park reported
+// exhausted, so a flag can name anything the operator saw tagged "(flat)" in
+// the park report. Reporting an axis as flat and then refusing to grant it is
+// the contradiction this avoids.
+func grantableAxes(auto []flow.BudgetAxis, park *flow.ParkRequest) []flow.BudgetAxis {
+	// Copy, never alias: the caller appends to `auto` as well, and two slices
+	// growing into one backing array would overwrite each other's tail.
+	out := append([]flow.BudgetAxis(nil), auto...)
+	for _, r := range park.Axes {
+		if r.Exhausted && !containsAxis(out, r.Axis) {
+			out = append(out, r.Axis)
+		}
+	}
+	return out
 }
 
 // parkTopUpAxes is the axis set bare `grant` acts on: the parked axis first,

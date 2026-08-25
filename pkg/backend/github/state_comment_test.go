@@ -194,3 +194,56 @@ func TestRenderStateComment_NoParkIsNil(t *testing.T) {
 		t.Errorf("park = %+v, want nil", got.Park)
 	}
 }
+
+// The axis report is the operator-facing half of a budget park, so it has to
+// survive the state comment intact — a park read back an hour later must show
+// the same full picture the run recorded, not just the axis that tripped.
+func TestRenderStateComment_ParkAxisReportRoundTrip(t *testing.T) {
+	doc := stateDoc{
+		Flow:     "implement",
+		Schema:   stateSchemaVersion,
+		SeededAt: time.Date(2026, 5, 26, 15, 0, 0, 0, time.UTC),
+		Park: parkDocFromRequest(flow.ParkRequest{
+			Kind:   flow.ParkBudgetExhausted,
+			Step:   "push",
+			Axis:   flow.AxisCost,
+			Reason: `spent $11.18 without resolving "push"`,
+			Axes: []flow.AxisReport{
+				flow.NewAxisReport(flow.AxisInvocations, 3, 3),
+				flow.NewAxisReport(flow.AxisPrompts, 2, 2),
+				flow.NewAxisReport(flow.AxisCost, 11.18, 10),
+				flow.NewAxisReport(flow.AxisTimeout, 0, 10800),
+			},
+		}, time.Date(2026, 5, 26, 15, 20, 0, 0, time.UTC)),
+	}
+
+	body, err := renderStateComment("alice", doc)
+	if err != nil {
+		t.Fatalf("renderStateComment: %v", err)
+	}
+	got, _, found, err := extractStateDoc(body)
+	if err != nil || !found {
+		t.Fatalf("extractStateDoc: found=%v err=%v", found, err)
+	}
+	req := parkRequestFromDoc(got.Park)
+	if req == nil {
+		t.Fatal("park did not survive the round trip")
+	}
+	if len(req.Axes) != 4 {
+		t.Fatalf("Axes = %+v, want all four", req.Axes)
+	}
+	byAxis := map[flow.BudgetAxis]flow.AxisReport{}
+	for _, a := range req.Axes {
+		byAxis[a.Axis] = a
+	}
+	cost := byAxis[flow.AxisCost]
+	if cost.Used != 11.18 || cost.Granted != 10 || !cost.Exhausted {
+		t.Errorf("cost = %+v, want 11.18/10 flat", cost)
+	}
+	// The zero-valued "used" on an axis with headroom must not be confused
+	// with a missing axis: omitempty drops the field, the axis stays.
+	to := byAxis[flow.AxisTimeout]
+	if to.Axis != flow.AxisTimeout || to.Granted != 10800 || to.Exhausted {
+		t.Errorf("timeout = %+v, want 0/10800 with headroom", to)
+	}
+}

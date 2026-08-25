@@ -365,7 +365,9 @@ func TestRunOne_RespectsPromptsBudget(t *testing.T) {
 
 			_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p2"})
 			return err
-		}, flow.StepConfig{})
+			// Explicit cap: this test is about the gate firing, not about
+			// whatever the package default happens to be.
+		}, flow.StepConfig{Budget: flow.StepBudget{MaxPromptsPerInvocation: 1}})
 
 	}, a)
 

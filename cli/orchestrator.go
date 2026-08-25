@@ -171,6 +171,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 				Kind:   flow.ParkBudgetExhausted,
 				Step:   li.Result(),
 				Axis:   flow.AxisInvocations,
+				Axes:   axisReports(art, effectiveTimeout(li, art), art.PromptsThisInvocation, 0),
 				Reason: fmt.Sprintf("ran %d times without resolving %q", art.Invocations, li.ArtifactId),
 			})
 		}
@@ -179,6 +180,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 				Kind:   flow.ParkBudgetExhausted,
 				Step:   li.Result(),
 				Axis:   flow.AxisCost,
+				Axes:   axisReports(art, effectiveTimeout(li, art), art.PromptsThisInvocation, 0),
 				Reason: fmt.Sprintf("spent $%.2f without resolving %q", art.CostUSDSpent, li.ArtifactId),
 			})
 		}
@@ -190,19 +192,13 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// to the step's compiled-in budget and then the package default. A signal
 	// step owns no record yet, so Artifact returns the zero record and the
 	// flow definition applies.
-	timeout := li.Budget.Timeout
-	if art.GrantedTimeout > 0 {
-		timeout = art.GrantedTimeout
-	}
-	if timeout <= 0 {
-		timeout = flow.DefaultStepBudget().Timeout
-	}
+	timeout := effectiveTimeout(li, art)
 	stepCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// Build the per-invocation StepCtx.
 	budgetKey := li.Result()
-	sctx := newStepCtx(stepCtx, app, claim, f, li, state)
+	sctx := newStepCtx(stepCtx, app, claim, f, li, state, timeout)
 
 	// Auto-emit step entry so every step transition reaches the tracker
 	// without each handler having to call ctx.Notify. Handlers that DO call
@@ -226,14 +222,18 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		// patch carrying no diagnostic value at all. Park only; the work
 		// stays in the worktree where the rerun picks it up.
 		if li.Kind == flow.LifecycleArtifact {
-			if err := app.Backend.BumpInvocations(ctx, claim, budgetKey); err != nil {
+			if err := bumpInvocations(ctx, app, claim, state, li.ArtifactId, budgetKey); err != nil {
 				return flow.InvocationResult{}, fmt.Errorf("bump invocations: %w", err)
 			}
 		}
 		return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
-			Kind:   flow.ParkBudgetExhausted,
-			Step:   li.Result(),
-			Axis:   flow.AxisTimeout,
+			Kind: flow.ParkBudgetExhausted,
+			Step: li.Result(),
+			Axis: flow.AxisTimeout,
+			// The invocations bump above is already counted here: a timeout
+			// park that under-reported invocations is exactly what sent the
+			// operator back for a second grant.
+			Axes:   sctx.axisReports(timeout),
 			Reason: fmt.Sprintf("step %q exceeded %s", nextName, timeout),
 		})
 	}
@@ -254,7 +254,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// Non-transient: the invocation produced a result (success, skip,
 	// park, or a real failure). Count it.
 	if li.Kind == flow.LifecycleArtifact {
-		if err := app.Backend.BumpInvocations(ctx, claim, budgetKey); err != nil {
+		if err := bumpInvocations(ctx, app, claim, state, li.ArtifactId, budgetKey); err != nil {
 			return flow.InvocationResult{}, fmt.Errorf("bump invocations: %w", err)
 		}
 	}
@@ -317,6 +317,7 @@ func translateHandlerError(
 			Kind:   flow.ParkBudgetExhausted,
 			Step:   li.Result(),
 			Axis:   budget.Axis,
+			Axes:   sctx.axisReports(sctx.timeout),
 			Reason: budget.Error(),
 		})
 	}
@@ -324,6 +325,75 @@ func translateHandlerError(
 	result.Status = "failed"
 	result.Reason = handlerErr.Error()
 	return result, nil
+}
+
+// effectiveTimeout resolves a step's per-run deadline: the granted timeout
+// from the record wins when set (`grant --timeout` raises it), then the step's
+// compiled-in budget, then the package default. Shared by the dispatch
+// deadline and the park-time axis snapshot so the two can never disagree about
+// what the cap actually was.
+func effectiveTimeout(li flow.LifecycleItem, rec flow.ArtifactRecord) time.Duration {
+	if rec.GrantedTimeout > 0 {
+		return rec.GrantedTimeout
+	}
+	if li.Budget.Timeout > 0 {
+		return li.Budget.Timeout
+	}
+	return flow.DefaultStepBudget().Timeout
+}
+
+// axisReports snapshots all four budget axes for a budget park.
+//
+// Every axis is reported, never just the one that tripped. The axes go flat
+// together — a run that times out has usually burned its invocations too, and
+// a step parked on prompts is often already over on cost — so a park naming
+// one axis sent the operator back for another grant as soon as the next
+// dispatch re-parked on the next axis. One park, one report, one grant.
+//
+// prompts is passed in rather than read off the record: the record's counter
+// resets on the invocation bump, and what the operator needs to judge the cap
+// by is what the run that just parked actually spent. elapsed is likewise
+// unrecorded — it is wall time against the deadline, meaningful only for a
+// park that happens after dispatch, and zero for the pre-dispatch gates.
+func axisReports(rec flow.ArtifactRecord, timeout time.Duration, prompts int, elapsed time.Duration) []flow.AxisReport {
+	return []flow.AxisReport{
+		flow.NewAxisReport(flow.AxisInvocations, float64(rec.Invocations), float64(rec.GrantedInvocations)),
+		flow.NewAxisReport(flow.AxisPrompts, float64(prompts), float64(rec.GrantedPromptsPerInvocation)),
+		flow.NewAxisReport(flow.AxisCost, rec.CostUSDSpent, rec.GrantedCostUSD),
+		flow.NewAxisReport(flow.AxisTimeout, elapsed.Seconds(), timeout.Seconds()),
+	}
+}
+
+// axisReports is the post-dispatch snapshot: same four axes, read from the
+// live view of the invocation rather than the record alone. Cost and
+// invocations come off the in-memory mirror (kept current by meteredAgent and
+// bumpInvocations), prompts off the metered agent's own counter, and elapsed
+// off the step's start.
+func (sc *stepCtx) axisReports(timeout time.Duration) []flow.AxisReport {
+	if sc.li.Kind != flow.LifecycleArtifact {
+		return nil
+	}
+	var prompts int
+	if sc.agent != nil {
+		prompts = sc.agent.promptsThisInvocation
+	}
+	return axisReports(sc.state.Artifact(sc.li.ArtifactId), timeout, prompts, time.Since(sc.startedAt))
+}
+
+// bumpInvocations counts the invocation on the backend and mirrors it into the
+// in-memory record. The mirror matters because the park paths downstream
+// snapshot their axes from it: a timeout park reporting the pre-bump count
+// would under-report the invocations axis, which is precisely the axis that
+// re-parks the step once the operator grants the time.
+func bumpInvocations(ctx context.Context, app *App, claim flow.Claim, state *flow.ItemState, id flow.ArtifactId, key string) error {
+	if err := app.Backend.BumpInvocations(ctx, claim, key); err != nil {
+		return err
+	}
+	rec := state.Artifact(id)
+	rec.Invocations++
+	rec.PromptsThisInvocation = 0 // mirror the backend exactly — it resets here too
+	state.Artifacts[id] = rec
+	return nil
 }
 
 func parkAndReturn(
@@ -373,16 +443,22 @@ type stepCtx struct {
 	wtErr    error
 	agent    *meteredAgent
 	resolved bool
+	// startedAt and timeout back the timeout axis of a park-time snapshot:
+	// elapsed-vs-cap is the one axis with no counter on the record.
+	startedAt time.Time
+	timeout   time.Duration
 }
 
-func newStepCtx(ctx context.Context, app *App, claim flow.Claim, f *flow.Flow, li flow.LifecycleItem, state *flow.ItemState) *stepCtx {
+func newStepCtx(ctx context.Context, app *App, claim flow.Claim, f *flow.Flow, li flow.LifecycleItem, state *flow.ItemState, timeout time.Duration) *stepCtx {
 	sc := &stepCtx{
-		ctx:   ctx,
-		app:   app,
-		claim: claim,
-		flow:  f,
-		li:    li,
-		state: state,
+		ctx:       ctx,
+		app:       app,
+		claim:     claim,
+		flow:      f,
+		li:        li,
+		state:     state,
+		startedAt: time.Now(),
+		timeout:   timeout,
 	}
 	sc.agent = &meteredAgent{
 		inner:   app.Agent,

@@ -42,7 +42,7 @@ func TestResolveBudget_EmptyMatchesDefault(t *testing.T) {
 
 func TestDefaultStepBudget_HasExpectedValues(t *testing.T) {
 	d := DefaultStepBudget()
-	if d.MaxInvocations != 3 || d.MaxPromptsPerInvocation != 1 || d.MaxCostUSD != 10 || d.Timeout != 30*time.Minute {
-		t.Errorf("defaults = %+v, want {3,1,10,30m}", d)
+	if d.MaxInvocations != 3 || d.MaxPromptsPerInvocation != 50 || d.MaxCostUSD != 20 || d.Timeout != 30*time.Minute {
+		t.Errorf("defaults = %+v, want {3,50,20,30m}", d)
 	}
 }

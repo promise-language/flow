@@ -162,10 +162,21 @@ type statusPayload struct {
 }
 
 type parkPayload struct {
-	Kind   string `json:"kind"`
-	Step   string `json:"step,omitempty"`
-	Axis   string `json:"axis,omitempty"`
-	Reason string `json:"reason,omitempty"`
+	Kind string `json:"kind"`
+	Step string `json:"step,omitempty"`
+	Axis string `json:"axis,omitempty"`
+	// Axes is every budget axis at park time, not just the tripping one, so a
+	// tool reading this can compute a single grant that covers all of them.
+	// Empty for park kinds that aren't budget-exhausted.
+	Axes   []axisReportPayload `json:"axes,omitempty"`
+	Reason string              `json:"reason,omitempty"`
+}
+
+type axisReportPayload struct {
+	Axis      string  `json:"axis"`
+	Used      float64 `json:"used"`
+	Granted   float64 `json:"granted"`
+	Exhausted bool    `json:"exhausted"`
 }
 
 type stepPayload struct {

@@ -270,16 +270,31 @@ func parkPayloadOf(p *flow.ParkRequest) *parkPayload {
 	if p == nil {
 		return nil
 	}
-	return &parkPayload{
+	pp := &parkPayload{
 		Kind:   string(p.Kind),
 		Step:   p.Step,
 		Axis:   string(p.Axis),
 		Reason: p.Reason,
 	}
+	for _, a := range p.Axes {
+		pp.Axes = append(pp.Axes, axisReportPayload{
+			Axis:      string(a.Axis),
+			Used:      a.Used,
+			Granted:   a.Granted,
+			Exhausted: a.Exhausted,
+		})
+	}
+	return pp
 }
 
 // parkLine renders a park for humans: "budget-exhausted on "implementation"
 // (invocations) — ran 3 times without resolving "implementation"".
+//
+// A budget park carries a second, indented line listing every axis, because
+// the headline names only the axis that tripped first. Granting that one and
+// nothing else is what turned a single blocked step into one operator
+// round-trip per axis; the axes tagged "(flat)" are the ones a grant has to
+// cover to actually get the step moving.
 func parkLine(p *parkPayload) string {
 	var b strings.Builder
 	b.WriteString(p.Kind)
@@ -292,7 +307,27 @@ func parkLine(p *parkPayload) string {
 	if p.Reason != "" {
 		fmt.Fprintf(&b, " — %s", p.Reason)
 	}
+	if line := axesLine(p.Axes); line != "" {
+		fmt.Fprintf(&b, "\n  axes: %s", line)
+	}
 	return b.String()
+}
+
+// axesLine joins the per-axis meters into one " · "-separated run.
+func axesLine(axes []axisReportPayload) string {
+	if len(axes) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(axes))
+	for _, a := range axes {
+		parts = append(parts, flow.AxisReport{
+			Axis:      flow.BudgetAxis(a.Axis),
+			Used:      a.Used,
+			Granted:   a.Granted,
+			Exhausted: a.Exhausted,
+		}.Format())
+	}
+	return strings.Join(parts, " · ")
 }
 
 // statusTitleMax bounds the human "title:" line, in runes. Item.Title is free

@@ -1,6 +1,9 @@
 package flow
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // ParkKind discriminates the reason an item was parked.
 type ParkKind string
@@ -47,10 +50,73 @@ type ParkRequest struct {
 	// thing `grant` accepts), so a park that named the label could not be
 	// matched to the record whose budget caused it. The SDK fills this in
 	// from LifecycleItem.Result() when a handler leaves it empty.
-	Step    string     `json:"step,omitempty"`
-	Axis    BudgetAxis `json:"axis,omitempty"` // set when Kind==ParkBudgetExhausted
-	Reason  string     `json:"reason,omitempty"`
-	Details string     `json:"details,omitempty"`
+	Step string     `json:"step,omitempty"`
+	Axis BudgetAxis `json:"axis,omitempty"` // set when Kind==ParkBudgetExhausted
+	// Axes is the state of EVERY budget axis at park time, not just the one
+	// in Axis. Reporting only the tripping axis cost the operator a round-trip
+	// per axis: the axes go flat together, so granting the named one bought a
+	// dispatch that re-parked on the next. With the full set an operator reads
+	// one park and grants once. Set alongside Axis when
+	// Kind==ParkBudgetExhausted; empty for every other park kind.
+	Axes    []AxisReport `json:"axes,omitempty"`
+	Reason  string       `json:"reason,omitempty"`
+	Details string       `json:"details,omitempty"`
+}
+
+// AxisReport is one budget axis's meter and cap at the moment a step parked.
+//
+// Used and Granted are carried in the axis's own unit — whole counts for
+// invocations and prompts, dollars for cost, seconds for timeout — as float64
+// so one type covers all four. Render them with Format, which knows the units.
+type AxisReport struct {
+	Axis    BudgetAxis `json:"axis"`
+	Used    float64    `json:"used"`
+	Granted float64    `json:"granted"`
+	// Exhausted marks an axis that is at or past its cap. These are the axes
+	// a grant must cover: any one of them re-parks the step. An axis with no
+	// cap set (Granted == 0) is unmetered, never exhausted.
+	Exhausted bool `json:"exhausted"`
+}
+
+// Format renders one axis as "used/granted" in its own unit, e.g. "3/3 inv",
+// "$11.18/$10.00", "1h30m0s/3h0m0s". Exhausted axes are tagged so the operator
+// can see at a glance which ones a grant has to cover.
+func (a AxisReport) Format() string {
+	var s string
+	switch a.Axis {
+	case AxisCost:
+		s = fmt.Sprintf("$%.2f/$%.2f", a.Used, a.Granted)
+	case AxisTimeout:
+		// Scale as float, not via time.Duration(seconds)*time.Second: the
+		// integer conversion truncates, and a step on a sub-second budget
+		// would report the meaningless "0s/0s".
+		s = fmt.Sprintf("%s/%s", durationSeconds(a.Used), durationSeconds(a.Granted))
+	case AxisPrompts:
+		s = fmt.Sprintf("%d/%d prompts", int(a.Used), int(a.Granted))
+	default:
+		s = fmt.Sprintf("%d/%d inv", int(a.Used), int(a.Granted))
+	}
+	if a.Exhausted {
+		s += " (flat)"
+	}
+	return s
+}
+
+// durationSeconds renders a float count of seconds as a duration, rounded to
+// the millisecond so wall-clock jitter does not print as noise.
+func durationSeconds(secs float64) time.Duration {
+	return (time.Duration(secs * float64(time.Second))).Round(time.Millisecond)
+}
+
+// NewAxisReport builds one report, deriving Exhausted from the pair. A zero
+// Granted means the axis carries no cap, so it cannot be exhausted.
+func NewAxisReport(axis BudgetAxis, used, granted float64) AxisReport {
+	return AxisReport{
+		Axis:      axis,
+		Used:      used,
+		Granted:   granted,
+		Exhausted: granted > 0 && used >= granted,
+	}
 }
 
 // GrantClearsPark reports whether a grant against budget key `key` — producing

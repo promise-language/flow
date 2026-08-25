@@ -41,16 +41,29 @@ type stateDoc struct {
 }
 
 type stateParkDoc struct {
-	Kind     string    `yaml:"kind"`
-	Step     string    `yaml:"step,omitempty"` // step ID (artifact/signal id)
-	Axis     string    `yaml:"axis,omitempty"`
-	Reason   string    `yaml:"reason,omitempty"`
-	Details  string    `yaml:"details,omitempty"`
-	ParkedAt time.Time `yaml:"parked_at,omitempty"`
+	Kind string `yaml:"kind"`
+	Step string `yaml:"step,omitempty"` // step ID (artifact/signal id)
+	Axis string `yaml:"axis,omitempty"`
+	// Axes is the every-axis snapshot behind ParkRequest.Axes. Persisted so
+	// the operator reading a park hours later sees the same full picture the
+	// run did, instead of the one axis that happened to trip first.
+	Axes     []stateParkAxisDoc `yaml:"axes,omitempty"`
+	Reason   string             `yaml:"reason,omitempty"`
+	Details  string             `yaml:"details,omitempty"`
+	ParkedAt time.Time          `yaml:"parked_at,omitempty"`
+}
+
+type stateParkAxisDoc struct {
+	Axis    string  `yaml:"axis"`
+	Used    float64 `yaml:"used,omitempty"`
+	Granted float64 `yaml:"granted,omitempty"`
+	// Exhausted is persisted rather than recomputed: it records the run's own
+	// verdict at park time, which is the thing being reported.
+	Exhausted bool `yaml:"exhausted,omitempty"`
 }
 
 func parkDocFromRequest(req flow.ParkRequest, at time.Time) *stateParkDoc {
-	return &stateParkDoc{
+	doc := &stateParkDoc{
 		Kind:     string(req.Kind),
 		Step:     req.Step,
 		Axis:     string(req.Axis),
@@ -58,19 +71,37 @@ func parkDocFromRequest(req flow.ParkRequest, at time.Time) *stateParkDoc {
 		Details:  req.Details,
 		ParkedAt: at,
 	}
+	for _, a := range req.Axes {
+		doc.Axes = append(doc.Axes, stateParkAxisDoc{
+			Axis:      string(a.Axis),
+			Used:      a.Used,
+			Granted:   a.Granted,
+			Exhausted: a.Exhausted,
+		})
+	}
+	return doc
 }
 
 func parkRequestFromDoc(d *stateParkDoc) *flow.ParkRequest {
 	if d == nil {
 		return nil
 	}
-	return &flow.ParkRequest{
+	req := &flow.ParkRequest{
 		Kind:    flow.ParkKind(d.Kind),
 		Step:    d.Step,
 		Axis:    flow.BudgetAxis(d.Axis),
 		Reason:  d.Reason,
 		Details: d.Details,
 	}
+	for _, a := range d.Axes {
+		req.Axes = append(req.Axes, flow.AxisReport{
+			Axis:      flow.BudgetAxis(a.Axis),
+			Used:      a.Used,
+			Granted:   a.Granted,
+			Exhausted: a.Exhausted,
+		})
+	}
+	return req
 }
 
 type stateArtifactDoc struct {

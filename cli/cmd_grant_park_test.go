@@ -268,8 +268,12 @@ func TestGrantPark_PromptsAxisRaisesTheCap(t *testing.T) {
 	if code := env.grant(); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
 	}
-	if got := env.rec(t, "plan").GrantedPromptsPerInvocation; got != 2 {
-		t.Errorf("GrantedPromptsPerInvocation = %d, want 2", got)
+	// The seeded cap is 1; a bare grant raises it by the default headroom.
+	// Asserting against the constant rather than a literal keeps this test
+	// about the behavior — the cap goes UP — and not about the tuning.
+	want := 1 + defaultPromptHeadroom
+	if got := env.rec(t, "plan").GrantedPromptsPerInvocation; got != want {
+		t.Errorf("GrantedPromptsPerInvocation = %d, want %d", got, want)
 	}
 }
 
