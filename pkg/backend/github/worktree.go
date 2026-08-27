@@ -92,7 +92,12 @@ func (w *worktree) Open(ctx context.Context, base, title, body string) (string, 
 
 	// Use `gh pr create` to handle cross-repo (fork) cases cleanly. The Go
 	// client requires owner-qualified head; gh handles that natively.
-	args := []string{"-C", w.b.cfg.WorktreeDir, "pr", "create", "--base", base, "--title", title, "--body", body, "--head", expected}
+	// --repo, not -C: `-C` is git's flag for selecting a working directory and
+	// gh has no such flag — passing it fails argument validation before gh does
+	// anything ("unknown shorthand flag: 'C'"). --repo also removes the
+	// dependency on the process working directory entirely, which the runner
+	// does not set.
+	args := []string{"--repo", w.b.cfg.repoFullName(), "pr", "create", "--base", base, "--title", title, "--body", body, "--head", expected}
 	stdout, stderr, err := w.b.git.runner(ctx, "gh", args...)
 	if err != nil {
 		return "", fmt.Errorf("gh pr create: %w (stderr=%s)", err, strings.TrimSpace(string(stderr)))
@@ -110,7 +115,8 @@ func (w *worktree) Open(ctx context.Context, base, title, body string) (string, 
 }
 
 func (w *worktree) Merge(ctx context.Context, url string) error {
-	args := []string{"-C", w.b.cfg.WorktreeDir, "pr", "merge", url, "--squash", "--auto"}
+	// --repo, not -C: see Open. gh has no -C flag.
+	args := []string{"--repo", w.b.cfg.repoFullName(), "pr", "merge", url, "--squash", "--auto"}
 	_, stderr, err := w.b.git.runner(ctx, "gh", args...)
 	if err != nil {
 		return fmt.Errorf("gh pr merge: %w (stderr=%s)", err, strings.TrimSpace(string(stderr)))
