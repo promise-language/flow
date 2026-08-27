@@ -338,8 +338,10 @@ usage:
                                      "status" — never the label (e.g. "write plan")
   %[1]s release                      drop the claim
 
-status, list, and grant print human-readable text on a terminal and JSON when
-piped or redirected; --json / --human (or FLOW_OUTPUT=json|human) force one.`, bin)
+status, list, grant, and resolve print human-readable text on a terminal and
+JSON when piped or redirected; --json / --human (or FLOW_OUTPUT=json|human)
+force one. resolve's human text is its progress narration on stderr, which it
+prints in both modes — in human mode it writes nothing to stdout at all.`, bin)
 }
 
 // newFlagSet returns a FlagSet configured for the strict-parsing convention:

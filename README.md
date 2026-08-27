@@ -698,7 +698,7 @@ See the forge [blueprint][forge-blueprint] for the full file layout
 | `list` | list items this flow can process |
 | `claim <id>` (alias `lease`) | acquire an exclusive claim; resolves the ref via `RefResolver` or a `ListEligible` substring match |
 | `run-step` | advance ONE lifecycle item; emit an `InvocationResult` JSON. Re-run until `done` |
-| `resolve [<id>]` (alias `run-all`) | drive the FULL lifecycle: loop `run-step` until the item finalizes or the run stops (parked, skipped, or failed). With `<id>` claims it first; with no claim and no id, auto-selects `ListEligible()[0]`. Streams each step's `InvocationResult` JSON |
+| `resolve [<id>]` (alias `run-all`) | drive the FULL lifecycle: loop `run-step` until the item finalizes or the run stops (parked, skipped, or failed). With `<id>` claims it first; with no claim and no id, auto-selects `ListEligible()[0]`. Narrates progress on stderr; in JSON mode streams each step's `InvocationResult` to stdout |
 | `status [<id>]` | read-only lifecycle checklist (uses `StateInspector` when there's no claim) |
 | `grant` | read the item's park and top up **exactly** the axis that parked it. Refuses (writing nothing) when the park is not a budget cap — a question park is cleared by answering, not by granting |
 | `grant --all [--invocations N] [--cost USD] [--prompts N]` | sweep every pending step, raising each axis to at least *consumed + headroom*. Steps that already have headroom are not written at all |
@@ -711,13 +711,19 @@ an unknown id, a label, a signal id, or an unseeded step is rejected with exit
 
 ### Output modes
 
-`status`, `list`, and `grant` render **human-readable text on a terminal and
-JSON when stdout is piped or redirected** — so a tool driving a flow binary
-never parses text meant for a person. `--json` / `--human` force one for a
-single command; `FLOW_OUTPUT=json|human` forces it for the process. `run-step`
-and `resolve` always emit `InvocationResult` JSON on stdout (their human
-progress goes to stderr), and errors are always plain text on stderr with the
-exit code as the signal.
+`status`, `list`, `grant`, and `resolve` render **human-readable text on a
+terminal and JSON when stdout is piped or redirected** — so a tool driving a
+flow binary never parses text meant for a person. `--json` / `--human` force
+one for a single command; `FLOW_OUTPUT=json|human` forces it for the process.
+Errors are always plain text on stderr with the exit code as the signal.
+
+`resolve` is a stream, not a one-shot report, so it splits the two: its human
+output is the per-step progress narration on **stderr**, which it prints in
+both modes, and its stdout carries per-step `InvocationResult` objects and
+nothing else — in human mode, nothing at all. That is why `resolve >
+steps.json` fills the file while the terminal still shows progress, and
+`resolve 2>/dev/null` yields the machine stream alone. `run-step` always emits
+its single `InvocationResult` JSON on stdout.
 
 `status --json` is the machine view of the checklist: each step carries its
 `id`, `label`, `kind` (`artifact|signal|await`), `state`
