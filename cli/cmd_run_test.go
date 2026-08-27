@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -103,5 +105,37 @@ func TestCmdRun_TakeoverFailureDoesNotBlockStep(t *testing.T) {
 	}
 	if wrapped.calls != 1 {
 		t.Errorf("MarkManualTakeover calls = %d, want 1 (failure path still calls)", wrapped.calls)
+	}
+}
+
+// run-step is a one-shot invocation, not a stream: it emits its single
+// InvocationResult on stdout UNCONDITIONALLY. resolve gained --json/--human
+// and gates its stream on the mode; run-step deliberately did not, and the
+// pressure to "finish the convention" is exactly what would silently break
+// every tool that parses this one line. FLOW_OUTPUT=human is the strongest
+// form of the ask — if any mode gate ever appears here, this fails.
+func TestCmdRun_EmitsJSONRegardlessOfOutputMode(t *testing.T) {
+	for _, mode := range []string{"", "human", "json"} {
+		t.Run("FLOW_OUTPUT="+mode, func(t *testing.T) {
+			t.Setenv(outputEnv, mode)
+			app, _, _ := testApp(t, func(f *flow.Flow) {
+				f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+					return ctx.ResolveMarkdown("the plan")
+				}, flow.StepConfig{})
+			}, &stubAgent{name: "stub"})
+			out := &bytes.Buffer{}
+			app.Out = out
+
+			if code := app.cmdRun(context.Background(), nil); code != 0 {
+				t.Fatalf("cmdRun = %d, want 0", code)
+			}
+			var res flow.InvocationResult
+			if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+				t.Fatalf("stdout %q is not an InvocationResult: %v", out.String(), err)
+			}
+			if res.Step != "write plan" || res.Status != "done" {
+				t.Errorf("result = %+v, want step %q status done", res, "write plan")
+			}
+		})
 	}
 }

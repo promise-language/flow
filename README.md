@@ -721,9 +721,11 @@ Errors are always plain text on stderr with the exit code as the signal.
 output is the per-step progress narration on **stderr**, which it prints in
 both modes, and its stdout carries per-step `InvocationResult` objects and
 nothing else — in human mode, nothing at all. That is why `resolve >
-steps.json` fills the file while the terminal still shows progress, and
-`resolve 2>/dev/null` yields the machine stream alone. `run-step` always emits
-its single `InvocationResult` JSON on stdout.
+steps.json` fills the file while the terminal still shows progress, and why
+`resolve --json 2>/dev/null` yields the machine stream alone. The mode is
+still decided by stdout, never by stderr: bare `resolve 2>/dev/null` on a
+terminal prints nothing at all, because a terminal stdout selects human.
+`run-step` always emits its single `InvocationResult` JSON on stdout.
 
 `status --json` is the machine view of the checklist: each step carries its
 `id`, `label`, `kind` (`artifact|signal|await`), `state`

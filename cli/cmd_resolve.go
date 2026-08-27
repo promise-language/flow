@@ -141,7 +141,10 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	// InvocationResult objects and nothing else — and in human mode nothing at
 	// all. That split is what makes `resolve > steps.json` do the obvious
 	// thing (JSON accumulating in the file, progress still on the terminal)
-	// and `resolve 2>/dev/null` yield the machine stream alone.
+	// and lets `resolve --json 2>/dev/null` yield the machine stream alone.
+	// The mode is decided by stdout, never by stderr: bare `resolve
+	// 2>/dev/null` on a terminal prints nothing at all, because a terminal
+	// stdout selects human.
 	//
 	// A single agent step can run for many minutes; without these lines the
 	// silence reads as a hang and invites the operator to kill a healthy run.

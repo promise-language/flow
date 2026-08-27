@@ -272,3 +272,38 @@ func TestResolveOutput_UnknownEnvWarns(t *testing.T) {
 		t.Errorf("stderr = %q, want a warning about the bad value", errBuf.String())
 	}
 }
+
+// The usage text names the commands that take --json/--human. That sentence is
+// a promise about a closed set, and this change is what put `resolve` in it —
+// so hold the documented set and the wired set equal. Probing with the
+// contradictory pair is what makes the wiring observable: a command that
+// registered the flags rejects them ("mutually exclusive"), one that never did
+// fails to parse them at all — and both decide before any backend work, so
+// nothing here touches the tracker.
+func TestUsage_NamesExactlyTheCommandsTakingOutputFlags(t *testing.T) {
+	// The output-modes note is the last paragraph of the usage text.
+	paras := strings.Split(strings.TrimSpace(usage("flow")), "\n\n")
+	note := paras[len(paras)-1]
+	if !strings.Contains(note, "--json") {
+		t.Fatalf("last usage paragraph is not the output-modes note: %q", note)
+	}
+
+	for cmd := range perCommandUsage {
+		app, out, errBuf := newArgparseApp(t)
+		code := RunWithArgs(*app, []string{cmd, "--json", "--human"})
+		if code != 2 {
+			t.Errorf("%s --json --human: exit = %d, want 2 (either rejected as contradictory or as undefined flags)", cmd, code)
+		}
+		if out.Len() != 0 {
+			t.Errorf("%s --json --human: stdout = %q, want empty", cmd, out.String())
+		}
+		takesFlags := strings.Contains(errBuf.String(), "mutually exclusive")
+		if !takesFlags && !strings.Contains(errBuf.String(), "not defined") {
+			t.Fatalf("%s --json --human: stderr = %q, want either the mutual-exclusion refusal or an undefined-flag error", cmd, errBuf.String())
+		}
+		if named := strings.Contains(note, cmd); named != takesFlags {
+			t.Errorf("%s: named in the output-modes note = %v, takes --json/--human = %v — the two must agree.\nnote: %q",
+				cmd, named, takesFlags, note)
+		}
+	}
+}
