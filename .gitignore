@@ -33,3 +33,6 @@ go.work.sum
 
 # forge dev tooling — bin/ holds locally-built tools, never committed
 bin/
+
+# written by `workspace setup` — per-host/per-clone, never committed
+/CLAUDE.local.md
