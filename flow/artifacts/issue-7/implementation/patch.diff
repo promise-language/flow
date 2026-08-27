@@ -1,0 +1,333 @@
+diff --git a/README.md b/README.md
+index 0d901d2..fa1f05e 100644
+--- a/README.md
++++ b/README.md
+@@ -698,7 +698,7 @@ See the forge [blueprint][forge-blueprint] for the full file layout
+ | `list` | list items this flow can process |
+ | `claim <id>` (alias `lease`) | acquire an exclusive claim; resolves the ref via `RefResolver` or a `ListEligible` substring match |
+ | `run-step` | advance ONE lifecycle item; emit an `InvocationResult` JSON. Re-run until `done` |
+-| `resolve [<id>]` (alias `run-all`) | drive the FULL lifecycle: loop `run-step` until the item finalizes or the run stops (parked, skipped, or failed). With `<id>` claims it first; with no claim and no id, auto-selects `ListEligible()[0]`. Streams each step's `InvocationResult` JSON |
++| `resolve [<id>]` (alias `run-all`) | drive the FULL lifecycle: loop `run-step` until the item finalizes or the run stops (parked, skipped, or failed). With `<id>` claims it first; with no claim and no id, auto-selects `ListEligible()[0]`. Narrates progress on stderr; in JSON mode streams each step's `InvocationResult` to stdout |
+ | `status [<id>]` | read-only lifecycle checklist (uses `StateInspector` when there's no claim) |
+ | `grant` | read the item's park and top up **exactly** the axis that parked it. Refuses (writing nothing) when the park is not a budget cap — a question park is cleared by answering, not by granting |
+ | `grant --all [--invocations N] [--cost USD] [--prompts N]` | sweep every pending step, raising each axis to at least *consumed + headroom*. Steps that already have headroom are not written at all |
+@@ -711,13 +711,19 @@ an unknown id, a label, a signal id, or an unseeded step is rejected with exit
+ 
+ ### Output modes
+ 
+-`status`, `list`, and `grant` render **human-readable text on a terminal and
+-JSON when stdout is piped or redirected** — so a tool driving a flow binary
+-never parses text meant for a person. `--json` / `--human` force one for a
+-single command; `FLOW_OUTPUT=json|human` forces it for the process. `run-step`
+-and `resolve` always emit `InvocationResult` JSON on stdout (their human
+-progress goes to stderr), and errors are always plain text on stderr with the
+-exit code as the signal.
++`status`, `list`, `grant`, and `resolve` render **human-readable text on a
++terminal and JSON when stdout is piped or redirected** — so a tool driving a
++flow binary never parses text meant for a person. `--json` / `--human` force
++one for a single command; `FLOW_OUTPUT=json|human` forces it for the process.
++Errors are always plain text on stderr with the exit code as the signal.
++
++`resolve` is a stream, not a one-shot report, so it splits the two: its human
++output is the per-step progress narration on **stderr**, which it prints in
++both modes, and its stdout carries per-step `InvocationResult` objects and
++nothing else — in human mode, nothing at all. That is why `resolve >
++steps.json` fills the file while the terminal still shows progress, and
++`resolve 2>/dev/null` yields the machine stream alone. `run-step` always emits
++its single `InvocationResult` JSON on stdout.
+ 
+ `status --json` is the machine view of the checklist: each step carries its
+ `id`, `label`, `kind` (`artifact|signal|await`), `state`
+diff --git a/cli/app.go b/cli/app.go
+index ae83a4c..63fbfa4 100644
+--- a/cli/app.go
++++ b/cli/app.go
+@@ -338,8 +338,10 @@ usage:
+                                      "status" — never the label (e.g. "write plan")
+   %[1]s release                      drop the claim
+ 
+-status, list, and grant print human-readable text on a terminal and JSON when
+-piped or redirected; --json / --human (or FLOW_OUTPUT=json|human) force one.`, bin)
++status, list, grant, and resolve print human-readable text on a terminal and
++JSON when piped or redirected; --json / --human (or FLOW_OUTPUT=json|human)
++force one. resolve's human text is its progress narration on stderr, which it
++prints in both modes — in human mode it writes nothing to stdout at all.`, bin)
+ }
+ 
+ // newFlagSet returns a FlagSet configured for the strict-parsing convention:
+diff --git a/cli/cmd_resolve.go b/cli/cmd_resolve.go
+index d7624bf..b13cf18 100644
+--- a/cli/cmd_resolve.go
++++ b/cli/cmd_resolve.go
+@@ -46,10 +46,11 @@ const maxResolveSteps = 50
+ // ListEligible mirrors the orchestrator's selectEligibleTasks (same per-item
+ // filter and same leased/urgency/priority sort), so the CLI picks the same
+ // "next" the orchestrator would. An empty eligible set is a clean exit (0),
+-// not an error — there is simply no work to do. Each step's result is
+-// streamed as JSON so the operator sees progress live.
++// not an error — there is simply no work to do. Progress is narrated on Err in
++// both output modes; in JSON mode each step's result is also streamed to Out.
+ func (app *App) cmdResolve(ctx context.Context, args []string) int {
+ 	fs := app.newFlagSet("resolve")
++	of := addOutputFlags(fs)
+ 	if err := parseInterspersed(fs, args); err != nil {
+ 		return 2
+ 	}
+@@ -57,6 +58,12 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
+ 		fmt.Fprintf(app.Err, "resolve: unexpected argument %q (resolve takes an optional item id)\n", fs.Arg(1))
+ 		return 2
+ 	}
++	// Decided before any claim work: a contradictory --json --human must exit 2
++	// without leasing anything.
++	mode, ok := of.mode(app, "resolve")
++	if !ok {
++		return 2
++	}
+ 
+ 	var claim *flow.Claim
+ 	if fs.NArg() == 1 {
+@@ -130,12 +137,16 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
+ 		}
+ 	}
+ 
+-	// Progress goes to Err so stdout stays a clean machine-readable stream of
+-	// per-step InvocationResult JSON. A single agent step can run for many
+-	// minutes; without these lines the silence reads as a hang and invites the
+-	// operator to kill a healthy run. We announce each step BEFORE running it
+-	// (so the long pause is attributed to a named step) and report the outcome
+-	// after.
++	// Progress goes to Err in BOTH modes, so stdout carries per-step
++	// InvocationResult objects and nothing else — and in human mode nothing at
++	// all. That split is what makes `resolve > steps.json` do the obvious
++	// thing (JSON accumulating in the file, progress still on the terminal)
++	// and `resolve 2>/dev/null` yield the machine stream alone.
++	//
++	// A single agent step can run for many minutes; without these lines the
++	// silence reads as a hang and invites the operator to kill a healthy run.
++	// We announce each step BEFORE running it (so the long pause is attributed
++	// to a named step) and report the outcome after.
+ 	fmt.Fprintf(app.Err, "resolve: driving %s to completion (until finalized or parked)…\n", claim.ItemRef.Display)
+ 	enc := json.NewEncoder(app.Out)
+ 	for range maxResolveSteps {
+@@ -158,7 +169,9 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
+ 			fmt.Fprintln(app.Err, "resolve:", err)
+ 			return 1
+ 		}
+-		_ = enc.Encode(res)
++		if mode == OutputJSON {
++			_ = enc.Encode(res)
++		}
+ 
+ 		label := res.Step
+ 		if label == "" {
+diff --git a/cli/cmd_resolve_test.go b/cli/cmd_resolve_test.go
+index 29eef94..837dd9e 100644
+--- a/cli/cmd_resolve_test.go
++++ b/cli/cmd_resolve_test.go
+@@ -357,6 +357,171 @@ func TestIsLeaseItemConflict(t *testing.T) {
+ 	}
+ }
+ 
++// ---------------------------------------------------------------------------
++// Output modes. resolve is a STREAM, not a one-shot report: its human output
++// is the stderr narration (printed in both modes) and its stdout carries
++// per-step InvocationResult objects and nothing else — in human mode, nothing
++// at all.
++// ---------------------------------------------------------------------------
++
++// decodeResultStream decodes the whole of s as a stream of InvocationResult
++// objects and asserts it is line-oriented (one compact object per line), which
++// is what `resolve | jq` and `resolve > steps.json` consume.
++func decodeResultStream(t *testing.T, s string) []flow.InvocationResult {
++	t.Helper()
++	var got []flow.InvocationResult
++	dec := json.NewDecoder(strings.NewReader(s))
++	for dec.More() {
++		var res flow.InvocationResult
++		if err := dec.Decode(&res); err != nil {
++			t.Fatalf("decode stream %q: %v", s, err)
++		}
++		got = append(got, res)
++	}
++	if n := strings.Count(strings.TrimSuffix(s, "\n"), "\n") + 1; s != "" && n != len(got) {
++		t.Errorf("stream has %d lines for %d objects — want one compact object per line; got %q", n, len(got), s)
++	}
++	return got
++}
++
++func TestCmdResolve_HumanModeWritesNothingToStdout(t *testing.T) {
++	t.Setenv(outputEnv, "")
++	be := fake.New()
++	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
++	// The fixture injects a bytes.Buffer for Out, which resolveOutput reads as
++	// human — the same mode a terminal gets.
++	app, out, errBuf := resolveTestApp(t, be)
++
++	code := app.cmdResolve(context.Background(), nil)
++	if code != 0 {
++		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
++	}
++	if out.Len() != 0 {
++		t.Errorf("human mode must write nothing to stdout; got %q", out.String())
++	}
++	// The narration is the human output, and it is on stderr.
++	if !strings.Contains(errBuf.String(), `resolve: write plan → done`) {
++		t.Errorf("expected the step outcome narrated on stderr; got %q", errBuf.String())
++	}
++}
++
++func TestCmdResolve_ExplicitHumanFlagWritesNothingToStdout(t *testing.T) {
++	t.Setenv(outputEnv, "json") // --human must win over the environment
++	be := fake.New()
++	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
++	app, out, errBuf := resolveTestApp(t, be)
++
++	code := app.cmdResolve(context.Background(), []string{"--human"})
++	if code != 0 {
++		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
++	}
++	if out.Len() != 0 {
++		t.Errorf("--human must write nothing to stdout; got %q", out.String())
++	}
++}
++
++func TestCmdResolve_JSONFlagStreamsResultsAndStillNarrates(t *testing.T) {
++	t.Setenv(outputEnv, "")
++	be := fake.New()
++	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
++	app, out, errBuf := resolveTestApp(t, be)
++
++	code := app.cmdResolve(context.Background(), []string{"--json"})
++	if code != 0 {
++		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
++	}
++	// One result for the step, one for the finalize pass that follows it.
++	got := decodeResultStream(t, out.String())
++	if len(got) != 2 {
++		t.Fatalf("stdout carried %d results, want 2 (step + finalize); got %q", len(got), out.String())
++	}
++	if got[0].Step != "write plan" || got[0].Status != "done" {
++		t.Errorf("first result = %+v, want step %q status done", got[0], "write plan")
++	}
++	if got[1].Step != "" || got[1].Status != "done" {
++		t.Errorf("second result = %+v, want the empty-step finalize, status done", got[1])
++	}
++	// JSON mode does not silence the narration: `resolve > steps.json` must
++	// still show progress on the terminal.
++	if !strings.Contains(errBuf.String(), `resolve: write plan → done`) {
++		t.Errorf("JSON mode must still narrate to stderr; got %q", errBuf.String())
++	}
++	if !strings.Contains(errBuf.String(), "finalized ✓") {
++		t.Errorf("JSON mode must still narrate the finalize line; got %q", errBuf.String())
++	}
++}
++
++func TestCmdResolve_FlowOutputEnvSelectsJSON(t *testing.T) {
++	t.Setenv(outputEnv, "json")
++	be := fake.New()
++	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
++	app, out, errBuf := resolveTestApp(t, be)
++
++	code := app.cmdResolve(context.Background(), nil)
++	if code != 0 {
++		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
++	}
++	if len(decodeResultStream(t, out.String())) != 2 {
++		t.Errorf("FLOW_OUTPUT=json must stream the results; got %q", out.String())
++	}
++}
++
++// The mode decision must precede every claim: a contradictory pair exits 2
++// without touching the backend. This backend fails LookupActiveClaim, so if
++// the check ever moved after the claim work the exit code would be 1.
++func TestCmdResolve_JSONAndHumanExitsTwoBeforeClaiming(t *testing.T) {
++	inner := fake.New()
++	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
++	be := &failingLookupActiveClaimBackend{Backend: inner, err: errors.New("lookup boom")}
++	app, out, errBuf := resolveTestApp(t, be)
++
++	code := app.cmdResolve(context.Background(), []string{"--json", "--human"})
++	if code != 2 {
++		t.Fatalf("exit code = %d, want 2; err=%q", code, errBuf.String())
++	}
++	if !strings.Contains(errBuf.String(), "--json and --human are mutually exclusive") {
++		t.Errorf("expected the mutual-exclusion message; got %q", errBuf.String())
++	}
++	if strings.Contains(errBuf.String(), "lookup boom") {
++		t.Errorf("the mode check must precede any claim work; got %q", errBuf.String())
++	}
++	if out.Len() != 0 {
++		t.Errorf("Out should be empty; got %q", out.String())
++	}
++}
++
++// parseInterspersed's contract: --json is accepted on either side of the
++// optional positional.
++func TestCmdResolve_JSONFlagEitherSideOfPositional(t *testing.T) {
++	t.Setenv(outputEnv, "")
++	for _, args := range [][]string{{"--json", "1"}, {"1", "--json"}} {
++		be := fake.New()
++		be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
++		app, out, errBuf := resolveTestApp(t, be)
++
++		code := app.cmdResolve(context.Background(), args)
++		if code != 0 {
++			t.Fatalf("%v: exit code = %d, want 0; err=%q", args, code, errBuf.String())
++		}
++		if len(decodeResultStream(t, out.String())) != 2 {
++			t.Errorf("%v: expected the JSON stream on stdout; got %q", args, out.String())
++		}
++	}
++}
++
++func TestCmdResolve_UnknownFlagExitsTwo(t *testing.T) {
++	be := fake.New()
++	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
++	app, out, _ := resolveTestApp(t, be)
++
++	if code := app.cmdResolve(context.Background(), []string{"--nope"}); code != 2 {
++		t.Fatalf("exit code = %d, want 2", code)
++	}
++	if out.Len() != 0 {
++		t.Errorf("Out should be empty on a usage error; got %q", out.String())
++	}
++}
++
+ // Regression guard: with an explicit <id>, cmdResolve must take the
+ // resolveClaimRef → Claim path and NEVER call ListEligible (the auto-select
+ // branch is only reached when no id is given and no claim is held).
+diff --git a/cli/help.go b/cli/help.go
+index cc890bc..829127c 100644
+--- a/cli/help.go
++++ b/cli/help.go
+@@ -66,7 +66,11 @@ var perCommandUsage = map[string]cmdHelp{
+ 	"run-step": {name: "run-step", summary: "advance one lifecycle item",
+ 		detail: "Advances exactly ONE lifecycle item against the active claim\n(one prompt → one artifact). Requires an active claim; takes no arguments."},
+ 	"resolve": {name: "resolve", aliases: []string{"run-all"}, syntax: "[<item-id>]", summary: "run all steps to completion",
+-		detail: "Runs ALL steps until the item is finalized or parked. With <item-id>,\nclaims it first; otherwise uses the active claim."},
++		detail: "Runs ALL steps until the item is finalized or parked. With <item-id>,\nclaims it first; otherwise uses the active claim.\n\n" +
++			"Progress is narrated on stderr in both output modes. In JSON mode\n" +
++			"(--json, FLOW_OUTPUT=json, or a piped/redirected stdout) each step's\n" +
++			"InvocationResult is also streamed to stdout, one compact object per\n" +
++			"line; in human mode stdout stays empty."},
+ 	"grant": {name: "grant", syntax: "[<step-id>] [--all] [--invocations N] [--prompts N] [--cost USD] [--timeout SECONDS] [--dry-run]", summary: "top up a step's budget",
+ 		detail: `With no arguments: reads why the item parked and tops up the axis that
+ parked it, plus any other axis already at its cap — a step out of both time
+diff --git a/docs/proposals/grant-and-step-identity.md b/docs/proposals/grant-and-step-identity.md
+index 7ab9d7d..c1376d0 100644
+--- a/docs/proposals/grant-and-step-identity.md
++++ b/docs/proposals/grant-and-step-identity.md
+@@ -78,9 +78,11 @@ information `grant` needs.
+ 
+ ### 5. `status` and `list` emit human text only
+ 
+-`resolve` already gets this right: stdout is a clean stream of
++`resolve` already gets the stream split right: stdout carries nothing but
+ `InvocationResult` JSON, human progress goes to stderr (see the comment above
+-the loop in [cli/cmd_resolve.go](../../cli/cmd_resolve.go)). `status`,
++the loop in [cli/cmd_resolve.go](../../cli/cmd_resolve.go)). It took no
++`--json` / `--human` at the time of writing — that was fixed separately, and
++the JSON is now gated on the mode while the stderr narration stays. `status`,
+ `list`, and `grant` print for humans unconditionally, so a tool has to parse
+ `[x]` / `[~]` / `[ ]` markers to learn anything.
+ 
