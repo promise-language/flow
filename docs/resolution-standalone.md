@@ -61,6 +61,20 @@ An item that cannot be worked is never selected: one already claimed elsewhere, 
 
 Selecting nothing is a clean outcome. No eligible item means there is no work, not that something failed.
 
+## Roles, and when one principal holds both
+
+Resolution has two phases and they are performed by different **capabilities**: producing a change, and integrating it. The model separates them because the shape it was designed for separates them — a contributor proposes to a maintainer who is not them, and that gap is what makes the review independent.
+
+**A principal may hold both.** When it does, the separation describes nothing real: running the integration phase as a second act does not recreate independence, it performs it. The check that was doing the work is the integration gate, not the boundary between the roles.
+
+So a principal holding both capabilities **may carry an item through in a single resolution**, ending at a merged change rather than a proposed one. The phases remain distinct — the change is still proposed, the request still exists, the diff and the reasoning are still recorded where a reader can find them — but no second invocation is required to act on a decision already made.
+
+**Carrying through is explicit.** It is stated by the operator, never inferred from the fact that a principal happens to hold both capabilities. Holding the capability to merge is not the same as intending to, and "this flow may land on the mainline" is a property that must be declared rather than acquired by accident.
+
+**The gate does not move.** Integration is still where verify is required, and it is required against **what will actually land** — the merge result, not the branch as it stood before it. Carrying through in one run shortens the path to integration; it does not remove anything from it. A change that cannot pass the gate does not merge, whoever is asking.
+
+**What is genuinely lost is worth naming.** A single principal reviewing their own agent's work is not independent review, and nothing in this arrangement makes it so. It buys a second pass with different prompts against a different target, which has real value — but it is not a second opinion, and it should not be relied on as one. Where independent review matters, the two phases belong to two principals, and that is the arrangement the separation exists to serve.
+
 ## Where verify is required
 
 `resolution.md` requires the verify command exactly where changes are integrated into trunk. **In this model the flow does not integrate — it proposes.** The product is a pull request; a human or a continuous-integration system decides whether it lands.
