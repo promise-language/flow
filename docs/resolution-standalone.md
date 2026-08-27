@@ -33,34 +33,40 @@ Two requirements follow:
 
 A flow defines its own steps; what follows is the shape a standalone resolution takes and the properties every such flow holds to.
 
-A resolution moves through four phases:
-
-| Phase | Produces |
+| Phase | |
 |---|---|
 | **Plan** | What will be done, before anything is changed |
-| **Produce** | The change itself |
-| **Check** | Judgements about the change — correctness, coverage, whatever the project values |
-| **Propose** | The request, once the gate passes |
+| **Produce** | Several steps, each carrying the change further under a different concern |
+| **Gate** | The verify command, on the tree as it then stands |
+| **Propose** | The request |
 
-### Checking steps fix what they find
+### Producing is several steps, not one
 
-**Every step from Produce onwards may modify the worktree.** A checking step is not restricted to reporting.
+The producing phase is not "write the change" followed by inspections of it. It is a sequence of steps that each **carry the change further**, differing in what they are looking for: make it work, then make it right, then make it tested.
 
-This is deliberate and it is the point most easily got wrong. A reviewer that can only *report* a fault costs a further agent turn to fix something it had already diagnosed, with the context in front of it — worse work for more money. One that fixes what it finds spends the turn it is already paying for.
+Naming them as checks would be a mistake with consequences. A step told to *assess* produces an assessment; a step told to *carry the change further* produces a change. The second is what is wanted, and the difference is set by what the step is asked to do rather than by what it is permitted to touch.
 
-Nothing is lost by allowing it, because the gate runs after the checking phases and before the proposal: whatever a checking step changes is verified before anything is proposed. The pipeline already establishes correctness; restricting the steps would only restrict usefulness.
+### Every producing step may modify the worktree — including the solution
 
-### A checking step's product is its briefing, not its findings
+**A producing step is not restricted to its own artifacts.** A step concerned with correctness fixes the fault it finds. A step concerned with coverage writes the missing tests — and where the change cannot be tested as written, **restructures it so that it can be.**
 
-The only audience a proposed change has is the person who reviews it. So a checking step's artifact answers *what did you check, what did you change, and what should I decide* — not a list of faults, most of which it has already repaired.
+That last license is the one worth stating plainly, because it is the surprising one: a step whose concern is coverage may alter the solution itself. That is intended. Code that cannot be tested is not finished, and discovering it while the context is still loaded is worth more than filing it as a finding for someone to meet later.
 
-That distinction matters because the two read differently. A list of faults describes a change that needs work. A briefing describes a change that has had work done to it, and directs attention at the residue.
+A step that could only report a fault costs a further agent turn to fix what it had already diagnosed, with everything it needed in front of it. One that fixes it spends the turn it is already paying for.
 
-### Every step's product reaches a reader
+Nothing is lost by allowing this, because **the gate runs after every producing step and before the proposal**. Whatever any of them changed is verified before anything is proposed. The pipeline establishes correctness; restricting the steps would only restrict usefulness.
 
-An artifact that reaches no reader is budget spent on nothing. The checking phases' artifacts belong in the request, alongside the plan and the gate's result — the request is where the reader is.
+### A producing step's artifact is its briefing
 
-An artifact that describes changes *which are in the diff* is worse than useless when it is filed out of sight: the reader sees unexplained work and has to reconstruct why it is there.
+Each producing step records what it did. The audience is the person who will review the proposal, so the artifact answers *what did you look for, what did you change, and what should I decide* — not a list of faults, most of which it has already repaired.
+
+The two read differently and the difference matters. A list of faults describes a change that needs work. A briefing describes one that has had work done to it, and directs attention at what remains.
+
+### Every artifact reaches a reader
+
+An artifact that reaches no reader is budget spent on nothing. The producing steps' briefings belong in the request, alongside the plan and the gate's result, because the request is where the reader is.
+
+An artifact filed out of sight is worse than absent when it describes changes that **are** in the diff: the reader meets unexplained work and has to reconstruct why it is there.
 
 ## Branch and pull request
 
