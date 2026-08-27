@@ -79,8 +79,9 @@ Re-running an item with an unanswered question consumes no budget and runs no ag
 
 A **gate** measures something and may refuse it. Every gate holds four properties, and they are what make one worth trusting:
 
-- **It measures; it never modifies.** Not the worktree, not the thing it inspects, nothing.
+- **It measures; it never modifies what it measures.** A gate may write elsewhere — a build cache, a report — but the subject it reports on is exactly as it found it.
 - **Its verdict is pass or refuse.** There is no third answer and no partial one.
+- **It may also produce a measurement.** Coverage, size, duration — a number the verdict was derived from, by comparison against a baseline or a threshold. The verdict stays binary; what varies is whether the gate had to measure something to reach it.
 - **A refusal carries a reason a person can check.** A refusal that cannot be confirmed or overturned is indistinguishable from the gate having given up.
 - **It is reproducible.** The same subject gives the same verdict to anyone who runs it, anywhere.
 
@@ -99,13 +100,33 @@ Recognising these as one thing is worth more than it first appears. A gate that 
 
 **This is a property, not a machinery.** What defines the gates, schedules them, records their results and decides what a refusal means for the work queue belongs to whatever schedules work — not to this SDK. What is stated here is what any of them must be.
 
-### The verify command is not a gate
+## Commands
 
-The **verify command** is the developer-facing wrapper, and it breaks the first rule deliberately. It does the mechanical repairs a person should not be doing by hand — formatting, and the checks that have a single correct answer — and then runs the gate.
+A **command** does work. It may modify anything it is pointed at, and it **may run gates as part of doing its job**.
 
-So it **may modify the worktree**, and anything that runs it re-reads worktree state afterwards rather than assuming the tree is unchanged.
+**Anyone runs them.** A step invokes a command mechanically; an agent runs one mid-turn to see whether what it has written holds together; a person runs one at a terminal. The same command does the same thing for all three, which is what lets an agent check its own work exactly the way the developer reviewing it will — and what makes a project's own tooling the flow's tooling, rather than the flow needing a parallel set of its own.
 
-Verify exists because a producing step should not fail over a misplaced brace it can fix. The gate exists because a *decision* about whether something may be integrated cannot rest on a command that changes its own subject.
+The same is true of gates, and there it is the point rather than a convenience: a gate that gave a different answer to the person who ran it than to the step that ran it would not be reproducible, and reproducibility is most of what a gate is for.
+
+Commands and gates are the two kinds of thing that get run, and the difference is not how they are implemented but what may be concluded from them:
+
+| | Gate | Command |
+|---|---|---|
+| Modifies | never | freely |
+| Produces | a verdict, sometimes a measurement | whatever work it did |
+| A decision may rest on it | yes | no |
+
+The last row is the whole point. A command's result cannot support a decision about the thing it ran against, because it changed that thing on the way. Asking "did this pass" of a command that repaired what was failing gets an answer about a state that did not exist when the question was asked.
+
+**Formatting is the clearest pair.** `format` is a command: it rewrites the source. *"Is this correctly formatted"* is a gate: it reports and changes nothing. Same subject, same underlying rules, and the two are not interchangeable — one repairs, and only the other can be cited.
+
+Most concerns worth checking have both, and building a new one is usually a question of which you need rather than what to write.
+
+**The verify command composes them.** It formats, applies the other fixes that have one correct answer, and then runs the gate — so it modifies, and anything running it re-reads worktree state afterwards rather than assuming the tree is unchanged.
+
+That composition is exactly what a developer wants: repair what is mechanical, then measure what is left. It is also exactly what a decision cannot rest on, which is why integration runs the gate directly rather than the command that wraps it.
+
+A step should not fail over a misplaced brace it can fix. That is what commands are for. Whether something may be integrated is a decision. That is what gates are for.
 
 ### Which is required where
 
