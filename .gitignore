@@ -36,3 +36,6 @@ bin/
 
 # written by `workspace setup` — per-host/per-clone, never committed
 /CLAUDE.local.md
+
+# flow SDK per-clone claim state (pkg/clistate) — never committed
+.flow/
