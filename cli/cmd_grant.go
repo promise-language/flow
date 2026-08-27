@@ -53,7 +53,7 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 	all := fs.Bool("all", false, "top up every pending step instead of the parked one")
 	dryRun := fs.Bool("dry-run", false, "print what would be granted; write nothing")
 	of := addOutputFlags(fs)
-	if err := parseInterspersed(fs, args); err != nil {
+	if !app.parseArgs(fs, args) {
 		return 2
 	}
 	// Which axes the operator actually typed. Park mode reads amounts as
@@ -67,20 +67,16 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 	}
 
 	if fs.NArg() > 1 {
-		fmt.Fprintf(app.Err, "grant: unexpected argument %q (grant takes at most one step id)\n", fs.Arg(1))
-		return 2
+		return app.usageError("grant: unexpected argument %q (grant takes at most one step id)", fs.Arg(1))
 	}
 	if fs.NArg() == 1 && *all {
-		fmt.Fprintf(app.Err, "grant: --all sweeps every pending step; it cannot be combined with the step id %q\n", fs.Arg(0))
-		return 2
+		return app.usageError("grant: --all sweeps every pending step; it cannot be combined with the step id %q", fs.Arg(0))
 	}
 	if *invocations < 0 || *prompts < 0 || *cost < 0 || *timeout < 0 {
-		fmt.Fprintln(app.Err, "grant: --invocations / --prompts / --cost / --timeout must be >= 0")
-		return 2
+		return app.usageError("grant: --invocations / --prompts / --cost / --timeout must be >= 0")
 	}
 	if fs.NArg() == 1 && strings.TrimSpace(fs.Arg(0)) == "" {
-		fmt.Fprintln(app.Err, "grant: empty step id")
-		return 2
+		return app.usageError("grant: empty step id")
 	}
 
 	claim, err := app.Backend.LookupActiveClaim(ctx, app.Owner)
@@ -228,7 +224,9 @@ func (app *App) planManual(f *flow.Flow, state *flow.ItemState, arg string, a gr
 		TimeoutAdd:           int64(a.timeout),
 	}
 	if g == (flow.Grant{}) {
-		fmt.Fprintln(app.Err, "grant: at least one of --invocations / --prompts / --cost / --timeout must be set")
+		// Naming a step id but no amount is a malformed invocation, not a
+		// refusal about this item — it takes the same shape as every other one.
+		app.usageError("grant: at least one of --invocations / --prompts / --cost / --timeout must be set")
 		return refuse()
 	}
 	return planned(plannedGrant{id: id, grant: g, before: state.Artifact(flow.ArtifactId(id))})

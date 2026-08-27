@@ -8,12 +8,11 @@ import (
 func (app *App) cmdList(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("list")
 	of := addOutputFlags(fs)
-	if err := parseInterspersed(fs, args); err != nil {
+	if !app.parseArgs(fs, args) {
 		return 2
 	}
 	if fs.NArg() > 0 {
-		fmt.Fprintf(app.Err, "list: unexpected argument %q (this command takes no arguments)\n", fs.Arg(0))
-		return 2
+		return app.usageError("list: unexpected argument %q (this command takes no arguments)", fs.Arg(0))
 	}
 	mode, ok := of.mode(app, "list")
 	if !ok {

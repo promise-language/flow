@@ -78,7 +78,7 @@ func addOutputFlags(fs *flag.FlagSet) outputFlags {
 // contradiction, not a precedence puzzle — it is rejected.
 func (of outputFlags) mode(app *App, cmd string) (OutputMode, bool) {
 	if *of.asJSON && *of.asHuman {
-		fmt.Fprintf(app.Err, "%s: --json and --human are mutually exclusive\n", cmd)
+		app.usageError("%s: --json and --human are mutually exclusive", cmd)
 		return OutputAuto, false
 	}
 	switch {

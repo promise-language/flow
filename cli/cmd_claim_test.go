@@ -85,7 +85,7 @@ func (r *recordingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, own
 }
 
 // T0484: `claim <id> --force` (bool flag after the positional) must parse and
-// reach the backend as force=true. Prior to the parseInterspersed fix the
+// reach the backend as force=true. Prior to the interspersed-parsing fix the
 // stdlib flag package stopped at the positional and reported --force as an
 // "unexpected argument".
 func TestCmdClaim_ForceAfterPositional(t *testing.T) {

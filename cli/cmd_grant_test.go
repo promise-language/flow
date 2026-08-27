@@ -71,7 +71,7 @@ func TestCmdGrant_FlagsBeforePositional(t *testing.T) {
 }
 
 // "--name=value" form after the positional must parse (covers the equals
-// branch of parseInterspersed).
+// branch of the parseArgs walk).
 func TestCmdGrant_EqualsFormAfterPositional(t *testing.T) {
 	app, _, errBuf, read := grantTestSetup(t)
 
@@ -85,7 +85,7 @@ func TestCmdGrant_EqualsFormAfterPositional(t *testing.T) {
 }
 
 // Multiple flags after the positional must all parse — covers the multi-flag
-// walk in parseInterspersed.
+// walk in parseArgs.
 func TestCmdGrant_InterspersedMultipleFlags(t *testing.T) {
 	app, _, errBuf, read := grantTestSetup(t)
 
@@ -126,7 +126,7 @@ func TestCmdGrant_TooManyPositionals(t *testing.T) {
 
 // "--" terminator: subsequent tokens are forced into positionals so a literal
 // "--invocations" can be passed as an artifact id. Covers the terminator
-// branch in parseInterspersed.
+// branch in parseArgs.
 func TestCmdGrant_DoubleDashTerminator(t *testing.T) {
 	app, _, errBuf, _ := grantTestSetup(t)
 

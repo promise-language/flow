@@ -51,12 +51,11 @@ const maxResolveSteps = 50
 func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("resolve")
 	of := addOutputFlags(fs)
-	if err := parseInterspersed(fs, args); err != nil {
+	if !app.parseArgs(fs, args) {
 		return 2
 	}
 	if fs.NArg() > 1 {
-		fmt.Fprintf(app.Err, "resolve: unexpected argument %q (resolve takes an optional item id)\n", fs.Arg(1))
-		return 2
+		return app.usageError("resolve: unexpected argument %q (resolve takes an optional item id)", fs.Arg(1))
 	}
 	// Decided before any claim work: a contradictory --json --human must exit 2
 	// without leasing anything.

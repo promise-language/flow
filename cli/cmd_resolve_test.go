@@ -500,8 +500,8 @@ func TestCmdResolve_JSONAndHumanExitsTwoBeforeClaiming(t *testing.T) {
 	}
 }
 
-// parseInterspersed's contract: --json is accepted on either side of the
-// optional positional.
+// parseArgs's contract: --json is accepted on either side of the optional
+// positional.
 func TestCmdResolve_JSONFlagEitherSideOfPositional(t *testing.T) {
 	t.Setenv(outputEnv, "")
 	for _, args := range [][]string{{"--json", "1"}, {"1", "--json"}} {
