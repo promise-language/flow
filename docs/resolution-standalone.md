@@ -71,6 +71,13 @@ So a principal holding both capabilities **may carry an item through in a single
 
 **Carrying through is explicit.** It is stated by the operator, never inferred from the fact that a principal happens to hold both capabilities. Holding the capability to merge is not the same as intending to, and "this flow may land on the mainline" is a property that must be declared rather than acquired by accident.
 
+It is declared where the step set is decided — with the configuration that builds the binary, not as an argument to a single run. The phases a resolution can perform are fixed when it is constructed, so a run cannot elect into an integration phase that was never registered. Declaring the capability and declaring the intent are therefore the same act, made once per binary rather than once per invocation.
+
+Two things follow, and without them "explicit" means only "written down somewhere":
+
+- **The impossible combination is refused at construction.** Intending to integrate without the capability to integrate is a configuration that cannot produce correct behaviour, and it is named as an error before any work begins — not discovered at the merge.
+- **A binary that carries through says so at runtime.** It reports it when asked whether it is fit to work, and before a resolution reaches the integration phase. A declaration made once, in configuration, is invisible to whoever invokes it later; explicit has to mean visible to the person acting on it, not merely present somewhere. That report is also the honest place to state what carrying through does not provide — it is not independent review — at the moment someone could still choose otherwise.
+
 **The gate does not move.** Integration is still where verify is required, and it is required against **what will actually land** — the merge result, not the branch as it stood before it. Carrying through in one run shortens the path to integration; it does not remove anything from it. A change that cannot pass the gate does not merge, whoever is asking.
 
 **What is genuinely lost is worth naming.** A single principal reviewing their own agent's work is not independent review, and nothing in this arrangement makes it so. It buys a second pass with different prompts against a different target, which has real value — but it is not a second opinion, and it should not be relied on as one. Where independent review matters, the two phases belong to two principals, and that is the arrangement the separation exists to serve.
