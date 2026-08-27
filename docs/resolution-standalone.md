@@ -39,6 +39,8 @@ Resolution terminates in a **pull request**. That is the item's product: the bra
 
 **A pull request is never opened over a worktree carrying uncommitted changes.** The request would describe a branch that does not contain the work, and the omission is invisible in the request itself.
 
+**The branch is pushed before the request is opened, never the other way round.** The ordering matters for recovery: if opening the request fails, the work is already safe on the remote and only the request is missing, so the fix is to open one — not to re-run the flow and redo the work. Opening first would leave a request describing a branch that does not yet exist.
+
 ## Committing
 
 The flow commits. The agent does not.
