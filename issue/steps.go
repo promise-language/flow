@@ -209,12 +209,87 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 	})
 }
 
+// recordStepWork commits whatever the calling step changed and refuses to
+// return with the worktree still dirty.
+//
+// Every step leaves the tree clean, which makes each step boundary a state the
+// resolution can be resumed from: a run that dies loses at most the step that
+// was running, never everything since implement. It also attributes the work —
+// history shows which step made which change, rather than one commit at the
+// end carrying whatever accumulated.
+//
+// Commit is a deliberate no-op when nothing is staged, so a step that changed
+// nothing records nothing and costs one call.
+func (b *builder) recordStepWork(ctx flow.StepCtx, wt flow.Worktree, label string) error {
+	if err := wt.Stage(ctx.Context()); err != nil {
+		return err
+	}
+	if err := wt.Commit(ctx.Context(), fmt.Sprintf("%s: %s", label, b.itemLabel(ctx))); err != nil {
+		return err
+	}
+	// Not redundant with the commit: staging cannot pick up what a backend
+	// refuses to stage, and a step returning over a dirty tree hands the next
+	// one work it did not make and will be blamed for.
+	patch, err := wt.CapturePatch(ctx.Context())
+	if err != nil {
+		return err
+	}
+	if len(patch) > 0 {
+		return fmt.Errorf(
+			"%s left %d bytes of uncommitted work in the worktree; every step must "+
+				"leave it clean, so the next step starts from a known state",
+			label, len(patch))
+	}
+	return nil
+}
+
+// itemLabel names the item in a commit subject, without the closes-reference:
+// only the implement commit carries that, or every step would read as its own
+// resolution of the item.
+func (b *builder) itemLabel(ctx flow.StepCtx) string {
+	item := ctx.Item()
+	if item.Title == "" {
+		return "#" + item.ID
+	}
+	return item.Title
+}
+
+// producingMarkdownStep runs a producing step whose artifact is prose: the
+// agent works, its changes are recorded, and only then does the artifact
+// resolve. That order is deliberate — resolving first would mark the step done
+// with its work still uncommitted, which is the state that loses it.
+func (b *builder) producingMarkdownStep(ctx flow.StepCtx, id PromptID, label string) error {
+	wt, err := ctx.Worktree()
+	if err != nil {
+		return err
+	}
+	pc, err := b.promptContext(ctx)
+	if err != nil {
+		return err
+	}
+	body, err := renderPrompt(b.cfg, id, pc)
+	if err != nil {
+		return err
+	}
+	resp, err := b.runAgent(ctx, flow.AgentRequest{Prompt: body})
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(resp.LastText) == "" {
+		return fmt.Errorf("agent returned nothing for %q", id)
+	}
+	if err := b.recordStepWork(ctx, wt, label); err != nil {
+		return err
+	}
+	return ctx.ResolveMarkdown(resp.LastText)
+}
+
 // stepReview asks for a critique of the change.
 func (b *builder) stepReview(ctx flow.StepCtx) error {
 	if err := b.onClaimBranch(ctx); err != nil {
 		return err
 	}
-	return b.agentMarkdownStep(ctx, PromptReview)
+	return b.producingMarkdownStep(ctx, PromptReview, "review")
 }
 
 // stepCoverage analyses test coverage of the change.
@@ -222,7 +297,7 @@ func (b *builder) stepCoverage(ctx flow.StepCtx) error {
 	if err := b.onClaimBranch(ctx); err != nil {
 		return err
 	}
-	return b.agentMarkdownStep(ctx, PromptCoverage)
+	return b.producingMarkdownStep(ctx, PromptCoverage, "coverage")
 }
 
 // stepVerifyImpl records the passing verification for the pull request.

@@ -75,19 +75,47 @@ Answering does not resume the item. Resumption is a separate deliberate act, bec
 
 Re-running an item with an unanswered question consumes no budget and runs no agent turn. The check happens before dispatch, not inside it.
 
-## The verify command
+## Gates
 
-The project's verify command establishes that a change is fit to integrate.
+A **gate** measures something and may refuse it. Every gate holds four properties, and they are what make one worth trusting:
 
-**It is required at exactly one point: where changes are integrated into trunk.** That is the only place it is mechanically mandatory, and it is mandatory without exception — nothing reaches trunk that has not passed.
+- **It measures; it never modifies.** Not the worktree, not the thing it inspects, nothing.
+- **Its verdict is pass or refuse.** There is no third answer and no partial one.
+- **A refusal carries a reason a person can check.** A refusal that cannot be confirmed or overturned is indistinguishable from the gate having given up.
+- **It is reproducible.** The same subject gives the same verdict to anyone who runs it, anywhere.
 
-**Everywhere else it is elective.** A step may run it while working, as often as it finds useful, to check its own progress or to drive a fix loop. That is a tool the step chose to pick up, not a gate it was made to pass. A step is not required to leave the tree green, and a step that leaves it red has not failed on that account — the change is simply not yet ready to integrate, which the integration point will establish on its own.
+The non-modification rule is what buys the last one. A measurement that changes its subject cannot be repeated: run it twice and the second answer is about a different thing than the first.
 
-Treating verify as a per-step gate costs real work: it forces a step to converge before handing off, when the natural shape is often several steps converging together.
+**Gates differ only in what they measure and when.** They are one mechanism, not a family of similar ones:
 
-It is configured once and reaches every consumer — the integration gate, and the prompt that tells an agent what to satisfy. **One value, every consumer.** Two settings that both mean "the verify command" will disagree, and the failure is silent: the agent runs one and it passes, the gate runs another and it cannot.
+| Measures | Runs |
+|---|---|
+| A tree, or a merge result | At the decision to integrate |
+| An action an agent proposes to take | Before that action |
+| What a step actually did, against what it said it would | After the step |
+| Whether a machine is fit to be given work | Before work is given |
 
-Running the verify command **may modify the worktree**. Anything that runs it re-reads worktree state afterwards and never assumes the tree is unchanged.
+Recognising these as one thing is worth more than it first appears. A gate that measures a proposed command is the cheapest place to catch a violation — the agent learns the constraint mid-turn and adapts. A gate that measures the result catches it however it happened, including by routes nobody anticipated. **They are complementary because they differ in position, not in kind**, and neither substitutes for the other: the first fails open when it is absent or bypassed, the second costs a whole turn before it speaks.
+
+**This is a property, not a machinery.** What defines the gates, schedules them, records their results and decides what a refusal means for the work queue belongs to whatever schedules work — not to this SDK. What is stated here is what any of them must be.
+
+### The verify command is not a gate
+
+The **verify command** is the developer-facing wrapper, and it breaks the first rule deliberately. It does the mechanical repairs a person should not be doing by hand — formatting, and the checks that have a single correct answer — and then runs the gate.
+
+So it **may modify the worktree**, and anything that runs it re-reads worktree state afterwards rather than assuming the tree is unchanged.
+
+Verify exists because a producing step should not fail over a misplaced brace it can fix. The gate exists because a *decision* about whether something may be integrated cannot rest on a command that changes its own subject.
+
+### Which is required where
+
+**Integration requires the gate.** That is the point where the answer must be reproducible by someone who was not there: a reviewer, a later bisect, a rebuild on a different machine. A verify run that repaired something on its way to a pass says the tree passes *after being changed*, which is a different claim.
+
+**Producing steps may run either**, and generally want verify — they are working, not deciding, and the repairs are the point.
+
+### One value, every consumer
+
+Whichever a project configures, it is configured **once** and reaches everything that needs it: the gate that must pass, and the prompt that tells an agent what to satisfy. Two settings that both mean "the check" will disagree, and the failure is silent — the agent runs one and it passes, the gate runs another and it cannot.
 
 ## Steps and the worktree
 
@@ -100,6 +128,23 @@ A step declares whether it may modify the worktree, and the declaration is expli
 Finalizing marks an item's resolution complete and releases the claim. It is terminal: a finalized item is not reprocessed.
 
 Finalizing means **the work was done**. An item that no flow will act on — because no flow accepts its type — is not finalized on that basis. Reporting success for work that was never attempted hides a misconfiguration, and doing it terminally makes the misconfiguration irreversible.
+
+## Every outcome leads somewhere
+
+**No step ends in a dead end.** Whatever a step concludes, there is a path from it to a terminal state — the item resolves, or a person acts and it continues.
+
+A step that cannot complete ends in exactly one of:
+
+| Outcome | Means | Cleared by |
+|---|---|---|
+| **Transient failure** | Something outside the work went wrong | Retrying |
+| **Invalidates earlier work** | An earlier step's result is wrong; that step must run again, with the reason why | The flow itself |
+| **Waits on a person** | A question, a decision, a permission | An answer |
+| **Waits on something else** | Another item, an external condition | That condition clearing |
+
+"Error" is not among them. A step that simply stops, with no route onward and nothing named that would unstick it, leaves an item nobody can finish and nobody can close — and it will sit that way indefinitely, because nothing is watching for it.
+
+That is why every stopping outcome names what would clear it. The name is not documentation; it is the difference between a state someone can act on and one that is merely inert.
 
 ## Reporting
 
