@@ -1,0 +1,66 @@
+# Standalone resolution
+
+**Normative.** How an item is resolved when **no server exists** and the flow binary drives the whole lifecycle itself.
+
+Everything in `resolution.md` applies. This document states only what is specific to the standalone model; a statement true of both drive models belongs there, not here.
+
+## What "standalone" means
+
+The binary is the entire system. There is no scheduler, no dispatcher, no lease service. An operator — or a timer — invokes the binary, and the binary decides what to do next by reading durable state from the backend.
+
+All state lives **in the backend's own artifacts**. There is no separate store to consult, and nothing to reconcile against: the item is the record.
+
+This is what makes the model resumable across machines with no coordination. Any worktree that can reach the backend and hold a claim derives the same next step.
+
+## Claiming without a lease service
+
+Exclusivity is asserted **in the backend's own data** — the claim is visible to anyone looking at the item, and is what another worktree observes before deciding it cannot take it.
+
+Because there is no arbiter, claiming is a race, and the race is resolved by the backend's own consistency rather than by a lock. A claim attempt that loses reports that it lost; it does not partially apply.
+
+A claim never takes an item away from another person. An item already owned or assigned elsewhere is refused unless the operator explicitly overrides, and the override is recorded.
+
+## Ownership is shared with humans
+
+The backend is a system people use directly. The same item carries human activity — comments, assignment, labels — and the flow's own bookkeeping.
+
+Two requirements follow:
+
+- **The flow's bookkeeping is distinguishable from human content.** Anything the flow writes is identifiable as machine-written, so reading answers, history, or state never mistakes one for the other.
+- **The flow does not overwrite what humans own.** The item's original description is never modified. Ownership markers belonging to other people are not removed to make room for the flow's own.
+
+## Branch and pull request
+
+Work happens on a **branch of its own per item**, never on the default branch.
+
+A step that consumes the branch checks it out first rather than assuming it is current. A worktree left on another item's branch is corrected, not failed on — the alternative turns one stale checkout into a deterministic failure on every retry.
+
+Resolution terminates in a **pull request**. That is the item's product: the branch is pushed and the request opened as the final step, and the item's completion is the request existing, not the work being merged.
+
+**A pull request is never opened over a worktree carrying uncommitted changes.** The request would describe a branch that does not contain the work, and the omission is invisible in the request itself.
+
+## Committing
+
+The flow commits. The agent does not.
+
+An agent that commits mid-step buries a half-finished round in history, so the prompts instruct against it and the step handler owns it instead.
+
+Commits capture the tree **after** staging and **before** any later step runs, so that the record of what a step produced includes files the step added. A capture taken before staging misses new files while appearing complete; one taken after committing sees a clean tree and reports nothing.
+
+A commit that records nothing is not evidence of success. Whether a branch carries work is answered by comparing it against its base, not by whether a commit call returned without error.
+
+## Selecting work
+
+With no dispatcher, the binary selects its own next item when not given one.
+
+Selection draws **only from items already opted in** — the set an operator has marked as available to be worked automatically. Discovering that an item exists is not the same as consenting to work on it unattended, and the two sets are never merged.
+
+An item that cannot be worked is never selected: one already claimed elsewhere, one waiting on an unfinished dependency, one explicitly disabled.
+
+Selecting nothing is a clean outcome. No eligible item means there is no work, not that something failed.
+
+## The gate
+
+The verify command is the gate every producing step must satisfy, and it runs **in the worktree**, against the tree as it stands.
+
+It is configured once and reaches both consumers — the gate itself and the prompt describing it. A default that ships with the SDK is a default that must work in the repository shipping it; a default naming a convention the project has abandoned is a trap, because a consumer who sets nothing gets a configuration that looks valid and cannot run.

@@ -1,3 +1,16 @@
+> **Archived, and NOT normative.** This is the original design document, written before the
+> system was built. It mixes end-state description with implementation plans, migration order,
+> repo inventory, and open questions, and parts of it describe a command surface that shipped
+> under different names (`run-all` for `resolve`, "planned" commands that now exist).
+>
+> Normative documents live at the top of `docs/`. Where this file and a normative document
+> disagree, the normative document is correct and this one is history.
+>
+> It is kept because sections of it — the architecture, the agent integration, and the GitHub
+> storage schema — have not yet been given normative homes. That gap is tracked as #22.
+
+---
+
 # Flow SDK — Design (`github.com/promise-language/flow`)
 
 ## Context
