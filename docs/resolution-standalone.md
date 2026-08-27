@@ -29,6 +29,39 @@ Two requirements follow:
 - **The flow's bookkeeping is distinguishable from human content.** Anything the flow writes is identifiable as machine-written, so reading answers, history, or state never mistakes one for the other.
 - **The flow does not overwrite what humans own.** The item's original description is never modified. Ownership markers belonging to other people are not removed to make room for the flow's own.
 
+## The steps of a resolution
+
+A flow defines its own steps; what follows is the shape a standalone resolution takes and the properties every such flow holds to.
+
+A resolution moves through four phases:
+
+| Phase | Produces |
+|---|---|
+| **Plan** | What will be done, before anything is changed |
+| **Produce** | The change itself |
+| **Check** | Judgements about the change — correctness, coverage, whatever the project values |
+| **Propose** | The request, once the gate passes |
+
+### Checking steps fix what they find
+
+**Every step from Produce onwards may modify the worktree.** A checking step is not restricted to reporting.
+
+This is deliberate and it is the point most easily got wrong. A reviewer that can only *report* a fault costs a further agent turn to fix something it had already diagnosed, with the context in front of it — worse work for more money. One that fixes what it finds spends the turn it is already paying for.
+
+Nothing is lost by allowing it, because the gate runs after the checking phases and before the proposal: whatever a checking step changes is verified before anything is proposed. The pipeline already establishes correctness; restricting the steps would only restrict usefulness.
+
+### A checking step's product is its briefing, not its findings
+
+The only audience a proposed change has is the person who reviews it. So a checking step's artifact answers *what did you check, what did you change, and what should I decide* — not a list of faults, most of which it has already repaired.
+
+That distinction matters because the two read differently. A list of faults describes a change that needs work. A briefing describes a change that has had work done to it, and directs attention at the residue.
+
+### Every step's product reaches a reader
+
+An artifact that reaches no reader is budget spent on nothing. The checking phases' artifacts belong in the request, alongside the plan and the gate's result — the request is where the reader is.
+
+An artifact that describes changes *which are in the diff* is worse than useless when it is filed out of sight: the reader sees unexplained work and has to reconstruct why it is there.
+
 ## Branch and pull request
 
 Work happens on a **branch of its own per item**, never on the default branch.
