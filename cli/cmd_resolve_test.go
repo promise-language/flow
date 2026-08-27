@@ -16,8 +16,20 @@ import (
 // given backend, pre-loaded with one fake item. Mirrors orchestrator_test.go's
 // testApp but does NOT pre-claim the item (auto-select tests need an
 // un-leased arena) and lets the caller swap in a wrapping backend (e.g. one
-// that fails ListEligible).
+// that fails ListEligible). The step resolves its artifact, so the run
+// advances and then finalizes.
 func resolveTestApp(t *testing.T, be flow.Backend) (*App, *bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
+	return resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+		return ctx.ResolveMarkdown("the plan")
+	})
+}
+
+// resolveTestAppStep is resolveTestApp with a caller-supplied handler for the
+// single "write plan" step — the lever for driving the loop to an outcome
+// other than done (return nil without resolving to park it, return an error to
+// fail it).
+func resolveTestAppStep(t *testing.T, be flow.Backend, step func(flow.StepCtx) error) (*App, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	out := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}
@@ -30,9 +42,7 @@ func resolveTestApp(t *testing.T, be flow.Backend) (*App, *bytes.Buffer, *bytes.
 		Owner:     "alice",
 	}
 	f := flow.NewFlow("implement", []flow.ItemType{"task"})
-	f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-		return ctx.ResolveMarkdown("the plan")
-	}, flow.StepConfig{})
+	f.AddStep("write plan", "plan", step, flow.StepConfig{})
 
 	app.Flows = []*flow.Flow{f}
 	if err := app.validate(); err != nil {
@@ -357,6 +367,171 @@ func TestIsLeaseItemConflict(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Output modes. resolve is a STREAM, not a one-shot report: its human output
+// is the stderr narration (printed in both modes) and its stdout carries
+// per-step InvocationResult objects and nothing else — in human mode, nothing
+// at all.
+// ---------------------------------------------------------------------------
+
+// decodeResultStream decodes the whole of s as a stream of InvocationResult
+// objects and asserts it is line-oriented (one compact object per line), which
+// is what `resolve | jq` and `resolve > steps.json` consume.
+func decodeResultStream(t *testing.T, s string) []flow.InvocationResult {
+	t.Helper()
+	var got []flow.InvocationResult
+	dec := json.NewDecoder(strings.NewReader(s))
+	for dec.More() {
+		var res flow.InvocationResult
+		if err := dec.Decode(&res); err != nil {
+			t.Fatalf("decode stream %q: %v", s, err)
+		}
+		got = append(got, res)
+	}
+	if n := strings.Count(strings.TrimSuffix(s, "\n"), "\n") + 1; s != "" && n != len(got) {
+		t.Errorf("stream has %d lines for %d objects — want one compact object per line; got %q", n, len(got), s)
+	}
+	return got
+}
+
+func TestCmdResolve_HumanModeWritesNothingToStdout(t *testing.T) {
+	t.Setenv(outputEnv, "")
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	// The fixture injects a bytes.Buffer for Out, which resolveOutput reads as
+	// human — the same mode a terminal gets.
+	app, out, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("human mode must write nothing to stdout; got %q", out.String())
+	}
+	// The narration is the human output, and it is on stderr.
+	if !strings.Contains(errBuf.String(), `resolve: write plan → done`) {
+		t.Errorf("expected the step outcome narrated on stderr; got %q", errBuf.String())
+	}
+}
+
+func TestCmdResolve_ExplicitHumanFlagWritesNothingToStdout(t *testing.T) {
+	t.Setenv(outputEnv, "json") // --human must win over the environment
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	app, out, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), []string{"--human"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("--human must write nothing to stdout; got %q", out.String())
+	}
+}
+
+func TestCmdResolve_JSONFlagStreamsResultsAndStillNarrates(t *testing.T) {
+	t.Setenv(outputEnv, "")
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	app, out, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), []string{"--json"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	// One result for the step, one for the finalize pass that follows it.
+	got := decodeResultStream(t, out.String())
+	if len(got) != 2 {
+		t.Fatalf("stdout carried %d results, want 2 (step + finalize); got %q", len(got), out.String())
+	}
+	if got[0].Step != "write plan" || got[0].Status != "done" {
+		t.Errorf("first result = %+v, want step %q status done", got[0], "write plan")
+	}
+	if got[1].Step != "" || got[1].Status != "done" {
+		t.Errorf("second result = %+v, want the empty-step finalize, status done", got[1])
+	}
+	// JSON mode does not silence the narration: `resolve > steps.json` must
+	// still show progress on the terminal.
+	if !strings.Contains(errBuf.String(), `resolve: write plan → done`) {
+		t.Errorf("JSON mode must still narrate to stderr; got %q", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "finalized ✓") {
+		t.Errorf("JSON mode must still narrate the finalize line; got %q", errBuf.String())
+	}
+}
+
+func TestCmdResolve_FlowOutputEnvSelectsJSON(t *testing.T) {
+	t.Setenv(outputEnv, "json")
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	app, out, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if len(decodeResultStream(t, out.String())) != 2 {
+		t.Errorf("FLOW_OUTPUT=json must stream the results; got %q", out.String())
+	}
+}
+
+// The mode decision must precede every claim: a contradictory pair exits 2
+// without touching the backend. This backend fails LookupActiveClaim, so if
+// the check ever moved after the claim work the exit code would be 1.
+func TestCmdResolve_JSONAndHumanExitsTwoBeforeClaiming(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be := &failingLookupActiveClaimBackend{Backend: inner, err: errors.New("lookup boom")}
+	app, out, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), []string{"--json", "--human"})
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2; err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "--json and --human are mutually exclusive") {
+		t.Errorf("expected the mutual-exclusion message; got %q", errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "lookup boom") {
+		t.Errorf("the mode check must precede any claim work; got %q", errBuf.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("Out should be empty; got %q", out.String())
+	}
+}
+
+// parseInterspersed's contract: --json is accepted on either side of the
+// optional positional.
+func TestCmdResolve_JSONFlagEitherSideOfPositional(t *testing.T) {
+	t.Setenv(outputEnv, "")
+	for _, args := range [][]string{{"--json", "1"}, {"1", "--json"}} {
+		be := fake.New()
+		be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+		app, out, errBuf := resolveTestApp(t, be)
+
+		code := app.cmdResolve(context.Background(), args)
+		if code != 0 {
+			t.Fatalf("%v: exit code = %d, want 0; err=%q", args, code, errBuf.String())
+		}
+		if len(decodeResultStream(t, out.String())) != 2 {
+			t.Errorf("%v: expected the JSON stream on stdout; got %q", args, out.String())
+		}
+	}
+}
+
+func TestCmdResolve_UnknownFlagExitsTwo(t *testing.T) {
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	app, out, _ := resolveTestApp(t, be)
+
+	if code := app.cmdResolve(context.Background(), []string{"--nope"}); code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
+	if out.Len() != 0 {
+		t.Errorf("Out should be empty on a usage error; got %q", out.String())
+	}
+}
+
 // Regression guard: with an explicit <id>, cmdResolve must take the
 // resolveClaimRef → Claim path and NEVER call ListEligible (the auto-select
 // branch is only reached when no id is given and no claim is held).
@@ -379,5 +554,95 @@ func TestCmdResolve_ExplicitIdStillClaimsWithoutListEligible(t *testing.T) {
 	}
 	if info == nil || info.Owner != "alice" {
 		t.Errorf("LookupClaim = %+v, want owner=alice", info)
+	}
+}
+
+// failingLoadStateBackend forces LoadState to error. Both the progress peek
+// and RunOne read state, so this drives the loop's RunOne-error branch — the
+// one exit that leaves the loop without an InvocationResult to report.
+type failingLoadStateBackend struct {
+	*fake.Backend
+	err error
+}
+
+func (b *failingLoadStateBackend) LoadState(ctx context.Context, claim flow.Claim) (*flow.ItemState, error) {
+	return nil, b.err
+}
+
+// The gate on the encode sits BEFORE the switch that ends the run, so every
+// terminal outcome — not just the happy finalize — is reported on the machine
+// stream. A park is precisely what a tool watches for (it is the operator's
+// cue to act), and a fix that only encoded advancing steps would drop it
+// silently while every existing test still passed.
+func TestCmdResolve_ModeSplitHoldsOnEveryTerminalOutcome(t *testing.T) {
+	cases := []struct {
+		name       string
+		step       func(flow.StepCtx) error
+		wantCode   int
+		wantStatus string
+	}{
+		// Returning without resolving the artifact parks the step.
+		{"parked", func(ctx flow.StepCtx) error { return nil }, 0, "parked"},
+		{"failed", func(ctx flow.StepCtx) error { return errors.New("handler boom") }, 1, "failed"},
+	}
+	for _, c := range cases {
+		t.Run(c.name+"/json", func(t *testing.T) {
+			t.Setenv(outputEnv, "")
+			be := fake.New()
+			be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+			app, out, errBuf := resolveTestAppStep(t, be, c.step)
+
+			code := app.cmdResolve(context.Background(), []string{"--json"})
+			if code != c.wantCode {
+				t.Fatalf("exit code = %d, want %d; err=%q", code, c.wantCode, errBuf.String())
+			}
+			got := decodeResultStream(t, out.String())
+			if len(got) != 1 {
+				t.Fatalf("stdout carried %d results, want 1 (the %s step, then the run stops); got %q", len(got), c.name, out.String())
+			}
+			if got[0].Status != c.wantStatus {
+				t.Errorf("result = %+v, want status %q", got[0], c.wantStatus)
+			}
+		})
+		t.Run(c.name+"/human", func(t *testing.T) {
+			t.Setenv(outputEnv, "")
+			be := fake.New()
+			be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+			app, out, errBuf := resolveTestAppStep(t, be, c.step)
+
+			code := app.cmdResolve(context.Background(), []string{"--human"})
+			if code != c.wantCode {
+				t.Fatalf("exit code = %d, want %d; err=%q", code, c.wantCode, errBuf.String())
+			}
+			if out.Len() != 0 {
+				t.Errorf("human mode must write nothing to stdout on a %s run; got %q", c.name, out.String())
+			}
+			// The outcome is still reported — on stderr, as prose.
+			if !strings.Contains(errBuf.String(), "write plan → "+c.wantStatus) {
+				t.Errorf("expected the %s outcome narrated on stderr; got %q", c.wantStatus, errBuf.String())
+			}
+		})
+	}
+}
+
+// A step that never produces a result at all: stdout stays empty even in JSON
+// mode, because errors travel as plain text on stderr with the exit code as
+// the signal. A reader of the stream must never have to tell a failure payload
+// from an InvocationResult.
+func TestCmdResolve_RunOneErrorKeepsStdoutClean(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be := &failingLoadStateBackend{Backend: inner, err: errors.New("state boom")}
+	app, out, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), []string{"--json"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout must carry InvocationResult objects and nothing else; got %q", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "state boom") {
+		t.Errorf("expected the error on stderr; got %q", errBuf.String())
 	}
 }

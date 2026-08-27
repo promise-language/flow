@@ -78,9 +78,11 @@ information `grant` needs.
 
 ### 5. `status` and `list` emit human text only
 
-`resolve` already gets this right: stdout is a clean stream of
+`resolve` already gets the stream split right: stdout carries nothing but
 `InvocationResult` JSON, human progress goes to stderr (see the comment above
-the loop in [cli/cmd_resolve.go](../../cli/cmd_resolve.go)). `status`,
+the loop in [cli/cmd_resolve.go](../../cli/cmd_resolve.go)). It took no
+`--json` / `--human` at the time of writing — that was fixed separately, and
+the JSON is now gated on the mode while the stderr narration stays. `status`,
 `list`, and `grant` print for humans unconditionally, so a tool has to parse
 `[x]` / `[~]` / `[ ]` markers to learn anything.
 

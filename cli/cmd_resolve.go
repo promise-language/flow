@@ -46,15 +46,22 @@ const maxResolveSteps = 50
 // ListEligible mirrors the orchestrator's selectEligibleTasks (same per-item
 // filter and same leased/urgency/priority sort), so the CLI picks the same
 // "next" the orchestrator would. An empty eligible set is a clean exit (0),
-// not an error — there is simply no work to do. Each step's result is
-// streamed as JSON so the operator sees progress live.
+// not an error — there is simply no work to do. Progress is narrated on Err in
+// both output modes; in JSON mode each step's result is also streamed to Out.
 func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("resolve")
+	of := addOutputFlags(fs)
 	if err := parseInterspersed(fs, args); err != nil {
 		return 2
 	}
 	if fs.NArg() > 1 {
 		fmt.Fprintf(app.Err, "resolve: unexpected argument %q (resolve takes an optional item id)\n", fs.Arg(1))
+		return 2
+	}
+	// Decided before any claim work: a contradictory --json --human must exit 2
+	// without leasing anything.
+	mode, ok := of.mode(app, "resolve")
+	if !ok {
 		return 2
 	}
 
@@ -130,12 +137,19 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		}
 	}
 
-	// Progress goes to Err so stdout stays a clean machine-readable stream of
-	// per-step InvocationResult JSON. A single agent step can run for many
-	// minutes; without these lines the silence reads as a hang and invites the
-	// operator to kill a healthy run. We announce each step BEFORE running it
-	// (so the long pause is attributed to a named step) and report the outcome
-	// after.
+	// Progress goes to Err in BOTH modes, so stdout carries per-step
+	// InvocationResult objects and nothing else — and in human mode nothing at
+	// all. That split is what makes `resolve > steps.json` do the obvious
+	// thing (JSON accumulating in the file, progress still on the terminal)
+	// and lets `resolve --json 2>/dev/null` yield the machine stream alone.
+	// The mode is decided by stdout, never by stderr: bare `resolve
+	// 2>/dev/null` on a terminal prints nothing at all, because a terminal
+	// stdout selects human.
+	//
+	// A single agent step can run for many minutes; without these lines the
+	// silence reads as a hang and invites the operator to kill a healthy run.
+	// We announce each step BEFORE running it (so the long pause is attributed
+	// to a named step) and report the outcome after.
 	fmt.Fprintf(app.Err, "resolve: driving %s to completion (until finalized or parked)…\n", claim.ItemRef.Display)
 	enc := json.NewEncoder(app.Out)
 	for range maxResolveSteps {
@@ -158,7 +172,9 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			fmt.Fprintln(app.Err, "resolve:", err)
 			return 1
 		}
-		_ = enc.Encode(res)
+		if mode == OutputJSON {
+			_ = enc.Encode(res)
+		}
 
 		label := res.Step
 		if label == "" {

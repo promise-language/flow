@@ -66,7 +66,11 @@ var perCommandUsage = map[string]cmdHelp{
 	"run-step": {name: "run-step", summary: "advance one lifecycle item",
 		detail: "Advances exactly ONE lifecycle item against the active claim\n(one prompt → one artifact). Requires an active claim; takes no arguments."},
 	"resolve": {name: "resolve", aliases: []string{"run-all"}, syntax: "[<item-id>]", summary: "run all steps to completion",
-		detail: "Runs ALL steps until the item is finalized or parked. With <item-id>,\nclaims it first; otherwise uses the active claim."},
+		detail: "Runs ALL steps until the item is finalized or parked. With <item-id>,\nclaims it first; otherwise uses the active claim.\n\n" +
+			"Progress is narrated on stderr in both output modes. In JSON mode\n" +
+			"(--json, FLOW_OUTPUT=json, or a piped/redirected stdout) each step's\n" +
+			"InvocationResult is also streamed to stdout, one compact object per\n" +
+			"line; in human mode stdout stays empty."},
 	"grant": {name: "grant", syntax: "[<step-id>] [--all] [--invocations N] [--prompts N] [--cost USD] [--timeout SECONDS] [--dry-run]", summary: "top up a step's budget",
 		detail: `With no arguments: reads why the item parked and tops up the axis that
 parked it, plus any other axis already at its cap — a step out of both time
