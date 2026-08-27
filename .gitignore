@@ -39,3 +39,6 @@ bin/
 
 # flow SDK per-clone claim state (pkg/clistate) — never committed
 .flow/
+
+# optional local post-build hook — per-clone, never committed
+/make.local
