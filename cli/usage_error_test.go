@@ -1,10 +1,15 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/flow"
+	"github.com/promise-language/flow/pkg/backend/fake"
 )
 
 // Every malformed invocation prints exactly two lines on stderr: what was
@@ -173,6 +178,15 @@ func TestUsageError_ContradictoryOptions(t *testing.T) {
 	})
 }
 
+// Naming a step id with no amount is malformed in the same way, and reaches
+// the shared shape from inside grant's planner rather than from parseArgs.
+func TestUsageError_GrantWithoutAnAmount(t *testing.T) {
+	app, out, errBuf, _ := grantTestSetup(t)
+	code := app.cmdGrant(t.Context(), []string{"plan"})
+	checkUsageError(t, "grant plan", out.String(), errBuf.String(), code,
+		"grant: at least one of --invocations / --prompts / --cost / --timeout must be set")
+}
+
 // The other half of the rule: usage IS printed when it is asked for — on
 // stdout, exit 0, with stderr left empty.
 func TestHelp_StillPrintsUsage(t *testing.T) {
@@ -232,5 +246,91 @@ func TestSelfPath_NamesThisExecutable(t *testing.T) {
 	}
 	if !filepath.IsAbs(got) && !strings.HasPrefix(got, "~") {
 		t.Errorf("selfPath = %q, want absolute or ~-rooted", got)
+	}
+}
+
+// The rejection is position-independent. Every existing unknown-flag case puts
+// the bad flag first; the walk has to keep checking after a positional too, or
+// `grant plan --bogus` runs the grant and the operator never learns the flag
+// did nothing.
+func TestUnknownFlag_AfterAPositional(t *testing.T) {
+	cases := [][]string{
+		{"grant", "plan", "--bogus"},
+		{"grant", "--invocations", "3", "plan", "--bogus"},
+		{"status", "42", "--bogus"},
+		{"resolve", "42", "--bogus"},
+	}
+	for _, args := range cases {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			app, out, errBuf := newArgparseApp(t)
+			code := RunWithArgs(*app, args)
+			checkUsageError(t, strings.Join(args, " "), out.String(), errBuf.String(), code,
+				args[0]+": use of unknown flag --bogus")
+		})
+	}
+}
+
+// "--" wins over the unknown-flag check. The check lives in the same walk that
+// handles the terminator, so ordering them wrong is a one-line mistake — and
+// it would leave an operator whose argument is literally spelled "--bogus"
+// with no way to pass it at all.
+func TestUnknownFlag_TerminatorEndsFlagChecking(t *testing.T) {
+	app, out, errBuf := newArgparseApp(t)
+	code := RunWithArgs(*app, []string{"list", "--", "--bogus"})
+	checkUsageError(t, "list -- --bogus", out.String(), errBuf.String(), code,
+		`list: unexpected argument "--bogus" (this command takes no arguments)`)
+}
+
+// Everything quoted back is operator input, and none of it is a format string.
+// usageError takes (format, args...) precisely so a "%" the operator typed
+// survives; a message assembled by concatenation, or a wrapper that rewrites
+// the format, prints "%!d(MISSING)" at them instead.
+func TestUsageError_OperatorTextIsNotAFormatString(t *testing.T) {
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"100%d"}, `issue: unknown command "100%d"`},
+		{[]string{"list", "--bogus%s"}, "list: use of unknown flag --bogus%s"},
+		{[]string{"list", "100%d"}, `list: unexpected argument "100%d" (this command takes no arguments)`},
+	}
+	for _, tc := range cases {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			app, out, errBuf := newArgparseApp(t)
+			app.Name = "issue"
+			code := RunWithArgs(*app, tc.args)
+			checkUsageError(t, strings.Join(tc.args, " "), out.String(), errBuf.String(), code, tc.want)
+		})
+	}
+}
+
+// Exit 2 "before the command takes any action" is a claim about side effects,
+// not just about the exit code: an unknown flag on `claim` must leave the item
+// unclaimed. The fake backend would happily claim it, so a rejection moved
+// after the action would still exit 2 and pass every message assertion.
+func TestUnknownFlag_ClaimsNothing(t *testing.T) {
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "42", Type: "task", Title: "42"})
+	app := &App{
+		Backend:   be,
+		Agent:     &stubAgent{name: "stub"},
+		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:     []*flow.Flow{newDummyFlow("x")},
+		Owner:     "alice",
+		Out:       &bytes.Buffer{},
+		Err:       &bytes.Buffer{},
+	}
+	out, errBuf := app.Out.(*bytes.Buffer), app.Err.(*bytes.Buffer)
+
+	code := RunWithArgs(*app, []string{"claim", "42", "--bogus"})
+	checkUsageError(t, "claim 42 --bogus", out.String(), errBuf.String(), code,
+		"claim: use of unknown flag --bogus")
+
+	claim, err := be.LookupActiveClaim(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("LookupActiveClaim: %v", err)
+	}
+	if claim != nil {
+		t.Errorf("item %q was claimed; a malformed invocation must act on nothing", claim.ItemRef.Display)
 	}
 }

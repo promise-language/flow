@@ -350,8 +350,14 @@ prints in both modes — in human mode it writes nothing to stdout at all.`, bin
 // It never prints the usage itself. A wall of flag definitions buries the one
 // fact the operator needs, and printing it unprompted trains people to skip it
 // on the occasion they did ask for it.
+//
+// The format string is passed to Fprintf unmodified — the newline is a
+// separate Fprintln — because `go vet`'s printf analyzer only recognises a
+// printf wrapper that forwards its format verbatim. Folding the "\n" in with
+// `format+"\n"` silently turns the check off for every call site below.
 func (app *App) usageError(format string, a ...any) int {
-	fmt.Fprintf(app.Err, format+"\n", a...)
+	fmt.Fprintf(app.Err, format, a...)
+	fmt.Fprintln(app.Err)
 	fmt.Fprintf(app.Err, "run `%s --help` for usage\n", selfPath(app.Name))
 	return 2
 }

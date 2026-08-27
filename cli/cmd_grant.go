@@ -224,7 +224,9 @@ func (app *App) planManual(f *flow.Flow, state *flow.ItemState, arg string, a gr
 		TimeoutAdd:           int64(a.timeout),
 	}
 	if g == (flow.Grant{}) {
-		fmt.Fprintln(app.Err, "grant: at least one of --invocations / --prompts / --cost / --timeout must be set")
+		// Naming a step id but no amount is a malformed invocation, not a
+		// refusal about this item — it takes the same shape as every other one.
+		app.usageError("grant: at least one of --invocations / --prompts / --cost / --timeout must be set")
 		return refuse()
 	}
 	return planned(plannedGrant{id: id, grant: g, before: state.Artifact(flow.ArtifactId(id))})
