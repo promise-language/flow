@@ -298,8 +298,8 @@ func TestUsage_NamesExactlyTheCommandsTakingOutputFlags(t *testing.T) {
 			t.Errorf("%s --json --human: stdout = %q, want empty", cmd, out.String())
 		}
 		takesFlags := strings.Contains(errBuf.String(), "mutually exclusive")
-		if !takesFlags && !strings.Contains(errBuf.String(), "not defined") {
-			t.Fatalf("%s --json --human: stderr = %q, want either the mutual-exclusion refusal or an undefined-flag error", cmd, errBuf.String())
+		if !takesFlags && !strings.Contains(errBuf.String(), "use of unknown flag") {
+			t.Fatalf("%s --json --human: stderr = %q, want either the mutual-exclusion refusal or an unknown-flag error", cmd, errBuf.String())
 		}
 		if named := strings.Contains(note, cmd); named != takesFlags {
 			t.Errorf("%s: named in the output-modes note = %v, takes --json/--human = %v — the two must agree.\nnote: %q",

@@ -11,12 +11,11 @@ import (
 func (app *App) cmdStatus(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("status")
 	of := addOutputFlags(fs)
-	if err := parseInterspersed(fs, args); err != nil {
+	if !app.parseArgs(fs, args) {
 		return 2
 	}
 	if fs.NArg() > 1 {
-		fmt.Fprintf(app.Err, "status: unexpected argument %q (status takes an optional item id)\n", fs.Arg(1))
-		return 2
+		return app.usageError("status: unexpected argument %q (status takes an optional item id)", fs.Arg(1))
 	}
 	mode, ok := of.mode(app, "status")
 	if !ok {

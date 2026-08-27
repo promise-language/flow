@@ -11,16 +11,14 @@ import (
 func (app *App) cmdClaim(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("claim")
 	force := fs.Bool("force", false, "claim even if the arena worktree has unsaved work (override the clean-tree check)")
-	if err := parseInterspersed(fs, args); err != nil {
+	if !app.parseArgs(fs, args) {
 		return 2
 	}
 	if fs.NArg() == 0 {
-		fmt.Fprintln(app.Err, "claim: missing item id (e.g., `claim 42`)")
-		return 2
+		return app.usageError("claim: missing item id (e.g., `claim 42`)")
 	}
 	if fs.NArg() > 1 {
-		fmt.Fprintf(app.Err, "claim: unexpected argument %q (claim takes exactly one item id)\n", fs.Arg(1))
-		return 2
+		return app.usageError("claim: unexpected argument %q (claim takes exactly one item id)", fs.Arg(1))
 	}
 	itemID := fs.Arg(0)
 

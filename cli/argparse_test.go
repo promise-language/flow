@@ -41,14 +41,19 @@ func TestRunWithArgs_UnknownCommand(t *testing.T) {
 	}
 }
 
-func TestRunWithArgs_NoArgsPrintsUsage(t *testing.T) {
+// A bare invocation names the failure and points at --help. It does NOT print
+// the usage: usage is printed when it is asked for, and only then.
+func TestRunWithArgs_NoArgsNamesTheFailure(t *testing.T) {
 	app, _, errBuf := newArgparseApp(t)
 	code := RunWithArgs(*app, nil)
 	if code != 2 {
 		t.Errorf("exit code = %d, want 2", code)
 	}
-	if !strings.Contains(errBuf.String(), "usage:") {
-		t.Errorf("err = %q, want usage text", errBuf.String())
+	if !strings.Contains(errBuf.String(), "no command given") {
+		t.Errorf("err = %q, want 'no command given'", errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "usage:") {
+		t.Errorf("err = %q, want no usage dump", errBuf.String())
 	}
 }
 
@@ -131,8 +136,7 @@ func TestNoArgsCommands_RejectUnknownFlag(t *testing.T) {
 			if code != 2 {
 				t.Errorf("exit code = %d, want 2", code)
 			}
-			if !strings.Contains(errBuf.String(), "flag provided but not defined") &&
-				!strings.Contains(errBuf.String(), "flag needs an argument") {
+			if !strings.Contains(errBuf.String(), "use of unknown flag --bogus") {
 				t.Errorf("err = %q, want flag-rejection message", errBuf.String())
 			}
 		})
@@ -199,7 +203,7 @@ func TestCmdGrant_RejectsUnknownFlag(t *testing.T) {
 	if code != 2 {
 		t.Errorf("exit code = %d, want 2", code)
 	}
-	if !strings.Contains(errBuf.String(), "flag provided but not defined") {
+	if !strings.Contains(errBuf.String(), "use of unknown flag --bogus") {
 		t.Errorf("err = %q, want flag-rejection message", errBuf.String())
 	}
 }

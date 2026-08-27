@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -116,8 +117,7 @@ func RunWithArgs(app App, args []string) int {
 	}
 
 	if len(args) == 0 {
-		fmt.Fprintln(app.Err, usage(app.Name))
-		return 2
+		return app.usageError("%s: no command given", app.Name)
 	}
 
 	cmd, rest := args[0], args[1:]
@@ -161,9 +161,7 @@ func RunWithArgs(app App, args []string) int {
 	case "resolve", "run-all":
 		return app.cmdResolve(ctx, rest)
 	default:
-		fmt.Fprintln(app.Err, "unknown command:", cmd)
-		fmt.Fprintln(app.Err, usage(app.Name))
-		return 2
+		return app.usageError("%s: unknown command %q", app.Name, cmd)
 	}
 }
 
@@ -344,27 +342,94 @@ force one. resolve's human text is its progress narration on stderr, which it
 prints in both modes — in human mode it writes nothing to stdout at all.`, bin)
 }
 
+// usageError reports a malformed invocation and returns the exit code for one.
+// It is the single shape every rejection of an invocation takes: one line
+// naming what was wrong, one line saying where the usage is, and exit 2 before
+// the command has done anything.
+//
+// It never prints the usage itself. A wall of flag definitions buries the one
+// fact the operator needs, and printing it unprompted trains people to skip it
+// on the occasion they did ask for it.
+func (app *App) usageError(format string, a ...any) int {
+	fmt.Fprintf(app.Err, format+"\n", a...)
+	fmt.Fprintf(app.Err, "run `%s --help` for usage\n", selfPath(app.Name))
+	return 2
+}
+
+// selfPath is how the pointer line names this binary: its own absolute path,
+// with $HOME abbreviated to ~. Not a placeholder and not a bare command name —
+// a machine carries one of these binaries per project plus whatever is on
+// PATH, and a reader who did not choose the invocation (every agent that was
+// handed it) cannot otherwise tell which one produced the error, or re-run it
+// without guessing.
+//
+// Falls back to the derived binary name when the executable cannot be
+// resolved: a pointer that names something beats no pointer at all.
+func selfPath(fallback string) string {
+	exe, err := os.Executable()
+	if err != nil {
+		return fallback
+	}
+	abs, err := filepath.Abs(exe)
+	if err != nil {
+		return fallback
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return abs
+	}
+	return abbreviateHome(abs, home)
+}
+
+// abbreviateHome rewrites a path under home as "~/…". The match is at a
+// separator boundary, so a sibling directory whose name merely starts with the
+// home path — /home/djabiXtra next to /home/djabi — is left alone rather than
+// mangled into "~Xtra".
+func abbreviateHome(path, home string) string {
+	sep := string(filepath.Separator)
+	home = strings.TrimSuffix(home, sep)
+	if home == "" {
+		return path
+	}
+	switch {
+	case path == home:
+		return "~"
+	case strings.HasPrefix(path, home+sep):
+		return "~" + path[len(home):]
+	}
+	return path
+}
+
 // newFlagSet returns a FlagSet configured for the strict-parsing convention:
-// errors print to app.Err, unknown flags are rejected. Caller registers any
-// flags, calls fs.Parse, then validates fs.NArg() against the expected
-// positional count.
+// unknown flags are rejected, and every rejection is reported by app.parseArgs
+// through usageError. The FlagSet's own output is discarded and its Usage is a
+// no-op, which is what suppresses the stdlib's default — a different message
+// followed by a dump of every flag the command accepts.
+//
+// Caller registers any flags, calls app.parseArgs, then validates fs.NArg()
+// against the expected positional count.
 func (app *App) newFlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	fs.SetOutput(app.Err)
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
 	return fs
 }
 
-// parseInterspersed parses args allowing flags to appear in any position
-// relative to positionals — the convention every modern CLI uses, but one the
-// stdlib flag package deliberately does not implement. Walks args once,
-// peeling flag tokens (and their values) off into a flags slice and pushing
-// the rest into positionals, then calls fs.Parse(flags, "--", positionals...)
-// so the stdlib parser sees the only order it understands. Unknown flags fall
-// through to fs.Parse's own "flag provided but not defined" error so existing
-// strict-parsing behavior is preserved. Bool flags are detected via the
+// parseArgs parses args allowing flags to appear in any position relative to
+// positionals — the convention every modern CLI uses, but one the stdlib flag
+// package deliberately does not implement. Walks args once, peeling flag
+// tokens (and their values) off into a flags slice and pushing the rest into
+// positionals, then calls fs.Parse(flags, "--", positionals...) so the stdlib
+// parser sees the only order it understands. Bool flags are detected via the
 // FlagSet's Lookup + IsBoolFlag so e.g. `claim <id> --force` is parsed
 // correctly (no slurping the next token).
-func parseInterspersed(fs *flag.FlagSet, args []string) error {
+//
+// That same Lookup is where an unrecognised flag is rejected, by name: the
+// walk already has to know whether the flag exists, and reporting it here is
+// what lets the message quote the flag as the operator spelled it instead of
+// the stdlib's normalized single-dash rendering. Returns false after reporting
+// the failure; the caller exits 2.
+func (app *App) parseArgs(fs *flag.FlagSet, args []string) bool {
 	var flags, positionals []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -377,36 +442,48 @@ func parseInterspersed(fs *flag.FlagSet, args []string) error {
 			positionals = append(positionals, a)
 			continue
 		}
-		// Strip 1 or 2 leading dashes to get the flag name.
+		// Strip 1 or 2 leading dashes to get the flag name, and cut
+		// "--name=value" at the "=" so the value is never mistaken for part of
+		// the name. `spelled` keeps the operator's own dashes, minus any value,
+		// so a refusal names the flag they typed.
 		name := a[1:]
 		if name[0] == '-' {
 			name = name[1:]
 		}
-		// "--name=value" is self-contained; never consume a follow-on token.
-		if strings.IndexByte(name, '=') >= 0 {
-			flags = append(flags, a)
-			continue
+		name, _, hasValue := strings.Cut(name, "=")
+		spelled, _, _ := strings.Cut(a, "=")
+
+		fl := fs.Lookup(name)
+		if fl == nil {
+			app.usageError("%s: use of unknown flag %s", fs.Name(), spelled)
+			return false
 		}
 		flags = append(flags, a)
-		// Peek next token only when the flag exists AND is NOT a bool flag —
-		// mirrors the stdlib's own internal logic in (*FlagSet).parseOne.
-		// Unknown flags: do not consume the next token here; let fs.Parse
-		// report the "flag provided but not defined" error itself.
-		if fl := fs.Lookup(name); fl != nil {
-			if bf, ok := fl.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
-				continue
-			}
-			if i+1 < len(args) {
-				i++
-				flags = append(flags, args[i])
-			}
+		// "--name=value" is self-contained; never consume a follow-on token.
+		if hasValue {
+			continue
+		}
+		// Peek next token only when the flag is NOT a bool flag — mirrors the
+		// stdlib's own internal logic in (*FlagSet).parseOne.
+		if bf, ok := fl.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
+			continue
+		}
+		if i+1 < len(args) {
+			i++
+			flags = append(flags, args[i])
 		}
 	}
 	if len(positionals) > 0 {
 		flags = append(flags, "--")
 		flags = append(flags, positionals...)
 	}
-	return fs.Parse(flags)
+	// Whatever the walk let through: a bad flag VALUE (`--invocations abc`), or
+	// a flag left without one at the end of the line.
+	if err := fs.Parse(flags); err != nil {
+		app.usageError("%s: %s", fs.Name(), err)
+		return false
+	}
+	return true
 }
 
 // rejectArgs parses args for a command that takes no flags and no
@@ -414,11 +491,11 @@ func parseInterspersed(fs *flag.FlagSet, args []string) error {
 // returns false (caller exits with code 2).
 func (app *App) rejectArgs(name string, args []string) bool {
 	fs := app.newFlagSet(name)
-	if err := fs.Parse(args); err != nil {
+	if !app.parseArgs(fs, args) {
 		return false
 	}
 	if fs.NArg() > 0 {
-		fmt.Fprintf(app.Err, "%s: unexpected argument %q (this command takes no arguments)\n", name, fs.Arg(0))
+		app.usageError("%s: unexpected argument %q (this command takes no arguments)", name, fs.Arg(0))
 		return false
 	}
 	return true
