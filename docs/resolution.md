@@ -77,7 +77,15 @@ Re-running an item with an unanswered question consumes no budget and runs no ag
 
 ## The verify command
 
-A flow's steps are gated by the project's verify command. It is configured once and reaches every consumer that needs it — the gate that must pass, and the prompt that tells an agent what to satisfy. **One value, every consumer.** Two settings that both mean "the verify command" will disagree, and the failure is silent: the agent runs one, the gate runs another.
+The project's verify command establishes that a change is fit to integrate.
+
+**It is required at exactly one point: where changes are integrated into trunk.** That is the only place it is mechanically mandatory, and it is mandatory without exception — nothing reaches trunk that has not passed.
+
+**Everywhere else it is elective.** A step may run it while working, as often as it finds useful, to check its own progress or to drive a fix loop. That is a tool the step chose to pick up, not a gate it was made to pass. A step is not required to leave the tree green, and a step that leaves it red has not failed on that account — the change is simply not yet ready to integrate, which the integration point will establish on its own.
+
+Treating verify as a per-step gate costs real work: it forces a step to converge before handing off, when the natural shape is often several steps converging together.
+
+It is configured once and reaches every consumer — the integration gate, and the prompt that tells an agent what to satisfy. **One value, every consumer.** Two settings that both mean "the verify command" will disagree, and the failure is silent: the agent runs one and it passes, the gate runs another and it cannot.
 
 Running the verify command **may modify the worktree**. Anything that runs it re-reads worktree state afterwards and never assumes the tree is unchanged.
 

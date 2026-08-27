@@ -50,6 +50,16 @@ A step that assumes a branch, or that terminates in a request, is a step that do
 
 Nothing here weakens the recording requirement in `resolution.md`: every modification a step makes is still either recorded or refused. Without a branch, the mainline is the record, which makes it *more* important that nothing unrecorded is left behind, not less.
 
+## Where verify is required
+
+`resolution.md` requires the verify command exactly where changes are integrated into trunk. **In this model that point is the push.**
+
+A commit is not integration. It is local and reversible — nobody else can see it, and it can be amended, reordered, or discarded. A step commits as freely as it finds useful, and needs no green tree to do so.
+
+The push is the integration. It is the first irreversible outward act, it lands on trunk with no branch and no request between, and there is no later reviewer and no merge gate behind it. **Verify passes before the push, without exception**, because nothing downstream will catch what it misses.
+
+That is the strictest form of the requirement, and the model that makes it strictest is the one with the least ceremony around it. It also means a red trunk is reachable only through a defect: anything landing unverified indicates the gate was skipped, not that review was lax.
+
 ## Interruption
 
 A binary invoked per step is interrupted routinely — the server restarts, a machine is reclaimed, a run is cancelled. Interruption is normal operation, not an error path.

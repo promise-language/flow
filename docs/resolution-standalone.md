@@ -59,8 +59,14 @@ An item that cannot be worked is never selected: one already claimed elsewhere, 
 
 Selecting nothing is a clean outcome. No eligible item means there is no work, not that something failed.
 
-## The gate
+## Where verify is required
 
-The verify command is the gate every producing step must satisfy, and it runs **in the worktree**, against the tree as it stands.
+`resolution.md` requires the verify command exactly where changes are integrated into trunk. **In this model the flow does not integrate — it proposes.** The product is a pull request; a human or a continuous-integration system decides whether it lands.
 
-It is configured once and reaches both consumers — the gate itself and the prompt describing it. A default that ships with the SDK is a default that must work in the repository shipping it; a default naming a convention the project has abandoned is a trap, because a consumer who sets nothing gets a configuration that looks valid and cannot run.
+Pushing is not integration here either. The branch is pushed, and a branch is not trunk — the push makes the work visible for review, not part of the mainline. (Under a central orchestrator the same act *is* the integration, because there is no branch between the push and trunk. Same verb, different meaning, and the difference is which model you are in.)
+
+So the mandatory gate sits *outside* the flow, and the authority over trunk is whatever guards the merge. A flow that ran verify before opening the request has not discharged that gate; it has only avoided proposing something it already knew was unfit.
+
+That is still worth doing, and it is why a step may elect to run verify. But it is a courtesy to the reviewer, not the gate itself, and the flow does not treat its own green run as permission to land.
+
+The verify command is configured once and reaches both consumers — any step electing to run it, and the prompt describing it to an agent. A default that ships with the SDK is a default that must work in the repository shipping it: a default naming a convention the project has abandoned is a trap, because a consumer who sets nothing gets a configuration that looks valid and cannot run.
