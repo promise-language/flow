@@ -209,14 +209,40 @@ Make {{.VerifyCmd}} pass. {{.DeferCommit}}
 Fix the cause. Do not change tests to make them pass unless the test is itself
 wrong, and say so explicitly if you conclude that.`,
 
-	PromptReview: `Review the diff on the current branch. Flag correctness bugs, surprising
-behavior, missed edge cases, and unnecessary complexity. Be specific, and cite
-file:line. End with PASS or FAIL.
+	PromptReview: `Review the diff on the current branch for correctness bugs, surprising
+behavior, missed edge cases, and unnecessary complexity — and FIX what you
+find. You have the context loaded; leaving a fault for someone else to repair
+costs another turn to rediscover what you already know.
+
+Keep {{.VerifyCmd}} passing. {{.DeferCommit}}
+
+Report what you changed and why, citing file:line, and say plainly what you
+left alone and what needs a human decision. Someone will read this to review
+the change, so write for them: what you looked for, what you changed, what
+they should still judge.
 
 {{.AnswersBlock}}`,
 
-	PromptCoverage: `Analyze test coverage of the changes on the current branch. List uncovered
-paths and recommend whether more tests are required.
+	PromptCoverage: `Bring the changes on the current branch up to this project's testing standard.
+This is a requirement to MEET, not a state to assess: write the tests.
+
+Nothing runs after you. A gap you describe instead of closing is a gap that
+ships, and no one will come back for it — the item will be resolved. You are
+the last step holding this context, so "someone should test this later" means
+it will not be tested.
+
+Where a change cannot be tested as written, restructure it so that it can be.
+Code that cannot be tested is not finished.
+
+Leaving something untested is an exception, not an outcome. If one survives
+after you have tried to restructure around it, justify it specifically — what
+it is, why it resists testing, and what would have to change. A reason is
+accountable; a list is a handoff to nobody.
+
+Keep {{.VerifyCmd}} passing. {{.DeferCommit}}
+
+Report what you added and what you restructured, so the person reviewing the
+change can see what you did rather than reconstruct it from the diff.
 
 {{.AnswersBlock}}`,
 

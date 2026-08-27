@@ -38,6 +38,10 @@ type fakeWorktree struct {
 	opened      bool
 	openBody    string
 	captured    []byte
+	// dirty models work appearing in the tree AFTER a commit — what the review
+	// and coverage steps do. A Commit that lands clears it, as git does; a
+	// Commit that lands nothing (noCommit) leaves it, as git also does.
+	dirty []byte
 }
 
 func newFakeWorktree() *fakeWorktree {
@@ -60,6 +64,7 @@ func (w *fakeWorktree) Commit(context.Context, string) error {
 	}
 	w.commits++
 	w.head = fmt.Sprintf("sha-%d", w.commits)
+	w.dirty = nil
 	return nil
 }
 func (w *fakeWorktree) Stage(context.Context) error { w.staged = true; return nil }
@@ -74,6 +79,9 @@ func (w *fakeWorktree) Validate(context.Context) error {
 func (w *fakeWorktree) CapturePatch(context.Context) ([]byte, error) {
 	// Models `git diff HEAD`: untracked work is invisible until staged, and
 	// nothing is left to see once it has been committed.
+	if len(w.dirty) > 0 {
+		return w.dirty, nil
+	}
 	if !w.staged || w.commits > 0 {
 		return nil, nil
 	}
@@ -545,5 +553,90 @@ func TestStepsOnlyRevParseTheGuaranteedRevisions(t *testing.T) {
 	}
 	if len(wt.revsAsked) == 0 {
 		t.Error("no revisions resolved — the empty-branch guard did not run")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Recording what the checking steps produced (#19) and surfacing it (#26).
+// ---------------------------------------------------------------------------
+
+// Review and coverage may edit — that is the design — but implement is the only
+// other step that commits. Without recording their work at the proposal, the
+// request describes a branch that does not contain it and nothing says so.
+// Observed on three consecutive real runs before this existed.
+func TestStepOpenPR_RecordsWhatTheCheckingStepsChanged(t *testing.T) {
+	wt := newFakeWorktree()
+	wt.exists["flow/issue-42"] = true
+	wt.commits = 1 // implement already committed
+	wt.dirty = []byte("diff --git a/cli/app.go b/cli/app.go\n")
+
+	before := wt.commits
+	if err := testBuilder(t).stepOpenPR(ctxWithPlan(wt, &scriptedAgent{})); err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	if wt.commits != before+1 {
+		t.Errorf("commits = %d, want %d — the checking steps' work was not recorded, "+
+			"so the pull request describes a branch missing it", wt.commits, before+1)
+	}
+	if !wt.opened {
+		t.Error("no pull request opened")
+	}
+}
+
+// The corollary: a clean tree costs nothing. Committing per step regardless
+// would record steps that changed nothing.
+func TestStepOpenPR_CleanTreeRecordsNothing(t *testing.T) {
+	wt := newFakeWorktree()
+	wt.exists["flow/issue-42"] = true
+	wt.commits = 1
+	wt.noCommit = true // git lands nothing with nothing staged
+
+	if err := testBuilder(t).stepOpenPR(ctxWithPlan(wt, &scriptedAgent{})); err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	if wt.commits != 1 {
+		t.Errorf("commits = %d, want 1 — an empty commit was recorded", wt.commits)
+	}
+}
+
+// The guard, one layer below the commit: if work survives recording, opening
+// the request would propose a branch that does not carry it. Refuse instead —
+// silently proposing an incomplete change is the failure being prevented.
+func TestStepOpenPR_RefusesWhenWorkSurvivesRecording(t *testing.T) {
+	wt := newFakeWorktree()
+	wt.exists["flow/issue-42"] = true
+	wt.commits = 1
+	wt.noCommit = true                        // nothing lands...
+	wt.dirty = []byte("diff --git a/x b/x\n") // ...but the tree still carries work
+
+	err := testBuilder(t).stepOpenPR(ctxWithPlan(wt, &scriptedAgent{}))
+	if err == nil || !strings.Contains(err.Error(), "uncommitted") {
+		t.Fatalf("err = %v, want a refusal naming the uncommitted work", err)
+	}
+	if wt.opened {
+		t.Error("opened a pull request over a tree still carrying work")
+	}
+}
+
+// The other half of the same defect: a checking step's product reaching no
+// reader is budget spent on nothing, and worse when it describes changes that
+// ARE in the diff — the reader sees unexplained work and must reconstruct why.
+func TestStepOpenPR_BodyCarriesTheCheckingStepsBriefings(t *testing.T) {
+	wt := newFakeWorktree()
+	wt.exists["flow/issue-42"] = true
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+	ctx.arts["review"] = flow.ArtifactRecord{
+		Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "routed grant through usageError"}
+	ctx.arts["coverage"] = flow.ArtifactRecord{
+		Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "added the arity cases"}
+
+	if err := testBuilder(t).stepOpenPR(ctx); err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	for _, want := range []string{"## Review", "routed grant through usageError", "## Coverage", "added the arity cases"} {
+		if !strings.Contains(wt.openBody, want) {
+			t.Errorf("body missing %q — it reaches only the state comment, where no reviewer looks:\n%s",
+				want, wt.openBody)
+		}
 	}
 }

@@ -158,13 +158,22 @@ func TestRenderPrompt_ProjectBodyBeatsDefault(t *testing.T) {
 	}
 }
 
+// Probes the fallback MECHANISM, not the prompt's wording. An earlier version
+// asserted on a phrase in the review prompt and broke the moment that prompt
+// was rewritten -- which tested the text, not the behaviour it was named for.
 func TestRenderPrompt_FallsBackToDefault(t *testing.T) {
 	got, err := renderPrompt(Config{}, PromptReview, PromptContext{})
 	if err != nil {
 		t.Fatalf("renderPrompt: %v", err)
 	}
-	if !strings.Contains(got, "PASS or FAIL") {
-		t.Errorf("got %q, want the library default", got)
+	want, err := renderPrompt(
+		Config{Prompts: map[PromptID]string{PromptReview: defaultPrompts[PromptReview]}},
+		PromptReview, PromptContext{})
+	if err != nil {
+		t.Fatalf("renderPrompt(explicit default): %v", err)
+	}
+	if got != want {
+		t.Errorf("omitting the override rendered differently from supplying the default:\ngot  %q\nwant %q", got, want)
 	}
 }
 
@@ -176,8 +185,12 @@ func TestRenderPrompt_EmptyProjectBodyFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderPrompt: %v", err)
 	}
-	if !strings.Contains(got, "PASS or FAIL") {
-		t.Errorf("got %q, want the default to fill in for a blank override", got)
+	want, err := renderPrompt(Config{}, PromptReview, PromptContext{})
+	if err != nil {
+		t.Fatalf("renderPrompt(no override): %v", err)
+	}
+	if got != want {
+		t.Errorf("a blank override did not fall back:\ngot  %q\nwant %q", got, want)
 	}
 }
 

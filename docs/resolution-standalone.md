@@ -50,7 +50,11 @@ Naming them as checks would be a mistake with consequences. A step told to *asse
 
 **A producing step is not restricted to its own artifacts.** A step concerned with correctness fixes the fault it finds. A step concerned with coverage writes the missing tests — and where the change cannot be tested as written, **restructures it so that it can be.**
 
-That last license is the one worth stating plainly, because it is the surprising one: a step whose concern is coverage may alter the solution itself. That is intended. Code that cannot be tested is not finished, and discovering it while the context is still loaded is worth more than filing it as a finding for someone to meet later.
+That last license is the one worth stating plainly, because it is the surprising one: a step whose concern is coverage may alter the solution itself. That is intended. Code that cannot be tested is not finished.
+
+**A producing step's concern is a requirement to meet, not a state to assess.** Nothing runs after the producing phase, and the item is resolved when the flow finishes — so a gap a step describes rather than closes is a gap that ships, handed to nobody. There is no later.
+
+Leaving a concern unmet is therefore an exception rather than an outcome, and an exception is justified specifically: what resisted, why, and what would have to change. A reason is accountable to the reader; a list of gaps is a handoff to a step that does not exist.
 
 A step that could only report a fault costs a further agent turn to fix what it had already diagnosed, with everything it needed in front of it. One that fixes it spends the turn it is already paying for.
 

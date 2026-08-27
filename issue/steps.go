@@ -294,12 +294,80 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 	// branch. Pushing here first would defeat that guard: a tree left on the
 	// default branch — or on another item's branch — would be force-tracked to
 	// origin before anything noticed it was the wrong one.
+	// Record anything the steps AFTER implement produced, before the push.
+	//
+	// Review and coverage may edit — deliberately, since a reviewer that can
+	// only report a fault costs an extra turn to fix one it could have fixed
+	// in place. But implement is the only other step that commits, so without
+	// this their work is pushed nowhere: the request would describe a branch
+	// that does not contain it, and nothing would say so. The change is simply
+	// absent, and only `git status` in the arena afterwards shows it.
+	//
+	// Its own commit rather than amending implement's: the history should read
+	// "implement" then "what review changed", because that is what happened.
+	if err := b.recordOutstanding(ctx, wt); err != nil {
+		return err
+	}
+
 	body, err := b.pullRequestBody(ctx)
 	if err != nil {
 		return err
 	}
 	_, err = flow.Open(ctx.Context(), wt, base, title, body)
 	return err
+}
+
+// recordOutstanding commits whatever the post-implement steps left in the tree,
+// and refuses to continue if anything survives that.
+//
+// One commit for all of them, not one per step: a commit per step would record
+// steps that changed nothing, and the unit an operator reads is "what happened
+// after the change was written", singular.
+func (b *builder) recordOutstanding(ctx flow.StepCtx, wt flow.Worktree) error {
+	before, err := wt.RevParse(ctx.Context(), "HEAD")
+	if err != nil {
+		return err
+	}
+	if err := wt.Stage(ctx.Context()); err != nil {
+		return err
+	}
+	// Commit is a deliberate no-op when nothing is staged, so a clean tree
+	// costs one call and records nothing.
+	if err := wt.Commit(ctx.Context(), b.followUpCommitMessage(ctx)); err != nil {
+		return err
+	}
+	after, err := wt.RevParse(ctx.Context(), "HEAD")
+	if err != nil {
+		return err
+	}
+	if after != before {
+		ctx.Notify("", "recorded changes made after the implement step")
+	}
+
+	// The guard, and it is not redundant with the commit above. Staging cannot
+	// pick up what a backend refuses to stage, and a request opened over a tree
+	// that still carries work would describe a branch missing it — the exact
+	// silent loss this function exists to prevent, one layer down.
+	patch, err := wt.CapturePatch(ctx.Context())
+	if err != nil {
+		return err
+	}
+	if len(patch) > 0 {
+		return fmt.Errorf(
+			"worktree still carries uncommitted changes after recording them, so a "+
+				"pull request would describe a branch that does not contain the work "+
+				"(%d bytes of diff remain); resolve the worktree by hand before retrying",
+			len(patch))
+	}
+	return nil
+}
+
+// followUpCommitMessage names the commit that records post-implement work. It
+// deliberately does NOT carry the closes-reference: the implement commit
+// already does, and repeating it would make a second commit look like a second
+// resolution of the same item.
+func (b *builder) followUpCommitMessage(ctx flow.StepCtx) string {
+	return fmt.Sprintf("Review and coverage on #%s", ctx.Item().ID)
 }
 
 // ---------------------------------------------------------------------------
@@ -512,6 +580,13 @@ func (b *builder) pullRequestBody(ctx flow.StepCtx) (string, error) {
 		return "", fmt.Errorf("plan artifact is resolved but its body did not load — " +
 			"refusing to open a pull request with no plan in it")
 	}
+	// Review and coverage reach the reader, not just the state comment. The
+	// only audience a proposed change has is the person who reviews it, and an
+	// artifact stored where they will not look is budget spent on nothing —
+	// worse when it describes work that IS in the diff, leaving them to infer
+	// unaided why it is there.
+	section("Review", StepReview)
+	section("Coverage", StepCoverage)
 	section("Verification", StepVerifyImpl)
 	fmt.Fprintln(&sb, closesRef(ctx.Item().ID))
 	return sb.String(), nil
