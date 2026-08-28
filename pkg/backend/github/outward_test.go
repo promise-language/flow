@@ -932,15 +932,24 @@ func TestPushSeparatesBranchMessagesAndDiff(t *testing.T) {
 		{"new work here", flow.OriginAgent, "an agent wrote the commit message"},
 		{"a line only this branch has", flow.OriginWorktree, "the diff is the tree under resolution"},
 	} {
-		i := slices.IndexFunc(seen[0].Text, func(p flow.Text) bool {
-			return strings.Contains(p.Body, want.fragment)
-		})
-		if i < 0 {
-			t.Errorf("the push disclosure does not carry %q at all", want.fragment)
-			continue
+		// EVERY part that carries the fragment, not the first one that does.
+		// Each of the three is composed end to end by one party, and that is
+		// what makes its origin true; a fragment turning up in a second part
+		// under another origin means one of them vouches for text it did not
+		// compose. A first-match check would pass through exactly that — the
+		// patch query carrying the commit messages alongside the diff.
+		found := 0
+		for _, p := range seen[0].Text {
+			if !strings.Contains(p.Body, want.fragment) {
+				continue
+			}
+			found++
+			if p.Origin != want.origin {
+				t.Errorf("%q is stated %q, want %q — %s", want.fragment, p.Origin, want.origin, want.why)
+			}
 		}
-		if got := seen[0].Text[i].Origin; got != want.origin {
-			t.Errorf("%q is stated %q, want %q — %s", want.fragment, got, want.origin, want.why)
+		if found == 0 {
+			t.Errorf("the push disclosure does not carry %q at all", want.fragment)
 		}
 	}
 }

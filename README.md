@@ -185,8 +185,9 @@ func main() {
 }
 ```
 
-Build it (`go build -o issue .`), then `./issue doctor`, `./issue claim <id>`,
-`./issue run-step`.
+Build it (`go build -o issue .`), then `./issue doctor` and `./issue list`.
+`./issue claim <id>` is the first thing that writes, so it — and every step
+after it — refuses until a guard is injected above.
 
 ### 2. The `cli.App` you assemble
 

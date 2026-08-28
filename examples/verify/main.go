@@ -29,6 +29,10 @@ func main() {
 	backend, err := ghbackend.NewBackend(ghbackend.Config{
 		BinaryName: "verify",
 		VerifyCmd:  []string{"go", "test", "./..."},
+		// No guard, so this binary publishes nothing: `doctor` and `list`
+		// work, and `claim` — the first write — refuses. See examples/issue
+		// and docs/disclosure.md.
+		Guard: nil,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "verify: backend init:", err)

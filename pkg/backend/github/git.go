@@ -169,8 +169,11 @@ func (g *gitOps) HasStaged(ctx context.Context) (bool, error) {
 
 // PushMaterial reports what pushing `branch` to origin would publish: the
 // message of every commit the remote does not already have, and those commits
-// as a patch. There is no Push here — it lives on outward, because a push is a
-// publication and must not be reachable without passing the seam.
+// as a patch. The two are returned separately and stay separate, because they
+// are disclosed under different origins — an agent wrote the messages, and the
+// diff is the tree under resolution. There is no Push here — it lives on
+// outward, because a push is a publication and must not be reachable without
+// passing the seam.
 //
 // `--not --remotes=origin` rather than a diff against a base branch: it needs
 // no base, and is correct both for a first push (nothing on origin excludes
@@ -190,11 +193,11 @@ func (g *gitOps) PushMaterial(ctx context.Context, branch string) (messages []st
 	// file at. `git push` never had to disambiguate, so this is a failure
 	// only the material query can hit, and it would fail a push that has
 	// nothing wrong with it.
-	logArgs := func(extra ...string) []string {
-		args := append([]string{"log", "--format=%B%x00"}, extra...)
+	logArgs := func(format string, extra ...string) []string {
+		args := append([]string{"log", "--format=" + format}, extra...)
 		return append(args, branch, "--not", "--remotes=origin", "--")
 	}
-	stdout, stderr, err := g.run(ctx, logArgs()...)
+	stdout, stderr, err := g.run(ctx, logArgs("%B%x00")...)
 	if err != nil {
 		return nil, "", fmt.Errorf("git log %s --not --remotes=origin: %w (%s)", branch, err, string(stderr))
 	}
@@ -203,7 +206,12 @@ func (g *gitOps) PushMaterial(ctx context.Context, branch string) (messages []st
 			messages = append(messages, trimmed)
 		}
 	}
-	full, stderr, err := g.run(ctx, logArgs("--patch")...)
+	// An EMPTY format for the patch, so the diff comes back as the diff and
+	// nothing else. `--format=%B` here would print every commit message ahead
+	// of its own diff, and the caller states one origin per string: the
+	// combined string would be the tree vouching for prose an agent wrote,
+	// which is the assembled-string case docs/disclosure.md refuses.
+	full, stderr, err := g.run(ctx, logArgs("", "--patch")...)
 	if err != nil {
 		return nil, "", fmt.Errorf("git log --patch %s --not --remotes=origin: %w (%s)", branch, err, string(stderr))
 	}
