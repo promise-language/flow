@@ -252,7 +252,11 @@ func (b *Backend) ResolveArtifact(ctx context.Context, claim flow.Claim, id flow
 				return err
 			}
 		}
-		c, err := b.out.CreateComment(ctx, actArtifactComment, issueNum, commentBody)
+		// The assembled comment, not the artifact: the SDK's marker line and
+		// spill notice around prose an agent wrote, which nobody vouches for
+		// as a whole.
+		c, err := b.out.CreateComment(ctx, flow.ActArtifactComment, issueNum,
+			flow.Text{Origin: flow.OriginAgent, Body: commentBody})
 		if err != nil {
 			return fmt.Errorf("post artifact comment: %w", err)
 		}
@@ -455,7 +459,10 @@ func (b *Backend) Park(ctx context.Context, claim flow.Claim, req flow.ParkReque
 	// Post a comment with the park reason so the timeline carries a record.
 	parkBody, _ := json.Marshal(req)
 	body := "<!-- flow:park -->\n```json\n" + string(parkBody) + "\n```"
-	if _, err := b.out.CreateComment(ctx, actParkRecord, issueNum, body); err != nil {
+	// The JSON frame is the SDK's; the reason and details inside it are a
+	// handler's or an agent's, so the assembled record is stated `agent`.
+	if _, err := b.out.CreateComment(ctx, flow.ActParkRecord, issueNum,
+		flow.Text{Origin: flow.OriginAgent, Body: body}); err != nil {
 		return err
 	}
 	// Record it in the state doc. An item can be parked before it is seeded
@@ -497,7 +504,8 @@ func (b *Backend) AskQuestions(ctx context.Context, claim flow.Claim, qs []flow.
 	body := sb.String()
 	// Keep the created comment: its server-side CreatedAt is the only clock
 	// that can be compared against the answers' timestamps. See Question.AskedAt.
-	created, err := b.out.CreateComment(ctx, actQuestion, issueNum, body)
+	created, err := b.out.CreateComment(ctx, flow.ActQuestion, issueNum,
+		flow.Text{Origin: flow.OriginAgent, Body: body})
 	if err != nil {
 		return nil, fmt.Errorf("post questions comment: %w", err)
 	}

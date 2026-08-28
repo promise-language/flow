@@ -86,6 +86,10 @@ Three things about the signature carry the rest of the design.
 
 Closed, because an open set is one a caller extends by inventing a name that means "fine, probably". Text that fits none of these is not a new origin — it is `elsewhere`, which is the member that exists to have somewhere honest to put it.
 
+**A string with more than one origin takes the origin of whichever party does not vouch for it.** Almost everything published is assembled — the SDK's marker line around an agent's prose, a path template interpolating a filename the agent chose. The frame is the SDK's and the SDK stands behind that, but it does not know what went into the part it was handed, so nobody stands behind the whole string. Splitting it is not available: what is published is the assembled string, and a guard shown the pieces would be examining text that is never sent. So an assembled string is stated as `agent` — or `elsewhere` — whenever any part of it is, and only a string composed end to end by one vouched party carries that party's origin.
+
+This is why an origin is stated **per string** and not per write. A push publishes three: a branch name the flow constructed, commit messages an agent wrote, and the diff as it stands in the tree under resolution. Each is composed end to end by one party, so each carries a true origin — and one origin for the whole push would have to be false about two of them.
+
 **`agent` exists because the alternative was a lie.** A pre-tool hook watching `gh issue create` knows where the *command* is running; it does not know where the *text* came from, and the agent that composed it may have had several repositories in context. Calling that `worktree` would be a claim about location dressed as a claim about provenance, which is the one thing an origin must not be.
 
 So `agent` says the true thing — **nobody vouches for this** — and it is the origin that earns the strictest examination, precisely because there is nothing behind it. It is also the most common one in practice: almost everything a resolution publishes was composed by an agent.

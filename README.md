@@ -156,6 +156,9 @@ func main() {
     backend, err := ghbackend.NewBackend(ghbackend.Config{
         BinaryName: "issue",
         VerifyCmd:  []string{"bash", "bin/verify.sh"}, // your project's gate
+        // Guard is what lets this publish anything at all. With none, reads
+        // work and the first write refuses — see docs/disclosure.md.
+        Guard: nil,
     })
     if err != nil {
         panic(err)

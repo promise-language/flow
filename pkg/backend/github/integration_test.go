@@ -64,6 +64,11 @@ func TestIntegration_ClaimSeedResolveCycle(t *testing.T) {
 		Owner:      owner,
 		Repo:       repo,
 		BinaryName: "flow-integration-test",
+		// This test's subject is the claim/seed/resolve cycle against a real
+		// sandbox repository, not the guard, and without one nothing would be
+		// published at all. What the guard refuses is asserted against the
+		// mock, where no bytes leave the machine.
+		Guard: allowing(),
 	}
 	b, err := NewBackend(cfg)
 	if err != nil {

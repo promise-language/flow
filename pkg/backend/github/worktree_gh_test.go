@@ -34,7 +34,7 @@ func ghArgsFor(t *testing.T, invoke func(*worktree) error) []string {
 			return nil, nil, nil
 		},
 	}
-	b.out = newOutward("", b.git, b.cfg.Owner, b.cfg.Repo)
+	b.out = newOutward("", b.git, b.cfg.Owner, b.cfg.Repo, allowing())
 	_ = invoke(&worktree{b: b, issueNum: 42})
 	if got == nil {
 		t.Fatal("gh was never invoked")
