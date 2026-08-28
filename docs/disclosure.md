@@ -59,9 +59,43 @@ This inverts the rule for gates that measure a tree.
 
 A gate over a worktree that could not run has measured nothing, and the correct response is to retry: refusing the change would blame it for a dead machine. **A disclosure guard that cannot answer refuses to send.** The asymmetry is in what an error costs. Not publishing something publishable wastes a step; publishing something unpublishable cannot be undone — deletion removes it from the page and not from anyone's index, mail, or memory.
 
+## What it is asked, and what it answers
+
+The guard is asked one question, by whatever is about to publish:
+
+> **(the text, where the text came from) → allow or refuse**
+
+**The flow declares that seam and cannot fill it.** It is a shape — an interface — and the thing that actually enforces anything is supplied from outside and injected, the same way a backend and an agent are.
+
+That is not an implementation preference; it is what the authorship rule requires. A concrete implementation living in the flow would be code inside a tree that agents edit, rebuildable by the party it refuses. A shape the flow declares and something else fills means the flow can state *that* every write is checked without owning *what* the check permits. **The guarded project has no control over it**, which is the whole requirement, and it is satisfied by the dependency direction rather than by anyone's discipline.
+
+Three things about the signature carry the rest of the design.
+
+**The caller supplies the origin. The guard never infers it.** This is what makes a definitive answer possible without a model and without guesswork. Provenance is not a property of text — a paragraph about another project's architecture reads exactly like a paragraph about this one — but it *is* known to whoever is about to publish. A backend writing an artifact knows it came from an agent turn in this worktree. A pre-tool hook knows which repository the command is running in. The party that has the fact states it, and the guard decides from it.
+
+**The set of origins is closed.**
+
+| Origin | Text that came from |
+|---|---|
+| `worktree` | The tree under resolution — an agent's turn within it, or a file read from it |
+| `item` | The item being resolved: its title, body, its comments. Already published where this is going |
+| `flow` | The SDK itself — templates, headings, its own error strings |
+| `operator` | A person, typed |
+| `elsewhere` | Anywhere else: another repository, another session, another machine |
+
+Closed, because an open set is one a caller extends by inventing a name that means "fine, probably". Text that fits none of these is not a new origin — it is `elsewhere`, which is the member that exists to have somewhere honest to put it.
+
+**There is no `unknown`.** A caller that cannot state an origin cannot make the call, and a guard that is not called does not permit anything — the write does not happen. Providing an `unknown` member would turn the one case this guard exists for into a value that can be passed, and a value that can be passed is a value someone defaults to.
+
+**An origin that cannot be stated is a refusal.** Not an error and not a default-allow: unattributable text is exactly the case this exists for, and a guard that waved it through would be safe only for text that was never at risk.
+
+**The answer is definitive.** Allow or refuse — no confidence, no maybe, nothing for a caller to weigh, and no allowed-plus-a-warning. A guard that returns a degree of concern has moved the decision to the caller, and the caller is the party trying to publish. A refusal carries its reason; permission carries nothing, because there is nothing a caller should do differently when the answer is yes.
+
 ## It is wired in, not launched
 
-The guard is **part of the SDK, on the path from the backend to GitHub.** It is not a program the flow execs, and it needs no protocol for receiving its subject: the act reaches it as a value, because it is a step in the code that performs the act.
+It is a call, not a program the flow execs, and it needs no protocol for receiving its subject: the text and its origin reach it as values, because it is a step in the code that performs the act.
+
+**A flow with nothing injected publishes nothing that needs guarding — or does not publish.** Whether an unfilled seam is an error at construction or a refusal at the first write is a question for the implementation, but it is not silently permissive: an interface that defaults to allow is an interface whose whole purpose is optional.
 
 That is not merely simpler than an external program. It is what satisfies the rule every guard is under: **a guard must not be authored by the party it constrains**, because a guard leaves no review window — one weakened at a step authorises the next step immediately, before any review exists, and the run in which it was bypassed looks exactly like the run in which it had nothing to refuse.
 
@@ -75,15 +109,24 @@ Being wired into the SDK satisfies both by construction. A flow is delivered fro
 
 ## Where it sits
 
-**At the boundary between the backend and GitHub**, and nowhere else.
+Text reaches GitHub by two paths, and the guard stands on both. It is **one guard in two positions**, not two policies — a rule that applied to one path and not the other would be a rule about who is writing rather than about what is published.
 
-Every outward write goes through the github backend: the API calls that create and edit comments and labels, the `gh` invocations that open a pull request, and the git operations that push a branch. That seam is the one place where a byte is both **final** and **not yet sent** — the two properties the guard needs.
+| Path | Position | Who is writing |
+|---|---|---|
+| The SDK's own writes | The seam between the github backend and GitHub | A resolution step |
+| **A tool call** | The pre-tool hook | **Any agent with a terminal — including one working with a person** |
 
-Anywhere earlier is too early: the text is still being assembled, and a template is not what gets published. Anywhere later does not exist.
+**The first: one seam, not a check per call site.** Every outward write goes through the github backend — the API calls that create and edit comments and labels, the `gh` invocations that open a pull request, the git operations that push a branch. That seam is the one place a byte is both **final** and **not yet sent**, which are the two properties the guard needs. Anywhere earlier is too early: the text is still being assembled, and a template is not what gets published. A guard installed at six call sites is a guard absent from the seventh.
 
-**One seam, not a check per call site.** A guard installed at six call sites is a guard absent from the seventh, and the seventh is the one someone adds later without knowing this document exists.
+**The second is the path that is easy to forget, because it is not the flow.** An agent at a terminal running `gh issue create`, `gh pr comment` or `git push` publishes exactly as permanently as a resolution does, and reaches none of the SDK's code to do it. It does pass the pre-tool hook, which sees the command and its final arguments — so the same guard applies there, and an agent working alongside a person is bound by it too.
 
-This also puts it where provenance is still legible. The backend knows which repository it is writing to; a step composing prose does not necessarily know where that prose will end up.
+Covering only the first would protect the automated path and leave the interactive one open, which is backwards: the interactive path is where an agent has several repositories in context at once.
+
+**The hook's guard must also come from outside the tree.** The rule above is not weaker for being enforced by a hook — a guard an `implement` step can edit is one an agent grants itself. A pre-tool guard built from the project's own tooling satisfies the letter of "there is a guard" and none of its purpose.
+
+**It has exactly one supplier, and a second one is an error rather than a precedence question.** A project does not build its own; the binary arrives from outside, and which projects receive it is decided where it is supplied, not where it lands.
+
+Two suppliers is the whole failure, even when both are well-intentioned. Whichever writes last wins, and *which writes last* is a build ordering — something an agent editing the tree can arrange. So a guard found from a second source does not lose a tie-break and is not overwritten: it stops the build, because silently replacing it would hide a project trying to supply its own, and silently keeping it would let the project have done so.
 
 ## What a refusal carries
 
