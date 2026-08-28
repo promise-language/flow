@@ -89,6 +89,8 @@ Closed, because an open set is one a caller extends by inventing a name that mea
 
 **An origin that cannot be stated is a refusal.** Not an error and not a default-allow: unattributable text is exactly the case this exists for, and a guard that waved it through would be safe only for text that was never at risk.
 
+**It answers fast enough to sit on every path it is on.** One of its callers runs on every commit, over every staged file; another runs on every tool call an agent makes. A guard that adds a visible pause to those is a guard someone turns off, and a guard that is off is indistinguishable from one that was never written. That rules out a model call and a network round trip in any implementation — not as a preference, but because the alternative is the guard's own removal.
+
 **The answer is definitive.** Allow or refuse — no confidence, no maybe, nothing for a caller to weigh, and no allowed-plus-a-warning. A guard that returns a degree of concern has moved the decision to the caller, and the caller is the party trying to publish. A refusal carries its reason; permission carries nothing, because there is nothing a caller should do differently when the answer is yes.
 
 ## It is wired in, not launched
@@ -118,15 +120,25 @@ Text reaches GitHub by two paths, and the guard stands on both. It is **one guar
 
 **The first: one seam, not a check per call site.** Every outward write goes through the github backend — the API calls that create and edit comments and labels, the `gh` invocations that open a pull request, the git operations that push a branch. That seam is the one place a byte is both **final** and **not yet sent**, which are the two properties the guard needs. Anywhere earlier is too early: the text is still being assembled, and a template is not what gets published. A guard installed at six call sites is a guard absent from the seventh.
 
-**The second is the path that is easy to forget, because it is not the flow.** An agent at a terminal running `gh issue create`, `gh pr comment` or `git push` publishes exactly as permanently as a resolution does, and reaches none of the SDK's code to do it. It does pass the pre-tool hook, which sees the command and its final arguments — so the same guard applies there, and an agent working alongside a person is bound by it too.
+**The second is the path that is easy to forget, because it is not the flow.** An agent at a terminal running `gh issue create`, `gh pr comment` or `git push` publishes exactly as permanently as a resolution does, and reaches none of the SDK's code to do it. It does pass the pre-tool hook — so the same guard applies there, and an agent working alongside a person is bound by it too.
+
+**The hook resolves what the command refers to; it does not stop at the arguments.** Text may be inline (`--body "…"`) or named (`--body-file …`), and a guard that examined only the literal arguments would be one `--body-file /tmp/x` away from irrelevant — every refusal avoidable by writing the text out first. So the hook reads what a command would publish, wherever the command points, and that includes what a push would carry: its commit messages and its diff.
+
+This is the same requirement as *final bytes*, arriving at a different position. A file reference is a template's cousin: something that is not yet the text, standing where the text will be.
 
 Covering only the first would protect the automated path and leave the interactive one open, which is backwards: the interactive path is where an agent has several repositories in context at once.
 
 **The hook's guard must also come from outside the tree.** The rule above is not weaker for being enforced by a hook — a guard an `implement` step can edit is one an agent grants itself. A pre-tool guard built from the project's own tooling satisfies the letter of "there is a guard" and none of its purpose.
 
-**It has exactly one supplier, and a second one is an error rather than a precedence question.** A project does not build its own; the binary arrives from outside, and which projects receive it is decided where it is supplied, not where it lands.
+**Neither the binary nor its invocation may live in the tree it constrains.** Both halves, and the second is the one that is easy to satisfy on paper and not in fact.
 
-Two suppliers is the whole failure, even when both are well-intentioned. Whichever writes last wins, and *which writes last* is a build ordering — something an agent editing the tree can arrange. So a guard found from a second source does not lose a tie-break and is not overwritten: it stops the build, because silently replacing it would hide a project trying to supply its own, and silently keeping it would let the project have done so.
+A guard whose binary is unreachable but whose *invocation* is editable is not enforced — it is requested. If the hook that names the binary lives inside the guarded tree, an agent removes the line and the guard is gone, with no diff anywhere to show that it ever ran. A gitignored configuration file is the worst version of this: the removal is not merely unreviewed, it is unrecorded.
+
+So the binary is referenced at a path the guarded tree does not write, and the wiring that names it lives somewhere that tree does not contain.
+
+**One supplier, and a project does not build its own.** Which projects receive it is decided where it is supplied, not where it lands — a project neither opts itself in nor opts itself out.
+
+Note what this dissolves rather than resolves. If two parties wrote a guard to the same path, something would have to adjudicate: precedence, build ordering, or a refusal to overwrite. All three are decisions made *by a build*, and the build of the guarded tree is edited by the party being guarded. Separate paths mean there is nothing to adjudicate, and a rule that is unnecessary is stronger than one enforced correctly.
 
 ## What a refusal carries
 
