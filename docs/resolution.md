@@ -122,20 +122,26 @@ A **guard** is not a gate. It stands on the execution path of an act that has no
 
 | | Gate | Guard |
 |---|---|---|
-| Subject | Something that exists | An act that has been proposed and not yet taken |
+| **Subject** | **Something that persists independently of the check** | **The act itself, which exists only as a proposal** |
 | Position | Beside the work. It observes | On the path. The act cannot occur without passing it |
 | Answers | A measurement, judged elsewhere | Allow or refuse, decided there and then |
-| Removing it | Loses an answer | **Loses the prevention** |
+| Its answer | Is stored, compared across runs, re-judged later | Is consumed once, by the caller about to act |
 
-The last row is the whole distinction. A gate that is absent means nobody measured — the work is unchanged, and the answer can still be obtained afterwards. A guard that is absent means the thing happened.
+**The subject is the distinction; everything else follows from it.** A gate's answer is storable and judged elsewhere *because there is something for it to be about afterwards*. A guard's answer is consumed immediately and never stored *because after the decision there is nothing left for it to be about* — the act either happened or it did not.
 
-Two of them exist in a resolution: one over the actions an agent proposes to take, and one over what the flow publishes (`docs/disclosure.md`).
+Prevention is **not** the test, and using it as one misclassifies the ordinary case. A gate that blocks a push prevents something: remove it and the push happens. It is still a gate, because its subject is a tree that exists, its answer is a measurement, and that measurement is judged against a baseline later. Whether a verdict blocks something is a fact about what consumes it, not about what it is.
 
-**A guard decides for itself, where a gate must not.** A gate's measurement is stored, ratcheted and re-judged later, so the judgement has to be recomputable by someone who was not there — which is why the thresholds are a separate artifact. A guard's answer is consumed the instant it is given and never becomes a fact about anything, so there is no later judgement to keep honest.
+Two guards exist in a resolution: one over the actions an agent proposes to take, and one over what the flow publishes (`docs/disclosure.md`).
+
+**A guard decides for itself, where a gate must not.** Judging is kept out of a gate because its measurement is re-judged later, so the comparison has to be recomputable by someone who was not there — which is why thresholds are a separate artifact. A guard has no persistent subject to re-judge, so there is no second judgement for separation to keep honest.
 
 **A guard and a gate over the same concern are complementary, and neither substitutes for the other.** A guard on a proposed command is the cheapest place to stop a violation — the agent learns the constraint mid-turn and adapts, rather than losing the whole turn. A gate on the result catches it however it happened, including by routes nobody anticipated. The guard fails open when it is absent or bypassed; the gate costs a whole turn before it speaks.
 
-**Where a guard's refusal cannot be undone, it must not come from the tree it protects.** A change wrongly admitted can be reverted, so a gate may be a project artifact. A message wrongly published cannot be, so the thing that could have stopped it must be something the party being stopped cannot author.
+**A guard must not be authored by the party it constrains**, and this holds for every guard rather than only the ones whose refusals are irreversible.
+
+The reason is that a guard leaves no review window. A weakened gate is caught by review before its answer authorises anything — the measurement persists, and a wrong one can be recomputed and contradicted. **A guard weakened at one step authorises the next step immediately**, before any review exists, and leaves no trace: a run in which the guard was bypassed looks exactly like a run in which it had nothing to refuse.
+
+So a guard's rules come from outside the tree it constrains. Where a resolution runs under an orchestrator, that is the arena applying rules from a companion repository; where it runs standalone, the guard is part of the flow, which is delivered from outside the tree it resolves. A guard configured from inside the worktree is one an `implement` step can edit, and an agent that can edit its own bounds has none.
 
 **This is a property, not a machinery.** What defines the gates, schedules them, records their measurements, holds the thresholds those measurements are judged against and decides what a failure means for the work queue belongs to whatever schedules work — not to this SDK. What is stated here is what any of them must be.
 

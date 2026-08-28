@@ -34,14 +34,12 @@ The last three are the ones most easily forgotten, because they reach the public
 
 | | Gate | Guard |
 |---|---|---|
-| Subject | Something that exists — a tree, a merge result | An act that has been proposed and not yet taken |
+| **Subject** | **Something that persists independently of the check** | **The act itself, which exists only as a proposal** |
 | Position | Beside the work. It observes | **On the path.** The act cannot occur without passing it |
 | Answers with | Measurements. Something else judges them | Allow or refuse, and why |
-| Judged against | A baseline that outlives the run | Nothing that outlives the decision |
-| Its answer is | Stored, ratcheted, re-judged later | Consumed immediately by the caller about to act |
-| Removing it | Loses an answer | **Loses the prevention.** The act proceeds |
+| Its answer | Is stored, ratcheted, re-judged later | Is consumed once, by the caller about to act |
 
-The last row is the difference that matters. A missing gate means nobody measured; the work is unchanged and the answer can be obtained later. A missing guard means the thing happened.
+The subject is the distinction, and the rest follows from it — see `docs/resolution.md`. Prevention is not the test: a gate that blocks a push prevents something too, and is still a gate, because its subject persists and its measurement is judged later.
 
 `bin/guard` is the precedent, and the name comes from it: it sits on the critical path of every tool call, receives the action proposed, and answers whether it proceeds. It is not a measuring gate and does not pretend to be one.
 
@@ -65,13 +63,11 @@ A gate over a worktree that could not run has measured nothing, and the correct 
 
 The guard is **part of the SDK, on the path from the backend to GitHub.** It is not a program the flow execs, and it needs no protocol for receiving its subject: the act reaches it as a value, because it is a step in the code that performs the act.
 
-That is not merely simpler than an external program. It is what makes the guard sound:
+That is not merely simpler than an external program. It is what satisfies the rule every guard is under: **a guard must not be authored by the party it constrains**, because a guard leaves no review window — one weakened at a step authorises the next step immediately, before any review exists, and the run in which it was bypassed looks exactly like the run in which it had nothing to refuse.
 
-> A guard whose refusal cannot be undone must not be authored by the party it refuses.
+This guard has a second reason on top of that one, and it is why it is worth the strongest available form. A gate over a tree may be a project artifact because a wrong answer is correctable: the measurement persists, the judgement is recomputable, and a change wrongly passed can be reverted. **A disclosure wrongly allowed cannot be.** For other guards, editing the guard costs a review that would have caught it. Here there is nothing left to catch.
 
-A gate over a tree may be a project artifact because a wrong answer is correctable — the measurement persists, the judgement is recomputable, and a change wrongly passed can be reverted. **A disclosure wrongly allowed cannot be.** So a guard an agent could edit to permit its own leak provides nothing, and it fails silently: the run that leaked looks exactly like the run that did not.
-
-Being wired into the SDK satisfies that by construction. A flow is delivered from outside the tree it resolves, so a guard inside the flow is, with no further arrangement, something the subject cannot author.
+Being wired into the SDK satisfies both by construction. A flow is delivered from outside the tree it resolves, so a guard inside the flow is, with no further arrangement, something the subject cannot author.
 
 **A project may tighten what counts as private for it. It may not supply the thing that decides.**
 
