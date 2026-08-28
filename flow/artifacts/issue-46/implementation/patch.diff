@@ -1,0 +1,1773 @@
+diff --git a/backend.go b/backend.go
+index a0119be..ec09911 100644
+--- a/backend.go
++++ b/backend.go
+@@ -454,6 +454,47 @@ type Worktree interface {
+ 	// defect that is not there.
+ 	RunGate(ctx context.Context, name GateName) (GateRun, error)
+ 
++	// Judge asks the PROJECT whether a measurement is acceptable.
++	//
++	// THE SDK NEVER COMPUTES THIS ITSELF. The thresholds are the project's —
++	// what its coverage floor is, which numbers block a change, what a
++	// baseline ratchets to — and an SDK that computed a verdict would have to
++	// hold them, which is the same mistake as a gate holding its own
++	// thresholds one layer up. It would have to hold them for every project it
++	// is ever pointed at.
++	//
++	// The SDK KEEPS THE SPAWN. The judge is handed an envelope it did not
++	// produce and could not have: a project entry point that ran the gate
++	// itself and returned a verdict would be the runner, and the runner is the
++	// one party that may not come from the tree — it is the sole witness to a
++	// process that no longer exists, so a runner that lied is undetectable in
++	// principle. The judge is checkable, which is what lets it be a tree
++	// artifact: re-run it against the same envelope and the same thresholds
++	// and it answers the same, which is why GateVerdict carries both.
++	//
++	// ONLY OutcomeMeasured MAY BE JUDGED, and a run carrying any other outcome
++	// is refused with an error before anything is spawned. The other four are
++	// not verdicts and must never be passed off as one: a gate that could not
++	// start, timed out, died or broke its contract has not reported that the
++	// tree is bad, and turning that into a refusal blames a change for a
++	// failure that was never about it.
++	//
++	// A NON-NIL ERROR MEANS NO VERDICT EXISTS, AND IS NEVER A REFUSAL. An
++	// unanswerable judge — absent, wedged, printing something that is not a
++	// verdict — says nothing about the measurement, and a caller that read it
++	// as "not acceptable" would refuse a sound change because the project's
++	// own tooling is broken. That is a fact for a person, not a result.
++	//
++	// A refusal, by contrast, is a perfectly good verdict and arrives with a
++	// nil error: Acceptable is false and Detail says which metric, its value,
++	// and the term it was judged against.
++	//
++	// The judge needs no outcome vocabulary of its own. What became of the
++	// judge's own process is nobody's evidence about anything — unlike the
++	// runner, it is not the sole witness to a vanished process, and anyone
++	// holding the envelope can ask again.
++	Judge(ctx context.Context, run GateRun) (GateVerdict, error)
++
+ 	// CapturePatch produces a unified diff of the current working tree.
+ 	// Handlers call it to attach work they have already verified; the
+ 	// orchestrator does NOT call it when a step's deadline fires — a timeout
+diff --git a/docs/gates-and-commands.md b/docs/gates-and-commands.md
+index a00c3bd..104c940 100644
+--- a/docs/gates-and-commands.md
++++ b/docs/gates-and-commands.md
+@@ -6,12 +6,15 @@
+ 
+ ## Required
+ 
+-Two, and a flow cannot run without them.
++Three, and a flow cannot run without them.
+ 
+ | | Kind | Does |
+ |---|---|---|
+ | `verify` | command | Repairs what is mechanically repairable, then reports whether what remains is sound |
+ | `integration` | gate | Measures whether the mainline would still be green with this in it |
++| the judge | judging entry point | Compares a measurement against this project's thresholds and answers |
++
++**The judge is what turns a measurement into an answer.** A gate has no verdict to give and neither has a runner: `measured` says a measurement exists, not that it is acceptable. The SDK does not compute one either, because the thresholds are the project's — so it hands the measurement back to the project and asks. Where the judge lives, how it is invoked and what it must print is [below](#where-the-verdict-is-made).
+ 
+ **`verify` is what a producing step works with.** It is run by steps, by agents mid-turn, and by people at a terminal, and it does the same thing for all three. A step should not fail over something `verify` would have fixed.
+ 
+@@ -65,7 +68,7 @@ Three parties, three jobs, and the separation is the whole design:
+ |---|---|---|
+ | **The gate** | Measures | The tree |
+ | **The runner** | Spawns the gate and observes what happened to it | Outside the tree |
+-| **`verify`** | Judges the measurement against the thresholds | The project's manifest |
++| **The judge** | Compares the measurement against the thresholds | The tree |
+ 
+ **A gate is never invoked directly.** A caller asks the runner to run one and reads what the runner reports. Spawning the process is the runner's job.
+ 
+@@ -97,7 +100,7 @@ An outcome the runner determines from what it observed, not a number the gate ch
+ 
+ | Outcome | Means | Whose problem |
+ |---|---|---|
+-| **measured** | The process completed and printed a valid envelope | Nobody's yet — judging the numbers is `verify`'s question |
++| **measured** | The process completed and printed a valid envelope | Nobody's yet — whether the numbers are acceptable is the judge's question |
+ | **timed out** | Killed at the declared timeout | The wait, or the host. Not the change |
+ | **could not start** | The program the exec line names is absent or not executable, so nothing ran | Whoever declared the gate, or whoever delivered the tree |
+ | **died** | Killed by a signal, or exited without printing a readable envelope | The host |
+@@ -193,12 +196,14 @@ That holds because of a rule about the caller rather than about `bin/run`:
+ 
+ Provenance is what separates them. The same envelope, byte for byte, means one thing when a runner produced it and another when it arrived from the tree being judged — and nothing in the bytes says which. So an agent that runs `bin/run`, sees a pass and reports that the gates pass has produced **nothing a decision may rest on**, however true the report is. A relayed claim was never accepted, so relaying it changes nothing.
+ 
+-This is why `bin/run`'s implementation does not have to be argued about. It may be a tree artifact, built by the project's own tooling, because its results cannot back a decision no matter who reads them.
++This is why the measuring mode's implementation does not have to be argued about. It may be a tree artifact, built by the project's own tooling, because what it produces cannot back a decision no matter who reads it. Its judging mode is also a tree artifact, but for a different reason and one that has to be earned — a verdict can be recomputed by anyone holding the inputs, and those travel with it. That is the section below.
+ 
+ **It reaches a verdict and prints it for a human**, because it is the judging layer and the judging layer is the only thing that can — it holds the thresholds, so it can put a number beside the terms it was judged on. A gate could only ever print the left-hand column.
+ 
+ That is also why a gate keeps exactly one output mode. A gate that pretty-printed when it thought a human was watching would have two, and one of them would not parse.
+ 
++**The SDK never invokes this mode.** The judging entry point below is the same program with a flag: `bin/run <gate>` measures and then judges, while `bin/run <gate> --verdict` judges an envelope it was handed and spawns nothing. Only the second is asked by anything a decision rests on — a judging entry point that ran its own gate would be the runner, and the runner may not come from the tree.
++
+ ### Where the verdict is made
+ 
+ A gate cannot be asked for a verdict, and neither can a runner: `measured` says a measurement exists, not that it is acceptable.
+@@ -209,6 +214,31 @@ That is not a concession to convenience. The thresholds are the project's — wh
+ 
+ So the project supplies a **judging entry point** beside its gates, and the SDK asks it. What the SDK contributes is the measurement: it spawns the gate, so it is the runner, and it hands the judge an envelope the judge did not produce. The judge holds the thresholds and answers.
+ 
++**The SDK keeps the spawn, and that is the load-bearing half.** If the SDK asked an entry point that ran the gate itself and returned a verdict, that entry point would be the runner — and the runner would then come from the tree, which is exactly what the section above forbids and the reason a gate cannot be trusted to report on its own run. So the judge is handed an envelope it did not produce and could not have.
++
++#### How the judge is asked
++
++| | Exec line | Reads | Prints on stdout | Exit code |
++|---|---|---|---|---|
++| Gate | `bin/gate <name> --envelope` | nothing | one envelope | not consulted |
++| **Judge** | **`bin/run <name> --verdict`** | **the envelope on stdin** | **one verdict object** | **not consulted** |
++
++```json
++{"acceptable": false, "thresholds": {"unformatted_files": 0}, "detail": "unformatted_files is 3, cap 0"}
++```
++
++**`acceptable` and `thresholds` are both required.** A missing `acceptable` decoding to `false` is the SDK inventing a refusal out of a judge that gave none, and a verdict whose thresholds were discarded is exactly as unfalsifiable as a lying runner — it is the recomputability of a verdict that lets a judge live in the tree at all. `detail` is prose for a person: which metric, its value, the term it was judged against. What is inside `thresholds` is between a project and its judge, and the SDK carries it without reading it.
++
++**One object on stdout and nothing else**, for the same reason a gate prints one envelope and nothing else.
++
++**The exit code is not consulted**, and here it buys something specific: a project whose judging mode exits non-zero on a refusal is doing something reasonable, and a reader that took that for failure would turn a legitimate refusal into an unanswerable judge.
++
++**Only a `measured` run may be judged.** The other four outcomes are not verdicts and must never be passed off as one — a gate that could not start, timed out, died or broke its contract has not reported that the tree is bad, and asking a judge about it would be asking it to invent an answer about a measurement that does not exist.
++
++**An unanswerable judge is not a refusal.** A judge that is absent, wedged, or printing something that is not a verdict has said nothing about the measurement. Reading its silence as *not acceptable* refuses a sound change because the project's own tooling is broken — a fact for a person, not a result. A refusal, by contrast, is a perfectly good answer and arrives as one.
++
++**A judging layer IS entitled to a binary answer**, unlike a gate. The disjoint-channel rule exists because a gate has no verdict to give; the judge's whole job is to have one.
++
+ **The judge is a tree artifact, and that is not a weakness.** So is the gate. Neither is protected by living outside the tree — a threshold outside it is *worse*, because it stops being a function of the subject. Both are protected the same way: a resolution's diff may not author a change to either. That is the artifact rule, and it is about the author rather than the location.
+ 
+ The verdict is computed from two inputs:
+@@ -243,6 +273,8 @@ The split is not a preference. An integration baseline has to be a function of t
+ 
+ **The envelope's shape is between a project and whoever judges it.** Two projects may carry different detail without either being wrong, so long as each is consistent with the thing reading it. The SDK does not read a project's measurements; it runs the gate and reports what became of the run.
+ 
++**The judge's exec line and the verdict's two required fields are universal**, for the same reason the gate's are: the SDK asks every project the same way and reads the same answer. **What is inside `thresholds` is not** — it is between a project and its judge, exactly as the envelope's shape is, and the SDK carries it so the verdict can be re-checked without ever reading it.
++
+ ## Where these live
+ 
+ **Gates and commands belong to the project. The flow does not.**
+diff --git a/gate.go b/gate.go
+index 01ebe9d..ffbc075 100644
+--- a/gate.go
++++ b/gate.go
+@@ -81,3 +81,42 @@ type GateRun struct {
+ 	// keys on it.
+ 	Detail string
+ }
++
++// GateVerdict is a JUDGING layer's answer about one measurement: whether the
++// numbers a gate reported are acceptable to the project that holds the
++// thresholds.
++//
++// A judging layer IS entitled to a binary answer, unlike a gate and unlike a
++// runner. The disjoint-channel rule exists because a gate has no verdict to
++// give; the judge's whole job is to have one.
++//
++// It carries the run it was reached from because a verdict handed over with
++// its inputs discarded is exactly as unfalsifiable as a lying runner. What
++// lets a judge live in the tree it judges is that anyone can re-run it against
++// the same envelope and the same thresholds and get the same answer — and that
++// is only true if both travel with the verdict. See
++// docs/gates-and-commands.md § "The runner comes from outside the tree".
++type GateVerdict struct {
++	// Run is the measurement this verdict is about, as the runner reported it.
++	// Its Stdout is the envelope the judge was handed; the judge did not
++	// produce it, and could not have.
++	//
++	// Only a run whose Outcome is OutcomeMeasured may be judged. The other
++	// four are not verdicts and must never be passed off as one: a run that
++	// measured nothing has not reported that the tree is bad.
++	Run GateRun
++
++	// Acceptable is the answer. It is the project's, computed from thresholds
++	// the SDK never sees.
++	Acceptable bool
++
++	// Thresholds are the terms the measurement was judged against, as the
++	// judge stated them — opaque to the SDK, which does not read a project's
++	// numbers. They are carried so the verdict can be recomputed by whoever
++	// was not there, which is the whole reason a judge may be a tree artifact.
++	Thresholds []byte
++
++	// Detail is the reason a person needs: which metric, its value, the term
++	// it was judged against. It is prose and nothing keys on it.
++	Detail string
++}
+diff --git a/gate_test.go b/gate_test.go
+index 2900595..5d7cae2 100644
+--- a/gate_test.go
++++ b/gate_test.go
+@@ -44,6 +44,29 @@ func TestGateRun_ZeroValueIsNotAnOutcome(t *testing.T) {
+ 	}
+ }
+ 
++// The zero GateVerdict says nothing was judged, and above all it does not say
++// a measured run was refused. Callers get one back beside an error — the
++// request no judge could answer — and a caller that read `Acceptable == false`
++// out of it would refuse a sound change because the project's judging layer
++// could not be reached.
++func TestGateVerdict_ZeroValueIsNotAVerdictAboutAMeasuredRun(t *testing.T) {
++	var v GateVerdict
++	if v.Acceptable {
++		t.Error("a zero GateVerdict reads as acceptable")
++	}
++	// The refusal it appears to be is unbacked: there is no run behind it, no
++	// terms it was reached against, and nothing a person could re-check.
++	if v.Run.Outcome == OutcomeMeasured {
++		t.Error("a zero GateVerdict carries a measured run")
++	}
++	if v.Thresholds != nil {
++		t.Errorf("Thresholds = %q, want none — nothing was compared", v.Thresholds)
++	}
++	if v.Detail != "" {
++		t.Errorf("Detail = %q, want none", v.Detail)
++	}
++}
++
+ // The set is CLOSED and it is not flow's to extend — base reads the same five
+ // names. The test above pins the five VALUES; it does not notice a sixth
+ // constant, which would compile, satisfy every switch in this repository, and
+diff --git a/issue/steps_test.go b/issue/steps_test.go
+index f85eb80..92b3c61 100644
+--- a/issue/steps_test.go
++++ b/issue/steps_test.go
+@@ -95,6 +95,15 @@ func (w *fakeWorktree) RunGate(_ context.Context, name flow.GateName) (flow.Gate
+ 	}
+ 	return flow.GateRun{Gate: name, Outcome: outcome, ExitCode: -1}, nil
+ }
++
++// Judge answers about a measured run and refuses anything else — the project
++// holds the thresholds, so nothing here computes one.
++func (w *fakeWorktree) Judge(_ context.Context, run flow.GateRun) (flow.GateVerdict, error) {
++	if run.Outcome != flow.OutcomeMeasured {
++		return flow.GateVerdict{}, fmt.Errorf("fake: %q measured nothing, so there is nothing to judge", run.Gate)
++	}
++	return flow.GateVerdict{Run: run, Acceptable: true, Thresholds: []byte("{}")}, nil
++}
+ func (w *fakeWorktree) CapturePatch(context.Context) ([]byte, error) {
+ 	// Models `git diff HEAD`: untracked work is invisible until staged, and
+ 	// nothing is left to see once it has been committed.
+diff --git a/pkg/backend/fake/fake.go b/pkg/backend/fake/fake.go
+index 29016aa..0667f42 100644
+--- a/pkg/backend/fake/fake.go
++++ b/pkg/backend/fake/fake.go
+@@ -23,6 +23,7 @@ type Backend struct {
+ 	clock           func() time.Time
+ 	verifyOK        bool             // controls Worktree.Verify result
+ 	gateOutcome     flow.GateOutcome // controls what Worktree.RunGate observes
++	verdict         *bool            // controls what Worktree.Judge answers; nil = acceptable
+ 	supportsRequest bool             // controls whether Worktree.Request() returns non-nil
+ 	// supportedArtifacts is the backend's canonical artifact schema returned by
+ 	// SupportedArtifacts. nil (the default) means "use the standard vocabulary"
+@@ -92,6 +93,24 @@ func (b *Backend) SetVerifyOK(ok bool) { b.verifyOK = ok }
+ // exercised against a fake that only knows pass and fail.
+ func (b *Backend) SetGateOutcome(o flow.GateOutcome) { b.gateOutcome = o }
+ 
++// SetGateVerdict controls what Worktree.Judge answers about a measured run.
++// Default: acceptable.
++//
++// A boolean rather than an outcome, because a judging layer IS entitled to a
++// binary answer — that is its whole job, and the reason a gate has no verdict
++// to give does not apply to it. A refusal is an ANSWER: it arrives with a nil
++// error, and a fake that returned one as an error would let a caller be
++// written that cannot tell a project saying no from a project whose judge is
++// broken.
++func (b *Backend) SetGateVerdict(acceptable bool) {
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	b.verdict = &acceptable
++	for _, wt := range b.worktrees {
++		wt.verdict = b.verdict
++	}
++}
++
+ // SetSupportsRequest controls whether Worktree.Request() returns a non-nil
+ // RequestManager. Default true; set to false to exercise the "backend
+ // doesn't support pull requests" path.
+@@ -521,6 +540,7 @@ func (b *Backend) Worktree(ctx context.Context, claim flow.Claim) (flow.Worktree
+ 	}
+ 	wt.verifyOK = b.verifyOK
+ 	wt.gateOutcome = b.gateOutcome
++	wt.verdict = b.verdict
+ 	wt.supportsRequest = b.supportsRequest
+ 	wt.nothingToCommit = b.nothingToCommit
+ 	return wt, nil
+@@ -555,6 +575,7 @@ type fakeWorktree struct {
+ 	// truthfully across invocations.
+ 	branches        map[string]bool
+ 	gateOutcome     flow.GateOutcome
++	verdict         *bool
+ 	verifyOK        bool
+ 	supportsRequest bool
+ 	branch          string
+@@ -640,6 +661,32 @@ func (w *fakeWorktree) RunGate(ctx context.Context, name flow.GateName) (flow.Ga
+ 	run.Detail = fmt.Sprintf("fake: gate %q %s", name, outcome)
+ 	return run, nil
+ }
++
++// Judge answers about a measured run and refuses everything else. The fake
++// models the protocol, not a project's thresholds — so the terms it reports
++// are ones that parse and say nothing, the same posture as its envelope.
++//
++// The error is for a request no judge could answer: a name no gate has, and a
++// run that measured nothing. A refusal is NOT one of them — it is a verdict,
++// and it comes back with a nil error.
++func (w *fakeWorktree) Judge(ctx context.Context, run flow.GateRun) (flow.GateVerdict, error) {
++	if !run.Gate.Valid() {
++		return flow.GateVerdict{}, fmt.Errorf("fake: %q is not a declared gate name", run.Gate)
++	}
++	if run.Outcome != flow.OutcomeMeasured {
++		return flow.GateVerdict{}, fmt.Errorf(
++			"fake: the run of gate %q reports %q, and only a %q run may be judged",
++			run.Gate, run.Outcome, flow.OutcomeMeasured)
++	}
++	acceptable := w.verdict == nil || *w.verdict
++	return flow.GateVerdict{
++		Run:        run,
++		Acceptable: acceptable,
++		Thresholds: []byte("{}"),
++		Detail:     fmt.Sprintf("fake: gate %q judged acceptable=%t against no terms at all", run.Gate, acceptable),
++	}, nil
++}
++
+ func (w *fakeWorktree) CapturePatch(ctx context.Context) ([]byte, error) { return nil, nil }
+ 
+ // Request returns the worktree itself — fake exposes a request manager so
+diff --git a/pkg/backend/fake/fake_test.go b/pkg/backend/fake/fake_test.go
+index 2687589..955e35f 100644
+--- a/pkg/backend/fake/fake_test.go
++++ b/pkg/backend/fake/fake_test.go
+@@ -380,6 +380,79 @@ func TestBackend_GateMeasuresByDefaultAndPrintsSomethingThatParses(t *testing.T)
+ 	}
+ }
+ 
++// measuredRun is a run the fake's judge will answer about: the only kind
++// anything may be asked to judge.
++func measuredRun(gate flow.GateName) flow.GateRun {
++	return flow.GateRun{Gate: gate, Outcome: flow.OutcomeMeasured, Stdout: []byte(`{}`)}
++}
++
++// The default has to let an unrelated test get on with its subject, and the
++// terms it reports have to parse: the fake models the protocol, so a caller
++// that carries a verdict's thresholds is written against a shape a real judge
++// produces.
++func TestBackend_JudgesAcceptableByDefaultWithTermsThatParse(t *testing.T) {
++	run := measuredRun(flow.GateTested)
++	v, err := gateWorktree(t, fake.New()).Judge(context.Background(), run)
++	if err != nil {
++		t.Fatalf("Judge: %v", err)
++	}
++	if !v.Acceptable {
++		t.Error("Acceptable = false, want the default")
++	}
++	var thresholds map[string]any
++	if err := json.Unmarshal(v.Thresholds, &thresholds); err != nil || thresholds == nil {
++		t.Errorf("Thresholds = %q, want one JSON object: %v", v.Thresholds, err)
++	}
++	// The measurement travels with the verdict, or nothing can re-check it.
++	if v.Run.Gate != run.Gate || v.Run.Outcome != run.Outcome {
++		t.Errorf("Run = %+v, want the measurement that was judged", v.Run)
++	}
++}
++
++// A REFUSAL IS A VERDICT. A fake that returned one as an error would let a
++// caller be written that cannot tell "the project says no" from "the judge
++// could not answer" — and that caller would treat a broken judging layer as a
++// failing tree, refusing sound changes for a reason nowhere in them.
++func TestBackend_SetGateVerdictRefusesWithoutErroring(t *testing.T) {
++	b := fake.New()
++	b.SetGateVerdict(false)
++	v, err := gateWorktree(t, b).Judge(context.Background(), measuredRun(flow.GateIntegration))
++	if err != nil {
++		t.Fatalf("Judge: %v — a refusal is an answer, not an error", err)
++	}
++	if v.Acceptable {
++		t.Error("Acceptable = true, want the refusal that was configured")
++	}
++}
++
++// The two requests no judge could answer. Only a measured run may be judged:
++// the other outcomes mean no measurement exists, and a judge asked about one
++// would have to invent an answer — which, read as a refusal, blames a change
++// for a gate that never ran.
++func TestBackend_JudgeRefusesWhatCannotBeJudged(t *testing.T) {
++	for _, c := range []struct {
++		name string
++		run  flow.GateRun
++	}{
++		{"a run that measured nothing", flow.GateRun{Gate: flow.GateTested, Outcome: flow.OutcomeDied}},
++		{"a run carrying no outcome at all", flow.GateRun{Gate: flow.GateTested}},
++		{"an undeclared gate name", measuredRun("lint")},
++	} {
++		t.Run(c.name, func(t *testing.T) {
++			v, err := gateWorktree(t, fake.New()).Judge(context.Background(), c.run)
++			if err == nil {
++				t.Fatal("Judge answered a request no judge could answer")
++			}
++			if v.Acceptable {
++				t.Error("Acceptable = true beside an error")
++			}
++			if v.Thresholds != nil {
++				t.Errorf("Thresholds = %q, want none — nothing was compared", v.Thresholds)
++			}
++		})
++	}
++}
++
+ // An undeclared name is a request no runner could attempt, so it is the one
+ // thing that is an error — and the GateRun beside it must carry no outcome. A
+ // caller that read a measurement out of it would act on a gate that never ran.
+diff --git a/pkg/backend/github/gate_test.go b/pkg/backend/github/gate_test.go
+index 69ca69c..8645c0d 100644
+--- a/pkg/backend/github/gate_test.go
++++ b/pkg/backend/github/gate_test.go
+@@ -40,7 +40,7 @@ func gateWorktree(t *testing.T, script string, timeout time.Duration) (*worktree
+ 		t.Fatal(err)
+ 	}
+ 	if script != "" {
+-		writeGateScript(t, dir, script, 0o755)
++		writeScript(t, dir, "gate", script, 0o755)
+ 	}
+ 	b := &Backend{cfg: Config{WorktreeDir: dir, GateTimeout: timeout}}
+ 	// A gate does not go through the configured-command seam: that seam reports
+@@ -52,10 +52,13 @@ func gateWorktree(t *testing.T, script string, timeout time.Duration) (*worktree
+ 	return &worktree{b: b}, dir
+ }
+ 
+-func writeGateScript(t *testing.T, dir, script string, mode os.FileMode) {
++// writeScript drops one entry point into the tree's bin/. The name is a
++// parameter because a project exposes more than one — the gate that measures,
++// and the judge that holds the thresholds — and both are reached the same way.
++func writeScript(t *testing.T, dir, name, body string, mode os.FileMode) {
+ 	t.Helper()
+-	path := filepath.Join(dir, "bin", "gate")
+-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), mode); err != nil {
++	path := filepath.Join(dir, "bin", name)
++	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), mode); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 	if err := os.Chmod(path, mode); err != nil { // WriteFile respects umask; Chmod does not
+@@ -217,7 +220,7 @@ func TestRunGate_CouldNotStartIsNotDied(t *testing.T) {
+ 	}, {
+ 		name: "present but not executable",
+ 		setup: func(t *testing.T, dir string) {
+-			writeGateScript(t, dir, `echo '{}'`, 0o644)
++			writeScript(t, dir, "gate", `echo '{}'`, 0o644)
+ 		},
+ 	}, {
+ 		name: "a directory where the program should be",
+diff --git a/pkg/backend/github/judge.go b/pkg/backend/github/judge.go
+new file mode 100644
+index 0000000..ddbdb3b
+--- /dev/null
++++ b/pkg/backend/github/judge.go
+@@ -0,0 +1,175 @@
++package github
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"os/exec"
++	"strings"
++	"time"
++
++	"github.com/promise-language/flow"
++)
++
++// verdictFlag is how the SDK asks the judging entry point for a verdict on a
++// measurement it is being handed. Protocol, not configuration: the entry point
++// answers on stdout only when it was given the flag, and any other invocation
++// is the project's own measuring mode, which spawns a gate and is not this.
++// Appended last, for the same reason --envelope is.
++const verdictFlag = "--verdict"
++
++// askJudge hands one measurement to the project's judging entry point and
++// returns what it answered.
++//
++// The SDK spawns this, as it spawns the gate, but it is NOT a second runner:
++// nothing here classifies what became of the process, because nothing needs
++// to. A runner is the sole witness to a gate that no longer exists; a judge
++// that did not answer can simply be asked again by anyone holding the
++// envelope. So there is no outcome vocabulary here and no five-way split — the
++// verdict is what arrived on stdout, and everything else is an error.
++//
++// A NON-NIL ERROR MEANS NO VERDICT EXISTS. It is never a refusal: a judge that
++// could not be reached has said nothing about the tree, and reading its
++// silence as "not acceptable" would refuse a sound change because the
++// project's tooling is broken.
++func askJudge(ctx context.Context, dir string, run flow.GateRun, argv []string, timeout time.Duration) (flow.GateVerdict, error) {
++	if err := ctx.Err(); err != nil {
++		return flow.GateVerdict{}, fmt.Errorf("judging %s: caller went away before the judge was spawned: %w", run.Gate, err)
++	}
++
++	judgeCtx, cancel := context.WithTimeout(ctx, timeout)
++	defer cancel()
++
++	var stdout, stderr bytes.Buffer
++	// argv[0] contains a separator, so os/exec performs no PATH lookup and no
++	// shell stands between here and the judge — the same rule the gate's exec
++	// line follows, and for the same reason.
++	cmd := exec.CommandContext(judgeCtx, argv[0], argv[1:]...)
++	cmd.Dir = dir
++	// The envelope the runner observed, byte for byte. The judge is handed a
++	// measurement it did not produce; that is the whole property this method
++	// exists to preserve.
++	cmd.Stdin = bytes.NewReader(run.Stdout)
++	// Captured, so they can be parsed and reported. Bounding what is read here
++	// is #40.
++	cmd.Stdout = &stdout
++	// The judge's stderr is CAPTURED and not passed through, which is the
++	// opposite of a gate's. A gate's stderr is the minutes of a long run, and
++	// a person watching needs it as it happens; a judge compares numbers it
++	// was given and prints an answer, so anything it writes there is the
++	// reason it could not, and it belongs in the error. Bounding what is read
++	// here is #40 too.
++	cmd.Stderr = &stderr
++	cmd.WaitDelay = gateWaitDelay
++
++	runErr := cmd.Run()
++
++	// The caller going away is not an answer. Checked before anything else,
++	// because a cancelled parent cancels the derived context too.
++	if ctxErr := ctx.Err(); ctxErr != nil {
++		return flow.GateVerdict{}, fmt.Errorf("judging %s: caller went away while the judge ran: %w", run.Gate, ctxErr)
++	}
++
++	// The verdict is what is on stdout, and the exit code is not consulted —
++	// for the same reason a gate's is not, plus one of its own: a project that
++	// made its judging mode exit non-zero on a refusal is doing something
++	// reasonable, and reading that as "the judge failed" would turn a
++	// legitimate refusal into an unanswerable judge.
++	verdict, parseErr := parseVerdict(stdout.Bytes())
++	if parseErr == nil {
++		verdict.Run = run
++		return verdict, nil
++	}
++
++	// No verdict. Say why in the terms of whoever has to fix it: the deadline
++	// first, because our own kill is what stopped the answer; then a process
++	// that never ran to completion; then what it printed instead.
++	if errors.Is(judgeCtx.Err(), context.DeadlineExceeded) {
++		return flow.GateVerdict{}, fmt.Errorf("judging %s: killed at the declared timeout of %s%s", run.Gate, timeout, stderrDetail(&stderr))
++	}
++	var exitErr *exec.ExitError
++	if runErr != nil && !errors.As(runErr, &exitErr) {
++		return flow.GateVerdict{}, fmt.Errorf("judging %s: %s did not answer: %w%s", run.Gate, argv[0], runErr, stderrDetail(&stderr))
++	}
++	// Silence and truncation are absence — the judge printed no verdict at all
++	// — while anything else is a defect in what it printed. Neither is a
++	// refusal, and the difference is what tells the person reading this
++	// whether to look at the judge's output or at why it stopped.
++	if errors.Is(parseErr, io.EOF) || errors.Is(parseErr, io.ErrUnexpectedEOF) {
++		return flow.GateVerdict{}, fmt.Errorf("judging %s: %s exited %d without printing a verdict: %w%s",
++			run.Gate, argv[0], exitCode(cmd), parseErr, stderrDetail(&stderr))
++	}
++	return flow.GateVerdict{}, fmt.Errorf("judging %s: %s printed something that is not a verdict: %w%s", run.Gate, argv[0], parseErr, stderrDetail(&stderr))
++}
++
++// exitCode is the judge's exit status where the kernel has one, and -1 where
++// it does not. A raw diagnostic in an error message and nothing else: no
++// verdict is read from it, which is the whole reason the judging mode may exit
++// non-zero on a refusal without that refusal becoming unanswerable.
++func exitCode(cmd *exec.Cmd) int {
++	if cmd.ProcessState == nil {
++		return -1
++	}
++	return cmd.ProcessState.ExitCode()
++}
++
++// stderrDetail renders what the judge wrote to stderr for inclusion in an
++// error, or nothing if it wrote nothing. It is the only account of why an
++// unanswerable judge could not answer.
++func stderrDetail(stderr *bytes.Buffer) string {
++	s := strings.TrimSpace(stderr.String())
++	if s == "" {
++		return ""
++	}
++	return "\nstderr:\n" + s
++}
++
++// verdictWire is the judge's answer as it arrives on stdout.
++//
++// Acceptable is a POINTER and Thresholds a raw message so that an absent field
++// is refused rather than defaulted. A missing "acceptable" decoding to false
++// is the SDK inventing a refusal out of a judge that did not give one, and a
++// verdict whose thresholds were discarded is as unfalsifiable as a lying
++// runner.
++type verdictWire struct {
++	Acceptable *bool           `json:"acceptable"`
++	Thresholds json.RawMessage `json:"thresholds"`
++	Detail     string          `json:"detail"`
++}
++
++// parseVerdict reads exactly one JSON object from stdout — not null, not an
++// array, not a scalar — and nothing else, and requires the two fields a
++// verdict cannot be without.
++//
++// What is inside "thresholds" is between the project and its judge: the SDK
++// carries it so the verdict can be recomputed, and does not read it.
++func parseVerdict(stdout []byte) (flow.GateVerdict, error) {
++	dec := json.NewDecoder(bytes.NewReader(stdout))
++	// A pointer, so JSON null — the one scalar a struct absorbs without
++	// complaint — is caught rather than read as a verdict with every field at
++	// its zero value, which would be a refusal nobody made.
++	var wire *verdictWire
++	if err := dec.Decode(&wire); err != nil {
++		return flow.GateVerdict{}, err
++	}
++	if wire == nil {
++		return flow.GateVerdict{}, errors.New("the verdict is null")
++	}
++	if dec.More() {
++		return flow.GateVerdict{}, errors.New("trailing content after the verdict")
++	}
++	if wire.Acceptable == nil {
++		return flow.GateVerdict{}, errors.New(`the verdict has no "acceptable" field, and a verdict that did not answer is not a refusal`)
++	}
++	if len(wire.Thresholds) == 0 {
++		return flow.GateVerdict{}, errors.New(`the verdict has no "thresholds" field, so nothing could re-check it`)
++	}
++	return flow.GateVerdict{
++		Acceptable: *wire.Acceptable,
++		Thresholds: wire.Thresholds,
++		Detail:     wire.Detail,
++	}, nil
++}
+diff --git a/pkg/backend/github/judge_test.go b/pkg/backend/github/judge_test.go
+new file mode 100644
+index 0000000..9eaaca3
+--- /dev/null
++++ b/pkg/backend/github/judge_test.go
+@@ -0,0 +1,452 @@
++package github
++
++import (
++	"context"
++	"errors"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/promise-language/flow"
++)
++
++// These spawn real processes, for the same reason the runner's tests do: the
++// subject is a process boundary. The judge is a program the SDK hands an
++// envelope on stdin and reads one object back from, and a mocked call would
++// exercise none of that — not the stdin plumbing, not an entry point that is
++// not there, not a judge that answers and exits non-zero anyway.
++
++// aVerdict is what a well-behaved judge prints: one object, both required
++// fields.
++const aVerdict = `{"acceptable":true,"thresholds":{"failed_tests":0},"detail":"failed_tests is 0, cap 0"}`
++
++// judgeWorktree returns a worktree whose judging entry point is the given
++// script, in the runner's fixture: a directory whose name contains a SPACE (so
++// a shell between the SDK and the entry point would word-split and fail), and
++// a command-runner seam that errors if anything goes through it.
++//
++// It writes NO bin/gate. Judge is handed a measurement it did not produce, so
++// it must not need a gate in the tree to answer.
++//
++// script == "" writes no bin/run at all.
++func judgeWorktree(t *testing.T, script string, timeout time.Duration) (*worktree, string) {
++	t.Helper()
++	w, dir := gateWorktree(t, "", timeout)
++	if script != "" {
++		writeScript(t, dir, "run", script, 0o755)
++	}
++	return w, dir
++}
++
++// measured is a run the SDK observed as a measurement: the only kind that may
++// be judged.
++func measured(gate flow.GateName, envelope string) flow.GateRun {
++	return flow.GateRun{
++		Gate:    gate,
++		Outcome: flow.OutcomeMeasured,
++		Stdout:  []byte(envelope),
++	}
++}
++
++// assertNoVerdict states the rule an error return carries: no verdict exists,
++// and above all it is NOT a refusal. A caller that read the zero value as
++// "unacceptable" would refuse a sound change because the project's judging
++// layer is broken, which is a fact for a person and not a result.
++func assertNoVerdict(t *testing.T, v flow.GateVerdict, err error) {
++	t.Helper()
++	if err == nil {
++		t.Fatal("no error: a judge that did not answer must not read as one that did")
++	}
++	if v.Acceptable {
++		t.Error("Acceptable is true beside an error")
++	}
++	if v.Thresholds != nil {
++		t.Errorf("Thresholds = %q, want none — nothing was compared", v.Thresholds)
++	}
++	if v.Run.Outcome != "" {
++		t.Errorf("Run.Outcome = %q, want none — there is no verdict to carry a run", v.Run.Outcome)
++	}
++}
++
++// A verdict is what the judge printed, and it comes back carrying the
++// measurement it was reached from.
++func TestJudge_ReturnsWhatTheProjectAnswered(t *testing.T) {
++	requireRealProcesses(t)
++
++	for _, c := range []struct {
++		name       string
++		script     string
++		acceptable bool
++		thresholds string
++		detail     string
++	}{{
++		name:       "acceptable",
++		script:     `echo '{"acceptable":true,"thresholds":{"failed_tests":0},"detail":"failed_tests is 0, cap 0"}'`,
++		acceptable: true,
++		thresholds: `{"failed_tests":0}`,
++		detail:     "failed_tests is 0, cap 0",
++	}, {
++		// A REFUSAL IS A VERDICT, not an error. The judging layer's whole job
++		// is to have a binary answer, and a caller that could not tell "the
++		// project says no" from "the judge could not be reached" would treat a
++		// broken judge as a failing tree.
++		name:       "a refusal",
++		script:     `echo '{"acceptable":false,"thresholds":{"failed_tests":0},"detail":"failed_tests is 3, cap 0"}'`,
++		acceptable: false,
++		thresholds: `{"failed_tests":0}`,
++		detail:     "failed_tests is 3, cap 0",
++	}, {
++		// Terms that parse and say nothing. A gate whose metrics nothing caps
++		// was judged against an empty set, which is a real answer and a
++		// different one from having no terms at all.
++		name:       "no term applied",
++		script:     `echo '{"acceptable":true,"thresholds":{}}'`,
++		acceptable: true,
++		thresholds: `{}`,
++	}, {
++		// The exit code is not consulted — a project that exits non-zero on a
++		// refusal is doing something reasonable, and reading that as failure
++		// would turn a legitimate refusal into an unanswerable judge.
++		name:       "printed a verdict and exited 1",
++		script:     `echo '{"acceptable":false,"thresholds":{"failed_tests":0},"detail":"failed_tests is 3, cap 0"}'; exit 1`,
++		acceptable: false,
++		thresholds: `{"failed_tests":0}`,
++		detail:     "failed_tests is 3, cap 0",
++	}} {
++		t.Run(c.name, func(t *testing.T) {
++			w, _ := judgeWorktree(t, c.script, 30*time.Second)
++			run := measured(flow.GateTested, `{"gate":"tested"}`)
++			v, err := w.Judge(context.Background(), run)
++			if err != nil {
++				t.Fatalf("Judge: %v — the judge answered, so there is a verdict", err)
++			}
++			if v.Acceptable != c.acceptable {
++				t.Errorf("Acceptable = %t, want %t", v.Acceptable, c.acceptable)
++			}
++			if string(v.Thresholds) != c.thresholds {
++				t.Errorf("Thresholds = %q, want %q", v.Thresholds, c.thresholds)
++			}
++			if v.Detail != c.detail {
++				t.Errorf("Detail = %q, want %q", v.Detail, c.detail)
++			}
++			// The measurement travels with the verdict. Without it nobody can
++			// re-run the judge against the same inputs, and a verdict nothing
++			// can re-check is as unfalsifiable as a lying runner — which is
++			// the property that lets a judge live in the tree it judges.
++			if v.Run.Gate != run.Gate || v.Run.Outcome != run.Outcome || string(v.Run.Stdout) != string(run.Stdout) {
++				t.Errorf("Run = %+v, want the measurement that was judged (%+v)", v.Run, run)
++			}
++		})
++	}
++}
++
++// The envelope reaches the judge on stdin, byte for byte, and it is the one
++// the runner observed. The judge does not produce it and could not: an entry
++// point that measured its own subject would be the runner, and the runner may
++// not come from the tree.
++func TestJudge_HandsTheEnvelopeToStdinUnchanged(t *testing.T) {
++	requireRealProcesses(t)
++
++	w, dir := judgeWorktree(t, `cat > stdin.seen; echo '`+aVerdict+`'`, 30*time.Second)
++	envelope := `{"gate":"tested","metrics":[{"name":"failed_tests","type":"int","value":3}],"note":"  spaces  and \"quotes\" "}`
++	if _, err := w.Judge(context.Background(), measured(flow.GateTested, envelope)); err != nil {
++		t.Fatalf("Judge: %v", err)
++	}
++	seen, err := os.ReadFile(filepath.Join(dir, "stdin.seen"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(seen) != envelope {
++		t.Errorf("the judge read %q on stdin, want %q", seen, envelope)
++	}
++}
++
++// The exec line is exec'd, never interpreted, and --verdict is appended last.
++// A project answers on stdout only when it was given the flag; without it the
++// same entry point is in its measuring mode, which spawns a gate.
++func TestJudge_ExecsTheEntryPointWithTheNameThenTheFlag(t *testing.T) {
++	requireRealProcesses(t)
++
++	for _, gate := range []flow.GateName{flow.GateIntegration, flow.GateTested, "tested:wasm"} {
++		t.Run(string(gate), func(t *testing.T) {
++			w, dir := judgeWorktree(t,
++				": > argv\necho \"$#\" >> argv\nfor a in \"$@\"; do echo \"$a\" >> argv; done\necho '"+aVerdict+"'",
++				30*time.Second)
++			if _, err := w.Judge(context.Background(), measured(gate, `{}`)); err != nil {
++				t.Fatalf("Judge: %v", err)
++			}
++			recorded, err := os.ReadFile(filepath.Join(dir, "argv"))
++			if err != nil {
++				t.Fatal(err)
++			}
++			// The instance travels whole, and the count pins it: splitting
++			// "tested:wasm" would ask the judge about the concept and get the
++			// terms for every suite under it.
++			want := "2\n" + string(gate) + "\n--verdict\n"
++			if string(recorded) != want {
++				t.Errorf("the judge saw argv %q, want %q", recorded, want)
++			}
++		})
++	}
++}
++
++// One JSON object with both required fields, and nothing else. Everything here
++// is a judge that did not answer — never a refusal.
++func TestJudge_RefusesAnythingThatIsNotAVerdict(t *testing.T) {
++	requireRealProcesses(t)
++
++	for _, c := range []struct {
++		name   string
++		script string
++		says   string
++	}{{
++		name:   "nothing at all",
++		script: `exit 0`,
++	}, {
++		name:   "not JSON",
++		script: `echo 'looks fine to me'`,
++	}, {
++		name:   "an array",
++		script: `echo '[{"acceptable":true,"thresholds":{}}]'`,
++	}, {
++		name:   "a scalar",
++		script: `echo 7`,
++	}, {
++		// The one scalar a struct decodes from without complaint: null leaves
++		// every field at its zero value, and Acceptable's zero value is a
++		// refusal nobody made.
++		name:   "null",
++		script: `echo null`,
++	}, {
++		name:   "two verdicts are not one verdict",
++		script: `printf '{"acceptable":true,"thresholds":{}}{"acceptable":false,"thresholds":{}}\n'`,
++	}, {
++		// Stdout carries the verdict and nothing else, for the same reason it
++		// carries the envelope and nothing else.
++		name:   "a verdict with something after it",
++		script: `printf '{"acceptable":true,"thresholds":{}}\ndone\n'`,
++	}, {
++		// The load-bearing one. Absent, "acceptable" would decode to false and
++		// the SDK would have invented a refusal out of a judge that gave none.
++		name:   "no acceptable field",
++		script: `echo '{"thresholds":{"failed_tests":0},"detail":"looks fine"}'`,
++		says:   "acceptable",
++	}, {
++		name:   "acceptable is not a boolean",
++		script: `echo '{"acceptable":"yes","thresholds":{}}'`,
++		says:   "acceptable",
++	}, {
++		// A verdict whose terms were discarded cannot be re-checked by anyone
++		// who was not there, which is exactly what a judge is allowed to be a
++		// tree artifact in exchange for.
++		name:   "no thresholds field",
++		script: `echo '{"acceptable":true,"detail":"looks fine"}'`,
++		says:   "thresholds",
++	}} {
++		t.Run(c.name, func(t *testing.T) {
++			w, _ := judgeWorktree(t, c.script, 30*time.Second)
++			v, err := w.Judge(context.Background(), measured(flow.GateTested, `{"gate":"tested"}`))
++			assertNoVerdict(t, v, err)
++			if c.says != "" && !strings.Contains(err.Error(), c.says) {
++				t.Errorf("err = %v, want it to name %q — the person fixing the judge needs the field", err, c.says)
++			}
++		})
++	}
++}
++
++// Only a measured run may be judged. The other four outcomes are not verdicts
++// and must never be passed off as one: a gate that could not start, timed out,
++// died or broke its contract has not reported that the tree is bad, and
++// handing that to a judge would ask it to invent an answer about a measurement
++// that does not exist.
++func TestJudge_RefusesARunThatMeasuredNothingWithoutSpawning(t *testing.T) {
++	requireRealProcesses(t)
++
++	for _, outcome := range []flow.GateOutcome{
++		flow.OutcomeTimedOut,
++		flow.OutcomeCouldNotStart,
++		flow.OutcomeDied,
++		flow.OutcomeBrokeContract,
++		"", // the zero GateRun, which says nothing was observed at all
++	} {
++		t.Run(string("outcome "+outcome), func(t *testing.T) {
++			w, dir := judgeWorktree(t, "touch asked\necho '"+aVerdict+"'", 30*time.Second)
++			run := flow.GateRun{Gate: flow.GateTested, Outcome: outcome, ExitCode: -1}
++			v, err := w.Judge(context.Background(), run)
++			assertNoVerdict(t, v, err)
++			if _, err := os.Stat(filepath.Join(dir, "asked")); err == nil {
++				t.Error("the judge was asked about a run that measured nothing")
++			}
++		})
++	}
++}
++
++// An undeclared concept is refused before anything is spawned, exactly as the
++// runner refuses it: the project cannot answer for a name it does not have,
++// and the failure would look like the judge refusing rather than the caller
++// asking about something that does not exist.
++func TestJudge_RefusesAnUndeclaredNameWithoutSpawning(t *testing.T) {
++	requireRealProcesses(t)
++
++	w, dir := judgeWorktree(t, "touch asked\necho '"+aVerdict+"'", 30*time.Second)
++	v, err := w.Judge(context.Background(), measured("lint", `{"gate":"lint"}`))
++	assertNoVerdict(t, v, err)
++	if !strings.Contains(err.Error(), "not a declared gate name") {
++		t.Errorf("err = %v, want a refusal naming the problem", err)
++	}
++	if _, err := os.Stat(filepath.Join(dir, "asked")); err == nil {
++		t.Error("asked the judge about an undeclared gate name")
++	}
++}
++
++// THE PROPERTY THE WHOLE SPLIT RESTS ON. Judge does not run the gate: the SDK
++// spawned it, and the judge is handed the envelope that came back. A judging
++// entry point that measured its own subject would be the runner — and the
++// runner is the one party that may not come from the tree, because it is the
++// sole witness to a process that no longer exists.
++func TestJudge_DoesNotRunTheGate(t *testing.T) {
++	requireRealProcesses(t)
++
++	w, dir := judgeWorktree(t, "echo '"+aVerdict+"'", 30*time.Second)
++	// A gate that is right there, executable, and would be found by anything
++	// that went looking for it.
++	writeScript(t, dir, "gate", "touch measured\necho '{\"gate\":\"tested\"}'", 0o755)
++
++	v, err := w.Judge(context.Background(), measured(flow.GateTested, `{"gate":"tested"}`))
++	if err != nil {
++		t.Fatalf("Judge: %v", err)
++	}
++	if !v.Acceptable {
++		t.Error("Acceptable = false, want the verdict the judge printed")
++	}
++	if _, err := os.Stat(filepath.Join(dir, "measured")); err == nil {
++		t.Error("the gate ran: the judging entry point took the runner's seat")
++	}
++}
++
++// A judge that is not there, or not executable, has not refused anything. This
++// is the case an error return exists for, and the one most expensive to read
++// as a verdict: every change would be refused for a reason that is nowhere in
++// the change.
++func TestJudge_AnUnreachableEntryPointIsNotARefusal(t *testing.T) {
++	requireRealProcesses(t)
++
++	for _, c := range []struct {
++		name  string
++		setup func(t *testing.T, dir string)
++	}{{
++		name:  "no judging entry point in the tree",
++		setup: func(*testing.T, string) {},
++	}, {
++		name: "present but not executable",
++		setup: func(t *testing.T, dir string) {
++			writeScript(t, dir, "run", "echo '"+aVerdict+"'", 0o644)
++		},
++	}} {
++		t.Run(c.name, func(t *testing.T) {
++			w, dir := judgeWorktree(t, "", 30*time.Second)
++			c.setup(t, dir)
++			v, err := w.Judge(context.Background(), measured(flow.GateTested, `{"gate":"tested"}`))
++			assertNoVerdict(t, v, err)
++			if !strings.Contains(err.Error(), "bin/run") {
++				t.Errorf("err = %v, want it to name the program that was absent", err)
++			}
++		})
++	}
++}
++
++// A wedged judge must not hang the SDK, and it must not answer either.
++func TestJudge_EnforcesTheDeclaredTimeout(t *testing.T) {
++	requireRealProcesses(t)
++
++	// exec, so the shell does not linger as the sleep's parent.
++	w, _ := judgeWorktree(t, "exec sleep 60", 100*time.Millisecond)
++	start := time.Now()
++	v, err := w.Judge(context.Background(), measured(flow.GateTested, `{"gate":"tested"}`))
++	elapsed := time.Since(start)
++	assertNoVerdict(t, v, err)
++	if elapsed > 30*time.Second {
++		t.Errorf("returned after %s — the declared timeout did not bound the wait", elapsed)
++	}
++	if !strings.Contains(err.Error(), "timeout") {
++		t.Errorf("err = %v, want it to name the wait as the problem", err)
++	}
++}
++
++// The caller going away is not an answer: nobody is waiting for the verdict,
++// and there is none.
++func TestJudge_ACancelledCallerIsAnError(t *testing.T) {
++	requireRealProcesses(t)
++
++	w, _ := judgeWorktree(t, "exec sleep 60", 30*time.Second)
++	ctx, cancel := context.WithCancel(context.Background())
++	go func() {
++		time.Sleep(50 * time.Millisecond)
++		cancel()
++	}()
++	v, err := w.Judge(ctx, measured(flow.GateTested, `{"gate":"tested"}`))
++	assertNoVerdict(t, v, err)
++	if !errors.Is(err, context.Canceled) {
++		t.Errorf("err = %v, want it to wrap context.Canceled", err)
++	}
++}
++
++func TestJudge_RefusesACallerWhoseContextIsAlreadyGone(t *testing.T) {
++	requireRealProcesses(t)
++
++	w, dir := judgeWorktree(t, "touch asked\necho '"+aVerdict+"'", 30*time.Second)
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	v, err := w.Judge(ctx, measured(flow.GateTested, `{"gate":"tested"}`))
++	assertNoVerdict(t, v, err)
++	if !errors.Is(err, context.Canceled) {
++		t.Errorf("err = %v, want it to wrap context.Canceled", err)
++	}
++	if _, err := os.Stat(filepath.Join(dir, "asked")); err == nil {
++		t.Error("the judge was spawned for a caller that had already gone away")
++	}
++}
++
++// A judge is free to answer without reading the envelope — it may know the
++// gate's terms make the numbers irrelevant, or it may simply be sloppy. Either
++// way the SDK is left holding a pipe nobody is draining, and an envelope large
++// enough to fill it must not wedge the caller.
++//
++// 128 KiB is past every common pipe buffer, so the write genuinely blocks and
++// the process genuinely exits underneath it.
++func TestJudge_AnswersEvenIfTheJudgeNeverReadsStdin(t *testing.T) {
++	requireRealProcesses(t)
++
++	w, _ := judgeWorktree(t, "echo '"+aVerdict+"'", 30*time.Second)
++	envelope := `{"gate":"tested","padding":"` + strings.Repeat("x", 128*1024) + `"}`
++
++	start := time.Now()
++	v, err := w.Judge(context.Background(), measured(flow.GateTested, envelope))
++	elapsed := time.Since(start)
++	if err != nil {
++		t.Fatalf("Judge: %v — the judge answered; that it ignored stdin is its business", err)
++	}
++	if !v.Acceptable {
++		t.Error("Acceptable = false, want the verdict the judge printed")
++	}
++	if elapsed > 20*time.Second {
++		t.Errorf("returned after %s — the SDK waited on a pipe the judge had stopped reading", elapsed)
++	}
++}
++
++// The judge's stderr is CAPTURED and reaches the error, which is the opposite
++// of a gate's. A gate's stderr is the minutes of a long run and a person needs
++// it as it happens; a judge that could not answer wrote the reason there, and
++// the reason belongs with the error or it is lost.
++func TestJudge_TheJudgesOwnComplaintReachesTheError(t *testing.T) {
++	requireRealProcesses(t)
++
++	w, _ := judgeWorktree(t, "echo 'bin/run: the thresholds manifest is missing' >&2\nexit 3", 30*time.Second)
++	v, err := w.Judge(context.Background(), measured(flow.GateTested, `{"gate":"tested"}`))
++	assertNoVerdict(t, v, err)
++	if !strings.Contains(err.Error(), "the thresholds manifest is missing") {
++		t.Errorf("err = %v, want it to carry what the judge said on stderr", err)
++	}
++}
+diff --git a/pkg/backend/github/worktree.go b/pkg/backend/github/worktree.go
+index a9fdc09..35933f6 100644
+--- a/pkg/backend/github/worktree.go
++++ b/pkg/backend/github/worktree.go
+@@ -136,10 +136,42 @@ func (w *worktree) RunGate(ctx context.Context, name flow.GateName) (flow.GateRu
+ 	return runGate(ctx, w.b.cfg.WorktreeDir, name, argv, w.b.cfg.GateTimeout)
+ }
+ 
++// Judge asks the project whether a measurement is acceptable, by exec'ing its
++// judging entry point with the envelope on stdin. See flow.Worktree.Judge: the
++// SDK never computes the verdict, and it keeps the spawn.
++//
++// Only a measured run may be judged, and that is checked here rather than by
++// the judge — the four other outcomes mean no measurement exists, so there is
++// nothing to hand over, and a judge asked to answer about one would have to
++// invent something.
++func (w *worktree) Judge(ctx context.Context, run flow.GateRun) (flow.GateVerdict, error) {
++	if !run.Gate.Valid() {
++		return flow.GateVerdict{}, fmt.Errorf("worktree.Judge: %q is not a declared gate name", run.Gate)
++	}
++	if run.Outcome != flow.OutcomeMeasured {
++		observed := string(run.Outcome)
++		if observed == "" {
++			observed = "no outcome at all"
++		}
++		return flow.GateVerdict{}, fmt.Errorf(
++			"worktree.Judge: the run of gate %s reports %s, and only a %s run may be judged — "+
++				"a run that measured nothing has not reported that the tree is bad",
++			run.Gate, observed, flow.OutcomeMeasured)
++	}
++	argv := append(append([]string{}, judgeEntryPoint...), string(run.Gate), verdictFlag)
++	return askJudge(ctx, w.b.cfg.WorktreeDir, run, argv, w.b.cfg.GateTimeout)
++}
++
+ // gateEntryPoint is how a project exposes its gates. Not configurable: the
+ // names are fixed, so the way to reach them is too.
+ var gateEntryPoint = []string{"bin/gate"}
+ 
++// judgeEntryPoint is how a project exposes the layer that holds its
++// thresholds. Not configurable, for the same reason the gate entry point is
++// not: the SDK asks one way, so two callers asking about the same measurement
++// cannot get different answers and both be right.
++var judgeEntryPoint = []string{"bin/run"}
++
+ // run executes one configured command in the worktree.
+ //
+ // Verify's, and not gates'. The seam it goes through reports (stdout, stderr,
+diff --git a/tools/build/cmd/run/main.go b/tools/build/cmd/run/main.go
+index bd76675..312e16a 100644
+--- a/tools/build/cmd/run/main.go
++++ b/tools/build/cmd/run/main.go
+@@ -24,10 +24,15 @@ var (
+ func usage() string {
+ 	var sb strings.Builder
+ 	sb.WriteString("run — measure one gate and judge what it measured.\n\n")
+-	sb.WriteString("Usage:\n  run <gate> [-h | -help]\n\n")
++	sb.WriteString("Usage:\n  run <gate> [-h | -help]\n  run <gate> --verdict < envelope\n\n")
+ 	sb.WriteString("Runs bin/gate <gate> --envelope, then prints each measurement beside the\n")
+ 	sb.WriteString("term it was judged on. Exit 0 means every capped measurement is within its\n")
+ 	sb.WriteString("cap; non-zero means one is not, or that nothing could be measured.\n\n")
++	sb.WriteString("With --verdict it judges an envelope it is GIVEN, on stdin, and runs no\n")
++	sb.WriteString("gate: it prints one JSON verdict on stdout and nothing else. That is the\n")
++	sb.WriteString("mode the SDK asks — the SDK spawns the gate, because a judge that ran its\n")
++	sb.WriteString("own measurement would be the runner, and the runner comes from outside the\n")
++	sb.WriteString("tree.\n\n")
+ 	sb.WriteString("Gates:\n")
+ 	for _, n := range common.GateNames() {
+ 		fmt.Fprintf(&sb, "  %-12s %s\n", n, common.GateSummary(n))
+@@ -45,24 +50,24 @@ func main() {
+ 	}
+ 	common.CheckStale(repoRoot, sourceHash)
+ 
+-	var name string
+-	for _, a := range args {
+-		switch {
+-		case strings.HasPrefix(a, "-"):
+-			fmt.Fprintf(os.Stderr, "run: use of unknown flag %q; run `%s -h` for usage\n", a, os.Args[0])
+-			os.Exit(2)
+-		case name != "":
+-			fmt.Fprintf(os.Stderr, "run: unexpected argument %q; one gate at a time\n", a)
+-			os.Exit(2)
+-		default:
+-			name = a
+-		}
+-	}
+-	if name == "" {
+-		fmt.Fprintf(os.Stderr, "run: no gate named; run `%s -h` for usage\n", os.Args[0])
++	name, verdict, err := common.ParseRunArgs(args)
++	if err != nil {
++		fmt.Fprintf(os.Stderr, "run: %v; run `%s -h` for usage\n", err, os.Args[0])
+ 		os.Exit(2)
+ 	}
+ 
++	// The judging mode. Nothing is spawned: the envelope arrives on stdin from
++	// whoever ran the gate, and stdout carries one verdict and nothing else.
++	// CheckStale has already run above, so stale tooling exits before it can
++	// print a verdict rather than answering with terms nobody currently holds.
++	if verdict {
++		if err := common.JudgeStdin(name, os.Stdin, os.Stdout); err != nil {
++			fmt.Fprintf(os.Stderr, "run: %v\n", err)
++			os.Exit(1)
++		}
++		return
++	}
++
+ 	if err := common.RunOneGate(repoRoot, common.GateBinary(repoRoot), name); err != nil {
+ 		fmt.Fprintf(os.Stderr, "run: %v\n", err)
+ 		os.Exit(1)
+diff --git a/tools/build/common/gate.go b/tools/build/common/gate.go
+index be457d4..e997e88 100644
+--- a/tools/build/common/gate.go
++++ b/tools/build/common/gate.go
+@@ -271,12 +271,19 @@ func ParseGateArgs(args []string) (name string, envelope bool, err error) {
+ 		return "", false, fmt.Errorf("no gate named; known gates: %s", strings.Join(GateNames(), ", "))
+ 	}
+ 	if !KnownGate(name) {
+-		return "", false, fmt.Errorf("no gate named %q in this project; known gates: %s",
+-			name, strings.Join(GateNames(), ", "))
++		return "", false, unknownGate(name)
+ 	}
+ 	return name, envelope, nil
+ }
+ 
++// unknownGate is the refusal every entry point gives for a name this project
++// does not have. One wording, because a caller that mistyped a gate name is
++// told the same thing whichever program it typed it at.
++func unknownGate(name string) error {
++	return fmt.Errorf("no gate named %q in this project; known gates: %s",
++		name, strings.Join(GateNames(), ", "))
++}
++
+ // measureFormatted counts files gofmt would rewrite. `-l` lists them; `-w`
+ // would repair them, which is verify's job and not a gate's.
+ func measureFormatted(repoRoot string) ([]Metric, string, error) {
+diff --git a/tools/build/common/gate_test.go b/tools/build/common/gate_test.go
+index a584f4d..ede7d5e 100644
+--- a/tools/build/common/gate_test.go
++++ b/tools/build/common/gate_test.go
+@@ -123,38 +123,8 @@ func TestGatesHoldNoThresholds(t *testing.T) {
+ 	}
+ }
+ 
+-// An incomplete run is never a pass and never moves a baseline. Honest numbers
+-// that understate what was checked are indistinguishable from an improvement
+-// unless the run says it measured less.
+-func TestIncompleteRunNeverPasses(t *testing.T) {
+-	within := Envelope{Metrics: []Metric{Count("failed_tests", 0)}}
+-	if !passes(within) {
+-		t.Fatal("a complete run inside every cap did not pass")
+-	}
+-	within.Incomplete = "some packages failed their tests"
+-	if passes(within) {
+-		t.Error("an incomplete run passed; its numbers understate what was checked")
+-	}
+-}
+-
+-// A metric nothing caps is reported and not judged. Adding a measurement must
+-// not silently start failing changes.
+-func TestUncappedMetricIsReportedNotJudged(t *testing.T) {
+-	env := Envelope{Metrics: []Metric{Quantity("statement_coverage", 12.5, "percent")}}
+-	if !passes(env) {
+-		t.Error("an uncapped metric failed a verdict nobody declared")
+-	}
+-	if out := renderVerdict(env); !strings.Contains(out, "not judged") {
+-		t.Errorf("an uncapped metric is not shown as unjudged:\n%s", out)
+-	}
+-}
+-
+-func TestCappedMetricOverItsCapFails(t *testing.T) {
+-	env := Envelope{Metrics: []Metric{Count("failed_tests", 1)}}
+-	if passes(env) {
+-		t.Error("a measurement over its cap passed")
+-	}
+-}
++// The judging half — what the caps do to a measurement, and the wire form of
++// the answer — lives beside the layer that holds them, in run_test.go.
+ 
+ // go test indents a failing subtest under its parent, and a subtest that failed
+ // is a failing test.
+diff --git a/tools/build/common/run.go b/tools/build/common/run.go
+index e82f0d0..73ad35a 100644
+--- a/tools/build/common/run.go
++++ b/tools/build/common/run.go
+@@ -11,10 +11,24 @@ package common
+ // It is also the only layer that can render a result for a person: it holds
+ // the caps, so it can print a number beside the terms it was judged on. A gate
+ // could only ever print the left-hand column.
++//
++// It has TWO MODES, and the difference is who ran the gate:
++//
++//   - `run <gate>` measures and then judges. A person at a terminal, and no
++//     decision rests on it — a result handed over by the measured party is a
++//     claim, not a measurement.
++//   - `run <gate> --verdict` judges an envelope it was GIVEN, on stdin, and
++//     spawns nothing. This is the one the SDK asks, and it is what keeps the
++//     SDK in the runner's seat: an entry point that ran the gate itself would
++//     be the runner, and the runner may not come from the tree.
++//
++// Both reach the verdict through the same comparison, so they cannot disagree
++// about what this project allows.
+ 
+ import (
+ 	"encoding/json"
+ 	"fmt"
++	"io"
+ 	"os"
+ 	"os/exec"
+ 	"path/filepath"
+@@ -50,8 +64,7 @@ var caps = map[string]float64{
+ // too, where a person can see it.
+ func RunOneGate(repoRoot, gateBin, name string) error {
+ 	if !KnownGate(name) {
+-		return fmt.Errorf("no gate named %q in this project; known gates: %s",
+-			name, strings.Join(GateNames(), ", "))
++		return unknownGate(name)
+ 	}
+ 
+ 	cmd := exec.Command(gateBin, name, "--envelope")
+@@ -76,25 +89,134 @@ func RunOneGate(repoRoot, gateBin, name string) error {
+ 	}
+ 
+ 	fmt.Print(renderVerdict(env))
+-	if !passes(env) {
+-		return fmt.Errorf("%s: measurements exceed what this project allows", name)
++	acceptable, _, detail := judge(env)
++	if !acceptable {
++		return fmt.Errorf("%s: %s", name, detail)
+ 	}
+ 	return nil
+ }
+ 
+-// passes reports whether every capped metric is within its cap. A metric
+-// nothing caps cannot fail, and an incomplete run cannot pass: honest numbers
+-// that understate what was checked must not be read as a good result.
+-func passes(env Envelope) bool {
+-	if env.Incomplete != "" {
+-		return false
+-	}
++// judge compares one envelope against the caps and reaches the verdict.
++//
++// This is the ONLY comparison in this program. The human path and the wire
++// path both come through here, because two paths reaching a verdict separately
++// would eventually disagree — and a project that answers "acceptable" to a
++// runner and prints a failure to a person has two thresholds wearing one name.
++//
++// It returns the terms it actually applied, not the whole table: a verdict has
++// to travel with what it was reached from, or nobody can re-check it, and the
++// caps a measurement never mentioned had no part in it.
++//
++// A metric nothing caps cannot fail, and an incomplete run cannot pass: honest
++// numbers that understate what was checked must not be read as a good result.
++func judge(env Envelope) (acceptable bool, thresholds map[string]float64, detail string) {
++	thresholds = map[string]float64{}
++	var exceeded []string
+ 	for _, m := range env.Metrics {
+-		if capValue, ok := caps[m.Name]; ok && m.Number() > capValue {
+-			return false
++		capValue, capped := caps[m.Name]
++		if !capped {
++			continue
+ 		}
++		thresholds[m.Name] = capValue
++		if m.Number() > capValue {
++			exceeded = append(exceeded, fmt.Sprintf("%s is %s, cap %s", m.Name, m.String(), number(capValue)))
++		}
++	}
++	switch {
++	case env.Incomplete != "":
++		// Refused even when every number is within its cap. The numbers are
++		// honest and describe less than a full run, which is indistinguishable
++		// from an improvement unless the run says so.
++		return false, thresholds, "the run measured less than a full one, and an incomplete run is never a pass: " + env.Incomplete
++	case len(exceeded) > 0:
++		return false, thresholds, strings.Join(exceeded, "; ")
++	case len(thresholds) == 0:
++		return true, thresholds, "nothing here is judged: no metric this gate reported has a threshold"
++	default:
++		return true, thresholds, "every judged metric is within its cap"
++	}
++}
++
++// JudgeStdin judges an envelope this program did NOT produce, and writes one
++// verdict object to out.
++//
++// Reading the measurement rather than making it is the whole point of this
++// mode. The SDK spawned the gate, so the SDK is the runner; if this entry
++// point ran the gate itself, the runner would be a tree artifact, and a runner
++// is the one party whose account of a vanished process nothing can check.
++//
++// Nothing reaches out on any error path. A caller reads one object or none —
++// a half-written verdict beside an error message is a second channel, and the
++// two could disagree.
++func JudgeStdin(name string, in io.Reader, out io.Writer) error {
++	if !KnownGate(name) {
++		return unknownGate(name)
++	}
++	envelope, err := io.ReadAll(in)
++	if err != nil {
++		return fmt.Errorf("reading the envelope to judge: %w", err)
++	}
++	var env Envelope
++	if err := json.Unmarshal(envelope, &env); err != nil {
++		return fmt.Errorf("what arrived on stdin is not an envelope: %w", err)
++	}
++	// The judge's check, and not the SDK's: only this layer knows which gate
++	// the terms it is about to apply belong to. Judging one gate's numbers
++	// against another's caps would answer a question nobody asked.
++	if env.Gate != name {
++		return fmt.Errorf("asked to judge %q against the terms for %q; a measurement is judged against its own gate's caps", env.Gate, name)
++	}
++	acceptable, thresholds, detail := judge(env)
++	// Marshalled whole before anything is written, so a failure here leaves
++	// stdout untouched rather than half a verdict.
++	body, err := json.Marshal(verdictWire{Acceptable: acceptable, Thresholds: thresholds, Detail: detail})
++	if err != nil {
++		return fmt.Errorf("rendering the verdict for %s: %w", name, err)
++	}
++	_, err = out.Write(append(body, '\n'))
++	return err
++}
++
++// verdictWire is what the judging layer prints in --verdict mode: one JSON
++// object, whole.
++//
++// Thresholds is not omitempty and is never nil. A verdict handed over with the
++// terms it was reached from discarded cannot be re-checked by anyone who was
++// not there, which is exactly the property that lets a judge live in the tree
++// it judges.
++type verdictWire struct {
++	Acceptable bool               `json:"acceptable"`
++	Thresholds map[string]float64 `json:"thresholds"`
++	Detail     string             `json:"detail,omitempty"`
++}
++
++// ParseRunArgs reads an invocation of this program: exactly one gate name, and
++// whether the caller asked for a verdict on an envelope it is handing over.
++//
++// Same rules as ParseGateArgs, and for the same reason — an unknown flag is
++// refused rather than ignored, and a second name refused rather than dropped.
++// A caller that meant --verdict and mistyped it must not silently get the
++// measuring mode, which spawns a gate.
++func ParseRunArgs(args []string) (name string, verdict bool, err error) {
++	for _, a := range NormalizeArgs(args) {
++		switch {
++		case a == "-verdict":
++			verdict = true
++		case strings.HasPrefix(a, "-"):
++			return "", false, fmt.Errorf("use of unknown flag %q", a)
++		case name != "":
++			return "", false, fmt.Errorf("unexpected argument %q; one gate at a time", a)
++		default:
++			name = a
++		}
++	}
++	if name == "" {
++		return "", false, fmt.Errorf("no gate named; known gates: %s", strings.Join(GateNames(), ", "))
++	}
++	if !KnownGate(name) {
++		return "", false, unknownGate(name)
+ 	}
+-	return true
++	return name, verdict, nil
+ }
+ 
+ // renderVerdict prints each measurement beside the term it was judged on.
+diff --git a/tools/build/common/run_test.go b/tools/build/common/run_test.go
+new file mode 100644
+index 0000000..32a101e
+--- /dev/null
++++ b/tools/build/common/run_test.go
+@@ -0,0 +1,305 @@
++package common
++
++import (
++	"bytes"
++	"encoding/json"
++	"errors"
++	"strings"
++	"testing"
++)
++
++// The judging layer holds the caps, so this is where a measurement becomes an
++// answer — the only place in this project that compares a number to a
++// threshold. Both modes come through judge(), so a test of judge() is a test of
++// what a person sees and of what the SDK is told.
++
++// A verdict says what was compared as well as what it concluded. Terms that
++// were not applied are not in it: a verdict has to travel with what it was
++// reached from, and caps a measurement never mentioned had no part in it.
++func TestJudge_WithinEveryCapIsAcceptableAndSaysWhatItApplied(t *testing.T) {
++	env := Envelope{Gate: "tested", Metrics: []Metric{
++		Count("failed_tests", 0),
++		Count("failed_packages", 0),
++		Quantity("statement_coverage", 61.5, "percent"),
++	}}
++	acceptable, thresholds, detail := judge(env)
++	if !acceptable {
++		t.Fatalf("a complete run inside every cap was refused: %s", detail)
++	}
++	if len(thresholds) != 2 || thresholds["failed_tests"] != 0 || thresholds["failed_packages"] != 0 {
++		t.Errorf("thresholds = %v, want exactly the two caps that applied", thresholds)
++	}
++	// A metric nothing caps is reported and not judged. Adding a measurement
++	// must not silently start failing changes.
++	if _, ok := thresholds["statement_coverage"]; ok {
++		t.Error("an uncapped metric appears among the terms it was judged against")
++	}
++	if out := renderVerdict(env); !strings.Contains(out, "not judged") {
++		t.Errorf("an uncapped metric is not shown as unjudged:\n%s", out)
++	}
++}
++
++// Over a cap is a refusal, and the detail is the whole reason a person is told
++// anything: which metric, what it measured, and the term it was judged
++// against. "Measurements exceed what this project allows" sends someone back to
++// the output to work out which.
++func TestJudge_OverACapNamesTheMetricItsValueAndTheTerm(t *testing.T) {
++	env := Envelope{Gate: "tested", Metrics: []Metric{
++		Count("failed_tests", 3),
++		Count("failed_packages", 0),
++	}}
++	acceptable, thresholds, detail := judge(env)
++	if acceptable {
++		t.Fatal("a measurement over its cap passed")
++	}
++	for _, want := range []string{"failed_tests", "3", "cap 0"} {
++		if !strings.Contains(detail, want) {
++			t.Errorf("detail = %q, want it to carry %q", detail, want)
++		}
++	}
++	// The cap that held is still part of what the verdict was reached from.
++	if len(thresholds) != 2 {
++		t.Errorf("thresholds = %v, want both applied caps", thresholds)
++	}
++}
++
++// An incomplete run is never a pass and never moves a baseline — even with
++// every number inside its cap. Honest numbers that understate what was checked
++// are indistinguishable from an improvement unless the run says it measured
++// less.
++func TestJudge_AnIncompleteRunIsRefusedEvenInsideEveryCap(t *testing.T) {
++	env := Envelope{
++		Gate:       "tested",
++		Metrics:    []Metric{Count("failed_tests", 0), Count("failed_packages", 0)},
++		Incomplete: "some packages failed their tests",
++	}
++	acceptable, thresholds, detail := judge(env)
++	if acceptable {
++		t.Fatal("an incomplete run passed; its numbers understate what was checked")
++	}
++	if !strings.Contains(detail, "some packages failed their tests") {
++		t.Errorf("detail = %q, want the reason the run measured less", detail)
++	}
++	if len(thresholds) != 2 {
++		t.Errorf("thresholds = %v, want the caps that applied", thresholds)
++	}
++}
++
++// A gate whose metrics nothing caps is acceptable, and the verdict says so
++// rather than implying a comparison nobody made. The caps table is a
++// placeholder (#38); a metric with no entry is reported and not judged.
++func TestJudge_NothingCappedIsAcceptableAndSaysNothingWasJudged(t *testing.T) {
++	env := Envelope{Gate: "covered", Metrics: []Metric{Quantity("statement_coverage", 12.5, "percent")}}
++	acceptable, thresholds, detail := judge(env)
++	if !acceptable {
++		t.Fatalf("an uncapped metric failed a verdict nobody declared: %s", detail)
++	}
++	if len(thresholds) != 0 {
++		t.Errorf("thresholds = %v, want none — no term applied", thresholds)
++	}
++	if !strings.Contains(detail, "judged") {
++		t.Errorf("detail = %q, want it to say nothing was judged", detail)
++	}
++}
++
++// The wire form: one JSON object on stdout, whole, with both required fields.
++// The SDK refuses anything else, and a missing "acceptable" would be read as a
++// refusal nobody made.
++func TestJudgeStdin_WritesExactlyOneVerdictObject(t *testing.T) {
++	env := Envelope{Gate: "tested", Metrics: []Metric{Count("failed_tests", 3), Count("failed_packages", 1)}}
++	var out bytes.Buffer
++	if err := JudgeStdin("tested", bytes.NewReader(marshal(t, env)), &out); err != nil {
++		t.Fatalf("JudgeStdin: %v", err)
++	}
++
++	dec := json.NewDecoder(bytes.NewReader(out.Bytes()))
++	var wire struct {
++		Acceptable *bool              `json:"acceptable"`
++		Thresholds map[string]float64 `json:"thresholds"`
++		Detail     string             `json:"detail"`
++	}
++	if err := dec.Decode(&wire); err != nil {
++		t.Fatalf("the verdict does not parse: %v (%q)", err, out.String())
++	}
++	if dec.More() {
++		t.Errorf("trailing content after the verdict: %q", out.String())
++	}
++	if wire.Acceptable == nil {
++		t.Fatalf(`no "acceptable" field: %q`, out.String())
++	}
++	if *wire.Acceptable {
++		t.Error("acceptable = true for three failing tests against a cap of 0")
++	}
++	// The terms travel with the verdict, or nobody who was not there can
++	// re-check it — which is the entire reason a judge may be a tree artifact.
++	if wire.Thresholds["failed_tests"] != 0 {
++		t.Errorf("thresholds = %v, want the caps that were applied", wire.Thresholds)
++	}
++	if !strings.Contains(wire.Detail, "failed_tests") {
++		t.Errorf("detail = %q, want the metric that failed", wire.Detail)
++	}
++}
++
++// Acceptable is written even when it is true, and thresholds even when nothing
++// applied. Omitting either would leave the SDK reading absence — and absence of
++// "acceptable" is a refusal nobody made.
++func TestJudgeStdin_WritesBothRequiredFieldsWhenThereIsNothingToSay(t *testing.T) {
++	env := Envelope{Gate: "covered", Metrics: []Metric{Quantity("statement_coverage", 12.5, "percent")}}
++	var out bytes.Buffer
++	if err := JudgeStdin("covered", bytes.NewReader(marshal(t, env)), &out); err != nil {
++		t.Fatalf("JudgeStdin: %v", err)
++	}
++	var fields map[string]json.RawMessage
++	if err := json.Unmarshal(out.Bytes(), &fields); err != nil {
++		t.Fatalf("the verdict does not parse: %v (%q)", err, out.String())
++	}
++	if string(fields["acceptable"]) != "true" {
++		t.Errorf("acceptable = %q, want true", fields["acceptable"])
++	}
++	// Not null: a null threshold set is discarded terms wearing a present
++	// field, and the SDK cannot tell it from a judge that forgot.
++	if string(fields["thresholds"]) != "{}" {
++		t.Errorf("thresholds = %q, want an empty object", fields["thresholds"])
++	}
++}
++
++// Nothing reaches stdout on any error path. A caller reads one verdict or
++// none: half an object beside an error message is a second channel, and the
++// two could disagree.
++func TestJudgeStdin_WritesNothingWhenItCannotAnswer(t *testing.T) {
++	for _, c := range []struct {
++		name     string
++		gate     string
++		envelope []byte
++		says     string
++	}{{
++		// The judge's check, not the SDK's: only this layer knows which gate
++		// the caps it is about to apply belong to.
++		name:     "an envelope for another gate",
++		gate:     "tested",
++		envelope: []byte(`{"gate":"formatted","metrics":[]}`),
++		says:     "formatted",
++	}, {
++		name:     "not an envelope at all",
++		gate:     "tested",
++		envelope: []byte("who knows"),
++		says:     "not an envelope",
++	}, {
++		name:     "a gate this project does not have",
++		gate:     "lint",
++		envelope: []byte(`{"gate":"lint","metrics":[]}`),
++		says:     "no gate named",
++	}, {
++		// A count arriving with a fractional part is not a count, and the
++		// envelope decoder refuses it. Judging it anyway would compare a
++		// number whose type changed against a cap for the one it replaced.
++		name:     "a metric whose value contradicts its declared type",
++		gate:     "tested",
++		envelope: []byte(`{"gate":"tested","metrics":[{"name":"failed_tests","type":"int","value":1.5}]}`),
++		says:     "failed_tests",
++	}} {
++		t.Run(c.name, func(t *testing.T) {
++			var out bytes.Buffer
++			err := JudgeStdin(c.gate, bytes.NewReader(c.envelope), &out)
++			if err == nil {
++				t.Fatalf("JudgeStdin answered a request it could not answer: %q", out.String())
++			}
++			if !strings.Contains(err.Error(), c.says) {
++				t.Errorf("err = %v, want it to name %q", err, c.says)
++			}
++			if out.Len() != 0 {
++				t.Errorf("wrote %q on an error path; a caller must read one verdict or none", out.String())
++			}
++		})
++	}
++}
++
++// An unreadable stdin is not a refusal either, and it must not reach stdout as
++// one.
++func TestJudgeStdin_AnUnreadableEnvelopeIsAnErrorAndNotAVerdict(t *testing.T) {
++	var out bytes.Buffer
++	err := JudgeStdin("tested", failingReader{}, &out)
++	if err == nil {
++		t.Fatal("JudgeStdin reached a verdict from an envelope it could not read")
++	}
++	if out.Len() != 0 {
++		t.Errorf("wrote %q on an error path", out.String())
++	}
++}
++
++type failingReader struct{}
++
++func (failingReader) Read([]byte) (int, error) { return 0, errors.New("the pipe broke") }
++
++// The two modes reach the same verdict, because they are the same comparison.
++// A project that answered "acceptable" to a runner and printed a failure to a
++// person would have two thresholds wearing one name.
++func TestJudgeStdin_AgreesWithWhatAPersonIsShown(t *testing.T) {
++	env := Envelope{Gate: "tested", Metrics: []Metric{Count("failed_tests", 2), Count("failed_packages", 1)}}
++	acceptable, _, detail := judge(env)
++
++	var out bytes.Buffer
++	if err := JudgeStdin("tested", bytes.NewReader(marshal(t, env)), &out); err != nil {
++		t.Fatalf("JudgeStdin: %v", err)
++	}
++	var wire struct {
++		Acceptable bool   `json:"acceptable"`
++		Detail     string `json:"detail"`
++	}
++	if err := json.Unmarshal(out.Bytes(), &wire); err != nil {
++		t.Fatal(err)
++	}
++	if wire.Acceptable != acceptable || wire.Detail != detail {
++		t.Errorf("the wire says (%t, %q) and the human path says (%t, %q)",
++			wire.Acceptable, wire.Detail, acceptable, detail)
++	}
++}
++
++// The invocation is the protocol, not this program's preferences: an unknown
++// flag is refused rather than ignored, and a second name refused rather than
++// dropped. A caller that meant --verdict and mistyped it must not silently get
++// the measuring mode, which spawns a gate.
++func TestParseRunArgs(t *testing.T) {
++	for _, c := range []struct {
++		args    []string
++		name    string
++		verdict bool
++		wantErr bool
++	}{
++		{args: []string{"tested"}, name: "tested"},
++		{args: []string{"tested", "--verdict"}, name: "tested", verdict: true},
++		{args: []string{"--verdict", "tested"}, name: "tested", verdict: true},
++		// Both spellings, as every other entry point here accepts.
++		{args: []string{"tested", "-verdict"}, name: "tested", verdict: true},
++		{args: []string{}, wantErr: true},
++		{args: []string{"--verdict"}, wantErr: true},
++		{args: []string{"tested", "formatted"}, wantErr: true},
++		{args: []string{"tested", "--verdicts"}, wantErr: true},
++		{args: []string{"tested", "--envelope"}, wantErr: true},
++		{args: []string{"lint"}, wantErr: true},
++	} {
++		name, verdict, err := ParseRunArgs(c.args)
++		if c.wantErr {
++			if err == nil {
++				t.Errorf("ParseRunArgs(%q) = (%q, %t, nil), want an error", c.args, name, verdict)
++			}
++			continue
++		}
++		if err != nil {
++			t.Errorf("ParseRunArgs(%q): %v", c.args, err)
++			continue
++		}
++		if name != c.name || verdict != c.verdict {
++			t.Errorf("ParseRunArgs(%q) = (%q, %t), want (%q, %t)", c.args, name, verdict, c.name, c.verdict)
++		}
++	}
++}
++
++func marshal(t *testing.T, env Envelope) []byte {
++	t.Helper()
++	b, err := json.Marshal(env)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return b
++}
