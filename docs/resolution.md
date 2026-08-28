@@ -56,6 +56,12 @@ Budget is granted additively by an operator. A grant clears the park it satisfie
 
 Infrastructure failures consume no budget. A step that could not run because the environment was unavailable has not spent an attempt.
 
+**Spending resources must produce progress.** Every invocation either advances the item or leaves behind something the next invocation starts from — the work done, the answer needed, or the reason the attempt could not be recorded. An invocation that consumes budget and leaves the item exactly as it found it has not failed once; it has established that every remaining invocation will fail the same way, because nothing about the next attempt differs from the last.
+
+That is the shape to check any retry against: **a retry that cannot differ from the attempt before it is not a retry, it is a loop with a budget.** It exhausts the grant, reports the cap as the reason, and names the wrong problem — an operator granted more budget would buy an identical failure.
+
+So an attempt stopped by something correctable hands the correction back. A refused write returns to the step that produced the text, carrying what was refused and why, so the next attempt is answering something the last one did not know.
+
 ## Parking
 
 A park records that a step stopped without completing, and why. Every park names the step it belongs to.

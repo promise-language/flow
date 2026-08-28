@@ -157,6 +157,10 @@ A refusal names **what** it found and **where**, and quotes enough to act on. "T
 
 A refusal is not a failure of the step. The text is revised and re-offered — the same shape as a failing check, and for the same reason: the work is sound and its expression is not.
 
+**The refusal reaches the author, not just the log.** The party that composed the text is the only one that can revise it, and for an agent that means being re-prompted with what was refused, why, and what would satisfy the rule. A refusal recorded somewhere the author never sees produces a step that fails, is retried, composes the same text from the same context, and is refused identically until its budget is gone — which then reports a budget cap as the reason, naming the wrong problem.
+
+**The work itself is never the casualty.** What was refused is an expression of work already done and paid for. Discarding it and starting over spends the whole cost again to reach the same sentence.
+
 ## Overriding
 
 **A person may override a refusal. Nothing else may.**
