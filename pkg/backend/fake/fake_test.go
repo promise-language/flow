@@ -453,6 +453,28 @@ func TestBackend_JudgeRefusesWhatCannotBeJudged(t *testing.T) {
 	}
 }
 
+// A refusal configured AFTER the worktree was handed out still reaches it,
+// which is the order a caller's test is naturally written in: claim, then set
+// up the failure it is about to exercise.
+//
+// This is the one that regresses invisibly. A fake that only fixed the verdict
+// at Worktree() time would leave such a test exercising the default — the
+// ACCEPTABLE path — while its name and its author both say refusal, and it
+// would go on passing for as long as the caller kept letting the change
+// through.
+func TestBackend_SetGateVerdictReachesAWorktreeAlreadyHandedOut(t *testing.T) {
+	b := fake.New()
+	wt := gateWorktree(t, b)
+	b.SetGateVerdict(false)
+	v, err := wt.Judge(context.Background(), measuredRun(flow.GateTested))
+	if err != nil {
+		t.Fatalf("Judge: %v — a refusal is an answer, not an error", err)
+	}
+	if v.Acceptable {
+		t.Error("Acceptable = true: the refusal did not reach a worktree that already existed")
+	}
+}
+
 // An undeclared name is a request no runner could attempt, so it is the one
 // thing that is an error — and the GateRun beside it must carry no outcome. A
 // caller that read a measurement out of it would act on a gate that never ran.

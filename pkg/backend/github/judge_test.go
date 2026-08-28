@@ -284,6 +284,18 @@ func TestJudge_RefusesARunThatMeasuredNothingWithoutSpawning(t *testing.T) {
 			run := flow.GateRun{Gate: flow.GateTested, Outcome: outcome, ExitCode: -1}
 			v, err := w.Judge(context.Background(), run)
 			assertNoVerdict(t, v, err)
+			// The refusal names what WAS observed, because that is the fact
+			// the person reading it has to act on — a timeout is the host's
+			// problem and a broken contract is the gate author's. A zero run
+			// observed nothing at all, and saying so beats a sentence with a
+			// hole where the outcome should be.
+			says := string(outcome)
+			if says == "" {
+				says = "no outcome at all"
+			}
+			if !strings.Contains(err.Error(), says) {
+				t.Errorf("err = %v, want it to name what was observed (%q)", err, says)
+			}
 			if _, err := os.Stat(filepath.Join(dir, "asked")); err == nil {
 				t.Error("the judge was asked about a run that measured nothing")
 			}
@@ -456,5 +468,73 @@ func TestJudge_TheJudgesOwnComplaintReachesTheError(t *testing.T) {
 	assertNoVerdict(t, v, err)
 	if !strings.Contains(err.Error(), "the thresholds manifest is missing") {
 		t.Errorf("err = %v, want it to carry what the judge said on stderr", err)
+	}
+}
+
+// A judge that printed NOTHING and a judge that printed the WRONG THING are
+// different problems, and the error says which. The first sends a person to
+// find out why it stopped — so the exit status it stopped with is in the
+// message — and the second sends them to look at what it printed. One wording
+// for both costs the reader the only clue they get, and neither is a refusal.
+func TestJudge_SaysWhetherTheVerdictWasAbsentOrMalformed(t *testing.T) {
+	requireRealProcesses(t)
+
+	for _, c := range []struct {
+		name   string
+		script string
+		says   string
+		notSay string
+	}{{
+		// Absence. The exit status is the whole account of what became of the
+		// judge, so it is reported as the number it was rather than as
+		// "non-zero" — the person debugging their judging entry point is the
+		// one who knows what 7 means in it.
+		name:   "silent, and exited 7",
+		script: `exit 7`,
+		says:   "exited 7 without printing a verdict",
+	}, {
+		// Still absence: an object that stops mid-field was never finished, so
+		// there is nothing to look at in what it printed.
+		name:   "cut off mid-verdict",
+		script: `printf '{"acceptable":tr'`,
+		says:   "without printing a verdict",
+	}, {
+		// A defect in what it printed, not in what became of it.
+		name:   "printed something else entirely",
+		script: `echo 'looks fine to me'`,
+		says:   "printed something that is not a verdict",
+		notSay: "without printing a verdict",
+	}} {
+		t.Run(c.name, func(t *testing.T) {
+			w, _ := judgeWorktree(t, c.script, 30*time.Second)
+			v, err := w.Judge(context.Background(), measured(flow.GateTested, `{"gate":"tested"}`))
+			assertNoVerdict(t, v, err)
+			if !strings.Contains(err.Error(), c.says) {
+				t.Errorf("err = %v, want it to say %q", err, c.says)
+			}
+			if c.notSay != "" && strings.Contains(err.Error(), c.notSay) {
+				t.Errorf("err = %v, want it NOT to say %q — the judge printed something, and that is where to look", err, c.notSay)
+			}
+		})
+	}
+}
+
+// A judge may write to stderr and still answer: entry points log, and a project
+// that traced where it read its thresholds from has not failed to judge. The
+// stderr is held for the error path only, so a verdict that arrived is returned
+// whole and the noise reaches neither the answer nor the caller.
+func TestJudge_AJudgeThatAlsoWritesToStderrStillAnswers(t *testing.T) {
+	requireRealProcesses(t)
+
+	w, _ := judgeWorktree(t, "echo 'run: reading thresholds from the manifest' >&2\necho '"+aVerdict+"'", 30*time.Second)
+	v, err := w.Judge(context.Background(), measured(flow.GateTested, `{"gate":"tested"}`))
+	if err != nil {
+		t.Fatalf("Judge: %v — the judge printed a verdict; what it logged is its business", err)
+	}
+	if !v.Acceptable {
+		t.Error("Acceptable = false, want the verdict the judge printed")
+	}
+	if strings.Contains(v.Detail, "reading thresholds") {
+		t.Errorf("Detail = %q, want only what the judge put in the verdict", v.Detail)
 	}
 }

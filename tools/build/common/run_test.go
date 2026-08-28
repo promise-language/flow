@@ -303,3 +303,69 @@ func marshal(t *testing.T, env Envelope) []byte {
 	}
 	return b
 }
+
+// Every metric over its cap is named, not just the first one found. A person
+// told about one, who fixes it and re-runs, is told about the next — one round
+// trip per failure, each costing whatever the gate takes to measure.
+func TestJudge_NamesEveryMetricOverItsCapNotJustTheFirst(t *testing.T) {
+	env := Envelope{Gate: "tested", Metrics: []Metric{
+		Count("failed_tests", 3),
+		Count("failed_packages", 2),
+	}}
+	acceptable, _, detail := judge(env)
+	if acceptable {
+		t.Fatal("two measurements over their caps passed")
+	}
+	for _, want := range []string{"failed_tests", "failed_packages"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("detail = %q, want it to carry %q too", detail, want)
+		}
+	}
+}
+
+// One wording for a name this project does not have, whichever entry point it
+// was typed at: `bin/gate`'s parser, `bin/run`'s parser, and both of `bin/run`'s
+// modes. One mistake, one sentence, one list of what does exist — a caller who
+// mistyped a gate should not have to work out whether the two programs disagree
+// about what a gate is.
+//
+// It is also WHERE each of them refuses: before anything is spawned and before
+// stdout is touched. RunOneGate is asked here with no gate binary at all, and
+// answers with the refusal rather than with a failure to exec one.
+//
+// MeasureGate is deliberately not in this set. It is reached only after a
+// parser has already accepted the name, so it never answers a person.
+func TestUnknownGateIsRefusedTheSameWayByEveryEntryPoint(t *testing.T) {
+	_, _, gateArgsErr := ParseGateArgs([]string{"lint"})
+	_, _, runArgsErr := ParseRunArgs([]string{"lint"})
+	var out bytes.Buffer
+	judgeErr := JudgeStdin("lint", bytes.NewReader([]byte(`{"gate":"lint","metrics":[]}`)), &out)
+	measureErr := RunOneGate("", "", "lint")
+
+	if out.Len() != 0 {
+		t.Errorf("the judging mode wrote %q for a gate this project does not have", out.String())
+	}
+	for _, c := range []struct {
+		who string
+		err error
+	}{
+		{"ParseGateArgs", gateArgsErr},
+		{"ParseRunArgs", runArgsErr},
+		{"JudgeStdin", judgeErr},
+		{"RunOneGate", measureErr},
+	} {
+		if c.err == nil {
+			t.Fatalf("%s accepted a gate this project does not have", c.who)
+		}
+		if c.err.Error() != gateArgsErr.Error() {
+			t.Errorf("%s says %q, and ParseGateArgs says %q", c.who, c.err, gateArgsErr)
+		}
+	}
+	// The sentence has to carry both halves, or the reader is told only that
+	// they are wrong and not what would have been right.
+	for _, want := range []string{`"lint"`, "tested"} {
+		if !strings.Contains(gateArgsErr.Error(), want) {
+			t.Errorf("the refusal is %q, want it to carry %s", gateArgsErr, want)
+		}
+	}
+}
