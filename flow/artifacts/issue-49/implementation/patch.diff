@@ -1,0 +1,1869 @@
+diff --git a/README.md b/README.md
+index befc760..ec72ed6 100644
+--- a/README.md
++++ b/README.md
+@@ -156,6 +156,9 @@ func main() {
+     backend, err := ghbackend.NewBackend(ghbackend.Config{
+         BinaryName: "issue",
+         VerifyCmd:  []string{"bash", "bin/verify.sh"}, // your project's gate
++        // Guard is what lets this publish anything at all. With none, reads
++        // work and the first write refuses — see docs/disclosure.md.
++        Guard: nil,
+     })
+     if err != nil {
+         panic(err)
+diff --git a/disclosure.go b/disclosure.go
+new file mode 100644
+index 0000000..5ec84dd
+--- /dev/null
++++ b/disclosure.go
+@@ -0,0 +1,190 @@
++package flow
++
++import (
++	"context"
++	"slices"
++)
++
++// Origin names the party standing behind a string that is about to be
++// published. It is not a category of text — two of the six name nobody, and
++// that is what the set is for.
++//
++// The caller supplies it and the guard never infers it. Provenance is not a
++// property of text: a paragraph about another project's architecture reads
++// exactly like a paragraph about this one, and provenance is precisely what is
++// lost when text is copied. But it IS known to whoever is about to publish, so
++// the party that has the fact states it and the guard decides from it.
++//
++// The set is closed, because an open one is a set a caller extends by
++// inventing a name that means "fine, probably". Text that fits none of these
++// is not a new origin; it is OriginElsewhere, which exists to have somewhere
++// honest to put it.
++//
++// There is deliberately no `unknown`. A caller that cannot state an origin
++// cannot make the call, and a guard that is not called permits nothing — the
++// write does not happen. An `unknown` member would turn the one case this
++// exists for into a value that can be passed, and a value that can be passed
++// is a value someone defaults to.
++//
++// docs/disclosure.md § "The set of origins is closed" is the definition; this
++// is its declaration.
++type Origin string
++
++const (
++	// OriginWorktree — a file read from the tree under resolution. Vouched for
++	// by the tree, which is what is being published about.
++	OriginWorktree Origin = "worktree"
++
++	// OriginItem — the item being resolved: its title, body, comments. Vouched
++	// for by the destination itself, which has already published it.
++	OriginItem Origin = "item"
++
++	// OriginFlow — the SDK: templates, headings, its own error strings.
++	// Vouched for by the flow, which is delivered from outside the tree.
++	OriginFlow Origin = "flow"
++
++	// OriginOperator — a person, typed.
++	OriginOperator Origin = "operator"
++
++	// OriginAgent — an agent composed it, and what went into it is not known
++	// to the caller. Vouched for by NOBODY, which is the true thing to say:
++	// the agent may have had several repositories in context. It earns the
++	// strictest examination precisely because there is nothing behind it, and
++	// it is the most common origin in practice — almost everything a
++	// resolution publishes was composed by an agent.
++	OriginAgent Origin = "agent"
++
++	// OriginElsewhere — anywhere else: another repository, another session,
++	// another machine. Vouched for by nobody, and known not to belong.
++	OriginElsewhere Origin = "elsewhere"
++)
++
++// AllOrigins returns every declared origin, in declaration order. A guard
++// enumerates it rather than mirroring the set, which is how two copies of one
++// vocabulary drift.
++func AllOrigins() []Origin {
++	return []Origin{
++		OriginWorktree, OriginItem, OriginFlow, OriginOperator, OriginAgent, OriginElsewhere,
++	}
++}
++
++// Valid reports whether o is a declared origin. The empty string is not one:
++// an origin that cannot be stated is a refusal, not a default.
++func (o Origin) Valid() bool { return slices.Contains(AllOrigins(), o) }
++
++// Text is one string as it will be sent, with the party standing behind it.
++//
++// One string rather than a whole write's body, because a single write commonly
++// publishes several strings with different origins: a push carries a branch
++// name the flow chose, commit messages an agent wrote, and a diff read out of
++// the worktree. Collapsing them would mean stating one origin for all three,
++// which means stating a false one for two.
++//
++// Body is the final bytes. Not the template, not the artifact before assembly,
++// not the prose before the SDK wrapped it in a heading — anything examined
++// before its last transformation can have content introduced after the
++// examination.
++type Text struct {
++	Origin Origin
++	Body   string
++}
++
++// DisclosureAct names what is being published. The set is closed: a write
++// whose act is not named here does not exist, and adding one means adding it
++// here.
++//
++// It lives in the SDK rather than in a backend so that a guard supplied from
++// outside can switch on the whole vocabulary without importing a backend and
++// its client library.
++type DisclosureAct string
++
++const (
++	ActArtifactComment DisclosureAct = "artifact-comment"
++	ActStateComment    DisclosureAct = "state-comment"
++	ActParkRecord      DisclosureAct = "park-record"
++	ActQuestion        DisclosureAct = "question"
++	ActLabel           DisclosureAct = "label"
++	ActPullRequest     DisclosureAct = "pull-request"
++	ActMerge           DisclosureAct = "pull-request-merge"
++	ActPush            DisclosureAct = "push"
++
++	// ActAssignee and ActArtifactFile are writes the github backend performs
++	// that docs/disclosure.md's surface table — which declares itself closed —
++	// does not list. The gap predates the seam; making the writes explicit only
++	// made it visible. These names are the interim vocabulary, and they should
++	// be renamed after the document's rows once #50 settles what those rows
++	// are.
++	ActAssignee     DisclosureAct = "assignee"
++	ActArtifactFile DisclosureAct = "artifact-file"
++)
++
++// AllDisclosureActs returns every declared act, in declaration order. A guard
++// enumerates it to be sure it has an answer for each; a test enumerates it to
++// be sure each has a call site behind it.
++func AllDisclosureActs() []DisclosureAct {
++	return []DisclosureAct{
++		ActArtifactComment, ActStateComment, ActParkRecord, ActQuestion, ActLabel,
++		ActPullRequest, ActMerge, ActPush, ActAssignee, ActArtifactFile,
++	}
++}
++
++// Valid reports whether a is a declared act.
++func (a DisclosureAct) Valid() bool { return slices.Contains(AllDisclosureActs(), a) }
++
++// Disclosure is one proposed outward write: the final bytes, each with the
++// party standing behind it, plus where they were going.
++type Disclosure struct {
++	// Act is what is being published. Always one of AllDisclosureActs.
++	Act DisclosureAct
++
++	// Owner and Repo are the repository the write would reach.
++	Owner string
++	Repo  string
++
++	// Item is the backend's id for the item being written to, or "" when the
++	// write is not item-scoped. A string rather than a number because the SDK's
++	// item ids are opaque; only the backend knows their shape.
++	Item string
++
++	// Ref is the git ref or branch being written to, or "".
++	Ref string
++
++	// Text is every string this write publishes, as it will be sent.
++	Text []Text
++}
++
++// DisclosureGuard examines a proposed write and answers whether it may happen.
++//
++// The flow declares this seam and cannot fill it. A concrete implementation
++// living here would be code inside a tree that agents edit, rebuildable by the
++// party it refuses; a shape the flow declares and something else fills means
++// the flow can state THAT every write is checked without owning WHAT the check
++// permits. So an implementation is supplied from outside and injected, the
++// same way a backend and an agent are — and a flow with nothing injected does
++// not publish.
++//
++// The answer is definitive. A nil error allows; any non-nil error refuses and
++// IS the reason, returned to whoever wrote the text. No confidence, no maybe,
++// no allowed-with-a-warning: a guard that returns a degree of concern has
++// moved the decision to the caller, and the caller is the party trying to
++// publish. A refusal must name what it found and where, and quote enough to
++// act on — "this may contain private information" is indistinguishable from a
++// guard that gave up.
++//
++// It never modifies what it examines. A guard that redacted and forwarded
++// would be worse than none: the author would never learn what was caught, and
++// nobody could tell text that was clean from text that was quietly rewritten.
++//
++// There is no override parameter, deliberately. A person may override a
++// refusal and nothing else may — the party proposing a disclosure is exactly
++// the party that must not be able to authorise it — so an override is arranged
++// between a person and the guard, and recorded there with the text it
++// permitted. A caller cannot ask for one.
++//
++// It must answer fast enough to sit on every path it is on, which rules out a
++// model call and a network round trip: a guard that adds a visible pause is a
++// guard someone turns off, and a guard that is off is indistinguishable from
++// one that was never written.
++type DisclosureGuard interface {
++	Examine(ctx context.Context, d Disclosure) error
++}
+diff --git a/disclosure_test.go b/disclosure_test.go
+new file mode 100644
+index 0000000..9f20132
+--- /dev/null
++++ b/disclosure_test.go
+@@ -0,0 +1,196 @@
++package flow
++
++import (
++	"errors"
++	"go/ast"
++	"go/parser"
++	"go/token"
++	"strings"
++	"testing"
++)
++
++// An origin that cannot be stated is a refusal, so Valid has to say no to
++// everything outside the set — including the two spellings a caller reaches for
++// when it does not know: the zero value, and a word that means "I did not
++// find out".
++func TestOrigin_Valid(t *testing.T) {
++	for _, c := range []struct {
++		origin Origin
++		valid  bool
++	}{
++		{OriginWorktree, true},
++		{OriginItem, true},
++		{OriginFlow, true},
++		{OriginOperator, true},
++		{OriginAgent, true},
++		{OriginElsewhere, true},
++
++		// The zero value. A struct field nobody filled in is the commonest way
++		// an origin goes unstated, and it must not be the one that passes.
++		{"", false},
++		// There is deliberately no `unknown` member: "a value that can be
++		// passed is a value someone defaults to."
++		{"unknown", false},
++		{"none", false},
++		{"probably-fine", false},
++		// Case and spacing are not forgiven. A near miss is a caller that
++		// invented a name, which is what a closed set exists to stop.
++		{"Agent", false},
++		{"agent ", false},
++	} {
++		t.Run(string(c.origin), func(t *testing.T) {
++			if got := c.origin.Valid(); got != c.valid {
++				t.Errorf("Origin(%q).Valid() = %v, want %v", c.origin, got, c.valid)
++			}
++		})
++	}
++}
++
++func TestDisclosureAct_Valid(t *testing.T) {
++	for _, c := range []struct {
++		act   DisclosureAct
++		valid bool
++	}{
++		{ActArtifactComment, true},
++		{ActPush, true},
++		{ActArtifactFile, true},
++
++		{"", false},
++		{"unknown", false},
++		// A plausible near-name for a declared act. The guard switches on these
++		// strings, so a name it does not know is a write it cannot answer about.
++		{"comment", false},
++		{"pull-request-open", false},
++	} {
++		t.Run(string(c.act), func(t *testing.T) {
++			if got := c.act.Valid(); got != c.valid {
++				t.Errorf("DisclosureAct(%q).Valid() = %v, want %v", c.act, got, c.valid)
++			}
++		})
++	}
++}
++
++// AllOrigins and AllDisclosureActs are hand-maintained, and every consumer that
++// enumerates one — a guard deciding it has an answer for each member, Valid
++// itself — trusts it to be the whole set. A constant added without being listed
++// would be invisible to all of them, and Valid would refuse a write that names
++// it: the drift this parses the source to prevent.
++//
++// Asserting a count would not do: it passes the moment someone adds one
++// constant and removes another.
++func TestAllOriginsAndActs_MatchTheDeclaredConstants(t *testing.T) {
++	fset := token.NewFileSet()
++	f, err := parser.ParseFile(fset, "disclosure.go", nil, 0)
++	if err != nil {
++		t.Fatalf("parse disclosure.go: %v", err)
++	}
++
++	declared := map[string]map[string]bool{"Origin": {}, "DisclosureAct": {}}
++	ast.Inspect(f, func(n ast.Node) bool {
++		spec, ok := n.(*ast.ValueSpec)
++		if !ok {
++			return true
++		}
++		id, ok := spec.Type.(*ast.Ident)
++		if !ok || declared[id.Name] == nil {
++			return true
++		}
++		for _, v := range spec.Values {
++			lit, ok := v.(*ast.BasicLit)
++			if !ok || lit.Kind != token.STRING {
++				continue
++			}
++			declared[id.Name][strings.Trim(lit.Value, `"`)] = true
++		}
++		return true
++	})
++
++	listed := map[string]map[string]bool{
++		"Origin":        {},
++		"DisclosureAct": {},
++	}
++	for _, o := range AllOrigins() {
++		listed["Origin"][string(o)] = true
++	}
++	for _, a := range AllDisclosureActs() {
++		listed["DisclosureAct"][string(a)] = true
++	}
++
++	for typeName, want := range declared {
++		if len(want) == 0 {
++			t.Fatalf("parsed no %s constants — the probe is broken, not the code", typeName)
++		}
++		for name := range want {
++			if !listed[typeName][name] {
++				t.Errorf("%s %q is declared but missing from All%ss — every consumer that "+
++					"enumerates the set would not see it, and Valid would refuse it", typeName, name, typeName)
++			}
++		}
++		for name := range listed[typeName] {
++			if !want[name] {
++				t.Errorf("All%ss lists %q, which is not a declared %s constant", typeName, name, typeName)
++			}
++		}
++	}
++}
++
++// Two names for one string are one act: the guard cannot tell the writes apart,
++// and a refusal cannot say which of them it refused. The same argument holds
++// for origins, where a duplicate would mean two parties sharing one name.
++func TestAllOriginsAndActs_HaveNoDuplicates(t *testing.T) {
++	seenOrigin := map[Origin]bool{}
++	for _, o := range AllOrigins() {
++		if seenOrigin[o] {
++			t.Errorf("the origin %q is listed twice", o)
++		}
++		seenOrigin[o] = true
++	}
++	seenAct := map[DisclosureAct]bool{}
++	for _, a := range AllDisclosureActs() {
++		if seenAct[a] {
++			t.Errorf("the act %q is listed twice", a)
++		}
++		seenAct[a] = true
++	}
++}
++
++// The returned slices are fresh each call. A package-level var would be mutable
++// by any importer, and a guard that reordered or truncated one would change the
++// set for everyone else in the process — including for Valid.
++func TestAllOriginsAndActs_CallerCannotMutateTheSet(t *testing.T) {
++	AllOrigins()[0] = "clobbered"
++	if AllOrigins()[0] == "clobbered" {
++		t.Error("mutating the returned slice changed the origin set for the next caller")
++	}
++	AllDisclosureActs()[0] = "clobbered"
++	if AllDisclosureActs()[0] == "clobbered" {
++		t.Error("mutating the returned slice changed the act set for the next caller")
++	}
++}
++
++// A refusal has to be recognisable without matching on a message, and must
++// never be mistaken for ErrTransient — which the orchestrator retries, and
++// retrying a refusal re-proposes the very text that was refused.
++func TestErrDisclosureRefused_CarriesTheActAndTheReason(t *testing.T) {
++	reason := ErrNoDisclosureGuard
++	err := error(ErrDisclosureRefused{Act: ActPush, Reason: reason})
++
++	if !errors.Is(err, ErrNoDisclosureGuard) {
++		t.Errorf("errors.Is(%v, ErrNoDisclosureGuard) = false, want true", err)
++	}
++	if errors.Is(err, ErrTransient) {
++		t.Error("a refusal is indistinguishable from a transient failure, so it will be retried")
++	}
++	var refused ErrDisclosureRefused
++	if !errors.As(err, &refused) {
++		t.Fatalf("errors.As did not reach ErrDisclosureRefused from %v", err)
++	}
++	if refused.Act != ActPush {
++		t.Errorf("refusal names the act %q, want %q", refused.Act, ActPush)
++	}
++	for _, want := range []string{string(ActPush), reason.Error()} {
++		if !strings.Contains(err.Error(), want) {
++			t.Errorf("the refusal %q does not say %q", err, want)
++		}
++	}
++}
+diff --git a/docs/disclosure.md b/docs/disclosure.md
+index 4abc902..5bb4aac 100644
+--- a/docs/disclosure.md
++++ b/docs/disclosure.md
+@@ -86,6 +86,10 @@ Three things about the signature carry the rest of the design.
+ 
+ Closed, because an open set is one a caller extends by inventing a name that means "fine, probably". Text that fits none of these is not a new origin — it is `elsewhere`, which is the member that exists to have somewhere honest to put it.
+ 
++**A string with more than one origin takes the origin of whichever party does not vouch for it.** Almost everything published is assembled — the SDK's marker line around an agent's prose, a path template interpolating a filename the agent chose. The frame is the SDK's and the SDK stands behind that, but it does not know what went into the part it was handed, so nobody stands behind the whole string. Splitting it is not available: what is published is the assembled string, and a guard shown the pieces would be examining text that is never sent. So an assembled string is stated as `agent` — or `elsewhere` — whenever any part of it is, and only a string composed end to end by one vouched party carries that party's origin.
++
++This is why an origin is stated **per string** and not per write. A push publishes three: a branch name the flow constructed, commit messages an agent wrote, and the diff as it stands in the tree under resolution. Each is composed end to end by one party, so each carries a true origin — and one origin for the whole push would have to be false about two of them.
++
+ **`agent` exists because the alternative was a lie.** A pre-tool hook watching `gh issue create` knows where the *command* is running; it does not know where the *text* came from, and the agent that composed it may have had several repositories in context. Calling that `worktree` would be a claim about location dressed as a claim about provenance, which is the one thing an origin must not be.
+ 
+ So `agent` says the true thing — **nobody vouches for this** — and it is the origin that earns the strictest examination, precisely because there is nothing behind it. It is also the most common one in practice: almost everything a resolution publishes was composed by an agent.
+diff --git a/errs.go b/errs.go
+index da9e88c..6889e33 100644
+--- a/errs.go
++++ b/errs.go
+@@ -33,6 +33,34 @@ var ErrResetSeedUnsupported = errors.New("flow: backend does not support ResetSe
+ // without needing a handler-level sentinel.
+ var ErrTransient = errors.New("flow: transient infrastructure failure")
+ 
++// ErrNoDisclosureGuard — no DisclosureGuard was injected, so nothing is
++// published. docs/disclosure.md: "an interface that defaults to allow is an
++// interface whose whole purpose is optional." Reads are unaffected; the first
++// write refuses.
++//
++// It is the Reason inside an ErrDisclosureRefused, so callers reach it with
++// errors.Is.
++var ErrNoDisclosureGuard = errors.New("flow: no disclosure guard is installed; nothing is published")
++
++// ErrDisclosureRefused — a proposed outward write did not happen. Act names
++// what was refused; Reason is the guard's own answer, carried unchanged so the
++// author can see what was caught.
++//
++// Typed rather than prose because a refusal has to be recognisable without
++// matching on a message, and because it must never be mistaken for
++// ErrTransient: a transient failure is retried, and retrying a refusal would
++// re-propose exactly the text that was refused.
++type ErrDisclosureRefused struct {
++	Act    DisclosureAct
++	Reason error
++}
++
++func (e ErrDisclosureRefused) Error() string {
++	return fmt.Sprintf("disclosure refused (%s): %v", e.Act, e.Reason)
++}
++
++func (e ErrDisclosureRefused) Unwrap() error { return e.Reason }
++
+ // ErrSkip — handler decided no progress is possible right now. The SDK marks
+ // the invocation skipped (no budget consumed beyond the invocation count).
+ type ErrSkip struct {
+diff --git a/examples/issue/main.go b/examples/issue/main.go
+index 35a9a67..ccb94a9 100644
+--- a/examples/issue/main.go
++++ b/examples/issue/main.go
+@@ -42,6 +42,13 @@ func main() {
+ 		BinaryName:  "issue",
+ 		VerifyCmd:   verifyCmd,
+ 		DefaultType: "task",
++		// No guard, so this binary publishes NOTHING: `list`, `status` and
++		// `doctor` work, and the first write refuses. That is the fail-closed
++		// rule in docs/disclosure.md working, not a gap to patch here — the
++		// SDK ships no implementation on purpose, because a guard living in
++		// the tree it constrains is rebuildable by the party it refuses. A
++		// real binary is handed one from wherever it is supplied.
++		Guard: nil,
+ 	})
+ 	if err != nil {
+ 		fmt.Fprintln(os.Stderr, "issue: backend init:", err)
+diff --git a/pkg/backend/github/artifact.go b/pkg/backend/github/artifact.go
+index 27c4513..85c0d32 100644
+--- a/pkg/backend/github/artifact.go
++++ b/pkg/backend/github/artifact.go
+@@ -252,7 +252,11 @@ func (b *Backend) ResolveArtifact(ctx context.Context, claim flow.Claim, id flow
+ 				return err
+ 			}
+ 		}
+-		c, err := b.out.CreateComment(ctx, actArtifactComment, issueNum, commentBody)
++		// The assembled comment, not the artifact: the SDK's marker line and
++		// spill notice around prose an agent wrote, which nobody vouches for
++		// as a whole.
++		c, err := b.out.CreateComment(ctx, flow.ActArtifactComment, issueNum,
++			flow.Text{Origin: flow.OriginAgent, Body: commentBody})
+ 		if err != nil {
+ 			return fmt.Errorf("post artifact comment: %w", err)
+ 		}
+@@ -455,7 +459,10 @@ func (b *Backend) Park(ctx context.Context, claim flow.Claim, req flow.ParkReque
+ 	// Post a comment with the park reason so the timeline carries a record.
+ 	parkBody, _ := json.Marshal(req)
+ 	body := "<!-- flow:park -->\n```json\n" + string(parkBody) + "\n```"
+-	if _, err := b.out.CreateComment(ctx, actParkRecord, issueNum, body); err != nil {
++	// The JSON frame is the SDK's; the reason and details inside it are a
++	// handler's or an agent's, so the assembled record is stated `agent`.
++	if _, err := b.out.CreateComment(ctx, flow.ActParkRecord, issueNum,
++		flow.Text{Origin: flow.OriginAgent, Body: body}); err != nil {
+ 		return err
+ 	}
+ 	// Record it in the state doc. An item can be parked before it is seeded
+@@ -497,7 +504,8 @@ func (b *Backend) AskQuestions(ctx context.Context, claim flow.Claim, qs []flow.
+ 	body := sb.String()
+ 	// Keep the created comment: its server-side CreatedAt is the only clock
+ 	// that can be compared against the answers' timestamps. See Question.AskedAt.
+-	created, err := b.out.CreateComment(ctx, actQuestion, issueNum, body)
++	created, err := b.out.CreateComment(ctx, flow.ActQuestion, issueNum,
++		flow.Text{Origin: flow.OriginAgent, Body: body})
+ 	if err != nil {
+ 		return nil, fmt.Errorf("post questions comment: %w", err)
+ 	}
+diff --git a/pkg/backend/github/backend.go b/pkg/backend/github/backend.go
+index 4de4047..5cf4c8d 100644
+--- a/pkg/backend/github/backend.go
++++ b/pkg/backend/github/backend.go
+@@ -66,8 +66,11 @@ func NewBackend(cfg Config) (*Backend, error) {
+ 	}
+ 
+ 	return &Backend{
+-		cfg:               cfg,
+-		out:               newOutward(token, git, cfg.Owner, cfg.Repo),
++		cfg: cfg,
++		// A missing cfg.Guard is not refused here: construction is not a
++		// publication, and refusing it would take `list`, `status` and
++		// `doctor` — all reads — down with it. The first write refuses.
++		out:               newOutward(token, git, cfg.Owner, cfg.Repo, cfg.Guard),
+ 		git:               git,
+ 		labels:            newLabels(cfg.LabelPrefix),
+ 		stateCommentCache: map[int]int64{},
+@@ -403,12 +406,19 @@ func quote(s string) string { return strings.ReplaceAll(s, "\"", "\\\"") }
+ 
+ // updateStateComment renders the new state body and PATCHes the cached
+ // state comment. Returns the new body so callers can keep a local copy.
++//
++// The rendered body is stated `agent`, not `flow`. The frame is the SDK's
++// YAML, but it interpolates a park reason and resolved-by values that came
++// from a handler or an agent turn, and nobody vouches for the assembled
++// string. Splitting it is not available: what is published is the whole
++// comment.
+ func (b *Backend) updateStateComment(ctx context.Context, issueNum int, commentID int64, doc stateDoc, owner string) (string, error) {
+ 	body, err := renderStateComment(owner, doc)
+ 	if err != nil {
+ 		return "", err
+ 	}
+-	if err := b.out.EditComment(ctx, actStateComment, issueNum, commentID, body); err != nil {
++	if err := b.out.EditComment(ctx, flow.ActStateComment, issueNum, commentID,
++		flow.Text{Origin: flow.OriginAgent, Body: body}); err != nil {
+ 		return "", fmt.Errorf("patch state comment %d: %w", commentID, err)
+ 	}
+ 	return body, nil
+@@ -420,7 +430,8 @@ func (b *Backend) postStateComment(ctx context.Context, issueNum int, doc stateD
+ 	if err != nil {
+ 		return 0, "", err
+ 	}
+-	comment, err := b.out.CreateComment(ctx, actStateComment, issueNum, body)
++	comment, err := b.out.CreateComment(ctx, flow.ActStateComment, issueNum,
++		flow.Text{Origin: flow.OriginAgent, Body: body})
+ 	if err != nil {
+ 		return 0, "", fmt.Errorf("post state comment: %w", err)
+ 	}
+diff --git a/pkg/backend/github/backend_test.go b/pkg/backend/github/backend_test.go
+index 1dde9d6..fc9a10f 100644
+--- a/pkg/backend/github/backend_test.go
++++ b/pkg/backend/github/backend_test.go
+@@ -523,7 +523,11 @@ func newMockedBackend(t *testing.T, mock *ghMock, srv *httptest.Server) *Backend
+ 			LabelPrefix:     "flow:",
+ 			MaxCommentBytes: 60 * 1024,
+ 		},
+-		out:               newOutward("fake-token", git, mock.owner, mock.repo),
++		// An allowing guard, because with none installed this backend
++		// publishes nothing and every test below would fail for that reason
++		// rather than its own. TestNoGuardPublishesNothing is where the
++		// absent-guard case is asserted.
++		out:               newOutward("fake-token", git, mock.owner, mock.repo, allowing()),
+ 		git:               git,
+ 		labels:            newLabels("flow:"),
+ 		stateCommentCache: map[int]int64{},
+diff --git a/pkg/backend/github/config.go b/pkg/backend/github/config.go
+index c3cfd73..2fde29e 100644
+--- a/pkg/backend/github/config.go
++++ b/pkg/backend/github/config.go
+@@ -10,6 +10,8 @@ import (
+ 	"fmt"
+ 	"strings"
+ 	"time"
++
++	"github.com/promise-language/flow"
+ )
+ 
+ // Config is the per-binary configuration the flow binary passes to
+@@ -30,6 +32,17 @@ type Config struct {
+ 	// `gh auth token` then GITHUB_TOKEN.
+ 	Token string
+ 
++	// Guard examines every byte this backend would send to GitHub and may
++	// refuse it. It is REQUIRED to publish anything: with none installed, the
++	// reads still work — so `list`, `status` and `doctor` do — and the first
++	// write refuses with flow.ErrNoDisclosureGuard.
++	//
++	// There is no implementation in this repository, deliberately. A guard
++	// living in the tree it constrains would be rebuildable by the party it
++	// refuses, so it is supplied from outside and injected here, the same way
++	// the backend and the agent are. See docs/disclosure.md.
++	Guard flow.DisclosureGuard
++
+ 	// VerifyCmd is the project's verify COMMAND, run by Worktree.Verify. It
+ 	// repairs what has one right answer and then measures, so it may modify the
+ 	// worktree.
+diff --git a/pkg/backend/github/integration_test.go b/pkg/backend/github/integration_test.go
+index 2654876..9d52524 100644
+--- a/pkg/backend/github/integration_test.go
++++ b/pkg/backend/github/integration_test.go
+@@ -64,6 +64,11 @@ func TestIntegration_ClaimSeedResolveCycle(t *testing.T) {
+ 		Owner:      owner,
+ 		Repo:       repo,
+ 		BinaryName: "flow-integration-test",
++		// This test's subject is the claim/seed/resolve cycle against a real
++		// sandbox repository, not the guard, and without one nothing would be
++		// published at all. What the guard refuses is asserted against the
++		// mock, where no bytes leave the machine.
++		Guard: allowing(),
+ 	}
+ 	b, err := NewBackend(cfg)
+ 	if err != nil {
+diff --git a/pkg/backend/github/outward.go b/pkg/backend/github/outward.go
+index 50cd335..14ff432 100644
+--- a/pkg/backend/github/outward.go
++++ b/pkg/backend/github/outward.go
+@@ -9,9 +9,11 @@ import (
+ 	"net/url"
+ 	"os"
+ 	"os/exec"
++	"strconv"
+ 	"strings"
+ 
+ 	"github.com/google/go-github/v68/github"
++	"github.com/promise-language/flow"
+ )
+ 
+ // outward is the boundary between this backend and GitHub.
+@@ -38,77 +40,84 @@ type outward struct {
+ 
+ 	// guard is consulted before every outward write and may refuse it.
+ 	//
+-	// Nil until #49 installs one. A nil guard allows, which is the behaviour
+-	// this package had before the seam existed and not a bypass: nothing
+-	// reads configuration to decide, and an installed guard cannot be
+-	// switched off — see docs/disclosure.md § "There is no bypass to
+-	// configure".
+-	guard func(context.Context, disclosure) error
++	// Nil means nothing is published. docs/disclosure.md fails closed, and
++	// inverts the rule for gates over a tree while doing so: "not publishing
++	// something publishable wastes a step; publishing something unpublishable
++	// cannot be undone". An unfilled seam is the case that rule is for, so a
++	// nil guard is not a bypass to configure — it is the state in which this
++	// backend writes nothing at all.
++	guard flow.DisclosureGuard
+ }
+ 
+ // newOutward builds the seam and the client it owns. Construction lives here
+ // too: a file that can build a client is a file that can write with one, so
+ // NewBackend hands over a token rather than a client.
+-func newOutward(token string, git *gitOps, owner, repo string) *outward {
++//
++// guard may be nil, and construction is where a missing one is tolerated: the
++// reads below still work, so `list`, `status` and `doctor` do. The first write
++// refuses.
++func newOutward(token string, git *gitOps, owner, repo string, guard flow.DisclosureGuard) *outward {
+ 	return &outward{
+ 		client: github.NewClient(nil).WithAuthToken(token),
+ 		git:    git,
+ 		owner:  owner,
+ 		repo:   repo,
++		guard:  guard,
+ 	}
+ }
+ 
+ func (o *outward) repoFullName() string { return o.owner + "/" + o.repo }
+ 
+-// act names what is being published. The set is closed: a write whose act is
+-// not named here does not exist, and adding one means adding it here.
+-type act string
+-
+-const (
+-	actArtifactComment act = "artifact-comment"
+-	actStateComment    act = "state-comment"
+-	actParkRecord      act = "park-record"
+-	actQuestion        act = "question"
+-	actLabel           act = "label"
+-	actPullRequest     act = "pull-request"
+-	actMerge           act = "pull-request-merge"
+-	actPush            act = "push"
+-
+-	// actAssignee and actArtifactFile are writes this backend performs that
+-	// docs/disclosure.md's surface table — which declares itself closed —
+-	// does not list. The gap predates the seam; making the writes explicit
+-	// only made it visible. These names are the interim vocabulary, and they
+-	// should be renamed after the document's rows once #50 settles what those
+-	// rows are.
+-	actAssignee     act = "assignee"
+-	actArtifactFile act = "artifact-file"
+-)
+-
+-// disclosure is one proposed outward write: the final bytes, plus enough
+-// provenance to say where they were going.
+-//
+-// Final is the load-bearing word. A guard examining a template, or an artifact
+-// before assembly, reports a safety it did not establish — so text holds the
+-// strings as they will be sent, after every truncation, notice and marker this
+-// package appends.
+-type disclosure struct {
+-	act   act
+-	owner string
+-	repo  string
+-	issue int      // the issue being written to, or 0 when not issue-scoped
+-	ref   string   // the git ref or branch being written to, or ""
+-	text  []string // every string this write publishes, as it will be sent
++// itemOf is the disclosure's item id for a write scoped to an issue. Empty
++// when the write is not issue-scoped, which is what flow.Disclosure.Item means.
++func itemOf(issue int) string {
++	if issue == 0 {
++		return ""
++	}
++	return strconv.Itoa(issue)
+ }
+ 
++// errUndeclaredAct and errUnstatableOrigin are the two refusals the seam issues
++// on its own, before any guard is consulted. Both are defects in a call site
++// rather than judgements about text, and both are refusals rather than errors
++// because docs/disclosure.md says so: "an origin that cannot be stated is a
++// refusal. Not an error and not a default-allow".
++var (
++	errUndeclaredAct    = errors.New("act is not in the declared vocabulary")
++	errUnstatableOrigin = errors.New("a published string states no valid origin")
++)
++
+ // publish is the funnel. Every method on outward that writes wraps its call in
+ // it; nothing else in this package reaches GitHub.
+-func (o *outward) publish(ctx context.Context, d disclosure, do func(context.Context) error) error {
+-	d.owner, d.repo = o.owner, o.repo
+-	if o.guard != nil {
+-		if err := o.guard(ctx, d); err != nil {
+-			return fmt.Errorf("disclosure refused (%s): %w", d.act, err)
++//
++// It refuses before `do` runs, never after — the whole value of a guard is that
++// the act has not happened yet.
++//
++// A refusal fails the backend call, which fails the step, which parks the item,
++// so a person sees what was found. docs/disclosure.md also wants the text
++// returned to the agent that wrote it for revision, which is a step-handler
++// change rather than a seam one: #52.
++func (o *outward) publish(ctx context.Context, d flow.Disclosure, do func(context.Context) error) error {
++	d.Owner, d.Repo = o.owner, o.repo
++	if !d.Act.Valid() {
++		return flow.ErrDisclosureRefused{Act: d.Act, Reason: errUndeclaredAct}
++	}
++	for _, t := range d.Text {
++		if !t.Origin.Valid() {
++			return flow.ErrDisclosureRefused{
++				Act:    d.Act,
++				Reason: fmt.Errorf("%w: %q", errUnstatableOrigin, t.Origin),
++			}
+ 		}
+ 	}
++	if o.guard == nil {
++		return flow.ErrDisclosureRefused{Act: d.Act, Reason: flow.ErrNoDisclosureGuard}
++	}
++	if err := o.guard.Examine(ctx, d); err != nil {
++		// The guard's answer is the reason, carried unchanged: a refusal that
++		// lost what it found is one the author cannot act on.
++		return flow.ErrDisclosureRefused{Act: d.Act, Reason: err}
++	}
+ 	return do(ctx)
+ }
+ 
+@@ -116,12 +125,26 @@ func (o *outward) publish(ctx context.Context, d disclosure, do func(context.Con
+ // Writes. Each one goes through publish.
+ // ---------------------------------------------------------------------------
+ 
++// stated turns a slice of strings this package built into disclosure parts,
++// all standing behind the same party. A fresh slice, always: what the guard is
++// shown must not be the slice the API call carries, or a guard could rewrite
++// the bytes after inspecting them.
++func stated(origin flow.Origin, bodies ...string) []flow.Text {
++	out := make([]flow.Text, 0, len(bodies))
++	for _, b := range bodies {
++		out = append(out, flow.Text{Origin: origin, Body: b})
++	}
++	return out
++}
++
+ // CreateComment posts a comment on an issue. The act says which of the
+-// backend's comment kinds this is; the body is the comment as it will appear.
+-func (o *outward) CreateComment(ctx context.Context, a act, issue int, body string) (*github.IssueComment, error) {
++// backend's comment kinds this is; the body is the comment as it will appear,
++// carrying the origin its composer stated.
++func (o *outward) CreateComment(ctx context.Context, a flow.DisclosureAct, issue int, body flow.Text) (*github.IssueComment, error) {
+ 	var created *github.IssueComment
+-	err := o.publish(ctx, disclosure{act: a, issue: issue, text: []string{body}}, func(ctx context.Context) error {
+-		c, _, err := o.client.Issues.CreateComment(ctx, o.owner, o.repo, issue, &github.IssueComment{Body: &body})
++	d := flow.Disclosure{Act: a, Item: itemOf(issue), Text: []flow.Text{body}}
++	err := o.publish(ctx, d, func(ctx context.Context) error {
++		c, _, err := o.client.Issues.CreateComment(ctx, o.owner, o.repo, issue, &github.IssueComment{Body: &body.Body})
+ 		created = c
+ 		return err
+ 	})
+@@ -132,9 +155,10 @@ func (o *outward) CreateComment(ctx context.Context, a act, issue int, body stri
+ }
+ 
+ // EditComment rewrites an existing comment in place.
+-func (o *outward) EditComment(ctx context.Context, a act, issue int, commentID int64, body string) error {
+-	return o.publish(ctx, disclosure{act: a, issue: issue, text: []string{body}}, func(ctx context.Context) error {
+-		_, _, err := o.client.Issues.EditComment(ctx, o.owner, o.repo, commentID, &github.IssueComment{Body: &body})
++func (o *outward) EditComment(ctx context.Context, a flow.DisclosureAct, issue int, commentID int64, body flow.Text) error {
++	d := flow.Disclosure{Act: a, Item: itemOf(issue), Text: []flow.Text{body}}
++	return o.publish(ctx, d, func(ctx context.Context) error {
++		_, _, err := o.client.Issues.EditComment(ctx, o.owner, o.repo, commentID, &github.IssueComment{Body: &body.Body})
+ 		return err
+ 	})
+ }
+@@ -143,8 +167,12 @@ func (o *outward) EditComment(ctx context.Context, a act, issue int, commentID i
+ // exempt and is not: the flow CONSTRUCTS them — flow:owner:<login>,
+ // flow:budget-exhausted:<step-id> — so a name is text the flow chose to
+ // publish.
++//
++// The origin is fixed here rather than taken from the caller because the whole
++// input class is the flow's: a name is a closed suffix vocabulary joined to
++// identifiers the SDK was configured with, and no agent prose reaches one.
+ func (o *outward) AddLabels(ctx context.Context, issue int, names []string) error {
+-	d := disclosure{act: actLabel, issue: issue, text: append([]string(nil), names...)}
++	d := flow.Disclosure{Act: flow.ActLabel, Item: itemOf(issue), Text: stated(flow.OriginFlow, names...)}
+ 	return o.publish(ctx, d, func(ctx context.Context) error {
+ 		_, _, err := o.client.Issues.AddLabelsToIssue(ctx, o.owner, o.repo, issue, names)
+ 		return err
+@@ -153,15 +181,18 @@ func (o *outward) AddLabels(ctx context.Context, issue int, names []string) erro
+ 
+ // RemoveLabel drops one label from an issue.
+ func (o *outward) RemoveLabel(ctx context.Context, issue int, name string) error {
+-	d := disclosure{act: actLabel, issue: issue, text: []string{name}}
++	d := flow.Disclosure{Act: flow.ActLabel, Item: itemOf(issue), Text: stated(flow.OriginFlow, name)}
+ 	return o.publish(ctx, d, func(ctx context.Context) error {
+ 		_, err := o.client.Issues.RemoveLabelForIssue(ctx, o.owner, o.repo, issue, name)
+ 		return err
+ 	})
+ }
+ 
++// AddAssignees assigns logins to an issue. A login is a person's, typed by the
++// person configuring the flow or read back from their own `gh` session — so
++// the origin is fixed to operator for the same reason AddLabels fixes flow.
+ func (o *outward) AddAssignees(ctx context.Context, issue int, logins []string) error {
+-	d := disclosure{act: actAssignee, issue: issue, text: append([]string(nil), logins...)}
++	d := flow.Disclosure{Act: flow.ActAssignee, Item: itemOf(issue), Text: stated(flow.OriginOperator, logins...)}
+ 	return o.publish(ctx, d, func(ctx context.Context) error {
+ 		_, _, err := o.client.Issues.AddAssignees(ctx, o.owner, o.repo, issue, logins)
+ 		return err
+@@ -169,7 +200,7 @@ func (o *outward) AddAssignees(ctx context.Context, issue int, logins []string)
+ }
+ 
+ func (o *outward) RemoveAssignees(ctx context.Context, issue int, logins []string) error {
+-	d := disclosure{act: actAssignee, issue: issue, text: append([]string(nil), logins...)}
++	d := flow.Disclosure{Act: flow.ActAssignee, Item: itemOf(issue), Text: stated(flow.OriginOperator, logins...)}
+ 	return o.publish(ctx, d, func(ctx context.Context) error {
+ 		_, _, err := o.client.Issues.RemoveAssignees(ctx, o.owner, o.repo, issue, logins)
+ 		return err
+@@ -178,11 +209,16 @@ func (o *outward) RemoveAssignees(ctx context.Context, issue int, logins []strin
+ 
+ // PutFile commits content to path on the artifacts branch. A non-empty
+ // opts.SHA updates the file already there; an empty one creates it.
++//
++// The path is stated `agent`, which is the case docs/disclosure.md uses to
++// define the rule: artifactFilePath templates a filename the agent chose in
++// flow.FileBody.Name, so the SDK stands behind its frame and nobody stands
++// behind the whole string. The commit message interpolates the same filename.
+ func (o *outward) PutFile(ctx context.Context, path string, opts *github.RepositoryContentFileOptions) error {
+-	d := disclosure{
+-		act:  actArtifactFile,
+-		ref:  opts.GetBranch(),
+-		text: []string{path, opts.GetMessage(), string(opts.Content)},
++	d := flow.Disclosure{
++		Act:  flow.ActArtifactFile,
++		Ref:  opts.GetBranch(),
++		Text: stated(flow.OriginAgent, path, opts.GetMessage(), string(opts.Content)),
+ 	}
+ 	return o.publish(ctx, d, func(ctx context.Context) error {
+ 		var err error
+@@ -197,7 +233,7 @@ func (o *outward) PutFile(ctx context.Context, path string, opts *github.Reposit
+ 
+ func (o *outward) CreateBlob(ctx context.Context, blob *github.Blob) (*github.Blob, error) {
+ 	var created *github.Blob
+-	d := disclosure{act: actArtifactFile, text: []string{blob.GetContent()}}
++	d := flow.Disclosure{Act: flow.ActArtifactFile, Text: stated(flow.OriginAgent, blob.GetContent())}
+ 	err := o.publish(ctx, d, func(ctx context.Context) error {
+ 		b, _, err := o.client.Git.CreateBlob(ctx, o.owner, o.repo, blob)
+ 		created = b
+@@ -215,7 +251,7 @@ func (o *outward) CreateTree(ctx context.Context, baseTree string, entries []*gi
+ 		paths = append(paths, e.GetPath())
+ 	}
+ 	var created *github.Tree
+-	d := disclosure{act: actArtifactFile, text: paths}
++	d := flow.Disclosure{Act: flow.ActArtifactFile, Text: stated(flow.OriginAgent, paths...)}
+ 	err := o.publish(ctx, d, func(ctx context.Context) error {
+ 		tr, _, err := o.client.Git.CreateTree(ctx, o.owner, o.repo, baseTree, entries)
+ 		created = tr
+@@ -229,7 +265,7 @@ func (o *outward) CreateTree(ctx context.Context, baseTree string, entries []*gi
+ 
+ func (o *outward) CreateCommit(ctx context.Context, commit *github.Commit) (*github.Commit, error) {
+ 	var created *github.Commit
+-	d := disclosure{act: actArtifactFile, text: []string{commit.GetMessage()}}
++	d := flow.Disclosure{Act: flow.ActArtifactFile, Text: stated(flow.OriginAgent, commit.GetMessage())}
+ 	err := o.publish(ctx, d, func(ctx context.Context) error {
+ 		c, _, err := o.client.Git.CreateCommit(ctx, o.owner, o.repo, commit, nil)
+ 		created = c
+@@ -241,8 +277,11 @@ func (o *outward) CreateCommit(ctx context.Context, commit *github.Commit) (*git
+ 	return created, nil
+ }
+ 
++// CreateRef creates the artifacts branch. Its name is a constant this package
++// holds — refs/heads/flow-artifacts — so the flow stands behind the whole
++// string, which is the narrow case where an origin other than agent is honest.
+ func (o *outward) CreateRef(ctx context.Context, ref *github.Reference) error {
+-	d := disclosure{act: actArtifactFile, ref: ref.GetRef(), text: []string{ref.GetRef()}}
++	d := flow.Disclosure{Act: flow.ActArtifactFile, Ref: ref.GetRef(), Text: stated(flow.OriginFlow, ref.GetRef())}
+ 	return o.publish(ctx, d, func(ctx context.Context) error {
+ 		_, _, err := o.client.Git.CreateRef(ctx, o.owner, o.repo, ref)
+ 		return err
+@@ -259,7 +298,10 @@ func (o *outward) CreateRef(ctx context.Context, ref *github.Reference) error {
+ // on the process working directory entirely, which the runner does not set.
+ func (o *outward) OpenPullRequest(ctx context.Context, base, head, title, body string) (string, error) {
+ 	var prURL string
+-	d := disclosure{act: actPullRequest, ref: head, text: []string{title, body, base, head}}
++	d := flow.Disclosure{Act: flow.ActPullRequest, Ref: head}
++	// Title and body are the agent's; base and head are branch names the flow
++	// chose, so they are the two parts of this write that anyone vouches for.
++	d.Text = append(stated(flow.OriginAgent, title, body), stated(flow.OriginFlow, base, head)...)
+ 	err := o.publish(ctx, d, func(ctx context.Context) error {
+ 		args := []string{"--repo", o.repoFullName(), "pr", "create",
+ 			"--base", base, "--title", title, "--body", body, "--head", head}
+@@ -278,8 +320,11 @@ func (o *outward) OpenPullRequest(ctx context.Context, base, head, title, body s
+ }
+ 
+ // MergePullRequest queues an auto-squash-merge of the PR at prURL.
++//
++// The URL is stated `item`: GitHub issued it, and it is already published
++// there.
+ func (o *outward) MergePullRequest(ctx context.Context, prURL string) error {
+-	d := disclosure{act: actMerge, text: []string{prURL}}
++	d := flow.Disclosure{Act: flow.ActMerge, Text: stated(flow.OriginItem, prURL)}
+ 	return o.publish(ctx, d, func(ctx context.Context) error {
+ 		// --repo, not -C: see OpenPullRequest. gh has no -C flag.
+ 		args := []string{"--repo", o.repoFullName(), "pr", "merge", prURL, "--squash", "--auto"}
+@@ -307,11 +352,15 @@ func (o *outward) Push(ctx context.Context) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	text := make([]string, 0, len(messages)+2)
+-	text = append(text, branch)
+-	text = append(text, messages...)
+-	text = append(text, patch)
+-	return o.publish(ctx, disclosure{act: actPush, ref: branch, text: text}, func(ctx context.Context) error {
++	// Three origins in one write, which is why a disclosure states them per
++	// string: the branch name the flow constructed, commit messages an agent
++	// wrote, and the diff as it stands in the tree under resolution. Any single
++	// origin for the whole push would be false about two thirds of it.
++	text := stated(flow.OriginFlow, branch)
++	text = append(text, stated(flow.OriginAgent, messages...)...)
++	text = append(text, stated(flow.OriginWorktree, patch)...)
++	d := flow.Disclosure{Act: flow.ActPush, Ref: branch, Text: text}
++	return o.publish(ctx, d, func(ctx context.Context) error {
+ 		_, stderr, err := o.git.run(ctx, "push", "-u", "origin", branch)
+ 		if err != nil {
+ 			return fmt.Errorf("git push -u origin %s: %w (%s)", branch, err, string(stderr))
+diff --git a/pkg/backend/github/outward_test.go b/pkg/backend/github/outward_test.go
+index 8aecee0..b7cb898 100644
+--- a/pkg/backend/github/outward_test.go
++++ b/pkg/backend/github/outward_test.go
+@@ -24,6 +24,42 @@ import (
+ // than a message so the assertions match on identity.
+ var errGuardRefused = errors.New("guard says no")
+ 
++// guardFunc adapts a function to flow.DisclosureGuard, so a test can state its
++// answer inline. The SDK ships no such adapter on purpose: a guard is supplied
++// from outside, and a one-line way to write a permissive one is not something
++// the SDK should make convenient.
++type guardFunc func(context.Context, flow.Disclosure) error
++
++func (f guardFunc) Examine(ctx context.Context, d flow.Disclosure) error { return f(ctx, d) }
++
++// allowing permits everything. Tests about something OTHER than the guard
++// install it, because with none installed nothing is published at all — which
++// is the point of TestNoGuardPublishesNothing and would otherwise be the
++// uninformative reason every other test failed.
++func allowing() flow.DisclosureGuard {
++	return guardFunc(func(context.Context, flow.Disclosure) error { return nil })
++}
++
++// refusing refuses everything, with the sentinel above.
++func refusing() flow.DisclosureGuard {
++	return guardFunc(func(context.Context, flow.Disclosure) error { return errGuardRefused })
++}
++
++// bodies drops the origins, for assertions about WHAT a disclosure carries.
++// The assertions about WHO stands behind each string read d.Text directly.
++func bodies(d flow.Disclosure) []string {
++	out := make([]string, 0, len(d.Text))
++	for _, t := range d.Text {
++		out = append(out, t.Body)
++	}
++	return out
++}
++
++// carries reports whether any of the disclosure's strings contains fragment.
++func carries(d flow.Disclosure, fragment string) bool {
++	return slices.ContainsFunc(bodies(d), func(s string) bool { return strings.Contains(s, fragment) })
++}
++
+ // spawnTape records every process the backend would have started, and answers
+ // plausibly enough for the callers that read the output.
+ type spawnTape struct {
+@@ -104,11 +140,13 @@ const seedCommentID = 1001
+ func outwardWrites() map[string]func(context.Context, *outward) error {
+ 	return map[string]func(context.Context, *outward) error{
+ 		"CreateComment": func(ctx context.Context, o *outward) error {
+-			_, err := o.CreateComment(ctx, actArtifactComment, 42, "a body")
++			_, err := o.CreateComment(ctx, flow.ActArtifactComment, 42,
++				flow.Text{Origin: flow.OriginAgent, Body: "a body"})
+ 			return err
+ 		},
+ 		"EditComment": func(ctx context.Context, o *outward) error {
+-			return o.EditComment(ctx, actStateComment, 42, seedCommentID, "a body")
++			return o.EditComment(ctx, flow.ActStateComment, 42, seedCommentID,
++				flow.Text{Origin: flow.OriginAgent, Body: "a body"})
+ 		},
+ 		"AddLabels": func(ctx context.Context, o *outward) error {
+ 			return o.AddLabels(ctx, 42, []string{"flow:seeded"})
+@@ -192,25 +230,26 @@ var outwardReads = map[string]bool{
+ // with a refusing guard and asserts the mock server saw no mutating request
+ // and no publishing process was spawned.
+ //
+-// Each method is driven twice. Once with no guard, to prove the drive actually
+-// reaches GitHub — without that, a method that errored on its arguments would
+-// satisfy the refusal assertion vacuously. Then once refusing, where nothing
+-// may leave.
++// Each method is driven twice. Once under an ALLOWING guard, to prove the drive
++// actually reaches GitHub — without that, a method that errored on its
++// arguments would satisfy the refusal assertion vacuously. Then once refusing,
++// where nothing may leave.
+ func TestEveryOutwardWriteIsRefusable(t *testing.T) {
+ 	writes := outwardWrites()
+ 	for name, drive := range writes {
+ 		t.Run(name, func(t *testing.T) {
+ 			b, mock, tape := newSeamBackend(t)
++			b.out.guard = allowing()
+ 
+ 			// Allowed: something must actually go out.
+ 			if err := drive(t.Context(), b.out); err != nil {
+-				t.Fatalf("%s with no guard: %v", name, err)
++				t.Fatalf("%s under an allowing guard: %v", name, err)
+ 			}
+ 			mock.mu.Lock()
+ 			sent := len(mock.mutations)
+ 			mock.mu.Unlock()
+ 			if sent == 0 && len(tape.publishing()) == 0 {
+-				t.Fatalf("%s sent nothing even unguarded — the drive does not reach GitHub, "+
++				t.Fatalf("%s sent nothing even when allowed — the drive does not reach GitHub, "+
+ 					"so the refusal below would prove nothing", name)
+ 			}
+ 
+@@ -219,7 +258,7 @@ func TestEveryOutwardWriteIsRefusable(t *testing.T) {
+ 			mock.mutations = nil
+ 			mock.mu.Unlock()
+ 			tape.reset()
+-			b.out.guard = func(context.Context, disclosure) error { return errGuardRefused }
++			b.out.guard = refusing()
+ 
+ 			err := drive(t.Context(), b.out)
+ 			if !errors.Is(err, errGuardRefused) {
+@@ -238,6 +277,180 @@ func TestEveryOutwardWriteIsRefusable(t *testing.T) {
+ 	}
+ }
+ 
++// The headline behaviour, and the one regression that matters: with NO guard
++// installed, nothing is published. This is the mirror of the test above —
++// same drive table, same assertions about the mock and the spawn tape — and
++// the difference is that there is no guard to refuse, which is exactly the
++// case docs/disclosure.md fails closed for: "not publishing something
++// publishable wastes a step; publishing something unpublishable cannot be
++// undone."
++//
++// Before #49 a nil guard allowed, so every one of these wrote to GitHub.
++func TestNoGuardPublishesNothing(t *testing.T) {
++	for name, drive := range outwardWrites() {
++		t.Run(name, func(t *testing.T) {
++			b, mock, tape := newSeamBackend(t)
++			b.out.guard = nil
++
++			err := drive(t.Context(), b.out)
++			if !errors.Is(err, flow.ErrNoDisclosureGuard) {
++				t.Errorf("%s with no guard: err = %v, want ErrNoDisclosureGuard", name, err)
++			}
++			var refused flow.ErrDisclosureRefused
++			if !errors.As(err, &refused) {
++				t.Errorf("%s with no guard: err = %v, want an ErrDisclosureRefused naming the act", name, err)
++			} else if !refused.Act.Valid() {
++				t.Errorf("%s refused naming the act %q, which is not a declared one", name, refused.Act)
++			}
++			// A refusal is not a dead host. The orchestrator retries
++			// ErrTransient, and retrying a refusal re-proposes the very text
++			// that was refused.
++			if errors.Is(err, flow.ErrTransient) {
++				t.Errorf("%s: a refusal is indistinguishable from a transient failure, so it will be retried", name)
++			}
++
++			mock.mu.Lock()
++			leaked := append([]string(nil), mock.mutations...)
++			mock.mu.Unlock()
++			if len(leaked) > 0 {
++				t.Errorf("%s reached GitHub with no guard installed: %v", name, leaked)
++			}
++			if spawned := tape.publishing(); len(spawned) > 0 {
++				t.Errorf("%s spawned a publishing process with no guard installed: %v", name, spawned)
++			}
++		})
++	}
++}
++
++// A whole resolution against a backend with no guard publishes nothing, which
++// is the property a per-method table cannot show: the SDK reaches GitHub
++// through the backend, and a step that swallowed a refusal would still leave
++// the mock untouched method by method while the run as a whole carried on.
++func TestNoGuardStopsTheResolutionAtItsFirstWrite(t *testing.T) {
++	b, mock, tape := newSeamBackend(t)
++	b.out.guard = nil
++
++	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", false)
++	if !errors.Is(err, flow.ErrNoDisclosureGuard) {
++		t.Errorf("Claim with no guard: err = %v, want ErrNoDisclosureGuard", err)
++	}
++	mock.mu.Lock()
++	defer mock.mu.Unlock()
++	if len(mock.mutations) > 0 {
++		t.Errorf("Claim wrote to GitHub with no guard installed: %v", mock.mutations)
++	}
++	if spawned := tape.publishing(); len(spawned) > 0 {
++		t.Errorf("Claim spawned a publishing process with no guard installed: %v", spawned)
++	}
++}
++
++// Failing closed is about writes, and only writes. A backend built with no
++// guard still READS — which is why NewBackend does not refuse construction, and
++// why `list`, `status` and `doctor` keep working on a binary that has not been
++// handed one yet. Refusing at construction would have taken them down too.
++func TestNoGuardStillReads(t *testing.T) {
++	b, _, _ := newSeamBackend(t)
++	b.out.guard = nil
++	ctx := t.Context()
++
++	if _, err := b.ListEligible(ctx); err != nil {
++		t.Errorf("ListEligible with no guard: %v", err)
++	}
++	if err := b.Doctor(ctx); err != nil {
++		t.Errorf("Doctor with no guard: %v", err)
++	}
++	if _, err := b.out.GetIssue(ctx, 42); err != nil {
++		t.Errorf("GetIssue with no guard: %v", err)
++	}
++	if _, err := b.LookupClaim(ctx, b.refFromIssue(42)); err != nil {
++		t.Errorf("LookupClaim with no guard: %v", err)
++	}
++}
++
++// "An origin that cannot be stated is a refusal. Not an error and not a
++// default-allow: unattributable text is exactly the case this exists for."
++// The guard is not even consulted — there is nothing for it to decide about a
++// string whose provenance the caller could not name.
++func TestUnstatableOriginIsRefused(t *testing.T) {
++	for _, origin := range []flow.Origin{"", "unknown", "probably-fine"} {
++		t.Run(string(origin), func(t *testing.T) {
++			b, mock, _ := newSeamBackend(t)
++			shown := 0
++			b.out.guard = guardFunc(func(context.Context, flow.Disclosure) error { shown++; return nil })
++
++			_, err := b.out.CreateComment(t.Context(), flow.ActArtifactComment, 42,
++				flow.Text{Origin: origin, Body: "a body"})
++			if !errors.Is(err, errUnstatableOrigin) {
++				t.Errorf("origin %q: err = %v, want a refusal naming the unstatable origin", origin, err)
++			}
++			if !strings.Contains(err.Error(), string(origin)) {
++				t.Errorf("origin %q: the refusal %q does not quote what it found", origin, err)
++			}
++			if shown != 0 {
++				t.Errorf("origin %q: the guard was consulted %d times about text with no stated origin", origin, shown)
++			}
++			mock.mu.Lock()
++			defer mock.mu.Unlock()
++			if len(mock.mutations) > 0 {
++				t.Errorf("origin %q reached GitHub: %v", origin, mock.mutations)
++			}
++		})
++	}
++}
++
++// The act vocabulary is closed on both sides: a guard cannot answer about a
++// write it has no name for, and a refusal that named an undeclared act would
++// tell nobody anything. Undeclared is refused at the seam, before the guard.
++func TestUndeclaredActIsRefused(t *testing.T) {
++	b, mock, _ := newSeamBackend(t)
++	shown := 0
++	b.out.guard = guardFunc(func(context.Context, flow.Disclosure) error { shown++; return nil })
++
++	_, err := b.out.CreateComment(t.Context(), flow.DisclosureAct("comment"), 42,
++		flow.Text{Origin: flow.OriginAgent, Body: "a body"})
++	if !errors.Is(err, errUndeclaredAct) {
++		t.Errorf("err = %v, want a refusal naming the undeclared act", err)
++	}
++	if shown != 0 {
++		t.Errorf("the guard was consulted %d times about an act it has no name for", shown)
++	}
++	mock.mu.Lock()
++	defer mock.mu.Unlock()
++	if len(mock.mutations) > 0 {
++		t.Errorf("a write with an undeclared act reached GitHub: %v", mock.mutations)
++	}
++}
++
++// "A refusal names what it found and where, and quotes enough to act on. 'This
++// text may contain private information' is indistinguishable from a guard that
++// gave up." The seam adds the act and keeps the guard's own answer intact —
++// wrapping that replaced the reason would lose the only part an author can act
++// on.
++func TestRefusalNamesTheActAndKeepsTheReason(t *testing.T) {
++	b, _, _ := newSeamBackend(t)
++	found := errors.New("line 3 names /home/someone/prog/other-project")
++	b.out.guard = guardFunc(func(context.Context, flow.Disclosure) error { return found })
++
++	_, err := b.out.CreateComment(t.Context(), flow.ActArtifactComment, 42,
++		flow.Text{Origin: flow.OriginAgent, Body: "a body"})
++	if !errors.Is(err, found) {
++		t.Errorf("err = %v, want the guard's own reason reachable through it", err)
++	}
++	var refused flow.ErrDisclosureRefused
++	if !errors.As(err, &refused) {
++		t.Fatalf("err = %v (%T), want an ErrDisclosureRefused", err, err)
++	}
++	if refused.Act != flow.ActArtifactComment {
++		t.Errorf("refusal names the act %q, want %q", refused.Act, flow.ActArtifactComment)
++	}
++	if !strings.Contains(err.Error(), found.Error()) {
++		t.Errorf("the refusal %q does not carry what the guard found", err)
++	}
++	if !strings.Contains(err.Error(), string(flow.ActArtifactComment)) {
++		t.Errorf("the refusal %q does not name what was refused", err)
++	}
++}
++
+ // The seam is only one seam if every method on it is accounted for. A method
+ // added to *outward that is in neither table fails here until it is classified,
+ // and classifying it as a write puts it under the refusal test above.
+@@ -324,28 +537,35 @@ func packageSourceFiles(t *testing.T) []string {
+ // recordingGuard captures what the seam was shown, and allows.
+ type recordingGuard struct {
+ 	mu   sync.Mutex
+-	seen []disclosure
++	seen []flow.Disclosure
+ }
+ 
+-func (g *recordingGuard) fn(_ context.Context, d disclosure) error {
++func (g *recordingGuard) Examine(_ context.Context, d flow.Disclosure) error {
+ 	g.mu.Lock()
+ 	g.seen = append(g.seen, d)
+ 	g.mu.Unlock()
+ 	return nil
+ }
+ 
+-func (g *recordingGuard) of(a act) []disclosure {
++func (g *recordingGuard) of(a flow.DisclosureAct) []flow.Disclosure {
+ 	g.mu.Lock()
+ 	defer g.mu.Unlock()
+-	var out []disclosure
++	var out []flow.Disclosure
+ 	for _, d := range g.seen {
+-		if d.act == a {
++		if d.Act == a {
+ 			out = append(out, d)
+ 		}
+ 	}
+ 	return out
+ }
+ 
++// all returns every disclosure the guard was shown, in order.
++func (g *recordingGuard) all() []flow.Disclosure {
++	g.mu.Lock()
++	defer g.mu.Unlock()
++	return append([]flow.Disclosure(nil), g.seen...)
++}
++
+ // docs/disclosure.md: "It sees the final bytes. Not the template, not the
+ // artifact before assembly, not the prose before the SDK wrapped it in a
+ // heading."
+@@ -369,7 +589,7 @@ func TestGuardSeesTheAssembledCommentAndNotTheArtifact(t *testing.T) {
+ 	}
+ 
+ 	guard := &recordingGuard{}
+-	b.out.guard = guard.fn
++	b.out.guard = guard
+ 
+ 	prose := strings.Repeat("plan prose. ", 900) // comfortably over 4KiB
+ 	if err := b.ResolveArtifact(ctx, claim, "plan", flow.ArtifactBody{
+@@ -379,11 +599,11 @@ func TestGuardSeesTheAssembledCommentAndNotTheArtifact(t *testing.T) {
+ 		t.Fatalf("ResolveArtifact: %v", err)
+ 	}
+ 
+-	comments := guard.of(actArtifactComment)
++	comments := guard.of(flow.ActArtifactComment)
+ 	if len(comments) != 1 {
+ 		t.Fatalf("guard saw %d artifact comments, want 1", len(comments))
+ 	}
+-	body := comments[0].text[0]
++	body := comments[0].Text[0].Body
+ 	if !strings.HasPrefix(body, artifactCommentMarkerPrefix) {
+ 		t.Errorf("guard was shown the prose, not the assembled comment: %.60q", body)
+ 	}
+@@ -393,18 +613,18 @@ func TestGuardSeesTheAssembledCommentAndNotTheArtifact(t *testing.T) {
+ 	if strings.Contains(body, prose) {
+ 		t.Error("guard was shown the whole artifact; the published comment carries a truncated preview")
+ 	}
+-	if comments[0].issue != 42 {
+-		t.Errorf("disclosure names issue %d, want 42", comments[0].issue)
++	if comments[0].Item != "42" {
++		t.Errorf("disclosure names item %q, want %q", comments[0].Item, "42")
+ 	}
+ 
+ 	// The spilled bytes are their own disclosure — the comment holds only a
+ 	// preview, so a guard that saw the comment alone would never see the rest.
+-	files := guard.of(actArtifactFile)
++	files := guard.of(flow.ActArtifactFile)
+ 	if len(files) == 0 {
+ 		t.Fatal("the spill to the artifacts branch never reached the guard")
+ 	}
+-	if !slices.ContainsFunc(files, func(d disclosure) bool {
+-		return slices.Contains(d.text, prose)
++	if !slices.ContainsFunc(files, func(d flow.Disclosure) bool {
++		return slices.Contains(bodies(d), prose)
+ 	}) {
+ 		t.Error("the spill disclosure does not carry the artifact's bytes")
+ 	}
+@@ -425,7 +645,7 @@ func TestGuardSeesConstructedLabelNames(t *testing.T) {
+ 	}
+ 
+ 	guard := &recordingGuard{}
+-	b.out.guard = guard.fn
++	b.out.guard = guard
+ 
+ 	if err := b.Park(ctx, claim, flow.ParkRequest{
+ 		Kind:   flow.ParkBudgetExhausted,
+@@ -436,13 +656,13 @@ func TestGuardSeesConstructedLabelNames(t *testing.T) {
+ 	}
+ 
+ 	want := b.labels.BudgetExhausted("implement")
+-	if !slices.ContainsFunc(guard.of(actLabel), func(d disclosure) bool {
+-		return slices.Contains(d.text, want)
++	if !slices.ContainsFunc(guard.of(flow.ActLabel), func(d flow.Disclosure) bool {
++		return slices.Contains(bodies(d), want)
+ 	}) {
+-		t.Errorf("guard never saw the constructed label %q; saw %v", want, guard.of(actLabel))
++		t.Errorf("guard never saw the constructed label %q; saw %v", want, guard.of(flow.ActLabel))
+ 	}
+-	if len(guard.of(actParkRecord)) != 1 {
+-		t.Errorf("guard saw %d park records, want 1", len(guard.of(actParkRecord)))
++	if len(guard.of(flow.ActParkRecord)) != 1 {
++		t.Errorf("guard saw %d park records, want 1", len(guard.of(flow.ActParkRecord)))
+ 	}
+ }
+ 
+@@ -451,7 +671,7 @@ func TestRefusedWriteFailsTheBackendCall(t *testing.T) {
+ 	b, mock, _ := newSeamBackend(t)
+ 	ctx := t.Context()
+ 
+-	b.out.guard = func(context.Context, disclosure) error { return errGuardRefused }
++	b.out.guard = refusing()
+ 	_, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
+ 	if !errors.Is(err, errGuardRefused) {
+ 		t.Errorf("Claim under a refusing guard: err = %v, want the refusal", err)
+@@ -463,20 +683,22 @@ func TestRefusedWriteFailsTheBackendCall(t *testing.T) {
+ 	}
+ }
+ 
+-// docs/disclosure.md: "It never modifies what it examines." The label and
+-// assignee writes are the ones that hand the guard a slice rather than a
+-// string. If it were the SAME slice the API call carries, a guard could rewrite
+-// the bytes after inspecting them — and then what was examined and what was
+-// published are two different texts, with nothing to say so.
++// docs/disclosure.md: "It never modifies what it examines." Every disclosure
++// hands the guard a slice, and if it were the SAME slice the API call carries,
++// a guard could rewrite the bytes after inspecting them — and then what was
++// examined and what was published are two different texts, with nothing to say
++// so. A comment carries the most, and the labels and assignees are the writes
++// whose input the caller already holds as a slice.
+ func TestTheGuardCannotAlterWhatIsSent(t *testing.T) {
+ 	b, mock, _ := newSeamBackend(t)
+ 	ctx := t.Context()
+-	b.out.guard = func(_ context.Context, d disclosure) error {
+-		for i := range d.text {
+-			d.text[i] = "rewritten-after-inspection"
++	b.out.guard = guardFunc(func(_ context.Context, d flow.Disclosure) error {
++		for i := range d.Text {
++			d.Text[i].Body = "rewritten-after-inspection"
++			d.Text[i].Origin = flow.OriginFlow
+ 		}
+ 		return nil
+-	}
++	})
+ 
+ 	if err := b.out.AddLabels(ctx, 42, []string{"flow:owner:alice"}); err != nil {
+ 		t.Fatalf("AddLabels: %v", err)
+@@ -484,9 +706,22 @@ func TestTheGuardCannotAlterWhatIsSent(t *testing.T) {
+ 	if err := b.out.AddAssignees(ctx, 42, []string{"alice"}); err != nil {
+ 		t.Fatalf("AddAssignees: %v", err)
+ 	}
++	const body = "the body the guard was shown"
++	if _, err := b.out.CreateComment(ctx, flow.ActArtifactComment, 42,
++		flow.Text{Origin: flow.OriginAgent, Body: body}); err != nil {
++		t.Fatalf("CreateComment: %v", err)
++	}
+ 
+ 	mock.mu.Lock()
+ 	defer mock.mu.Unlock()
++	if !slices.ContainsFunc(mock.comments, func(c ghMockComment) bool { return c.Body == body }) {
++		t.Error("the comment body the guard was shown is not the one that was posted")
++	}
++	for _, c := range mock.comments {
++		if c.Body == "rewritten-after-inspection" {
++			t.Error("the guard rewrote a comment body by mutating what it was shown")
++		}
++	}
+ 	if !slices.Contains(mock.issueLabels, "flow:owner:alice") {
+ 		t.Errorf("the label the guard was shown is not the one that was sent: %v", mock.issueLabels)
+ 	}
+@@ -507,33 +742,30 @@ func TestTheGuardCannotAlterWhatIsSent(t *testing.T) {
+ func TestDisclosureNamesTheRepositoryItWouldReach(t *testing.T) {
+ 	b, _, _ := newSeamBackend(t)
+ 	guard := &recordingGuard{}
+-	b.out.guard = guard.fn
++	b.out.guard = guard
+ 
+-	if _, err := b.out.CreateComment(t.Context(), actArtifactComment, 42, "a body"); err != nil {
++	if _, err := b.out.CreateComment(t.Context(), flow.ActArtifactComment, 42,
++		flow.Text{Origin: flow.OriginAgent, Body: "a body"}); err != nil {
+ 		t.Fatalf("CreateComment: %v", err)
+ 	}
+-	seen := guard.of(actArtifactComment)
++	seen := guard.of(flow.ActArtifactComment)
+ 	if len(seen) != 1 {
+ 		t.Fatalf("guard saw %d disclosures, want 1", len(seen))
+ 	}
+-	if seen[0].owner != "o" || seen[0].repo != "r" {
++	if seen[0].Owner != "o" || seen[0].Repo != "r" {
+ 		t.Errorf("disclosure names %q/%q, want the repository the backend writes to",
+-			seen[0].owner, seen[0].repo)
++			seen[0].Owner, seen[0].Repo)
+ 	}
+ }
+ 
+-// The act vocabulary is closed, and a name in it is worth nothing unless some
+-// call site produces it carrying that write's final bytes. The kinds asserted
+-// above — the artifact comment, the spilled bytes, the constructed label, the
+-// park record — are not repeated here; this drives the rest of a resolution and
+-// fails when a declared act has no call site behind it, which is what a write
+-// naming the wrong act looks like from outside.
+-func TestEveryActReachesTheGuardWithItsFinalBytes(t *testing.T) {
+-	b, _, _ := newSeamBackend(t)
++// driveAResolution runs a whole resolution against the mock — claim, seed,
++// resolve a file artifact (which always spills, so the artifacts branch is
++// reached too), ask, park, open and merge — and returns the PR URL. Every
++// declared act comes out of it, which is what makes it worth sharing between
++// the tests that assert about the set rather than about one write.
++func driveAResolution(t *testing.T, b *Backend) (prURL string) {
++	t.Helper()
+ 	ctx := t.Context()
+-	guard := &recordingGuard{}
+-	b.out.guard = guard.fn
+-
+ 	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
+ 	if err != nil {
+ 		t.Fatalf("Claim: %v", err)
+@@ -543,7 +775,6 @@ func TestEveryActReachesTheGuardWithItsFinalBytes(t *testing.T) {
+ 	}); err != nil {
+ 		t.Fatalf("SeedState: %v", err)
+ 	}
+-	// A file artifact always spills, so this reaches the artifacts branch too.
+ 	if err := b.ResolveArtifact(ctx, claim, "plan", flow.ArtifactBody{
+ 		Type: flow.ArtifactFile,
+ 		File: flow.FileBody{Name: "notes.txt", Content: []byte("the spilled bytes")},
+@@ -561,15 +792,32 @@ func TestEveryActReachesTheGuardWithItsFinalBytes(t *testing.T) {
+ 		t.Fatalf("Park: %v", err)
+ 	}
+ 	w := &worktree{b: b, claim: claim, issueNum: 42}
+-	prURL, err := w.Open(ctx, "main", "a pull request title", "a pull request body")
++	prURL, err = w.Open(ctx, "main", "a pull request title", "a pull request body")
+ 	if err != nil {
+ 		t.Fatalf("worktree.Open: %v", err)
+ 	}
+ 	if err := w.Merge(ctx, prURL); err != nil {
+ 		t.Fatalf("worktree.Merge: %v", err)
+ 	}
++	if err := w.Push(ctx); err != nil {
++		t.Fatalf("worktree.Push: %v", err)
++	}
++	return prURL
++}
+ 
+-	for _, a := range declaredActs(t) {
++// The act vocabulary is closed, and a name in it is worth nothing unless some
++// call site produces it carrying that write's final bytes. The kinds asserted
++// above — the artifact comment, the spilled bytes, the constructed label, the
++// park record — are not repeated here; this drives the rest of a resolution and
++// fails when a declared act has no call site behind it, which is what a write
++// naming the wrong act looks like from outside.
++func TestEveryActReachesTheGuardWithItsFinalBytes(t *testing.T) {
++	b, _, _ := newSeamBackend(t)
++	guard := &recordingGuard{}
++	b.out.guard = guard
++	prURL := driveAResolution(t, b)
++
++	for _, a := range flow.AllDisclosureActs() {
+ 		if len(guard.of(a)) == 0 {
+ 			t.Errorf("nothing produced the act %q: either no call site names it, "+
+ 				"or the one that should names another", a)
+@@ -577,84 +825,193 @@ func TestEveryActReachesTheGuardWithItsFinalBytes(t *testing.T) {
+ 	}
+ 
+ 	for _, want := range []struct {
+-		act       act
++		act       flow.DisclosureAct
+ 		fragments []string
+ 	}{
+-		{actAssignee, []string{"alice"}},
+-		{actStateComment, []string{"flow:state-v1 begin"}},
+-		{actQuestion, []string{"<!-- flow:question", "Which base branch?", "main, or the release branch?"}},
+-		{actPullRequest, []string{"a pull request title", "a pull request body", "main", "flow/issue-42"}},
+-		{actMerge, []string{prURL}},
++		{flow.ActAssignee, []string{"alice"}},
++		{flow.ActStateComment, []string{"flow:state-v1 begin"}},
++		{flow.ActQuestion, []string{"<!-- flow:question", "Which base branch?", "main, or the release branch?"}},
++		{flow.ActPullRequest, []string{"a pull request title", "a pull request body", "main", "flow/issue-42"}},
++		{flow.ActMerge, []string{prURL}},
+ 	} {
+ 		seen := guard.of(want.act)
+ 		for _, fragment := range want.fragments {
+-			if !slices.ContainsFunc(seen, func(d disclosure) bool {
+-				return slices.ContainsFunc(d.text, func(s string) bool {
+-					return strings.Contains(s, fragment)
+-				})
+-			}) {
++			if !slices.ContainsFunc(seen, func(d flow.Disclosure) bool { return carries(d, fragment) }) {
+ 				t.Errorf("no %q disclosure carries %q; saw %v", want.act, fragment, seen)
+ 			}
+ 		}
+ 	}
+ 
+ 	// The pull request publishes a branch, and the disclosure has to say which.
+-	if pr := guard.of(actPullRequest); len(pr) != 1 || pr[0].ref != "flow/issue-42" {
++	if pr := guard.of(flow.ActPullRequest); len(pr) != 1 || pr[0].Ref != "flow/issue-42" {
+ 		t.Errorf("pull-request disclosure ref = %v, want the head branch it opens from", pr)
+ 	}
+ }
+ 
+-// declaredActs reads the act vocabulary out of outward.go. Hand-listing it in
+-// the test would let an act be added that nothing ever produces; reading the
+-// source keeps the set closed in the direction that matters — every name
+-// declared has a call site behind it.
+-func declaredActs(t *testing.T) []act {
+-	t.Helper()
+-	fset := token.NewFileSet()
+-	file, err := parser.ParseFile(fset, "outward.go", nil, 0)
+-	if err != nil {
+-		t.Fatalf("parse outward.go: %v", err)
++// The whole point of stating an origin is that provenance cannot be recovered
++// from text, so a call site that forgets to state one has published something
++// nothing could have judged. This drives the same full resolution as the test
++// above and checks every part of every disclosure names a declared origin —
++// which is what catches a write added later that leaves the field zero.
++//
++// The seam refuses an unstatable origin (TestUnstatableOriginIsRefused), so a
++// forgotten one would fail this as a refusal rather than as a bad value. Both
++// are the same defect; this names it.
++func TestEveryPublishedStringStatesAnOrigin(t *testing.T) {
++	b, _, _ := newSeamBackend(t)
++	guard := &recordingGuard{}
++	b.out.guard = guard
++	driveAResolution(t, b)
++
++	seen := guard.all()
++	if len(seen) == 0 {
++		t.Fatal("the guard was shown nothing — the drive is not publishing")
+ 	}
+-	var out []act
+-	for _, decl := range file.Decls {
+-		gen, ok := decl.(*ast.GenDecl)
+-		if !ok || gen.Tok != token.CONST {
+-			continue
++	parts := 0
++	for _, d := range seen {
++		if len(d.Text) == 0 {
++			t.Errorf("the %q disclosure carries no text at all", d.Act)
+ 		}
+-		for _, spec := range gen.Specs {
+-			vs, ok := spec.(*ast.ValueSpec)
+-			if !ok || len(vs.Values) != 1 {
+-				continue
++		for _, part := range d.Text {
++			parts++
++			if !part.Origin.Valid() {
++				t.Errorf("a %q disclosure states the origin %q for %.60q, which is not one of %v",
++					d.Act, part.Origin, part.Body, flow.AllOrigins())
+ 			}
+-			if id, ok := vs.Type.(*ast.Ident); !ok || id.Name != "act" {
+-				continue
+-			}
+-			lit, ok := vs.Values[0].(*ast.BasicLit)
+-			if !ok || lit.Kind != token.STRING {
+-				continue
+-			}
+-			v, err := strconv.Unquote(lit.Value)
+-			if err != nil {
+-				t.Fatalf("%s: %v", fset.Position(lit.Pos()), err)
+-			}
+-			out = append(out, act(v))
+ 		}
+ 	}
+-	if len(out) == 0 {
+-		t.Fatal("found no act constants — the check is not running")
+-	}
+-	// Two names for one string are one act: the guard cannot tell the writes
+-	// apart, and a refusal cannot say which of them it refused.
+-	seen := map[act]bool{}
+-	for _, a := range out {
+-		if seen[a] {
+-			t.Errorf("the act %q is declared twice", a)
++	if parts == 0 {
++		t.Fatal("no disclosure carried any text — the check is not running")
++	}
++}
++
++// A push is the one write whose parts genuinely have three different origins,
++// and the case a single origin per write could not express: collapsing it would
++// have to discard either the worktree origin the document defines for exactly
++// this, or the agent origin of the commit messages.
++//
++// Against a real repository, for the reason TestPushMaterial is.
++func TestPushSeparatesBranchMessagesAndDiff(t *testing.T) {
++	if _, err := exec.LookPath("git"); err != nil {
++		t.Skip("git not on PATH")
++	}
++	dir, origin := t.TempDir(), t.TempDir()
++	gitInTest(t, origin, "init", "--bare", "-b", "main", ".")
++	gitInTest(t, dir, "init", "-b", "main", ".")
++	commitFile(t, dir, "a.txt", "old content\n", "on origin already")
++	gitInTest(t, dir, "remote", "add", "origin", origin)
++	gitInTest(t, dir, "push", "origin", "main")
++	gitInTest(t, dir, "checkout", "-b", "flow/issue-42")
++	commitFile(t, dir, "b.txt", "a line only this branch has\n", "new work here")
++
++	g := newGitOps(dir)
++	spawn := g.runner
++	g.runner = func(ctx context.Context, wd, name string, args ...string) ([]byte, []byte, error) {
++		if slices.Contains(args, "push") {
++			return nil, nil, nil
+ 		}
+-		seen[a] = true
++		return spawn(ctx, wd, name, args...)
+ 	}
+-	return out
++
++	guard := &recordingGuard{}
++	o := &outward{git: g, owner: "o", repo: "r", guard: guard}
++	if err := o.Push(t.Context()); err != nil {
++		t.Fatalf("Push: %v", err)
++	}
++
++	seen := guard.of(flow.ActPush)
++	if len(seen) != 1 {
++		t.Fatalf("guard saw %d push disclosures, want 1", len(seen))
++	}
++	for _, want := range []struct {
++		fragment string
++		origin   flow.Origin
++		why      string
++	}{
++		{"flow/issue-42", flow.OriginFlow, "the SDK constructed the claim branch name"},
++		{"new work here", flow.OriginAgent, "an agent wrote the commit message"},
++		{"a line only this branch has", flow.OriginWorktree, "the diff is the tree under resolution"},
++	} {
++		i := slices.IndexFunc(seen[0].Text, func(p flow.Text) bool {
++			return strings.Contains(p.Body, want.fragment)
++		})
++		if i < 0 {
++			t.Errorf("the push disclosure does not carry %q at all", want.fragment)
++			continue
++		}
++		if got := seen[0].Text[i].Origin; got != want.origin {
++			t.Errorf("%q is stated %q, want %q — %s", want.fragment, got, want.origin, want.why)
++		}
++	}
++}
++
++// docs/disclosure.md's own example of an assembled string: artifactFilePath
++// templates a filename the agent chose in flow.FileBody.Name, and the commit
++// message interpolates the same one. The SDK stands behind its frame, but not
++// behind what it was handed, so nobody stands behind the whole string — and
++// stating either as `flow` would be the SDK vouching for an agent's text.
++func TestArtifactPathCarriesTheAgentFilename(t *testing.T) {
++	b, _, _ := newSeamBackend(t)
++	ctx := t.Context()
++	guard := &recordingGuard{}
++
++	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
++	if err != nil {
++		t.Fatalf("Claim: %v", err)
++	}
++	if err := b.SeedState(ctx, claim, []flow.ArtifactSpec{{Id: "plan", Type: flow.ArtifactFile}}); err != nil {
++		t.Fatalf("SeedState: %v", err)
++	}
++	b.out.guard = guard
++
++	const filename = "an-agent-chose-this.txt"
++	resolve := func(content string) {
++		t.Helper()
++		if err := b.ResolveArtifact(ctx, claim, "plan", flow.ArtifactBody{
++			Type: flow.ArtifactFile,
++			File: flow.FileBody{Name: filename, Content: []byte(content)},
++		}); err != nil {
++			t.Fatalf("ResolveArtifact: %v", err)
++		}
++	}
++	// Two routes reach the artifacts branch and both template the filename: the
++	// first spill creates the branch through the Git Data API, and every later
++	// one goes through the Contents API. A test that drove only the first would
++	// leave PutFile's origin unasserted.
++	resolve("the bytes")
++	afterBranchCreation := len(guard.all())
++	resolve("the bytes, again")
++
++	stating := func(t *testing.T, seen []flow.Disclosure, route string) {
++		t.Helper()
++		found := 0
++		for _, d := range seen {
++			for _, part := range d.Text {
++				if !strings.Contains(part.Body, filename) {
++					continue
++				}
++				found++
++				if part.Origin != flow.OriginAgent {
++					t.Errorf("%s: %.80q is stated %q, want %q: it interpolates a filename the agent chose",
++						route, part.Body, part.Origin, flow.OriginAgent)
++				}
++			}
++		}
++		if found == 0 {
++			t.Errorf("%s: nothing carried the agent's filename %q at all", route, filename)
++		}
++	}
++	all := guard.all()
++	stating(t, all[:afterBranchCreation], "creating the artifacts branch")
++	stating(t, all[afterBranchCreation:], "updating a file already on the branch")
+ }
+ 
++// The set now lives in the SDK (flow.AllDisclosureActs), so the check above
++// enumerates it directly. The property it keeps is the same one the AST parse
++// used to keep — every declared name has a call site behind it — and the
++// mirror property, that every constant is listed, is asserted in the root
++// package's disclosure_test.go, which is where the constants are.
++
+ // ---------------------------------------------------------------------------
+ // What a push would publish.
+ // ---------------------------------------------------------------------------
+@@ -815,7 +1172,7 @@ func TestPushRefusesWhenItCannotSeeWhatWouldBePublished(t *testing.T) {
+ 	// A guard that allows everything it is shown, so a refusal here can only
+ 	// be the seam declining to show it anything.
+ 	shown := 0
+-	b.out.guard = func(context.Context, disclosure) error { shown++; return nil }
++	b.out.guard = guardFunc(func(context.Context, flow.Disclosure) error { shown++; return nil })
+ 
+ 	if err := b.out.Push(t.Context()); err == nil {
+ 		t.Fatal("Push succeeded although it could not compute what the push would publish")
+@@ -832,7 +1189,7 @@ func TestPushRefusesWhenItCannotSeeWhatWouldBePublished(t *testing.T) {
+ // it through the worktree, which is how the SDK reaches it.
+ func TestRefusedPushDoesNotPush(t *testing.T) {
+ 	b, _, tape := newSeamBackend(t)
+-	b.out.guard = func(context.Context, disclosure) error { return errGuardRefused }
++	b.out.guard = refusing()
+ 
+ 	w := &worktree{b: b, issueNum: 42}
+ 	if err := w.Push(t.Context()); !errors.Is(err, errGuardRefused) {
+@@ -880,36 +1237,33 @@ func TestGuardSeesTheCommitsAndDiffAPushWouldPublish(t *testing.T) {
+ 	guard := &recordingGuard{}
+ 	pushesWhenAsked := -1
+ 	o := &outward{git: g, owner: "o", repo: "r"}
+-	o.guard = func(ctx context.Context, d disclosure) error {
++	o.guard = guardFunc(func(ctx context.Context, d flow.Disclosure) error {
+ 		pushesWhenAsked = pushes
+-		return guard.fn(ctx, d)
+-	}
++		return guard.Examine(ctx, d)
++	})
+ 	if err := o.Push(t.Context()); err != nil {
+ 		t.Fatalf("Push: %v", err)
+ 	}
+ 
+-	seen := guard.of(actPush)
++	seen := guard.of(flow.ActPush)
+ 	if len(seen) != 1 {
+ 		t.Fatalf("guard saw %d push disclosures, want 1", len(seen))
+ 	}
+ 	d := seen[0]
+-	if d.ref != "flow/issue-42" {
+-		t.Errorf("push disclosure ref = %q, want the branch being published", d.ref)
+-	}
+-	carries := func(fragment string) bool {
+-		return slices.ContainsFunc(d.text, func(s string) bool { return strings.Contains(s, fragment) })
++	if d.Ref != "flow/issue-42" {
++		t.Errorf("push disclosure ref = %q, want the branch being published", d.Ref)
+ 	}
+-	if !carries("flow/issue-42") {
+-		t.Errorf("the push disclosure does not name the branch it would create: %q", d.text)
++	if !carries(d, "flow/issue-42") {
++		t.Errorf("the push disclosure does not name the branch it would create: %q", bodies(d))
+ 	}
+-	if !carries("new work here") {
+-		t.Errorf("the push disclosure does not carry the commit message it would publish: %q", d.text)
++	if !carries(d, "new work here") {
++		t.Errorf("the push disclosure does not carry the commit message it would publish: %q", bodies(d))
+ 	}
+-	if !carries("a line only this branch has") {
+-		t.Errorf("the push disclosure does not carry the diff it would publish: %q", d.text)
++	if !carries(d, "a line only this branch has") {
++		t.Errorf("the push disclosure does not carry the diff it would publish: %q", bodies(d))
+ 	}
+-	if carries("on origin already") {
+-		t.Errorf("the push disclosure carries a commit origin already has: %q", d.text)
++	if carries(d, "on origin already") {
++		t.Errorf("the push disclosure carries a commit origin already has: %q", bodies(d))
+ 	}
+ 	if pushesWhenAsked != 0 {
+ 		t.Errorf("the guard was asked after %d pushes had already run", pushesWhenAsked)
+diff --git a/pkg/backend/github/worktree_gh_test.go b/pkg/backend/github/worktree_gh_test.go
+index dfd51a6..bf9816c 100644
+--- a/pkg/backend/github/worktree_gh_test.go
++++ b/pkg/backend/github/worktree_gh_test.go
+@@ -34,7 +34,7 @@ func ghArgsFor(t *testing.T, invoke func(*worktree) error) []string {
+ 			return nil, nil, nil
+ 		},
+ 	}
+-	b.out = newOutward("", b.git, b.cfg.Owner, b.cfg.Repo)
++	b.out = newOutward("", b.git, b.cfg.Owner, b.cfg.Repo, allowing())
+ 	_ = invoke(&worktree{b: b, issueNum: 42})
+ 	if got == nil {
+ 		t.Fatal("gh was never invoked")
