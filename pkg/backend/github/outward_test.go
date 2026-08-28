@@ -367,6 +367,87 @@ func TestNoGuardStillReads(t *testing.T) {
 	}
 }
 
+// Every guard above is installed by assigning b.out.guard, a field no binary
+// can reach. Config.Guard is the only route one has and NewBackend the only
+// constructor, so the line that carries cfg.Guard into newOutward is what makes
+// all of it real — and it is the one part nothing above touches. Drop it and
+// every test here still passes while no injected guard is ever consulted again;
+// put an allowing one there instead and the backend publishes everything, with
+// nothing able to say so.
+func TestConfigGuardIsTheOnlyWayToInstallOne(t *testing.T) {
+	// Built the way a binary builds it: through NewBackend, from a Config.
+	configured := func(t *testing.T, guard flow.DisclosureGuard) (*Backend, *ghMock) {
+		t.Helper()
+		mock := newGHMock(t)
+		srv := mock.server()
+		t.Cleanup(srv.Close)
+		b, err := NewBackend(Config{
+			Owner:      mock.owner,
+			Repo:       mock.repo,
+			BinaryName: "implement",
+			Token:      "fake-token",
+			Guard:      guard,
+		})
+		if err != nil {
+			t.Fatalf("NewBackend: %v", err)
+		}
+		if _, err := b.WithBaseURL(srv.URL+"/", srv.URL+"/"); err != nil {
+			t.Fatalf("WithBaseURL: %v", err)
+		}
+		return b, mock
+	}
+	write := func(t *testing.T, b *Backend) error {
+		t.Helper()
+		_, err := b.out.CreateComment(t.Context(), flow.ActArtifactComment, 42,
+			flow.Text{Origin: flow.OriginAgent, Body: "a body"})
+		return err
+	}
+	sent := func(t *testing.T, mock *ghMock) []string {
+		t.Helper()
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		return append([]string(nil), mock.mutations...)
+	}
+
+	t.Run("the guard in the config is the one consulted", func(t *testing.T) {
+		guard := &recordingGuard{}
+		b, mock := configured(t, guard)
+		if err := write(t, b); err != nil {
+			t.Fatalf("CreateComment: %v", err)
+		}
+		if n := len(guard.of(flow.ActArtifactComment)); n != 1 {
+			t.Errorf("the guard handed to NewBackend saw %d disclosures, want 1: Config.Guard never reached the seam", n)
+		}
+		// Without this, the two refusals below would be satisfied just as well
+		// by a backend that cannot write at all.
+		if len(sent(t, mock)) == 0 {
+			t.Error("an allowed write reached nothing, so the refusals below would prove nothing")
+		}
+	})
+
+	t.Run("its refusal stops the write", func(t *testing.T) {
+		b, mock := configured(t, refusing())
+		if err := write(t, b); !errors.Is(err, errGuardRefused) {
+			t.Errorf("err = %v, want the configured guard's refusal", err)
+		}
+		if leaked := sent(t, mock); len(leaked) > 0 {
+			t.Errorf("a write reached GitHub although the configured guard refused it: %v", leaked)
+		}
+	})
+
+	t.Run("a config with no guard constructs and publishes nothing", func(t *testing.T) {
+		// Construction must succeed — refusing it would take `list`, `status`
+		// and `doctor` down with it — and then the first write refuses.
+		b, mock := configured(t, nil)
+		if err := write(t, b); !errors.Is(err, flow.ErrNoDisclosureGuard) {
+			t.Errorf("err = %v, want ErrNoDisclosureGuard", err)
+		}
+		if leaked := sent(t, mock); len(leaked) > 0 {
+			t.Errorf("a write reached GitHub from a backend configured with no guard: %v", leaked)
+		}
+	})
+}
+
 // "An origin that cannot be stated is a refusal. Not an error and not a
 // default-allow: unattributable text is exactly the case this exists for."
 // The guard is not even consulted — there is nothing for it to decide about a
@@ -885,6 +966,71 @@ func TestEveryPublishedStringStatesAnOrigin(t *testing.T) {
 	}
 }
 
+// WHICH party is stated is the entire content of a disclosure: text carries no
+// provenance, so an origin the guard is told is one it cannot check. Every call
+// site's choice is deliberate and argued in a comment beside it, and each
+// argument runs against the obvious reading — the state comment and the park
+// record are the SDK's own YAML and JSON and are stated `agent` because of what
+// they interpolate; a label name looks like text someone composed and is stated
+// `flow` because the SDK constructs the whole of it.
+//
+// TestEveryPublishedStringStatesAnOrigin asserts only that SOME declared origin
+// is stated. Outside the push and the artifact path, nothing asserts which — so
+// "correcting" the state comment to `flow`, which is what its frame looks like,
+// would pass every test in this file.
+func TestEachWriteStatesWhoStandsBehindIt(t *testing.T) {
+	b, _, _ := newSeamBackend(t)
+	guard := &recordingGuard{}
+	b.out.guard = guard
+	prURL := driveAResolution(t, b)
+
+	for _, want := range []struct {
+		act      flow.DisclosureAct
+		fragment string
+		origin   flow.Origin
+		why      string
+	}{
+		{flow.ActArtifactComment, artifactCommentMarkerPrefix, flow.OriginAgent,
+			"the SDK's marker line wraps an artifact an agent produced, so nobody vouches for the assembled comment"},
+		{flow.ActStateComment, "flow:state-v1 begin", flow.OriginAgent,
+			"the YAML frame is the SDK's, but it interpolates values a handler or an agent turn supplied"},
+		{flow.ActParkRecord, "waiting on the base branch", flow.OriginAgent,
+			"the JSON frame is the SDK's; the park reason inside it is not"},
+		{flow.ActQuestion, "Which base branch?", flow.OriginAgent,
+			"an agent composed the question the SDK renders"},
+		{flow.ActLabel, "flow:", flow.OriginFlow,
+			"a label name is a closed suffix vocabulary joined to identifiers the SDK was configured with"},
+		{flow.ActAssignee, "alice", flow.OriginOperator,
+			"a login is a person's, typed by whoever configured the flow or read back from their own gh session"},
+		{flow.ActMerge, prURL, flow.OriginItem,
+			"GitHub issued the URL, and the destination has already published it"},
+		{flow.ActPullRequest, "a pull request title", flow.OriginAgent, "an agent wrote the title"},
+		{flow.ActPullRequest, "a pull request body", flow.OriginAgent, "an agent wrote the body"},
+		{flow.ActPullRequest, "flow/issue-42", flow.OriginFlow, "the SDK constructed the claim branch name"},
+	} {
+		// EVERY part carrying the fragment, for the reason
+		// TestPushSeparatesBranchMessagesAndDiff checks every one: a fragment
+		// turning up in a second part under another origin means one of the two
+		// vouches for text it did not compose.
+		found := 0
+		for _, d := range guard.of(want.act) {
+			for _, p := range d.Text {
+				if !strings.Contains(p.Body, want.fragment) {
+					continue
+				}
+				found++
+				if p.Origin != want.origin {
+					t.Errorf("%q states %q for %.60q, want %q — %s",
+						want.act, p.Origin, p.Body, want.origin, want.why)
+				}
+			}
+		}
+		if found == 0 {
+			t.Errorf("no %q disclosure carries %q at all", want.act, want.fragment)
+		}
+	}
+}
+
 // A push is the one write whose parts genuinely have three different origins,
 // and the case a single origin per write could not express: collapsing it would
 // have to discard either the worktree origin the document defines for exactly
@@ -1191,6 +1337,34 @@ func TestPushRefusesWhenItCannotSeeWhatWouldBePublished(t *testing.T) {
 	}
 	if spawned := tape.publishing(); len(spawned) > 0 {
 		t.Errorf("a push ran although its material could not be computed: %v", spawned)
+	}
+}
+
+// The branch name is the other thing a push needs before it can say what it
+// would publish, and git can decline to produce that too — a detached HEAD, a
+// repository the runner is not in. It is a separate early return from the one
+// above and the same rule: a seam that cannot describe the write does not make
+// it, and does not ask a guard to bless a description it does not have.
+func TestPushRefusesWhenItCannotNameTheBranch(t *testing.T) {
+	b, _, _ := newSeamBackend(t)
+	tape := &spawnTape{}
+	b.git.runner = func(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
+		if slices.Contains(args, "rev-parse") {
+			return nil, []byte("fatal: ambiguous argument 'HEAD'"), errors.New("exit status 128")
+		}
+		return tape.run(ctx, dir, name, args...)
+	}
+	shown := 0
+	b.out.guard = guardFunc(func(context.Context, flow.Disclosure) error { shown++; return nil })
+
+	if err := b.out.Push(t.Context()); err == nil {
+		t.Fatal("Push succeeded although git would not name the branch it would publish")
+	}
+	if shown != 0 {
+		t.Errorf("the guard was consulted %d times about a push whose branch git would not name", shown)
+	}
+	if spawned := tape.publishing(); len(spawned) > 0 {
+		t.Errorf("a push ran although its branch could not be named: %v", spawned)
 	}
 }
 
