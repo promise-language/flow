@@ -395,7 +395,30 @@ type Worktree interface {
 	// tree that no longer exists.
 	Verify(ctx context.Context) error
 
-	// RunGate runs the named GATE in the worktree. Returns nil iff it passes.
+	// RunGate runs the named GATE in the worktree and reports what the RUNNER
+	// observed of the process.
+	//
+	// The SDK is the party that spawns gate processes, so the SDK is the
+	// runner. A gate is never invoked directly and its own exit code is not
+	// consulted: the states that matter most — killed for memory, exited 0
+	// having printed nothing — are the ones the gate is not alive to report,
+	// and only the process that spawned it can tell them apart.
+	//
+	// The runner reports an OUTCOME, never a verdict. "measured" says a
+	// measurement exists, not that it is acceptable; that needs the
+	// thresholds, which are a separate artefact out of the subject's reach and
+	// held by neither the gate nor the runner.
+	//
+	// The gate's exit code travels in GateRun.ExitCode as a raw diagnostic and
+	// nothing decides on it.
+	//
+	// A NON-NIL ERROR MEANS NO GATE WAS RUN AND NO OUTCOME EXISTS. It is
+	// returned only for a request the runner could not attempt — an undeclared
+	// gate name, or a caller whose context went away — and a caller must never
+	// read it as a gate failure. Every way a gate can fail is an outcome:
+	// OutcomeCouldNotStart in particular is an outcome, not an error, because
+	// a caller that cannot tell it from OutcomeDied retries a missing binary
+	// forever.
 	//
 	// A gate MODIFIES NOTHING it measures, which is what makes its answer
 	// reproducible by whoever runs it — a reviewer, a later bisect, a rebuild
@@ -429,7 +452,7 @@ type Worktree interface {
 	// a gate that gave up waiting has not measured anything, and reporting that
 	// as a refusal marks a sound change unsound and sends someone to look for a
 	// defect that is not there.
-	RunGate(ctx context.Context, name GateName) error
+	RunGate(ctx context.Context, name GateName) (GateRun, error)
 
 	// CapturePatch produces a unified diff of the current working tree.
 	// Handlers call it to attach work they have already verified; the

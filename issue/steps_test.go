@@ -42,10 +42,10 @@ type fakeWorktree struct {
 	// and coverage steps do. A Commit that lands clears it, as git does; a
 	// Commit that lands nothing (noCommit) leaves it, as git also does.
 	dirty []byte
-	// gatesRun records which gates were asked for; gateFails names those that
-	// refuse.
-	gatesRun  []flow.GateName
-	gateFails map[flow.GateName]bool
+	// gatesRun records which gates were asked for; gateOutcome names what the
+	// runner observed of the ones that did not simply measure.
+	gatesRun    []flow.GateName
+	gateOutcome map[flow.GateName]flow.GateOutcome
 }
 
 func newFakeWorktree() *fakeWorktree {
@@ -81,18 +81,19 @@ func (w *fakeWorktree) Verify(context.Context) error {
 	return w.verifyErr
 }
 
-// RunGate answers for any declared name. gateFails names the ones that refuse,
-// so a test can fail the integration gate while the verify command passes —
-// which is the whole point of their being different things.
-func (w *fakeWorktree) RunGate(_ context.Context, name flow.GateName) error {
+// RunGate answers for any declared name. gateOutcome names the ones that do
+// not measure, so a test can have the integration gate die while the verify
+// command passes — which is the whole point of their being different things.
+func (w *fakeWorktree) RunGate(_ context.Context, name flow.GateName) (flow.GateRun, error) {
 	if !name.Valid() {
-		return fmt.Errorf("fake: %q is not a declared gate name", name)
+		return flow.GateRun{}, fmt.Errorf("fake: %q is not a declared gate name", name)
 	}
 	w.gatesRun = append(w.gatesRun, name)
-	if w.gateFails[name] {
-		return fmt.Errorf("fake: gate %q failed", name)
+	outcome, ok := w.gateOutcome[name]
+	if !ok {
+		outcome = flow.OutcomeMeasured
 	}
-	return nil
+	return flow.GateRun{Gate: name, Outcome: outcome, ExitCode: -1}, nil
 }
 func (w *fakeWorktree) CapturePatch(context.Context) ([]byte, error) {
 	// Models `git diff HEAD`: untracked work is invisible until staged, and

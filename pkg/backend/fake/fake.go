@@ -21,9 +21,9 @@ type Backend struct {
 	items           map[string]*itemRecord // keyed by item.ID
 	signals         []flow.SignalDef
 	clock           func() time.Time
-	verifyOK        bool // controls Worktree.Verify result
-	gateOK          bool // controls Worktree.RunGate result
-	supportsRequest bool // controls whether Worktree.Request() returns non-nil
+	verifyOK        bool             // controls Worktree.Verify result
+	gateOutcome     flow.GateOutcome // controls what Worktree.RunGate observes
+	supportsRequest bool             // controls whether Worktree.Request() returns non-nil
 	// supportedArtifacts is the backend's canonical artifact schema returned by
 	// SupportedArtifacts. nil (the default) means "use the standard vocabulary"
 	// (defaultSupportedArtifacts); SetSupportedArtifacts overrides it so tests
@@ -71,7 +71,7 @@ func New(signals ...flow.SignalDef) *Backend {
 		signals:         signals,
 		clock:           time.Now,
 		verifyOK:        true,
-		gateOK:          true,
+		gateOutcome:     flow.OutcomeMeasured,
 		supportsRequest: true,
 	}
 }
@@ -82,10 +82,15 @@ func (b *Backend) SetClock(c func() time.Time) { b.clock = c }
 // SetVerifyOK controls what Worktree.Verify returns. Default true.
 func (b *Backend) SetVerifyOK(ok bool) { b.verifyOK = ok }
 
-// SetGateOK controls whether every gate passes. Separate from SetVerifyOK
-// because verify and gates are different things: a tree can be repairable by
-// verify and still fail the gate that decides.
-func (b *Backend) SetGateOK(ok bool) { b.gateOK = ok }
+// SetGateOutcome controls what the runner observes of every gate. Default
+// flow.OutcomeMeasured.
+//
+// Separate from SetVerifyOK because verify and gates are different things: a
+// tree can be repairable by verify and still fail the gate that decides. An
+// outcome rather than a boolean because the set is what the fake exists to
+// model — a caller that must tell "could not start" from "died" cannot be
+// exercised against a fake that only knows pass and fail.
+func (b *Backend) SetGateOutcome(o flow.GateOutcome) { b.gateOutcome = o }
 
 // SetSupportsRequest controls whether Worktree.Request() returns a non-nil
 // RequestManager. Default true; set to false to exercise the "backend
@@ -515,7 +520,7 @@ func (b *Backend) Worktree(ctx context.Context, claim flow.Claim) (flow.Worktree
 		b.worktrees[id] = wt
 	}
 	wt.verifyOK = b.verifyOK
-	wt.gateOK = b.gateOK
+	wt.gateOutcome = b.gateOutcome
 	wt.supportsRequest = b.supportsRequest
 	wt.nothingToCommit = b.nothingToCommit
 	return wt, nil
@@ -549,7 +554,7 @@ type fakeWorktree struct {
 	// branches records which branches exist, so Branch can report `created`
 	// truthfully across invocations.
 	branches        map[string]bool
-	gateOK          bool
+	gateOutcome     flow.GateOutcome
 	verifyOK        bool
 	supportsRequest bool
 	branch          string
@@ -609,15 +614,31 @@ func (w *fakeWorktree) Verify(ctx context.Context) error {
 }
 
 // RunGate answers for every gate name. The fake models the protocol, not a
-// project's gate set, so it does not pretend to know which names exist.
-func (w *fakeWorktree) RunGate(ctx context.Context, name flow.GateName) error {
+// project's gate set, so it does not pretend to know which names exist — and
+// it does not pretend to know a project's numbers either: on OutcomeMeasured
+// the envelope it reports is one that parses and says nothing else.
+//
+// The error is for a request no runner could attempt. Every way a gate fails
+// is an outcome.
+func (w *fakeWorktree) RunGate(ctx context.Context, name flow.GateName) (flow.GateRun, error) {
 	if !name.Valid() {
-		return fmt.Errorf("fake: %q is not a declared gate name", name)
+		return flow.GateRun{}, fmt.Errorf("fake: %q is not a declared gate name", name)
 	}
-	if !w.gateOK {
-		return fmt.Errorf("fake: gate %q failed", name)
+	outcome := w.gateOutcome
+	if outcome == "" {
+		outcome = flow.OutcomeMeasured
 	}
-	return nil
+	run := flow.GateRun{Gate: name, Outcome: outcome, ExitCode: -1}
+	switch outcome {
+	case flow.OutcomeMeasured:
+		run.ExitCode = 0
+		run.Stdout = fmt.Appendf(nil, "{%q:%q}\n", "gate", name)
+	case flow.OutcomeBrokeContract:
+		run.ExitCode = 0
+		run.Stdout = []byte("fake: not an envelope\n")
+	}
+	run.Detail = fmt.Sprintf("fake: gate %q %s", name, outcome)
+	return run, nil
 }
 func (w *fakeWorktree) CapturePatch(ctx context.Context) ([]byte, error) { return nil, nil }
 

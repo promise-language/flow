@@ -5,8 +5,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/promise-language/flow"
 )
 
 // The pull-request path invokes `gh`, and nothing else in this package does.
@@ -86,10 +84,14 @@ func TestGhOpenTargetsTheBranchAndBase(t *testing.T) {
 	}
 }
 
-// Verify and RunGate spawn commands, and the whole of what distinguishes them
-// is which command. Asserting on a mocked result would pass against a version
-// that ran the wrong one — the same shape of defect as the `gh -C` flag, which
-// shipped because nothing exercised the command line.
+// Verify spawns the configured command, and the whole of what it does is which
+// command. Asserting on a mocked result would pass against a version that ran
+// the wrong one — the same shape of defect as the `gh -C` flag, which shipped
+// because nothing exercised the command line.
+//
+// Gates do not come through here. This seam reports (stdout, stderr, error),
+// which is all a COMMAND needs and strictly less than a runner has to observe;
+// they are spawned in gate.go and tested against real processes in gate_test.go.
 func runArgsFor(t *testing.T, cfg Config, invoke func(*worktree) error) (name string, args []string) {
 	t.Helper()
 	var gotName string
@@ -106,61 +108,18 @@ func runArgsFor(t *testing.T, cfg Config, invoke func(*worktree) error) (name st
 	return gotName, gotArgs
 }
 
-func TestRunGate_AsksTheEntryPointForTheNamedGate(t *testing.T) {
-	for _, gate := range []flow.GateName{"integration", "tested", "tested:wasm"} {
-		t.Run(string(gate), func(t *testing.T) {
-			w := &worktree{b: &Backend{cfg: Config{WorktreeDir: "/tmp/wt"}}}
-			var got []string
-			w.b.git = &gitOps{runner: func(_ context.Context, _, _ string, a ...string) ([]byte, []byte, error) {
-				got = a
-				return nil, nil, nil
-			}}
-			if err := w.RunGate(context.Background(), gate); err != nil {
-				t.Fatalf("RunGate(%q): %v", gate, err)
-			}
-			// The instance travels whole. Splitting it here would ask for the
-			// concept and silently run every suite under it.
-			if len(got) == 0 || got[len(got)-1] != string(gate) {
-				t.Errorf("gate name reached the entry point as %v, want it to end in %q", got, gate)
-			}
-		})
-	}
-}
-
-// An undeclared concept is refused before anything is spawned. Running it would
-// hand the project a name it cannot answer, and the failure would look like the
-// gate refusing rather than the caller asking for something that does not exist.
-func TestRunGate_RefusesAnUndeclaredNameWithoutSpawning(t *testing.T) {
-	w := &worktree{b: &Backend{cfg: Config{WorktreeDir: "/tmp/wt"}}}
-	spawned := false
-	w.b.git = &gitOps{runner: func(context.Context, string, string, ...string) ([]byte, []byte, error) {
-		spawned = true
-		return nil, nil, nil
-	}}
-	err := w.RunGate(context.Background(), "lint")
-	if err == nil || !strings.Contains(err.Error(), "not a declared gate name") {
-		t.Fatalf("err = %v, want a refusal naming the problem", err)
-	}
-	if spawned {
-		t.Error("spawned a command for an undeclared gate name")
-	}
-}
-
-// Verify runs the CONFIGURED command; RunGate runs the entry point. Confusing
-// them would make a decision rest on the command that modifies the tree, which
-// is the distinction the two methods exist to keep.
-func TestVerifyAndRunGateRunDifferentCommands(t *testing.T) {
+// Verify runs the CONFIGURED command, whole. The gate side of this pairing —
+// that RunGate does NOT reach it — is TestRunGate_RunsTheEntryPointAndNotThe
+// VerifyCommand, which has to spawn a real process to say so.
+func TestVerifyRunsTheConfiguredCommand(t *testing.T) {
 	cfg := Config{WorktreeDir: "/tmp/wt", VerifyCmd: []string{"bin/verify", "--wasm"}}
 
-	_, verifyArgs := runArgsFor(t, cfg, func(w *worktree) error { return w.Verify(context.Background()) })
-	gateName, _ := runArgsFor(t, cfg, func(w *worktree) error {
-		return w.RunGate(context.Background(), flow.GateIntegration)
-	})
+	name, args := runArgsFor(t, cfg, func(w *worktree) error { return w.Verify(context.Background()) })
 
-	if len(verifyArgs) == 0 || verifyArgs[0] != "--wasm" {
-		t.Errorf("Verify ran with args %v, want the configured VerifyCmd", verifyArgs)
+	if name != "bin/verify" {
+		t.Errorf("Verify ran %q, want the configured VerifyCmd", name)
 	}
-	if gateName == "bin/verify" {
-		t.Error("RunGate ran the verify command — a decision would rest on something that modifies the tree")
+	if len(args) == 0 || args[0] != "--wasm" {
+		t.Errorf("Verify ran with args %v, want the configured VerifyCmd", args)
 	}
 }
