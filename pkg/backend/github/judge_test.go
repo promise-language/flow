@@ -244,6 +244,14 @@ func TestJudge_RefusesAnythingThatIsNotAVerdict(t *testing.T) {
 		name:   "no thresholds field",
 		script: `echo '{"acceptable":true,"detail":"looks fine"}'`,
 		says:   "thresholds",
+	}, {
+		// Null terms are discarded terms wearing a present field. Nothing
+		// tells them from the judge that forgot, and a verdict carrying
+		// "null" is exactly the unrecomputable one the required field exists
+		// to prevent — so it is refused where an absent field is.
+		name:   "thresholds is null",
+		script: `echo '{"acceptable":true,"thresholds":null,"detail":"looks fine"}'`,
+		says:   "thresholds",
 	}} {
 		t.Run(c.name, func(t *testing.T) {
 			w, _ := judgeWorktree(t, c.script, 30*time.Second)

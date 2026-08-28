@@ -130,10 +130,11 @@ func stderrDetail(stderr *bytes.Buffer) string {
 // verdictWire is the judge's answer as it arrives on stdout.
 //
 // Acceptable is a POINTER and Thresholds a raw message so that an absent field
-// is refused rather than defaulted. A missing "acceptable" decoding to false
-// is the SDK inventing a refusal out of a judge that did not give one, and a
-// verdict whose thresholds were discarded is as unfalsifiable as a lying
-// runner.
+// is refused rather than defaulted, and so that a field present but null is
+// refused too. A missing "acceptable" decoding to false is the SDK inventing a
+// refusal out of a judge that did not give one, and a verdict whose thresholds
+// were discarded is as unfalsifiable as a lying runner — whether they were
+// omitted or written as null.
 type verdictWire struct {
 	Acceptable *bool           `json:"acceptable"`
 	Thresholds json.RawMessage `json:"thresholds"`
@@ -164,8 +165,12 @@ func parseVerdict(stdout []byte) (flow.GateVerdict, error) {
 	if wire.Acceptable == nil {
 		return flow.GateVerdict{}, errors.New(`the verdict has no "acceptable" field, and a verdict that did not answer is not a refusal`)
 	}
-	if len(wire.Thresholds) == 0 {
-		return flow.GateVerdict{}, errors.New(`the verdict has no "thresholds" field, so nothing could re-check it`)
+	// JSON null is refused here for the same reason it is refused one level up:
+	// it is the value a raw message absorbs without complaint, and a null
+	// threshold set is discarded terms wearing a present field — nothing can
+	// tell it from the judge that forgot, and neither can be re-checked.
+	if len(wire.Thresholds) == 0 || bytes.Equal(bytes.TrimSpace(wire.Thresholds), []byte("null")) {
+		return flow.GateVerdict{}, errors.New(`the verdict states no "thresholds", so nothing could re-check it`)
 	}
 	return flow.GateVerdict{
 		Acceptable: *wire.Acceptable,
