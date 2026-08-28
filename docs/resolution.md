@@ -77,15 +77,34 @@ Re-running an item with an unanswered question consumes no budget and runs no ag
 
 ## Gates
 
-A **gate** measures something and may refuse it. Every gate holds four properties, and they are what make one worth trusting:
+A **gate** measures something. Every gate holds four properties, and they are what make one worth trusting:
 
 - **It measures; it never modifies what it measures — including afterwards.** A gate may write elsewhere, a build cache or a report, but the subject it reports on is exactly as it found it and exactly as it leaves it. Measuring faithfully and then tidying up is not a gate: a producing step asks one mid-work, and cleaning behind the answer discards the work the step is in the middle of.
-- **Its verdict is pass or refuse.** There is no third answer and no partial one.
-- **It may also produce a measurement.** Coverage, size, duration — a number the verdict was derived from, by comparison against a baseline or a threshold. The verdict stays binary; what varies is whether the gate had to measure something to reach it.
-- **A refusal carries a reason a person can check.** A refusal that cannot be confirmed or overturned is indistinguishable from the gate having given up.
-- **It is reproducible.** The same subject gives the same verdict to anyone who runs it, anywhere.
+- **It reports what it measured, and does not judge it.** Coverage, size, duration, failure counts — numbers, not a verdict. Whether those numbers are acceptable is decided elsewhere, against thresholds the gate does not hold.
+- **Its measurement is complete, or says why it is not.** A run that skipped a suite reports honest numbers that understate what was checked, which is indistinguishable from a regression unless the run says so.
+- **It is reproducible.** The same subject gives the same measurement to anyone who runs it, anywhere.
 
-The non-modification rule is what buys the last one. A measurement that changes its subject cannot be repeated: run it twice and the second answer is about a different thing than the first.
+### A gate does not decide
+
+This is the property most easily lost, and losing it is expensive.
+
+The thresholds a measurement is judged against — a coverage floor, a size limit, a baseline that ratchets — are not the gate's. They belong to whoever decides, and they are deliberately **out of reach of whatever the gate is measuring**. A gate that carries its own thresholds can be made to pass by editing the gate, and when the thing being measured is a change written by an agent, the agent can edit it.
+
+So `test_failures: 3` is not a verdict. It is a pass or a failure depending on state the gate does not have and must not be given.
+
+**A gate also does not report whether it finished.** A process killed for memory, or truncated mid-write, is not alive to say so — and one that exits cleanly having measured nothing can say something false. What became of a run is the account of whatever spawned it, which is a third party: the gate measures, a runner observes, and the layer holding the thresholds judges. [gates-and-commands.md](gates-and-commands.md) states the contract.
+
+### Reproducibility has two halves, and one rule covers both
+
+**The measurement half** is why a gate is a program rather than a script. A script inherits whatever the environment hands it — user configuration, path differences, shell dialects — so two hosts can disagree about a textually identical gate for reasons that have nothing to do with the subject.
+
+**The judgement half** is the same requirement applied to what the measurement is compared against: **what a verdict depends on must be a function of the subject.** A threshold that moves on its own schedule fails this — the same tree is judged one way today and another way next month, and neither answer is about the tree. Checking out an old commit and judging it against a threshold that has moved since answers a question about neither.
+
+Note what this does *not* say. A threshold versioned with the tree is the one place it cannot vary: it moves when the subject moves, so a commit carries the terms it was judged on and any machine reaches the same verdict offline. Being *near* the gate is not the problem — being independent of the subject is.
+
+That is why "a gate does not judge" is a separate rule with a separate reason, and not a corollary of this one. It is the artifact rule: the party under judgement must not hold what judges it.
+
+The non-modification rule is what makes any of it repeatable. A measurement that changes its subject cannot be repeated: run it twice and the second answer is about a different thing than the first.
 
 **Gates differ only in what they measure and when.** They are one mechanism, not a family of similar ones:
 
@@ -98,7 +117,7 @@ The non-modification rule is what buys the last one. A measurement that changes 
 
 Recognising these as one thing is worth more than it first appears. A gate that measures a proposed command is the cheapest place to catch a violation — the agent learns the constraint mid-turn and adapts. A gate that measures the result catches it however it happened, including by routes nobody anticipated. **They are complementary because they differ in position, not in kind**, and neither substitutes for the other: the first fails open when it is absent or bypassed, the second costs a whole turn before it speaks.
 
-**This is a property, not a machinery.** What defines the gates, schedules them, records their results and decides what a refusal means for the work queue belongs to whatever schedules work — not to this SDK. What is stated here is what any of them must be.
+**This is a property, not a machinery.** What defines the gates, schedules them, records their measurements, holds the thresholds those measurements are judged against and decides what a failure means for the work queue belongs to whatever schedules work — not to this SDK. What is stated here is what any of them must be.
 
 ## Commands
 
@@ -113,10 +132,14 @@ Commands and gates are the two kinds of thing that get run, and the difference i
 | | Gate | Command |
 |---|---|---|
 | Modifies | never | freely |
-| Produces | a verdict, sometimes a measurement | whatever work it did |
+| Produces | a measurement | whatever work it did |
 | A decision may rest on it | yes | no |
 
 The last row is the whole point. A command's result cannot support a decision about the thing it ran against, because it changed that thing on the way. Asking "did this pass" of a command that repaired what was failing gets an answer about a state that did not exist when the question was asked.
+
+A gate's measurement *may* support a decision — but it is not itself the decision. Something else holds the thresholds and reaches the verdict; see [gates-and-commands.md](gates-and-commands.md).
+
+**The rule constrains the caller, not the tool.** A repairing command that repairs is behaving correctly; the defect is in what was asked. That is why this cannot be caught by checking tools for misbehaviour — there is nothing misbehaving to catch, and the wrong answer arrives as a green result rather than as an error.
 
 **Formatting is the clearest pair.** `format` is a command: it rewrites the source. *"Is this correctly formatted"* is a gate: it reports and changes nothing. Same subject, same underlying rules, and the two are not interchangeable — one repairs, and only the other can be cited.
 
@@ -130,7 +153,7 @@ A step should not fail over a misplaced brace it can fix. That is what commands 
 
 ### Which is required where
 
-**Integration requires the gate.** That is the point where the answer must be reproducible by someone who was not there: a reviewer, a later bisect, a rebuild on a different machine. A verify run that repaired something on its way to a pass says the tree passes *after being changed*, which is a different claim.
+**Integration requires the gate.** That is the point where the measurement must be reproducible by someone who was not there: a reviewer, a later bisect, a rebuild on a different machine. A verify run that repaired something on its way to a pass says the tree passes *after being changed*, which is a different claim.
 
 **Producing steps may run either**, and generally want verify — they are working, not deciding, and the repairs are the point.
 

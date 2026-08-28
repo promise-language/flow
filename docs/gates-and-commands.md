@@ -8,18 +8,18 @@
 
 Two, and a flow cannot run without them.
 
-| | Kind | Answers |
+| | Kind | Does |
 |---|---|---|
-| `verify` | command | Repair what is mechanically repairable, then report whether what remains is sound |
-| `integration` | gate | Will the mainline still be green if this lands |
+| `verify` | command | Repairs what is mechanically repairable, then reports whether what remains is sound |
+| `integration` | gate | Measures whether the mainline would still be green with this in it |
 
 **`verify` is what a producing step works with.** It is run by steps, by agents mid-turn, and by people at a terminal, and it does the same thing for all three. A step should not fail over something `verify` would have fixed.
 
-**`integration` is what a decision rests on.** It runs before a change is proposed and again before it lands, and nothing reaches the mainline without it. It modifies nothing, so its answer is reproducible by whoever asks — which is the entire reason a decision may rest on it and not on `verify`.
+**`integration` is what a decision rests on.** It runs before a change is proposed and again before it lands, and nothing reaches the mainline without it. It modifies nothing, so its measurement is reproducible by whoever asks — which is the entire reason a decision may rest on it and not on `verify`. The decision itself is still made by the layer holding the thresholds; the gate supplies the numbers it is made from.
 
 **The gate is about a tree, not about the mainline.** It takes a state of the code and reports whether it is sound. It does not know or care where the mainline is — which is what lets the same gate answer two different questions, depending on what it is pointed at:
 
-| Pointed at | Answers |
+| Pointed at | Measures |
 |---|---|
 | The working tree, or the branch | Is this change sound? |
 | The merge result | Would the mainline still be green with this in it? |
@@ -56,6 +56,151 @@ So the narrow parts are what iteration uses, and the whole is what a decision re
 The narrow parts inform the work. The whole supports the decision. It is the same division as commands and gates, one level down.
 
 A project may still implement `integration` as a single indivisible command. It will work, and every fix round will cost the full suite.
+
+## Running a gate, and reading what it reported
+
+Three parties, three jobs, and the separation is the whole design:
+
+| Party | Does | Comes from |
+|---|---|---|
+| **The gate** | Measures | The tree |
+| **The runner** | Spawns the gate and observes what happened to it | Outside the tree |
+| **`verify`** | Judges the measurement against the thresholds | The project's manifest |
+
+**A gate is never invoked directly.** A caller asks the runner to run one and reads what the runner reports. Spawning the process is the runner's job.
+
+### The gate has exactly one output
+
+The envelope, one JSON object on stdout: what was measured, and the reason it measured less than usual if it did. Never a verdict.
+
+**Stdout carries the envelope and nothing else.** Progress, logs and a failing suite's own output go to stderr. A gate that narrates on stdout produces something that is not an envelope, which is `broke the contract`.
+
+**The gate's exit code is not consulted.** Not as a verdict — it does not have one — and not as an account of the run either, because the states that matter most are the ones a gate is not alive to report. A process killed at the declared timeout, killed for memory, or truncated mid-write by a full disk says nothing at all. And the safe-looking direction fails too: **a gate that exits 0 having printed nothing has stated something false**, and a caller reading its code believes it.
+
+Only the party that spawned the process can tell those apart, and it can say so in terms no gate could have reached.
+
+This is also what keeps a second channel from existing. The gate says one thing; everything else a caller learns is the runner's account of what it watched. Two channels that could disagree never arise, so there is no rule here for when they do.
+
+### The exec line is exec'd, never interpreted
+
+The exec line is `bin/gate <name>`, and the question is asked one way only — two callers asking the same thing must not be able to get different answers and both be right.
+
+**The runner appends `--envelope`.** The flag is protocol rather than project configuration, so it has one spelling everywhere and a runner adds it without being told to. It is appended last, after whatever the project declared, because that is the only rule that works without parsing the line.
+
+**A gate prints an envelope only when it was given the flag.** Any other invocation is a person or an agent at a terminal, and must print nothing on stdout and exit non-zero. Silence and failure are what stop the human path from becoming a second channel: a bare invocation that printed measurements and exited `0` would be read as a pass by the first script that wrapped it, which is the ambiguity the three parties exist to remove.
+
+`bin/gate tested --envelope` is the program `bin/gate` with the argument `tested`. No shell, so no quoting rules, no word splitting, no `.rc` file, no dialect. This is portability, not preference: a line that is interpreted gives different answers on different hosts for reasons that have nothing to do with the subject, which is the measurement half of reproducibility failing at the point of invocation.
+
+### What the runner reports
+
+An outcome the runner determines from what it observed, not a number the gate chose:
+
+| Outcome | Means | Whose problem |
+|---|---|---|
+| **measured** | The process completed and printed a valid envelope | Nobody's yet — judging the numbers is `verify`'s question |
+| **timed out** | Killed at the declared timeout | The wait, or the host. Not the change |
+| **could not start** | The program the exec line names is absent or not executable, so nothing ran | Whoever declared the gate, or whoever delivered the tree |
+| **died** | Killed by a signal, or exited without printing a readable envelope | The host |
+| **broke the contract** | Printed something that is not an envelope, disagreed with what the manifest declared, or modified the subject it measured | The gate's own code |
+
+**Only `timed out` is worth retrying unchanged.** The other three failures all recur, which is why a retry policy keys on that split — but they are owned by three different people, so collapsing them costs attribution even where it never costs a wrong retry.
+
+`could not start` is the one it is most tempting to fold into `died`, and the most expensive to. `died` carries *retry is correct*; a retry loop pointed at a missing binary never terminates and never learns, and reads as a flaky host for as long as anyone lets it run. It is not `broke the contract` either — that is a defect in what the gate *printed*, fixed in the gate's code, whereas an absent program is a defect in what was declared or in what was delivered. Different repository, different person.
+
+The gate's own exit code is kept beside the outcome as a raw diagnostic — it is the only place the kernel's number survives, and a person debugging a gate wants it — but nothing decides on it.
+
+**This vocabulary is not flow's.** It is a wire contract shared with base, defined once in [base's gate contract](https://github.com/promise-language/base/blob/main/docs/gate-contract.md) — the piece the SDK reads in every project, so it has to mean the same thing everywhere. The five names above are reproduced for readability; where this document and that one differ about them, that one is right. What is flow's, and stated here, is what flow does with each outcome.
+
+### Progress reaches the reader as it is written
+
+Stdout is captured. **Stderr is passed straight through, unbuffered.** Gates run long, and a gate that is working and a gate that is wedged produce the same thing — nothing — for as long as the output is held. Someone watching a ten-minute suite needs to see it working, and an operator deciding whether to kill a run is deciding on that silence.
+
+**Passed through means the reader's own stream, not a pipe the runner copies.** The distinction is not pedantry: a runner that pipes stderr and forwards it faithfully still defeats the rule, because most runtimes switch from line to block buffering the moment their output is not a terminal — so the gate's progress arrives in one block at exit, which is the silence this exists to prevent. The gate must be genuinely attached to whatever the reader is attached to.
+
+Two consequences worth stating before anyone hits them:
+
+- **Progress does not extend a deadline.** Otherwise a wedged-but-chatty gate runs until something else kills it, which is the failure the deadline exists to bound.
+- **Concurrent gates interleave**, and the obvious remedy — prefixing each line with the gate's name — is forbidden by passthrough: a runner that rewrites the stream is no longer passing it through, and a gate's own output is not the runner's to edit. This needs settling before anything runs gates in parallel.
+
+### The runner bounds what it reads
+
+**The bound is on stdout**, which is the stream the runner holds in order to parse it. Stderr is passed through and never accumulated, so it needs no bound — it is already going somewhere with a person on the end of it.
+
+A gate that gets stdout wrong is the ordinary case, not an exotic one — a test runner left to print its log there emits as much as the suite feels like. So the runner reads **up to a bound**, and what it does at the bound is part of the contract rather than an implementation detail:
+
+- **It stops at the bound.** A runner that drains an unbounded stream has handed a gate the ability to exhaust it. That failure is categorically worse than the one it is supervising: a gate exhausting its own memory is one red result, while the runner going down takes everything it was watching with it — and unattended, that is the difference between a failure someone sees and a silence nobody does.
+- **It keeps a prefix, and stores only that.** Enough to identify what the gate was actually emitting, which is what a person diagnosing `broke the contract` needs. The full stream never reaches a store.
+- **It does not leave the child wedged.** A runner that stops reading a pipe the gate is still writing to blocks that gate on a full pipe buffer, turning an over-talkative gate into a hung one — which then reports as `timed out`, naming the wrong problem. Closing the read side or killing the child is part of stopping, not a separate concern.
+
+Bounded output is what makes `broke the contract` safe to detect at all. Without it, the runner has to hold everything a defective gate produced in order to conclude that it was defective.
+
+### How the runner tells them apart
+
+`could not start` is decided at the spawn — the exec fails and no process exists. The rest are decided by what the process printed, because the envelope is written whole:
+
+- **Parses** → measured. The envelope is the gate's own account of what it measured.
+- **Absent or truncated** → died. Silence is absence, not a malformed envelope.
+- **Present and not an envelope** → broke the contract.
+- **An envelope that contradicts what the manifest declared** → broke the contract. A float where the manifest says `int` is a mismatch to name, not a widening to absorb: a metric whose type changed mid-history measured something else, and absorbing it silently moves a ratchet that by construction never moves back.
+
+### The non-modification rule is checked, not assumed
+
+`resolution.md` requires a gate to leave its subject exactly as it found it. That is checkable only if *subject* names something specific, so it does: **the subject is the tracked tree.** The runner records tracked state before spawning and compares after; paths the project ignores are outside the subject, which is where a build cache and a report legitimately go.
+
+A difference means **broke the contract**, never `measured`.
+
+Three consequences, and the middle one is why the check earns its cost:
+
+- **A violation is not a failing measurement.** A gate that broke the contract has not reported that its subject is bad — it has failed to report anything. That is expensive read either way: as a failure it blames a change for a defect in the gate, as a pass it admits a transition on a measurement nobody made. So no measurement is stored, no baseline moves, and whatever the gate was blocking is refused **for the gate**, not for the tree.
+- **A modified worktree is spent.** The remaining gates for that transition must not run in it. There is no partial recovery: nothing downstream can distinguish which gates ran before the modification and which ran after, so their honest numbers describe a tree nobody proposed.
+- **A repairing gate reads as an improvement.** It is the ordinary way this happens — a format gate that fixes rather than reports — and its numbers get better, feed a ratchet, and raise a floor no honest run can meet.
+
+Two limits, stated rather than discovered. **A gate that modifies and restores passes the check** — before-and-after cannot see it, and a gate built to evade this is a gate written to pass itself, which is what the thresholds boundary handles instead. And **detection is after the fact**: the modification has happened, and what the check buys is that it is reported rather than absorbed.
+
+This is what makes deriving completeness from the *absence* of a stated reason safe. A gate that deliberately measured less says so and gives a reason; a truncated envelope is not an envelope at all. Without parse-or-nothing, a truncation would read as a complete run — exactly backwards.
+
+**A run that measured less than usual must never move a baseline.** Honest numbers that understate what was checked are indistinguishable from a regression unless the run says it measured less.
+
+### The runner comes from outside the tree, and that is the whole requirement
+
+A gate an agent can edit must not be what decides whether that agent's change passed. A runner taken from the worktree could be edited to skip. **The property is whose artifact it is** — the same boundary the write-contract sits behind.
+
+**Being remote is not what makes a runner trusted.** A purely local runner that never speaks to a server and only keeps tabs on what it started satisfies this exactly as well.
+
+That matters here, because the standalone model has no server and this is the one requirement it might have been thought to fail. It does not — and flow is already positioned to satisfy it. **A flow is delivered from outside the tree it resolves**; that is stated below for a different reason, and it is precisely the property a runner needs.
+
+### Running one gate by hand
+
+A person or an agent wanting one gate's result runs **`bin/run <gate>`**, which takes the same path the runner takes rather than a parallel one. Running a single gate is not a lesser case: it is faster than everything that blocks a transition, and it is what someone iterating on one failure actually wants.
+
+**It reaches a verdict and prints it for a human**, because it is the judging layer and the judging layer is the only thing that can — it holds the thresholds, so it can put a number beside the terms it was judged on. A gate could only ever print the left-hand column.
+
+That is also why a gate keeps exactly one output mode. A gate that pretty-printed when it thought a human was watching would have two, and one of them would not parse.
+
+### Where the verdict is made
+
+A gate cannot be asked for a verdict, and neither can a runner: `measured` says a measurement exists, not that it is acceptable.
+
+The verdict is computed by whoever is deciding, from two inputs:
+
+| Input | From | Says |
+|---|---|---|
+| The measurement | The gate, this run | What is true of this subject now |
+| The thresholds | The project, out of the subject's reach | What would be acceptable |
+
+**The thresholds are a distinct artefact from the gates.** Which gates must be green before a change may proceed, what floor coverage must clear, which baselines ratchet — that is a manifest the project provides alongside its gates, and no gate reads it.
+
+**A gate holding its thresholds can be passed by editing the gate.** When the subject is a change written by an agent, the agent can edit it, and a gate must not be able to acquit the thing it is measuring. That is the artifact rule, and it is why the thresholds are a separate artefact.
+
+**But separate does not mean elsewhere.** A threshold must be a function of the subject — `resolution.md` — which a manifest versioned with the tree satisfies and a per-host cache or independently-moving server state does not. A commit carries the terms it was judged on, so any machine reaches the same verdict for that commit, offline, whenever it is asked.
+
+**The rule is about the author, not the location.** What is forbidden is the party under judgement moving what judges it: a resolution's diff may not contain the manifest, refused rather than merged and flagged, because once a floor has moved no later run can tell it was wrong. A person lowering a threshold deliberately in a reviewed change is doing something legitimate — a metric that got worse for a reason the project accepts — and a rule that forbade it by location would forbid that too.
+
+### What is universal, and what is not
+
+**The exec line and the outcome vocabulary are universal.** Every project's gates are exec'd the same way and every run reports one of the same five outcomes, because the SDK reads them in every project and cannot hold one dialect per repository.
+
+**The envelope's shape is between a project and whoever judges it.** Two projects may carry different detail without either being wrong, so long as each is consistent with the thing reading it. The SDK does not read a project's measurements; it runs the gate and reports what became of the run.
 
 ## Where these live
 
@@ -107,9 +252,9 @@ Some gates cannot run beside another. A full suite that saturates a machine meas
 
 So a gate may **queue before it runs**, and the caller waits.
 
-**Waiting is not failing, and losing that distinction is expensive.** A gate that queued and then ran is exactly as authoritative as one that ran immediately. A gate that gave up waiting has measured nothing at all — and reporting that as a refusal marks a sound change unsound, and sends someone to look for a defect that does not exist.
+**Waiting is not failing, and losing that distinction is expensive.** A gate that queued and then ran is exactly as authoritative as one that ran immediately. A gate that gave up waiting has measured nothing at all — and reporting that as a measurement marks a sound change unsound, and sends someone to look for a defect that does not exist.
 
-The failure is not hypothetical: a wait capped below the time a real run takes turns every busy period into a stream of false refusals, each indistinguishable from a genuine one.
+The failure is not hypothetical: a wait capped below the time a real run takes turns every busy period into a stream of false failures, each indistinguishable from a genuine one.
 
 Two things follow:
 

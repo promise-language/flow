@@ -80,7 +80,7 @@ Prevention comes first where it exists — the plan step runs in a mode that for
 
 But prevention of either kind is enforced **by the agent**, not by this flow, which passes a flag or a configuration and trusts the outcome. A shell, a tool that shells out, or a mode that does not apply cleanly goes straight through it. So prevention is worth having, is the cheapest place to catch a violation, and is not the guarantee.
 
-**Both layers are gates** in the sense `resolution.md` defines: each measures, modifies nothing, and may refuse. They differ in position, which is exactly why neither substitutes for the other — one refuses an action before it happens, the other refuses a result however it came about.
+**Both layers are gates** in the sense `resolution.md` defines: each measures and modifies nothing. They differ in position, which is exactly why neither substitutes for the other — one refuses an action before it happens, the other refuses a result however it came about.
 
 **The guarantee is the check afterwards.** Each step records the branch, the commit, and the tree state before its agent turn, and verifies against them after:
 
