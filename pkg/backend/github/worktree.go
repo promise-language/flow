@@ -134,17 +134,20 @@ func (w *worktree) Verify(ctx context.Context) error {
 	return w.run(ctx, "verify", w.b.cfg.VerifyCmd)
 }
 
-// RunGate runs the named gate in cfg.WorktreeDir. Exit-0 → pass.
+// RunGate runs the named gate in cfg.WorktreeDir and reports what the runner
+// observed. Not exit-0 → pass: the gate's exit code is carried as a diagnostic
+// and decided on by nothing. See runGate.
 //
 // Gates are reached through the project's gate entry point by name rather than
 // each being configured separately. That is what makes the parts addressable:
 // a step fixing one failing suite asks for that suite, without the project
 // having had to enumerate every part in advance.
-func (w *worktree) RunGate(ctx context.Context, name flow.GateName) error {
+func (w *worktree) RunGate(ctx context.Context, name flow.GateName) (flow.GateRun, error) {
 	if !name.Valid() {
-		return fmt.Errorf("worktree.RunGate: %q is not a declared gate name", name)
+		return flow.GateRun{}, fmt.Errorf("worktree.RunGate: %q is not a declared gate name", name)
 	}
-	return w.run(ctx, "gate "+string(name), append(append([]string{}, gateEntryPoint...), string(name)))
+	argv := append(append([]string{}, gateEntryPoint...), string(name), envelopeFlag)
+	return runGate(ctx, w.b.cfg.WorktreeDir, name, argv, w.b.cfg.GateTimeout)
 }
 
 // gateEntryPoint is how a project exposes its gates. Not configurable: the
@@ -153,9 +156,11 @@ var gateEntryPoint = []string{"bin/gate"}
 
 // run executes one configured command in the worktree.
 //
-// Shared by Verify and Gate because the mechanics are identical — what differs
-// is what a caller may conclude, which is a property of the two names and not
-// of how they are spawned.
+// Verify's, and not gates'. The seam it goes through reports (stdout, stderr,
+// error), which is all a COMMAND needs — it either exited 0 or it did not. A
+// runner has to observe more than that: the seam hides a failure to spawn
+// inside the same error as a failure to finish, and discards the ProcessState
+// that says whether a signal ended the process. See runGate.
 func (w *worktree) run(ctx context.Context, what string, args []string) error {
 	stdout, stderr, err := w.b.git.runner(ctx, w.b.cfg.WorktreeDir, args[0], args[1:]...)
 	if err != nil {

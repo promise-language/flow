@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Config is the per-binary configuration the flow binary passes to
@@ -48,6 +49,21 @@ type Config struct {
 
 	// WorktreeDir is the local git worktree path. Default ".".
 	WorktreeDir string
+
+	// GateTimeout bounds one gate's work, clock starting at the spawn. A gate
+	// that hits it reports OutcomeTimedOut — the one outcome worth retrying
+	// unchanged — rather than hanging its runner. Progress does not extend it:
+	// otherwise a wedged-but-chatty gate runs until something else kills it,
+	// which is the failure the deadline exists to bound.
+	//
+	// Default: 10 minutes, which sits under DefaultStepBudget().Timeout so a
+	// wedged gate is caught by its own deadline rather than by consuming the
+	// whole step.
+	//
+	// This is the DECLARATION SITE ONLY until the thresholds manifest lands
+	// (#38). When it does, the timeout moves there and this field goes, rather
+	// than becoming a second copy.
+	GateTimeout time.Duration
 }
 
 // withDefaults returns a copy of c with empty fields filled in.
@@ -63,6 +79,9 @@ func (c Config) withDefaults() Config {
 	}
 	if len(c.VerifyCmd) == 0 {
 		c.VerifyCmd = []string{"bash", "bin/verify.sh"}
+	}
+	if c.GateTimeout == 0 {
+		c.GateTimeout = 10 * time.Minute
 	}
 	return c
 }
