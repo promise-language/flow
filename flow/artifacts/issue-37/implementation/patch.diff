@@ -1,0 +1,1134 @@
+diff --git a/backend.go b/backend.go
+index 63f84a4..a0119be 100644
+--- a/backend.go
++++ b/backend.go
+@@ -395,7 +395,30 @@ type Worktree interface {
+ 	// tree that no longer exists.
+ 	Verify(ctx context.Context) error
+ 
+-	// RunGate runs the named GATE in the worktree. Returns nil iff it passes.
++	// RunGate runs the named GATE in the worktree and reports what the RUNNER
++	// observed of the process.
++	//
++	// The SDK is the party that spawns gate processes, so the SDK is the
++	// runner. A gate is never invoked directly and its own exit code is not
++	// consulted: the states that matter most — killed for memory, exited 0
++	// having printed nothing — are the ones the gate is not alive to report,
++	// and only the process that spawned it can tell them apart.
++	//
++	// The runner reports an OUTCOME, never a verdict. "measured" says a
++	// measurement exists, not that it is acceptable; that needs the
++	// thresholds, which are a separate artefact out of the subject's reach and
++	// held by neither the gate nor the runner.
++	//
++	// The gate's exit code travels in GateRun.ExitCode as a raw diagnostic and
++	// nothing decides on it.
++	//
++	// A NON-NIL ERROR MEANS NO GATE WAS RUN AND NO OUTCOME EXISTS. It is
++	// returned only for a request the runner could not attempt — an undeclared
++	// gate name, or a caller whose context went away — and a caller must never
++	// read it as a gate failure. Every way a gate can fail is an outcome:
++	// OutcomeCouldNotStart in particular is an outcome, not an error, because
++	// a caller that cannot tell it from OutcomeDied retries a missing binary
++	// forever.
+ 	//
+ 	// A gate MODIFIES NOTHING it measures, which is what makes its answer
+ 	// reproducible by whoever runs it — a reviewer, a later bisect, a rebuild
+@@ -429,7 +452,7 @@ type Worktree interface {
+ 	// a gate that gave up waiting has not measured anything, and reporting that
+ 	// as a refusal marks a sound change unsound and sends someone to look for a
+ 	// defect that is not there.
+-	RunGate(ctx context.Context, name GateName) error
++	RunGate(ctx context.Context, name GateName) (GateRun, error)
+ 
+ 	// CapturePatch produces a unified diff of the current working tree.
+ 	// Handlers call it to attach work they have already verified; the
+diff --git a/gate.go b/gate.go
+new file mode 100644
+index 0000000..01ebe9d
+--- /dev/null
++++ b/gate.go
+@@ -0,0 +1,83 @@
++package flow
++
++// GateOutcome is what a RUNNER observed of one gate process. It is not a
++// verdict and not a number the gate chose: the gate measures, the runner
++// spawns it and watches what became of it, and something else judges the
++// measurement against thresholds the gate cannot reach.
++//
++// The set is CLOSED, and it is not flow's. It is a wire contract shared with
++// base — the SDK reads it in every project, so it has to mean the same thing
++// everywhere. See docs/gates-and-commands.md § "What the runner reports", and
++// base's docs/gate-contract.md, which is authoritative where the two differ.
++//
++// Only OutcomeTimedOut is worth retrying unchanged. The other three failures
++// all recur — but they stay distinct anyway, because they are owned by three
++// different people and collapsing them attributes a failure to the wrong
++// repository.
++type GateOutcome string
++
++const (
++	// OutcomeMeasured — the process completed and printed a valid envelope.
++	// Nobody's problem yet: whether the numbers are acceptable is a question
++	// for whoever holds the thresholds, and neither the gate nor the runner
++	// holds them.
++	OutcomeMeasured GateOutcome = "measured"
++
++	// OutcomeTimedOut — killed at the declared timeout. The problem is the
++	// wait, or the host. It is not the change, and it is the one outcome a
++	// retry can resolve.
++	OutcomeTimedOut GateOutcome = "timed_out"
++
++	// OutcomeCouldNotStart — the program the exec line names is absent or not
++	// executable, so nothing ran. The problem belongs to whoever declared the
++	// gate, or whoever delivered the tree.
++	//
++	// This must never fold into OutcomeDied, which carries "retry is correct":
++	// a retry loop pointed at a missing binary never terminates and reads as a
++	// flaky host for as long as anyone lets it run.
++	OutcomeCouldNotStart GateOutcome = "could_not_start"
++
++	// OutcomeDied — killed by a signal, or exited without printing a readable
++	// envelope. The problem is the host. Silence is absence, not a malformed
++	// envelope, so a truncated envelope lands here and not on
++	// OutcomeBrokeContract.
++	OutcomeDied GateOutcome = "died"
++
++	// OutcomeBrokeContract — the gate printed something that is not an
++	// envelope. The problem is in the gate's own code, which is a different
++	// repository from an absent program and a different one again from the
++	// change under measurement.
++	OutcomeBrokeContract GateOutcome = "broke_contract"
++)
++
++// GateRun is a runner's account of one gate process: what it observed, plus
++// the raw diagnostics a person debugging the gate wants.
++//
++// Outcome is the field decisions are made on. ExitCode is NOT — it is carried
++// because it is the only place the kernel's number survives, and a gate never
++// chose it in the states that matter most.
++type GateRun struct {
++	// Gate is the name that was asked for.
++	Gate GateName
++
++	// Outcome is what the runner observed. Always set when the runner returned
++	// no error.
++	Outcome GateOutcome
++
++	// ExitCode is the gate's own exit status, kept as a raw diagnostic and
++	// decided on by nothing. It is -1 exactly where the kernel has no number to
++	// give — the program never started, or the process was terminated by a
++	// signal — which is what (*os.ProcessState).ExitCode() already reports.
++	ExitCode int
++
++	// Stdout is what the gate printed on stdout: the envelope when Outcome is
++	// OutcomeMeasured, and whatever it printed instead when it is not. Stderr
++	// is not here — it is passed straight through to the reader's own stream
++	// rather than accumulated, so someone watching a long gate sees it work.
++	Stdout []byte
++
++	// Detail is the runner's account for a person: which signal, which program
++	// was absent, where the envelope stopped parsing. It is prose and nothing
++	// keys on it.
++	Detail string
++}
+diff --git a/gate_test.go b/gate_test.go
+new file mode 100644
+index 0000000..1876152
+--- /dev/null
++++ b/gate_test.go
+@@ -0,0 +1,40 @@
++package flow
++
++import "testing"
++
++// The five outcome strings are a WIRE CONTRACT shared with base, not flow's own
++// spelling. A silent change to one of them is a break that only shows up in
++// another repository, so they are pinned here as literals rather than derived
++// from the constants they name.
++//
++// Pinning the set as well as the values: a sixth outcome is not an addition, it
++// is a change to a vocabulary something else reads.
++func TestGateOutcomes_AreTheDeclaredWireSpelling(t *testing.T) {
++	for _, c := range []struct {
++		outcome GateOutcome
++		wire    string
++	}{
++		{OutcomeMeasured, "measured"},
++		{OutcomeTimedOut, "timed_out"},
++		{OutcomeCouldNotStart, "could_not_start"},
++		{OutcomeDied, "died"},
++		{OutcomeBrokeContract, "broke_contract"},
++	} {
++		if string(c.outcome) != c.wire {
++			t.Errorf("outcome = %q, want %q", c.outcome, c.wire)
++		}
++	}
++}
++
++// The zero GateRun says nothing was observed. Callers get one back beside an
++// error — the request the runner could not attempt — and must not be able to
++// read a measurement out of it.
++func TestGateRun_ZeroValueIsNotAnOutcome(t *testing.T) {
++	var run GateRun
++	if run.Outcome != "" {
++		t.Errorf("zero GateRun.Outcome = %q, want the empty outcome", run.Outcome)
++	}
++	if run.Outcome == OutcomeMeasured {
++		t.Error("a zero GateRun reads as a measurement")
++	}
++}
+diff --git a/issue/steps_test.go b/issue/steps_test.go
+index 7156b62..f85eb80 100644
+--- a/issue/steps_test.go
++++ b/issue/steps_test.go
+@@ -42,10 +42,10 @@ type fakeWorktree struct {
+ 	// and coverage steps do. A Commit that lands clears it, as git does; a
+ 	// Commit that lands nothing (noCommit) leaves it, as git also does.
+ 	dirty []byte
+-	// gatesRun records which gates were asked for; gateFails names those that
+-	// refuse.
+-	gatesRun  []flow.GateName
+-	gateFails map[flow.GateName]bool
++	// gatesRun records which gates were asked for; gateOutcome names what the
++	// runner observed of the ones that did not simply measure.
++	gatesRun    []flow.GateName
++	gateOutcome map[flow.GateName]flow.GateOutcome
+ }
+ 
+ func newFakeWorktree() *fakeWorktree {
+@@ -81,18 +81,19 @@ func (w *fakeWorktree) Verify(context.Context) error {
+ 	return w.verifyErr
+ }
+ 
+-// RunGate answers for any declared name. gateFails names the ones that refuse,
+-// so a test can fail the integration gate while the verify command passes —
+-// which is the whole point of their being different things.
+-func (w *fakeWorktree) RunGate(_ context.Context, name flow.GateName) error {
++// RunGate answers for any declared name. gateOutcome names the ones that do
++// not measure, so a test can have the integration gate die while the verify
++// command passes — which is the whole point of their being different things.
++func (w *fakeWorktree) RunGate(_ context.Context, name flow.GateName) (flow.GateRun, error) {
+ 	if !name.Valid() {
+-		return fmt.Errorf("fake: %q is not a declared gate name", name)
++		return flow.GateRun{}, fmt.Errorf("fake: %q is not a declared gate name", name)
+ 	}
+ 	w.gatesRun = append(w.gatesRun, name)
+-	if w.gateFails[name] {
+-		return fmt.Errorf("fake: gate %q failed", name)
++	outcome, ok := w.gateOutcome[name]
++	if !ok {
++		outcome = flow.OutcomeMeasured
+ 	}
+-	return nil
++	return flow.GateRun{Gate: name, Outcome: outcome, ExitCode: -1}, nil
+ }
+ func (w *fakeWorktree) CapturePatch(context.Context) ([]byte, error) {
+ 	// Models `git diff HEAD`: untracked work is invisible until staged, and
+diff --git a/pkg/backend/fake/fake.go b/pkg/backend/fake/fake.go
+index 0641f41..29016aa 100644
+--- a/pkg/backend/fake/fake.go
++++ b/pkg/backend/fake/fake.go
+@@ -21,9 +21,9 @@ type Backend struct {
+ 	items           map[string]*itemRecord // keyed by item.ID
+ 	signals         []flow.SignalDef
+ 	clock           func() time.Time
+-	verifyOK        bool // controls Worktree.Verify result
+-	gateOK          bool // controls Worktree.RunGate result
+-	supportsRequest bool // controls whether Worktree.Request() returns non-nil
++	verifyOK        bool             // controls Worktree.Verify result
++	gateOutcome     flow.GateOutcome // controls what Worktree.RunGate observes
++	supportsRequest bool             // controls whether Worktree.Request() returns non-nil
+ 	// supportedArtifacts is the backend's canonical artifact schema returned by
+ 	// SupportedArtifacts. nil (the default) means "use the standard vocabulary"
+ 	// (defaultSupportedArtifacts); SetSupportedArtifacts overrides it so tests
+@@ -71,7 +71,7 @@ func New(signals ...flow.SignalDef) *Backend {
+ 		signals:         signals,
+ 		clock:           time.Now,
+ 		verifyOK:        true,
+-		gateOK:          true,
++		gateOutcome:     flow.OutcomeMeasured,
+ 		supportsRequest: true,
+ 	}
+ }
+@@ -82,10 +82,15 @@ func (b *Backend) SetClock(c func() time.Time) { b.clock = c }
+ // SetVerifyOK controls what Worktree.Verify returns. Default true.
+ func (b *Backend) SetVerifyOK(ok bool) { b.verifyOK = ok }
+ 
+-// SetGateOK controls whether every gate passes. Separate from SetVerifyOK
+-// because verify and gates are different things: a tree can be repairable by
+-// verify and still fail the gate that decides.
+-func (b *Backend) SetGateOK(ok bool) { b.gateOK = ok }
++// SetGateOutcome controls what the runner observes of every gate. Default
++// flow.OutcomeMeasured.
++//
++// Separate from SetVerifyOK because verify and gates are different things: a
++// tree can be repairable by verify and still fail the gate that decides. An
++// outcome rather than a boolean because the set is what the fake exists to
++// model — a caller that must tell "could not start" from "died" cannot be
++// exercised against a fake that only knows pass and fail.
++func (b *Backend) SetGateOutcome(o flow.GateOutcome) { b.gateOutcome = o }
+ 
+ // SetSupportsRequest controls whether Worktree.Request() returns a non-nil
+ // RequestManager. Default true; set to false to exercise the "backend
+@@ -515,7 +520,7 @@ func (b *Backend) Worktree(ctx context.Context, claim flow.Claim) (flow.Worktree
+ 		b.worktrees[id] = wt
+ 	}
+ 	wt.verifyOK = b.verifyOK
+-	wt.gateOK = b.gateOK
++	wt.gateOutcome = b.gateOutcome
+ 	wt.supportsRequest = b.supportsRequest
+ 	wt.nothingToCommit = b.nothingToCommit
+ 	return wt, nil
+@@ -549,7 +554,7 @@ type fakeWorktree struct {
+ 	// branches records which branches exist, so Branch can report `created`
+ 	// truthfully across invocations.
+ 	branches        map[string]bool
+-	gateOK          bool
++	gateOutcome     flow.GateOutcome
+ 	verifyOK        bool
+ 	supportsRequest bool
+ 	branch          string
+@@ -609,15 +614,31 @@ func (w *fakeWorktree) Verify(ctx context.Context) error {
+ }
+ 
+ // RunGate answers for every gate name. The fake models the protocol, not a
+-// project's gate set, so it does not pretend to know which names exist.
+-func (w *fakeWorktree) RunGate(ctx context.Context, name flow.GateName) error {
++// project's gate set, so it does not pretend to know which names exist — and
++// it does not pretend to know a project's numbers either: on OutcomeMeasured
++// the envelope it reports is one that parses and says nothing else.
++//
++// The error is for a request no runner could attempt. Every way a gate fails
++// is an outcome.
++func (w *fakeWorktree) RunGate(ctx context.Context, name flow.GateName) (flow.GateRun, error) {
+ 	if !name.Valid() {
+-		return fmt.Errorf("fake: %q is not a declared gate name", name)
+-	}
+-	if !w.gateOK {
+-		return fmt.Errorf("fake: gate %q failed", name)
+-	}
+-	return nil
++		return flow.GateRun{}, fmt.Errorf("fake: %q is not a declared gate name", name)
++	}
++	outcome := w.gateOutcome
++	if outcome == "" {
++		outcome = flow.OutcomeMeasured
++	}
++	run := flow.GateRun{Gate: name, Outcome: outcome, ExitCode: -1}
++	switch outcome {
++	case flow.OutcomeMeasured:
++		run.ExitCode = 0
++		run.Stdout = fmt.Appendf(nil, "{%q:%q}\n", "gate", name)
++	case flow.OutcomeBrokeContract:
++		run.ExitCode = 0
++		run.Stdout = []byte("fake: not an envelope\n")
++	}
++	run.Detail = fmt.Sprintf("fake: gate %q %s", name, outcome)
++	return run, nil
+ }
+ func (w *fakeWorktree) CapturePatch(ctx context.Context) ([]byte, error) { return nil, nil }
+ 
+diff --git a/pkg/backend/github/config.go b/pkg/backend/github/config.go
+index db9f76a..e1417c1 100644
+--- a/pkg/backend/github/config.go
++++ b/pkg/backend/github/config.go
+@@ -9,6 +9,7 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"strings"
++	"time"
+ )
+ 
+ // Config is the per-binary configuration the flow binary passes to
+@@ -48,6 +49,21 @@ type Config struct {
+ 
+ 	// WorktreeDir is the local git worktree path. Default ".".
+ 	WorktreeDir string
++
++	// GateTimeout bounds one gate's work, clock starting at the spawn. A gate
++	// that hits it reports OutcomeTimedOut — the one outcome worth retrying
++	// unchanged — rather than hanging its runner. Progress does not extend it:
++	// otherwise a wedged-but-chatty gate runs until something else kills it,
++	// which is the failure the deadline exists to bound.
++	//
++	// Default: 10 minutes, which sits under DefaultStepBudget().Timeout so a
++	// wedged gate is caught by its own deadline rather than by consuming the
++	// whole step.
++	//
++	// This is the DECLARATION SITE ONLY until the thresholds manifest lands
++	// (#38). When it does, the timeout moves there and this field goes, rather
++	// than becoming a second copy.
++	GateTimeout time.Duration
+ }
+ 
+ // withDefaults returns a copy of c with empty fields filled in.
+@@ -64,6 +80,9 @@ func (c Config) withDefaults() Config {
+ 	if len(c.VerifyCmd) == 0 {
+ 		c.VerifyCmd = []string{"bash", "bin/verify.sh"}
+ 	}
++	if c.GateTimeout == 0 {
++		c.GateTimeout = 10 * time.Minute
++	}
+ 	return c
+ }
+ 
+diff --git a/pkg/backend/github/gate.go b/pkg/backend/github/gate.go
+new file mode 100644
+index 0000000..bb4d651
+--- /dev/null
++++ b/pkg/backend/github/gate.go
+@@ -0,0 +1,152 @@
++package github
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"os"
++	"os/exec"
++	"time"
++
++	"github.com/promise-language/flow"
++)
++
++// envelopeFlag is how the runner asks a gate for its measurements. Protocol,
++// not configuration: a gate prints an envelope only when it was given the
++// flag, and any other invocation is a person at a terminal. Appended last, so
++// the gate name reaches the entry point in the position it would have had
++// without it.
++const envelopeFlag = "--envelope"
++
++// gateStderr is where a gate's progress goes. Typed *os.File deliberately:
++// exec.Cmd hands a real descriptor straight to the child and spawns no copying
++// goroutine, which is the passthrough the contract requires. An io.Writer here
++// would be a pipe the runner copies, and most runtimes switch to block
++// buffering the moment their output is not a terminal — so a ten-minute gate's
++// progress would arrive in one block at exit, which is the silence the rule
++// exists to prevent.
++//
++// A variable so a test can point it somewhere it can read; nothing else
++// reassigns it.
++var gateStderr *os.File = os.Stderr
++
++// gateWaitDelay bounds how long Wait may block on the stdout pipe AFTER the
++// process itself is gone. Without it, a gate that leaves a background child
++// holding that pipe makes Wait block forever after the timeout kill — the
++// declared timeout would fire and the runner would still hang, which is the
++// failure a declared timeout exists to close.
++var gateWaitDelay = 5 * time.Second
++
++// runGate spawns one gate and reports what it observed. It is the runner: it
++// never consults the gate's exit code to decide, and it never looks inside the
++// envelope — the SDK does not read a project's measurements, it runs the gate
++// and reports what became of the run.
++//
++// A non-nil error means no gate ran and no outcome exists. Every way a gate
++// itself can fail is one of the five outcomes.
++func runGate(ctx context.Context, dir string, name flow.GateName, argv []string, timeout time.Duration) (flow.GateRun, error) {
++	run := flow.GateRun{Gate: name, ExitCode: -1}
++
++	if err := ctx.Err(); err != nil {
++		return flow.GateRun{}, fmt.Errorf("gate %s: caller went away before the gate was spawned: %w", name, err)
++	}
++
++	gateCtx, cancel := context.WithTimeout(ctx, timeout)
++	defer cancel()
++
++	var stdout bytes.Buffer
++	// argv[0] contains a separator, so os/exec performs no PATH lookup and the
++	// OS resolves it against Dir after the child chdirs. No shell stands
++	// between here and the gate: a line that is interpreted gives different
++	// answers on different hosts for reasons that have nothing to do with the
++	// subject.
++	cmd := exec.CommandContext(gateCtx, argv[0], argv[1:]...)
++	cmd.Dir = dir
++	cmd.Stdin = nil // /dev/null — a gate cannot block on a terminal that is not there
++	// Captured, so it can be parsed. Bounding what is read here is #40.
++	cmd.Stdout = &stdout
++	cmd.Stderr = gateStderr
++	cmd.WaitDelay = gateWaitDelay
++
++	if err := cmd.Start(); err != nil {
++		// Start fails only when no process was created. That is exactly "could
++		// not start": absent, not executable, a directory, a bad interpreter.
++		// No error-string sniffing is needed to reach it — except for the
++		// caller's own context, which exec reports through the same return.
++		if ctxErr := ctx.Err(); ctxErr != nil {
++			return flow.GateRun{}, fmt.Errorf("gate %s: caller went away before the gate was spawned: %w", name, ctxErr)
++		}
++		run.Outcome = flow.OutcomeCouldNotStart
++		run.Detail = fmt.Sprintf("spawning %s in %s: %v", argv[0], dir, err)
++		return run, nil
++	}
++
++	waitErr := cmd.Wait()
++	run.Stdout = stdout.Bytes()
++	if cmd.ProcessState != nil {
++		run.ExitCode = cmd.ProcessState.ExitCode()
++	}
++
++	// The caller going away is not an outcome. Checked before the deadline,
++	// because a cancelled parent cancels the derived context too and only OUR
++	// deadline is the one a retry can resolve.
++	if ctxErr := ctx.Err(); ctxErr != nil {
++		return flow.GateRun{}, fmt.Errorf("gate %s: caller went away while the gate ran: %w", name, ctxErr)
++	}
++	if errors.Is(gateCtx.Err(), context.DeadlineExceeded) {
++		run.Outcome = flow.OutcomeTimedOut
++		run.Detail = fmt.Sprintf("killed at the declared timeout of %s", timeout)
++		return run, nil
++	}
++	// A signal wins over anything on stdout. A gate the host killed has not
++	// reported, whatever it managed to print first.
++	if cmd.ProcessState == nil || !cmd.ProcessState.Exited() {
++		run.Outcome = flow.OutcomeDied
++		run.Detail = fmt.Sprintf("did not exit on its own: %v", waitErr)
++		return run, nil
++	}
++
++	// The envelope is written whole, so what is on stdout tells the rest apart.
++	// The runner checks that ONE JSON object is there and nothing else; what is
++	// inside it is between the project and whoever judges it.
++	//
++	// "An envelope that contradicts what the manifest declared" is also
++	// broke-the-contract, and is unreachable until a manifest exists (#38).
++	if err := parseEnvelope(run.Stdout); err != nil {
++		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
++			// Silence is absence, not a malformed envelope — and a truncated
++			// envelope is not an envelope at all, which is what makes it safe
++			// to read a complete one as a complete run.
++			run.Outcome = flow.OutcomeDied
++			run.Detail = fmt.Sprintf("exited %d without printing a readable envelope: %v", run.ExitCode, err)
++			return run, nil
++		}
++		run.Outcome = flow.OutcomeBrokeContract
++		run.Detail = fmt.Sprintf("printed something that is not an envelope: %v", err)
++		return run, nil
++	}
++
++	// Exit code recorded, decided on by nothing: a gate that measured a failure
++	// and said so exited non-zero and has measured.
++	run.Outcome = flow.OutcomeMeasured
++	return run, nil
++}
++
++// parseEnvelope reports whether stdout carries exactly one JSON object and
++// nothing else. It returns io.EOF or io.ErrUnexpectedEOF for absence and
++// truncation — the two the caller must read as "died" rather than as a defect
++// in what the gate printed.
++func parseEnvelope(stdout []byte) error {
++	dec := json.NewDecoder(bytes.NewReader(stdout))
++	var envelope map[string]any // a map, so an array or a scalar is refused
++	if err := dec.Decode(&envelope); err != nil {
++		return err
++	}
++	if dec.More() {
++		return errors.New("trailing content after the envelope")
++	}
++	return nil
++}
+diff --git a/pkg/backend/github/gate_test.go b/pkg/backend/github/gate_test.go
+new file mode 100644
+index 0000000..8d92311
+--- /dev/null
++++ b/pkg/backend/github/gate_test.go
+@@ -0,0 +1,448 @@
++package github
++
++import (
++	"context"
++	"errors"
++	"os"
++	"path/filepath"
++	"runtime"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/promise-language/flow"
++)
++
++// These spawn real processes.
++//
++// This is the whole subject of the runner: what it reports is what it OBSERVED
++// of a process — that the exec failed, that a signal ended it, that it exited 0
++// having printed nothing. A mocked spawn can observe none of that, so a test
++// built on one would pass against a runner that decided on the exit code, which
++// is precisely the defect these exist to prevent.
++func requireRealProcesses(t *testing.T) {
++	t.Helper()
++	if runtime.GOOS == "windows" {
++		t.Skip("the gate scripts are POSIX shell")
++	}
++}
++
++// gateWorktree returns a worktree whose gate entry point is the given script,
++// in a directory whose name contains a SPACE. The space is not decoration: if
++// anything ever put a shell between the SDK and bin/gate, the exec line would
++// word-split here and the gate would not be found.
++//
++// script == "" writes no bin/gate at all.
++func gateWorktree(t *testing.T, script string, timeout time.Duration) (*worktree, string) {
++	t.Helper()
++	dir := filepath.Join(t.TempDir(), "work tree")
++	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if script != "" {
++		writeGateScript(t, dir, script, 0o755)
++	}
++	b := &Backend{cfg: Config{WorktreeDir: dir, GateTimeout: timeout}}
++	// A gate does not go through the configured-command seam: that seam reports
++	// (stdout, stderr, error), which cannot express what a runner has to see.
++	b.git = &gitOps{dir: dir, runner: func(_ context.Context, _, name string, _ ...string) ([]byte, []byte, error) {
++		t.Errorf("a gate was spawned through the command runner (%s)", name)
++		return nil, nil, nil
++	}}
++	return &worktree{b: b}, dir
++}
++
++func writeGateScript(t *testing.T, dir, script string, mode os.FileMode) {
++	t.Helper()
++	path := filepath.Join(dir, "bin", "gate")
++	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), mode); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(path, mode); err != nil { // WriteFile respects umask; Chmod does not
++		t.Fatal(err)
++	}
++}
++
++// The five outcomes, decided from what the runner observed and never from the
++// number the gate chose.
++func TestRunGate_ClassifiesWhatItObserved(t *testing.T) {
++	requireRealProcesses(t)
++
++	for _, c := range []struct {
++		name     string
++		script   string
++		outcome  flow.GateOutcome
++		exitCode int
++		stdout   string
++	}{{
++		name:     "a valid envelope is a measurement",
++		script:   `echo '{"gate":"integration","checked":3}'`,
++		outcome:  flow.OutcomeMeasured,
++		exitCode: 0,
++		stdout:   `{"gate":"integration","checked":3}`,
++	}, {
++		// The load-bearing case. A gate that measured a failure says so IN the
++		// envelope and exits non-zero; the runner has still watched a complete
++		// measurement, and whether the numbers are acceptable is not its
++		// question. A runner that read the exit code would report a failure
++		// here and throw away the measurement that explains it.
++		name:     "a valid envelope beside a non-zero exit is still a measurement",
++		script:   `echo '{"gate":"tested","failures":2}'; exit 1`,
++		outcome:  flow.OutcomeMeasured,
++		exitCode: 1,
++		stdout:   `{"gate":"tested","failures":2}`,
++	}, {
++		// Exit-0 → pass believes this. A gate that exits 0 having printed
++		// nothing has stated something false, and only the runner can say so.
++		name:     "exit 0 having printed nothing is not a pass",
++		script:   `exit 0`,
++		outcome:  flow.OutcomeDied,
++		exitCode: 0,
++	}, {
++		name:     "not an envelope at all",
++		script:   `echo 'not json'`,
++		outcome:  flow.OutcomeBrokeContract,
++		exitCode: 0,
++		stdout:   "not json",
++	}, {
++		// Silence is absence, not a malformed envelope. Truncation must land on
++		// died and not on broke-the-contract: the envelope is written whole, so
++		// a half-written one means the writer stopped existing, and blaming the
++		// gate's code sends someone to the wrong repository.
++		name:     "a truncated envelope died, it did not break the contract",
++		script:   `printf '{"gate":"tested",'`,
++		outcome:  flow.OutcomeDied,
++		exitCode: 0,
++		stdout:   `{"gate":"tested",`,
++	}, {
++		name:     "an array is not an envelope",
++		script:   `echo '[1,2]'`,
++		outcome:  flow.OutcomeBrokeContract,
++		exitCode: 0,
++	}, {
++		name:     "a scalar is not an envelope",
++		script:   `echo 7`,
++		outcome:  flow.OutcomeBrokeContract,
++		exitCode: 0,
++	}, {
++		// Stdout carries the envelope and nothing else. A gate that also logs
++		// there has broken the contract, even though the first value parses.
++		name:     "an envelope with something after it",
++		script:   `printf '{"gate":"tested"}\ndone\n'`,
++		outcome:  flow.OutcomeBrokeContract,
++		exitCode: 0,
++	}, {
++		name:     "two envelopes are not one envelope",
++		script:   `printf '{"a":1}{"b":2}\n'`,
++		outcome:  flow.OutcomeBrokeContract,
++		exitCode: 0,
++	}, {
++		name:     "whitespace is silence",
++		script:   `printf '   \n\n'`,
++		outcome:  flow.OutcomeDied,
++		exitCode: 0,
++	}} {
++		t.Run(c.name, func(t *testing.T) {
++			w, _ := gateWorktree(t, c.script, 30*time.Second)
++			run, err := w.RunGate(context.Background(), flow.GateIntegration)
++			if err != nil {
++				t.Fatalf("RunGate: %v — an error means no gate ran, and one did", err)
++			}
++			if run.Outcome != c.outcome {
++				t.Errorf("outcome = %q, want %q (detail: %s)", run.Outcome, c.outcome, run.Detail)
++			}
++			if run.ExitCode != c.exitCode {
++				t.Errorf("ExitCode = %d, want %d", run.ExitCode, c.exitCode)
++			}
++			if c.stdout != "" && !strings.Contains(string(run.Stdout), c.stdout) {
++				t.Errorf("Stdout = %q, want it to carry %q", run.Stdout, c.stdout)
++			}
++			if run.Gate != flow.GateIntegration {
++				t.Errorf("Gate = %q, want the name that was asked for", run.Gate)
++			}
++		})
++	}
++}
++
++// A gate the host killed has not reported, whatever it managed to print first.
++// The signal is the runner's observation; the envelope would be the gate's
++// claim, and the gate was not alive to finish making it.
++func TestRunGate_ASignalIsDeathEvenWithAnEnvelopeOnStdout(t *testing.T) {
++	requireRealProcesses(t)
++
++	// The `sleep` is an external command, so the shell flushes its stdout
++	// before forking it — the envelope is on the pipe before the kill.
++	w, _ := gateWorktree(t, "echo '{\"gate\":\"integration\"}'\nsleep 0.2\nkill -9 $$", 30*time.Second)
++	run, err := w.RunGate(context.Background(), flow.GateIntegration)
++	if err != nil {
++		t.Fatalf("RunGate: %v", err)
++	}
++	if run.Outcome != flow.OutcomeDied {
++		t.Errorf("outcome = %q, want %q (detail: %s)", run.Outcome, flow.OutcomeDied, run.Detail)
++	}
++	if !strings.Contains(string(run.Stdout), `"gate"`) {
++		t.Fatalf("Stdout = %q, want the envelope that was printed before the signal", run.Stdout)
++	}
++	// -1 is the kernel having no number to give, which is exactly the state a
++	// runner exists to report and an exit code cannot.
++	if run.ExitCode != -1 {
++		t.Errorf("ExitCode = %d, want -1 — a killed process chose no exit code", run.ExitCode)
++	}
++}
++
++// could not start is decided at the spawn, and must never fold into died. died
++// carries "retry is correct"; a retry loop pointed at a missing binary never
++// terminates and reads as a flaky host for as long as anyone lets it run.
++func TestRunGate_CouldNotStartIsNotDied(t *testing.T) {
++	requireRealProcesses(t)
++
++	for _, c := range []struct {
++		name  string
++		setup func(t *testing.T, dir string)
++	}{{
++		name:  "no gate entry point in the tree",
++		setup: func(*testing.T, string) {},
++	}, {
++		name: "present but not executable",
++		setup: func(t *testing.T, dir string) {
++			writeGateScript(t, dir, `echo '{}'`, 0o644)
++		},
++	}, {
++		name: "a directory where the program should be",
++		setup: func(t *testing.T, dir string) {
++			if err := os.MkdirAll(filepath.Join(dir, "bin", "gate"), 0o755); err != nil {
++				t.Fatal(err)
++			}
++		},
++	}, {
++		name: "a shebang naming an interpreter that is not there",
++		setup: func(t *testing.T, dir string) {
++			path := filepath.Join(dir, "bin", "gate")
++			if err := os.WriteFile(path, []byte("#!/nonexistent/interpreter\n"), 0o755); err != nil {
++				t.Fatal(err)
++			}
++			if err := os.Chmod(path, 0o755); err != nil {
++				t.Fatal(err)
++			}
++		},
++	}} {
++		t.Run(c.name, func(t *testing.T) {
++			w, dir := gateWorktree(t, "", 30*time.Second)
++			c.setup(t, dir)
++			run, err := w.RunGate(context.Background(), flow.GateIntegration)
++			if err != nil {
++				t.Fatalf("RunGate: %v — this is an outcome, not an error", err)
++			}
++			if run.Outcome != flow.OutcomeCouldNotStart {
++				t.Errorf("outcome = %q, want %q (detail: %s)", run.Outcome, flow.OutcomeCouldNotStart, run.Detail)
++			}
++			if run.ExitCode != -1 {
++				t.Errorf("ExitCode = %d, want -1 — nothing ran, so nothing exited", run.ExitCode)
++			}
++			if run.Detail == "" {
++				t.Error("no Detail: the person who has to fix this needs to know which program was absent")
++			}
++		})
++	}
++}
++
++// A hung gate must not hang its runner, and the outcome must be the one worth
++// retrying unchanged rather than one that blames the change.
++func TestRunGate_EnforcesTheDeclaredTimeout(t *testing.T) {
++	requireRealProcesses(t)
++
++	// exec, so the shell does not linger as the sleep's parent.
++	w, _ := gateWorktree(t, "exec sleep 60", 100*time.Millisecond)
++	start := time.Now()
++	run, err := w.RunGate(context.Background(), flow.GateIntegration)
++	elapsed := time.Since(start)
++	if err != nil {
++		t.Fatalf("RunGate: %v", err)
++	}
++	if run.Outcome != flow.OutcomeTimedOut {
++		t.Errorf("outcome = %q, want %q (detail: %s)", run.Outcome, flow.OutcomeTimedOut, run.Detail)
++	}
++	if elapsed > 30*time.Second {
++		t.Errorf("returned after %s — the declared timeout did not bound the wait", elapsed)
++	}
++}
++
++// The caller going away is not an outcome: no gate result exists to report.
++// Reporting it as timed out would mark a run retryable that nobody is waiting
++// for, and reporting it as died would blame the host for a caller's decision.
++func TestRunGate_ACancelledCallerIsAnErrorAndNotAnOutcome(t *testing.T) {
++	requireRealProcesses(t)
++
++	w, _ := gateWorktree(t, "exec sleep 60", 30*time.Second)
++	ctx, cancel := context.WithCancel(context.Background())
++	go func() {
++		time.Sleep(50 * time.Millisecond)
++		cancel()
++	}()
++	run, err := w.RunGate(ctx, flow.GateIntegration)
++	if !errors.Is(err, context.Canceled) {
++		t.Fatalf("err = %v, want it to wrap context.Canceled", err)
++	}
++	if run.Outcome != "" {
++		t.Errorf("outcome = %q, want none — no gate result exists", run.Outcome)
++	}
++}
++
++func TestRunGate_RefusesACallerWhoseContextIsAlreadyGone(t *testing.T) {
++	requireRealProcesses(t)
++
++	w, dir := gateWorktree(t, "touch ran\necho '{}'", 30*time.Second)
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	run, err := w.RunGate(ctx, flow.GateIntegration)
++	if !errors.Is(err, context.Canceled) {
++		t.Fatalf("err = %v, want it to wrap context.Canceled", err)
++	}
++	if run.Outcome != "" {
++		t.Errorf("outcome = %q, want none", run.Outcome)
++	}
++	// Specifically NOT could-not-start: exec reports an already-cancelled
++	// context through the same return as a missing program, and confusing them
++	// would send someone hunting for a binary that is right there.
++	if _, err := os.Stat(filepath.Join(dir, "ran")); err == nil {
++		t.Error("the gate was spawned for a caller that had already gone away")
++	}
++}
++
++// The exec line is exec'd, never interpreted, and --envelope is appended last.
++// A gate prints an envelope only when it was given the flag, so a runner that
++// forgot it would read every gate as silence.
++func TestRunGate_ExecsTheEntryPointWithTheNameThenTheFlag(t *testing.T) {
++	requireRealProcesses(t)
++
++	for _, gate := range []flow.GateName{flow.GateIntegration, flow.GateTested, "tested:wasm"} {
++		t.Run(string(gate), func(t *testing.T) {
++			w, dir := gateWorktree(t, ": > argv\necho \"$#\" >> argv\nfor a in \"$@\"; do echo \"$a\" >> argv; done\necho '{}'", 30*time.Second)
++			run, err := w.RunGate(context.Background(), gate)
++			if err != nil {
++				t.Fatalf("RunGate: %v", err)
++			}
++			if run.Outcome != flow.OutcomeMeasured {
++				t.Fatalf("outcome = %q, want measured (detail: %s)", run.Outcome, run.Detail)
++			}
++			recorded, err := os.ReadFile(filepath.Join(dir, "argv"))
++			if err != nil {
++				t.Fatal(err)
++			}
++			// The instance travels whole, and the count pins it: splitting
++			// "tested:wasm" would ask for the concept and silently run every
++			// suite under it.
++			want := "2\n" + string(gate) + "\n--envelope\n"
++			if string(recorded) != want {
++				t.Errorf("gate saw argv %q, want %q", recorded, want)
++			}
++		})
++	}
++}
++
++// Stdout is captured so it can be parsed. Stderr is the gate's progress and
++// goes straight to the reader's own stream: someone watching a ten-minute
++// suite needs to see it working, and a runner that accumulated it would hand
++// them one block at exit.
++func TestRunGate_PassesStderrThroughAndKeepsItOutOfTheResult(t *testing.T) {
++	requireRealProcesses(t)
++
++	sink, err := os.CreateTemp(t.TempDir(), "stderr")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer sink.Close()
++	restore := gateStderr
++	gateStderr = sink
++	t.Cleanup(func() { gateStderr = restore })
++
++	w, _ := gateWorktree(t, "echo 'suite 3 of 9' >&2\necho '{\"gate\":\"integration\"}'", 30*time.Second)
++	run, err := w.RunGate(context.Background(), flow.GateIntegration)
++	if err != nil {
++		t.Fatalf("RunGate: %v", err)
++	}
++	if run.Outcome != flow.OutcomeMeasured {
++		t.Fatalf("outcome = %q, want measured (detail: %s)", run.Outcome, run.Detail)
++	}
++	passed, err := os.ReadFile(sink.Name())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.Contains(string(passed), "suite 3 of 9") {
++		t.Errorf("stderr sink holds %q, want the gate's progress", passed)
++	}
++	// Stderr is passed through, not accumulated — mixing it into the captured
++	// stream would make the gate's own progress look like a broken envelope.
++	if strings.Contains(string(run.Stdout), "suite 3 of 9") {
++		t.Errorf("stderr reached Stdout: %q", run.Stdout)
++	}
++}
++
++// A gate that leaves a background child holding the stdout pipe must not hold
++// the runner after the gate itself is gone. Without a bound on that wait, the
++// declared timeout fires and the runner still hangs — the exact failure a
++// declared timeout exists to close.
++func TestRunGate_DoesNotWaitForeverOnAChildTheGateLeftBehind(t *testing.T) {
++	requireRealProcesses(t)
++
++	restore := gateWaitDelay
++	gateWaitDelay = 200 * time.Millisecond
++	t.Cleanup(func() { gateWaitDelay = restore })
++
++	// The child keeps fd 1 — the pipe the runner is reading, which is the whole
++	// point — and drops stderr, which it would otherwise hold open past the end
++	// of the run for no reason this test is about.
++	w, _ := gateWorktree(t, "sleep 30 2>/dev/null &\necho '{\"gate\":\"integration\"}'", 30*time.Second)
++	start := time.Now()
++	run, err := w.RunGate(context.Background(), flow.GateIntegration)
++	elapsed := time.Since(start)
++	if err != nil {
++		t.Fatalf("RunGate: %v", err)
++	}
++	if elapsed > 20*time.Second {
++		t.Fatalf("returned after %s — the runner waited on a child the gate had abandoned", elapsed)
++	}
++	// The gate itself completed and printed an envelope. What its leftover
++	// child is doing is not a reason to discard that.
++	if run.Outcome != flow.OutcomeMeasured {
++		t.Errorf("outcome = %q, want measured (detail: %s)", run.Outcome, run.Detail)
++	}
++}
++
++// An undeclared concept is refused before anything is spawned. Running it would
++// hand the project a name it cannot answer, and the failure would look like the
++// gate refusing rather than the caller asking for something that does not exist.
++func TestRunGate_RefusesAnUndeclaredNameWithoutSpawning(t *testing.T) {
++	requireRealProcesses(t)
++
++	w, dir := gateWorktree(t, "touch ran\necho '{}'", 30*time.Second)
++	run, err := w.RunGate(context.Background(), "lint")
++	if err == nil || !strings.Contains(err.Error(), "not a declared gate name") {
++		t.Fatalf("err = %v, want a refusal naming the problem", err)
++	}
++	if run.Outcome != "" {
++		t.Errorf("outcome = %q, want none — nothing was run", run.Outcome)
++	}
++	if _, err := os.Stat(filepath.Join(dir, "ran")); err == nil {
++		t.Error("spawned a process for an undeclared gate name")
++	}
++}
++
++// Verify runs the CONFIGURED command; RunGate runs the entry point. Confusing
++// them would make a decision rest on the command that modifies the tree, which
++// is the distinction the two methods exist to keep.
++func TestRunGate_RunsTheEntryPointAndNotTheVerifyCommand(t *testing.T) {
++	requireRealProcesses(t)
++
++	w, dir := gateWorktree(t, "echo '{\"gate\":\"integration\"}'", 30*time.Second)
++	w.b.cfg.VerifyCmd = []string{filepath.Join(dir, "bin", "verify")}
++	// bin/verify does not exist. If RunGate ran it, the outcome would be
++	// could-not-start rather than a measurement.
++	run, err := w.RunGate(context.Background(), flow.GateIntegration)
++	if err != nil {
++		t.Fatalf("RunGate: %v", err)
++	}
++	if run.Outcome != flow.OutcomeMeasured {
++		t.Errorf("outcome = %q, want measured — RunGate did not reach bin/gate (detail: %s)", run.Outcome, run.Detail)
++	}
++}
+diff --git a/pkg/backend/github/worktree.go b/pkg/backend/github/worktree.go
+index 49babaf..8ae6020 100644
+--- a/pkg/backend/github/worktree.go
++++ b/pkg/backend/github/worktree.go
+@@ -134,17 +134,20 @@ func (w *worktree) Verify(ctx context.Context) error {
+ 	return w.run(ctx, "verify", w.b.cfg.VerifyCmd)
+ }
+ 
+-// RunGate runs the named gate in cfg.WorktreeDir. Exit-0 → pass.
++// RunGate runs the named gate in cfg.WorktreeDir and reports what the runner
++// observed. Not exit-0 → pass: the gate's exit code is carried as a diagnostic
++// and decided on by nothing. See runGate.
+ //
+ // Gates are reached through the project's gate entry point by name rather than
+ // each being configured separately. That is what makes the parts addressable:
+ // a step fixing one failing suite asks for that suite, without the project
+ // having had to enumerate every part in advance.
+-func (w *worktree) RunGate(ctx context.Context, name flow.GateName) error {
++func (w *worktree) RunGate(ctx context.Context, name flow.GateName) (flow.GateRun, error) {
+ 	if !name.Valid() {
+-		return fmt.Errorf("worktree.RunGate: %q is not a declared gate name", name)
++		return flow.GateRun{}, fmt.Errorf("worktree.RunGate: %q is not a declared gate name", name)
+ 	}
+-	return w.run(ctx, "gate "+string(name), append(append([]string{}, gateEntryPoint...), string(name)))
++	argv := append(append([]string{}, gateEntryPoint...), string(name), envelopeFlag)
++	return runGate(ctx, w.b.cfg.WorktreeDir, name, argv, w.b.cfg.GateTimeout)
+ }
+ 
+ // gateEntryPoint is how a project exposes its gates. Not configurable: the
+@@ -153,9 +156,11 @@ var gateEntryPoint = []string{"bin/gate"}
+ 
+ // run executes one configured command in the worktree.
+ //
+-// Shared by Verify and Gate because the mechanics are identical — what differs
+-// is what a caller may conclude, which is a property of the two names and not
+-// of how they are spawned.
++// Verify's, and not gates'. The seam it goes through reports (stdout, stderr,
++// error), which is all a COMMAND needs — it either exited 0 or it did not. A
++// runner has to observe more than that: the seam hides a failure to spawn
++// inside the same error as a failure to finish, and discards the ProcessState
++// that says whether a signal ended the process. See runGate.
+ func (w *worktree) run(ctx context.Context, what string, args []string) error {
+ 	stdout, stderr, err := w.b.git.runner(ctx, w.b.cfg.WorktreeDir, args[0], args[1:]...)
+ 	if err != nil {
+diff --git a/pkg/backend/github/worktree_gh_test.go b/pkg/backend/github/worktree_gh_test.go
+index 6dae089..56ee737 100644
+--- a/pkg/backend/github/worktree_gh_test.go
++++ b/pkg/backend/github/worktree_gh_test.go
+@@ -5,8 +5,6 @@ import (
+ 	"slices"
+ 	"strings"
+ 	"testing"
+-
+-	"github.com/promise-language/flow"
+ )
+ 
+ // The pull-request path invokes `gh`, and nothing else in this package does.
+@@ -86,10 +84,14 @@ func TestGhOpenTargetsTheBranchAndBase(t *testing.T) {
+ 	}
+ }
+ 
+-// Verify and RunGate spawn commands, and the whole of what distinguishes them
+-// is which command. Asserting on a mocked result would pass against a version
+-// that ran the wrong one — the same shape of defect as the `gh -C` flag, which
+-// shipped because nothing exercised the command line.
++// Verify spawns the configured command, and the whole of what it does is which
++// command. Asserting on a mocked result would pass against a version that ran
++// the wrong one — the same shape of defect as the `gh -C` flag, which shipped
++// because nothing exercised the command line.
++//
++// Gates do not come through here. This seam reports (stdout, stderr, error),
++// which is all a COMMAND needs and strictly less than a runner has to observe;
++// they are spawned in gate.go and tested against real processes in gate_test.go.
+ func runArgsFor(t *testing.T, cfg Config, invoke func(*worktree) error) (name string, args []string) {
+ 	t.Helper()
+ 	var gotName string
+@@ -106,61 +108,18 @@ func runArgsFor(t *testing.T, cfg Config, invoke func(*worktree) error) (name st
+ 	return gotName, gotArgs
+ }
+ 
+-func TestRunGate_AsksTheEntryPointForTheNamedGate(t *testing.T) {
+-	for _, gate := range []flow.GateName{"integration", "tested", "tested:wasm"} {
+-		t.Run(string(gate), func(t *testing.T) {
+-			w := &worktree{b: &Backend{cfg: Config{WorktreeDir: "/tmp/wt"}}}
+-			var got []string
+-			w.b.git = &gitOps{runner: func(_ context.Context, _, _ string, a ...string) ([]byte, []byte, error) {
+-				got = a
+-				return nil, nil, nil
+-			}}
+-			if err := w.RunGate(context.Background(), gate); err != nil {
+-				t.Fatalf("RunGate(%q): %v", gate, err)
+-			}
+-			// The instance travels whole. Splitting it here would ask for the
+-			// concept and silently run every suite under it.
+-			if len(got) == 0 || got[len(got)-1] != string(gate) {
+-				t.Errorf("gate name reached the entry point as %v, want it to end in %q", got, gate)
+-			}
+-		})
+-	}
+-}
+-
+-// An undeclared concept is refused before anything is spawned. Running it would
+-// hand the project a name it cannot answer, and the failure would look like the
+-// gate refusing rather than the caller asking for something that does not exist.
+-func TestRunGate_RefusesAnUndeclaredNameWithoutSpawning(t *testing.T) {
+-	w := &worktree{b: &Backend{cfg: Config{WorktreeDir: "/tmp/wt"}}}
+-	spawned := false
+-	w.b.git = &gitOps{runner: func(context.Context, string, string, ...string) ([]byte, []byte, error) {
+-		spawned = true
+-		return nil, nil, nil
+-	}}
+-	err := w.RunGate(context.Background(), "lint")
+-	if err == nil || !strings.Contains(err.Error(), "not a declared gate name") {
+-		t.Fatalf("err = %v, want a refusal naming the problem", err)
+-	}
+-	if spawned {
+-		t.Error("spawned a command for an undeclared gate name")
+-	}
+-}
+-
+-// Verify runs the CONFIGURED command; RunGate runs the entry point. Confusing
+-// them would make a decision rest on the command that modifies the tree, which
+-// is the distinction the two methods exist to keep.
+-func TestVerifyAndRunGateRunDifferentCommands(t *testing.T) {
++// Verify runs the CONFIGURED command, whole. The gate side of this pairing —
++// that RunGate does NOT reach it — is TestRunGate_RunsTheEntryPointAndNotThe
++// VerifyCommand, which has to spawn a real process to say so.
++func TestVerifyRunsTheConfiguredCommand(t *testing.T) {
+ 	cfg := Config{WorktreeDir: "/tmp/wt", VerifyCmd: []string{"bin/verify", "--wasm"}}
+ 
+-	_, verifyArgs := runArgsFor(t, cfg, func(w *worktree) error { return w.Verify(context.Background()) })
+-	gateName, _ := runArgsFor(t, cfg, func(w *worktree) error {
+-		return w.RunGate(context.Background(), flow.GateIntegration)
+-	})
++	name, args := runArgsFor(t, cfg, func(w *worktree) error { return w.Verify(context.Background()) })
+ 
+-	if len(verifyArgs) == 0 || verifyArgs[0] != "--wasm" {
+-		t.Errorf("Verify ran with args %v, want the configured VerifyCmd", verifyArgs)
++	if name != "bin/verify" {
++		t.Errorf("Verify ran %q, want the configured VerifyCmd", name)
+ 	}
+-	if gateName == "bin/verify" {
+-		t.Error("RunGate ran the verify command — a decision would rest on something that modifies the tree")
++	if len(args) == 0 || args[0] != "--wasm" {
++		t.Errorf("Verify ran with args %v, want the configured VerifyCmd", args)
+ 	}
+ }
