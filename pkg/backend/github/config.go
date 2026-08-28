@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/promise-language/flow"
 )
 
 // Config is the per-binary configuration the flow binary passes to
@@ -29,6 +31,17 @@ type Config struct {
 	// Token overrides token lookup. When empty, NewBackend tries
 	// `gh auth token` then GITHUB_TOKEN.
 	Token string
+
+	// Guard examines every byte this backend would send to GitHub and may
+	// refuse it. It is REQUIRED to publish anything: with none installed, the
+	// reads still work — so `list`, `status` and `doctor` do — and the first
+	// write refuses with flow.ErrNoDisclosureGuard.
+	//
+	// There is no implementation in this repository, deliberately. A guard
+	// living in the tree it constrains would be rebuildable by the party it
+	// refuses, so it is supplied from outside and injected here, the same way
+	// the backend and the agent are. See docs/disclosure.md.
+	Guard flow.DisclosureGuard
 
 	// VerifyCmd is the project's verify COMMAND, run by Worktree.Verify. It
 	// repairs what has one right answer and then measures, so it may modify the

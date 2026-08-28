@@ -33,6 +33,34 @@ var ErrResetSeedUnsupported = errors.New("flow: backend does not support ResetSe
 // without needing a handler-level sentinel.
 var ErrTransient = errors.New("flow: transient infrastructure failure")
 
+// ErrNoDisclosureGuard — no DisclosureGuard was injected, so nothing is
+// published. docs/disclosure.md: "an interface that defaults to allow is an
+// interface whose whole purpose is optional." Reads are unaffected; the first
+// write refuses.
+//
+// It is the Reason inside an ErrDisclosureRefused, so callers reach it with
+// errors.Is.
+var ErrNoDisclosureGuard = errors.New("flow: no disclosure guard is installed; nothing is published")
+
+// ErrDisclosureRefused — a proposed outward write did not happen. Act names
+// what was refused; Reason is the guard's own answer, carried unchanged so the
+// author can see what was caught.
+//
+// Typed rather than prose because a refusal has to be recognisable without
+// matching on a message, and because it must never be mistaken for
+// ErrTransient: a transient failure is retried, and retrying a refusal would
+// re-propose exactly the text that was refused.
+type ErrDisclosureRefused struct {
+	Act    DisclosureAct
+	Reason error
+}
+
+func (e ErrDisclosureRefused) Error() string {
+	return fmt.Sprintf("disclosure refused (%s): %v", e.Act, e.Reason)
+}
+
+func (e ErrDisclosureRefused) Unwrap() error { return e.Reason }
+
 // ErrSkip — handler decided no progress is possible right now. The SDK marks
 // the invocation skipped (no budget consumed beyond the invocation count).
 type ErrSkip struct {

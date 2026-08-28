@@ -9,9 +9,11 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/google/go-github/v68/github"
+	"github.com/promise-language/flow"
 )
 
 // outward is the boundary between this backend and GitHub.
@@ -38,76 +40,83 @@ type outward struct {
 
 	// guard is consulted before every outward write and may refuse it.
 	//
-	// Nil until #49 installs one. A nil guard allows, which is the behaviour
-	// this package had before the seam existed and not a bypass: nothing
-	// reads configuration to decide, and an installed guard cannot be
-	// switched off — see docs/disclosure.md § "There is no bypass to
-	// configure".
-	guard func(context.Context, disclosure) error
+	// Nil means nothing is published. docs/disclosure.md fails closed, and
+	// inverts the rule for gates over a tree while doing so: "not publishing
+	// something publishable wastes a step; publishing something unpublishable
+	// cannot be undone". An unfilled seam is the case that rule is for, so a
+	// nil guard is not a bypass to configure — it is the state in which this
+	// backend writes nothing at all.
+	guard flow.DisclosureGuard
 }
 
 // newOutward builds the seam and the client it owns. Construction lives here
 // too: a file that can build a client is a file that can write with one, so
 // NewBackend hands over a token rather than a client.
-func newOutward(token string, git *gitOps, owner, repo string) *outward {
+//
+// guard may be nil, and construction is where a missing one is tolerated: the
+// reads below still work, so `list`, `status` and `doctor` do. The first write
+// refuses.
+func newOutward(token string, git *gitOps, owner, repo string, guard flow.DisclosureGuard) *outward {
 	return &outward{
 		client: github.NewClient(nil).WithAuthToken(token),
 		git:    git,
 		owner:  owner,
 		repo:   repo,
+		guard:  guard,
 	}
 }
 
 func (o *outward) repoFullName() string { return o.owner + "/" + o.repo }
 
-// act names what is being published. The set is closed: a write whose act is
-// not named here does not exist, and adding one means adding it here.
-type act string
-
-const (
-	actArtifactComment act = "artifact-comment"
-	actStateComment    act = "state-comment"
-	actParkRecord      act = "park-record"
-	actQuestion        act = "question"
-	actLabel           act = "label"
-	actPullRequest     act = "pull-request"
-	actMerge           act = "pull-request-merge"
-	actPush            act = "push"
-
-	// actAssignee and actArtifactFile are writes this backend performs that
-	// docs/disclosure.md's surface table — which declares itself closed —
-	// does not list. The gap predates the seam; making the writes explicit
-	// only made it visible. These names are the interim vocabulary, and they
-	// should be renamed after the document's rows once #50 settles what those
-	// rows are.
-	actAssignee     act = "assignee"
-	actArtifactFile act = "artifact-file"
-)
-
-// disclosure is one proposed outward write: the final bytes, plus enough
-// provenance to say where they were going.
-//
-// Final is the load-bearing word. A guard examining a template, or an artifact
-// before assembly, reports a safety it did not establish — so text holds the
-// strings as they will be sent, after every truncation, notice and marker this
-// package appends.
-type disclosure struct {
-	act   act
-	owner string
-	repo  string
-	issue int      // the issue being written to, or 0 when not issue-scoped
-	ref   string   // the git ref or branch being written to, or ""
-	text  []string // every string this write publishes, as it will be sent
+// itemOf is the disclosure's item id for a write scoped to an issue. Empty
+// when the write is not issue-scoped, which is what flow.Disclosure.Item means.
+func itemOf(issue int) string {
+	if issue == 0 {
+		return ""
+	}
+	return strconv.Itoa(issue)
 }
+
+// errUndeclaredAct and errUnstatableOrigin are the two refusals the seam issues
+// on its own, before any guard is consulted. Both are defects in a call site
+// rather than judgements about text, and both are refusals rather than errors
+// because docs/disclosure.md says so: "an origin that cannot be stated is a
+// refusal. Not an error and not a default-allow".
+var (
+	errUndeclaredAct    = errors.New("act is not in the declared vocabulary")
+	errUnstatableOrigin = errors.New("a published string states no valid origin")
+)
 
 // publish is the funnel. Every method on outward that writes wraps its call in
 // it; nothing else in this package reaches GitHub.
-func (o *outward) publish(ctx context.Context, d disclosure, do func(context.Context) error) error {
-	d.owner, d.repo = o.owner, o.repo
-	if o.guard != nil {
-		if err := o.guard(ctx, d); err != nil {
-			return fmt.Errorf("disclosure refused (%s): %w", d.act, err)
+//
+// It refuses before `do` runs, never after — the whole value of a guard is that
+// the act has not happened yet.
+//
+// A refusal fails the backend call, which fails the step, which parks the item,
+// so a person sees what was found. docs/disclosure.md also wants the text
+// returned to the agent that wrote it for revision, which is a step-handler
+// change rather than a seam one: #52.
+func (o *outward) publish(ctx context.Context, d flow.Disclosure, do func(context.Context) error) error {
+	d.Owner, d.Repo = o.owner, o.repo
+	if !d.Act.Valid() {
+		return flow.ErrDisclosureRefused{Act: d.Act, Reason: errUndeclaredAct}
+	}
+	for _, t := range d.Text {
+		if !t.Origin.Valid() {
+			return flow.ErrDisclosureRefused{
+				Act:    d.Act,
+				Reason: fmt.Errorf("%w: %q", errUnstatableOrigin, t.Origin),
+			}
 		}
+	}
+	if o.guard == nil {
+		return flow.ErrDisclosureRefused{Act: d.Act, Reason: flow.ErrNoDisclosureGuard}
+	}
+	if err := o.guard.Examine(ctx, d); err != nil {
+		// The guard's answer is the reason, carried unchanged: a refusal that
+		// lost what it found is one the author cannot act on.
+		return flow.ErrDisclosureRefused{Act: d.Act, Reason: err}
 	}
 	return do(ctx)
 }
@@ -116,12 +125,26 @@ func (o *outward) publish(ctx context.Context, d disclosure, do func(context.Con
 // Writes. Each one goes through publish.
 // ---------------------------------------------------------------------------
 
+// stated turns a slice of strings this package built into disclosure parts,
+// all standing behind the same party. A fresh slice, always: what the guard is
+// shown must not be the slice the API call carries, or a guard could rewrite
+// the bytes after inspecting them.
+func stated(origin flow.Origin, bodies ...string) []flow.Text {
+	out := make([]flow.Text, 0, len(bodies))
+	for _, b := range bodies {
+		out = append(out, flow.Text{Origin: origin, Body: b})
+	}
+	return out
+}
+
 // CreateComment posts a comment on an issue. The act says which of the
-// backend's comment kinds this is; the body is the comment as it will appear.
-func (o *outward) CreateComment(ctx context.Context, a act, issue int, body string) (*github.IssueComment, error) {
+// backend's comment kinds this is; the body is the comment as it will appear,
+// carrying the origin its composer stated.
+func (o *outward) CreateComment(ctx context.Context, a flow.DisclosureAct, issue int, body flow.Text) (*github.IssueComment, error) {
 	var created *github.IssueComment
-	err := o.publish(ctx, disclosure{act: a, issue: issue, text: []string{body}}, func(ctx context.Context) error {
-		c, _, err := o.client.Issues.CreateComment(ctx, o.owner, o.repo, issue, &github.IssueComment{Body: &body})
+	d := flow.Disclosure{Act: a, Item: itemOf(issue), Text: []flow.Text{body}}
+	err := o.publish(ctx, d, func(ctx context.Context) error {
+		c, _, err := o.client.Issues.CreateComment(ctx, o.owner, o.repo, issue, &github.IssueComment{Body: &body.Body})
 		created = c
 		return err
 	})
@@ -132,9 +155,10 @@ func (o *outward) CreateComment(ctx context.Context, a act, issue int, body stri
 }
 
 // EditComment rewrites an existing comment in place.
-func (o *outward) EditComment(ctx context.Context, a act, issue int, commentID int64, body string) error {
-	return o.publish(ctx, disclosure{act: a, issue: issue, text: []string{body}}, func(ctx context.Context) error {
-		_, _, err := o.client.Issues.EditComment(ctx, o.owner, o.repo, commentID, &github.IssueComment{Body: &body})
+func (o *outward) EditComment(ctx context.Context, a flow.DisclosureAct, issue int, commentID int64, body flow.Text) error {
+	d := flow.Disclosure{Act: a, Item: itemOf(issue), Text: []flow.Text{body}}
+	return o.publish(ctx, d, func(ctx context.Context) error {
+		_, _, err := o.client.Issues.EditComment(ctx, o.owner, o.repo, commentID, &github.IssueComment{Body: &body.Body})
 		return err
 	})
 }
@@ -143,8 +167,12 @@ func (o *outward) EditComment(ctx context.Context, a act, issue int, commentID i
 // exempt and is not: the flow CONSTRUCTS them — flow:owner:<login>,
 // flow:budget-exhausted:<step-id> — so a name is text the flow chose to
 // publish.
+//
+// The origin is fixed here rather than taken from the caller because the whole
+// input class is the flow's: a name is a closed suffix vocabulary joined to
+// identifiers the SDK was configured with, and no agent prose reaches one.
 func (o *outward) AddLabels(ctx context.Context, issue int, names []string) error {
-	d := disclosure{act: actLabel, issue: issue, text: append([]string(nil), names...)}
+	d := flow.Disclosure{Act: flow.ActLabel, Item: itemOf(issue), Text: stated(flow.OriginFlow, names...)}
 	return o.publish(ctx, d, func(ctx context.Context) error {
 		_, _, err := o.client.Issues.AddLabelsToIssue(ctx, o.owner, o.repo, issue, names)
 		return err
@@ -153,15 +181,18 @@ func (o *outward) AddLabels(ctx context.Context, issue int, names []string) erro
 
 // RemoveLabel drops one label from an issue.
 func (o *outward) RemoveLabel(ctx context.Context, issue int, name string) error {
-	d := disclosure{act: actLabel, issue: issue, text: []string{name}}
+	d := flow.Disclosure{Act: flow.ActLabel, Item: itemOf(issue), Text: stated(flow.OriginFlow, name)}
 	return o.publish(ctx, d, func(ctx context.Context) error {
 		_, err := o.client.Issues.RemoveLabelForIssue(ctx, o.owner, o.repo, issue, name)
 		return err
 	})
 }
 
+// AddAssignees assigns logins to an issue. A login is a person's, typed by the
+// person configuring the flow or read back from their own `gh` session — so
+// the origin is fixed to operator for the same reason AddLabels fixes flow.
 func (o *outward) AddAssignees(ctx context.Context, issue int, logins []string) error {
-	d := disclosure{act: actAssignee, issue: issue, text: append([]string(nil), logins...)}
+	d := flow.Disclosure{Act: flow.ActAssignee, Item: itemOf(issue), Text: stated(flow.OriginOperator, logins...)}
 	return o.publish(ctx, d, func(ctx context.Context) error {
 		_, _, err := o.client.Issues.AddAssignees(ctx, o.owner, o.repo, issue, logins)
 		return err
@@ -169,7 +200,7 @@ func (o *outward) AddAssignees(ctx context.Context, issue int, logins []string) 
 }
 
 func (o *outward) RemoveAssignees(ctx context.Context, issue int, logins []string) error {
-	d := disclosure{act: actAssignee, issue: issue, text: append([]string(nil), logins...)}
+	d := flow.Disclosure{Act: flow.ActAssignee, Item: itemOf(issue), Text: stated(flow.OriginOperator, logins...)}
 	return o.publish(ctx, d, func(ctx context.Context) error {
 		_, _, err := o.client.Issues.RemoveAssignees(ctx, o.owner, o.repo, issue, logins)
 		return err
@@ -178,11 +209,16 @@ func (o *outward) RemoveAssignees(ctx context.Context, issue int, logins []strin
 
 // PutFile commits content to path on the artifacts branch. A non-empty
 // opts.SHA updates the file already there; an empty one creates it.
+//
+// The path is stated `agent`, which is the case docs/disclosure.md uses to
+// define the rule: artifactFilePath templates a filename the agent chose in
+// flow.FileBody.Name, so the SDK stands behind its frame and nobody stands
+// behind the whole string. The commit message interpolates the same filename.
 func (o *outward) PutFile(ctx context.Context, path string, opts *github.RepositoryContentFileOptions) error {
-	d := disclosure{
-		act:  actArtifactFile,
-		ref:  opts.GetBranch(),
-		text: []string{path, opts.GetMessage(), string(opts.Content)},
+	d := flow.Disclosure{
+		Act:  flow.ActArtifactFile,
+		Ref:  opts.GetBranch(),
+		Text: stated(flow.OriginAgent, path, opts.GetMessage(), string(opts.Content)),
 	}
 	return o.publish(ctx, d, func(ctx context.Context) error {
 		var err error
@@ -197,7 +233,7 @@ func (o *outward) PutFile(ctx context.Context, path string, opts *github.Reposit
 
 func (o *outward) CreateBlob(ctx context.Context, blob *github.Blob) (*github.Blob, error) {
 	var created *github.Blob
-	d := disclosure{act: actArtifactFile, text: []string{blob.GetContent()}}
+	d := flow.Disclosure{Act: flow.ActArtifactFile, Text: stated(flow.OriginAgent, blob.GetContent())}
 	err := o.publish(ctx, d, func(ctx context.Context) error {
 		b, _, err := o.client.Git.CreateBlob(ctx, o.owner, o.repo, blob)
 		created = b
@@ -215,7 +251,7 @@ func (o *outward) CreateTree(ctx context.Context, baseTree string, entries []*gi
 		paths = append(paths, e.GetPath())
 	}
 	var created *github.Tree
-	d := disclosure{act: actArtifactFile, text: paths}
+	d := flow.Disclosure{Act: flow.ActArtifactFile, Text: stated(flow.OriginAgent, paths...)}
 	err := o.publish(ctx, d, func(ctx context.Context) error {
 		tr, _, err := o.client.Git.CreateTree(ctx, o.owner, o.repo, baseTree, entries)
 		created = tr
@@ -229,7 +265,7 @@ func (o *outward) CreateTree(ctx context.Context, baseTree string, entries []*gi
 
 func (o *outward) CreateCommit(ctx context.Context, commit *github.Commit) (*github.Commit, error) {
 	var created *github.Commit
-	d := disclosure{act: actArtifactFile, text: []string{commit.GetMessage()}}
+	d := flow.Disclosure{Act: flow.ActArtifactFile, Text: stated(flow.OriginAgent, commit.GetMessage())}
 	err := o.publish(ctx, d, func(ctx context.Context) error {
 		c, _, err := o.client.Git.CreateCommit(ctx, o.owner, o.repo, commit, nil)
 		created = c
@@ -241,8 +277,11 @@ func (o *outward) CreateCommit(ctx context.Context, commit *github.Commit) (*git
 	return created, nil
 }
 
+// CreateRef creates the artifacts branch. Its name is a constant this package
+// holds — refs/heads/flow-artifacts — so the flow stands behind the whole
+// string, which is the narrow case where an origin other than agent is honest.
 func (o *outward) CreateRef(ctx context.Context, ref *github.Reference) error {
-	d := disclosure{act: actArtifactFile, ref: ref.GetRef(), text: []string{ref.GetRef()}}
+	d := flow.Disclosure{Act: flow.ActArtifactFile, Ref: ref.GetRef(), Text: stated(flow.OriginFlow, ref.GetRef())}
 	return o.publish(ctx, d, func(ctx context.Context) error {
 		_, _, err := o.client.Git.CreateRef(ctx, o.owner, o.repo, ref)
 		return err
@@ -259,7 +298,10 @@ func (o *outward) CreateRef(ctx context.Context, ref *github.Reference) error {
 // on the process working directory entirely, which the runner does not set.
 func (o *outward) OpenPullRequest(ctx context.Context, base, head, title, body string) (string, error) {
 	var prURL string
-	d := disclosure{act: actPullRequest, ref: head, text: []string{title, body, base, head}}
+	d := flow.Disclosure{Act: flow.ActPullRequest, Ref: head}
+	// Title and body are the agent's; base and head are branch names the flow
+	// chose, so they are the two parts of this write that anyone vouches for.
+	d.Text = append(stated(flow.OriginAgent, title, body), stated(flow.OriginFlow, base, head)...)
 	err := o.publish(ctx, d, func(ctx context.Context) error {
 		args := []string{"--repo", o.repoFullName(), "pr", "create",
 			"--base", base, "--title", title, "--body", body, "--head", head}
@@ -278,8 +320,11 @@ func (o *outward) OpenPullRequest(ctx context.Context, base, head, title, body s
 }
 
 // MergePullRequest queues an auto-squash-merge of the PR at prURL.
+//
+// The URL is stated `item`: GitHub issued it, and it is already published
+// there.
 func (o *outward) MergePullRequest(ctx context.Context, prURL string) error {
-	d := disclosure{act: actMerge, text: []string{prURL}}
+	d := flow.Disclosure{Act: flow.ActMerge, Text: stated(flow.OriginItem, prURL)}
 	return o.publish(ctx, d, func(ctx context.Context) error {
 		// --repo, not -C: see OpenPullRequest. gh has no -C flag.
 		args := []string{"--repo", o.repoFullName(), "pr", "merge", prURL, "--squash", "--auto"}
@@ -307,11 +352,15 @@ func (o *outward) Push(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	text := make([]string, 0, len(messages)+2)
-	text = append(text, branch)
-	text = append(text, messages...)
-	text = append(text, patch)
-	return o.publish(ctx, disclosure{act: actPush, ref: branch, text: text}, func(ctx context.Context) error {
+	// Three origins in one write, which is why a disclosure states them per
+	// string: the branch name the flow constructed, commit messages an agent
+	// wrote, and the diff as it stands in the tree under resolution. Any single
+	// origin for the whole push would be false about two thirds of it.
+	text := stated(flow.OriginFlow, branch)
+	text = append(text, stated(flow.OriginAgent, messages...)...)
+	text = append(text, stated(flow.OriginWorktree, patch)...)
+	d := flow.Disclosure{Act: flow.ActPush, Ref: branch, Text: text}
+	return o.publish(ctx, d, func(ctx context.Context) error {
 		_, stderr, err := o.git.run(ctx, "push", "-u", "origin", branch)
 		if err != nil {
 			return fmt.Errorf("git push -u origin %s: %w (%s)", branch, err, string(stderr))

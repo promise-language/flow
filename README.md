@@ -156,6 +156,9 @@ func main() {
     backend, err := ghbackend.NewBackend(ghbackend.Config{
         BinaryName: "issue",
         VerifyCmd:  []string{"bash", "bin/verify.sh"}, // your project's gate
+        // Guard is what lets this publish anything at all. With none, reads
+        // work and the first write refuses — see docs/disclosure.md.
+        Guard: nil,
     })
     if err != nil {
         panic(err)
@@ -182,8 +185,9 @@ func main() {
 }
 ```
 
-Build it (`go build -o issue .`), then `./issue doctor`, `./issue claim <id>`,
-`./issue run-step`.
+Build it (`go build -o issue .`), then `./issue doctor` and `./issue list`.
+`./issue claim <id>` is the first thing that writes, so it — and every step
+after it — refuses until a guard is injected above.
 
 ### 2. The `cli.App` you assemble
 

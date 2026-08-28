@@ -42,6 +42,13 @@ func main() {
 		BinaryName:  "issue",
 		VerifyCmd:   verifyCmd,
 		DefaultType: "task",
+		// No guard, so this binary publishes NOTHING: `list`, `status` and
+		// `doctor` work, and the first write refuses. That is the fail-closed
+		// rule in docs/disclosure.md working, not a gap to patch here — the
+		// SDK ships no implementation on purpose, because a guard living in
+		// the tree it constrains is rebuildable by the party it refuses. A
+		// real binary is handed one from wherever it is supplied.
+		Guard: nil,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "issue: backend init:", err)

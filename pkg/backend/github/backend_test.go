@@ -523,7 +523,11 @@ func newMockedBackend(t *testing.T, mock *ghMock, srv *httptest.Server) *Backend
 			LabelPrefix:     "flow:",
 			MaxCommentBytes: 60 * 1024,
 		},
-		out:               newOutward("fake-token", git, mock.owner, mock.repo),
+		// An allowing guard, because with none installed this backend
+		// publishes nothing and every test below would fail for that reason
+		// rather than its own. TestNoGuardPublishesNothing is where the
+		// absent-guard case is asserted.
+		out:               newOutward("fake-token", git, mock.owner, mock.repo, allowing()),
 		git:               git,
 		labels:            newLabels("flow:"),
 		stateCommentCache: map[int]int64{},

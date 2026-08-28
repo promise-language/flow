@@ -66,8 +66,11 @@ func NewBackend(cfg Config) (*Backend, error) {
 	}
 
 	return &Backend{
-		cfg:               cfg,
-		out:               newOutward(token, git, cfg.Owner, cfg.Repo),
+		cfg: cfg,
+		// A missing cfg.Guard is not refused here: construction is not a
+		// publication, and refusing it would take `list`, `status` and
+		// `doctor` — all reads — down with it. The first write refuses.
+		out:               newOutward(token, git, cfg.Owner, cfg.Repo, cfg.Guard),
 		git:               git,
 		labels:            newLabels(cfg.LabelPrefix),
 		stateCommentCache: map[int]int64{},
@@ -403,12 +406,19 @@ func quote(s string) string { return strings.ReplaceAll(s, "\"", "\\\"") }
 
 // updateStateComment renders the new state body and PATCHes the cached
 // state comment. Returns the new body so callers can keep a local copy.
+//
+// The rendered body is stated `agent`, not `flow`. The frame is the SDK's
+// YAML, but it interpolates a park reason and resolved-by values that came
+// from a handler or an agent turn, and nobody vouches for the assembled
+// string. Splitting it is not available: what is published is the whole
+// comment.
 func (b *Backend) updateStateComment(ctx context.Context, issueNum int, commentID int64, doc stateDoc, owner string) (string, error) {
 	body, err := renderStateComment(owner, doc)
 	if err != nil {
 		return "", err
 	}
-	if err := b.out.EditComment(ctx, actStateComment, issueNum, commentID, body); err != nil {
+	if err := b.out.EditComment(ctx, flow.ActStateComment, issueNum, commentID,
+		flow.Text{Origin: flow.OriginAgent, Body: body}); err != nil {
 		return "", fmt.Errorf("patch state comment %d: %w", commentID, err)
 	}
 	return body, nil
@@ -420,7 +430,8 @@ func (b *Backend) postStateComment(ctx context.Context, issueNum int, doc stateD
 	if err != nil {
 		return 0, "", err
 	}
-	comment, err := b.out.CreateComment(ctx, actStateComment, issueNum, body)
+	comment, err := b.out.CreateComment(ctx, flow.ActStateComment, issueNum,
+		flow.Text{Origin: flow.OriginAgent, Body: body})
 	if err != nil {
 		return 0, "", fmt.Errorf("post state comment: %w", err)
 	}
