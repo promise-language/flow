@@ -33,7 +33,7 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 	}
 	if len(cfg.VerifyCmd) == 0 {
 		return cli.App{}, fmt.Errorf("issue: Config.VerifyCmd is required — " +
-			"the gate is what makes the implement step land working code")
+			"it is what a producing step works with, and what the prompts tell the agent to satisfy")
 	}
 
 	// Role decides which step set is registered, and cli.App's flow list is

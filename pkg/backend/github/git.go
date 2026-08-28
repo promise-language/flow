@@ -13,16 +13,21 @@ import (
 // substitute the runner via exec.LookPath / PATH manipulation, or by
 // constructing one with a custom runner.
 type gitOps struct {
-	dir    string
-	runner func(ctx context.Context, name string, args ...string) ([]byte, []byte, error)
+	dir string
+	// runner spawns one command. dir is the working directory, or "" to
+	// inherit the process's — git and gh are told where to work by flag
+	// (-C, --repo), while the project's own commands are run IN the worktree
+	// and have nowhere else to learn it from.
+	runner func(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error)
 }
 
 func newGitOps(dir string) *gitOps {
 	return &gitOps{dir: dir, runner: defaultGitRunner}
 }
 
-func defaultGitRunner(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
+func defaultGitRunner(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
 	stdout, err := cmd.Output()
 	var stderr []byte
 	if ee, ok := err.(*exec.ExitError); ok {
@@ -34,7 +39,7 @@ func defaultGitRunner(ctx context.Context, name string, args ...string) ([]byte,
 // run invokes `git <args>` in g.dir and returns stdout, captured stderr, err.
 func (g *gitOps) run(ctx context.Context, args ...string) ([]byte, []byte, error) {
 	full := append([]string{"-C", g.dir}, args...)
-	return g.runner(ctx, "git", full...)
+	return g.runner(ctx, "", "git", full...)
 }
 
 // OriginOwnerRepo runs `git remote get-url origin` and parses out the

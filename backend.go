@@ -346,6 +346,22 @@ type Worktree interface {
 	Stage(ctx context.Context) error
 
 	Commit(ctx context.Context, msg string) error
+	// Push publishes the branch.
+	//
+	// It MAY WAIT. Landing is rebase → measure the merge result → push, and a
+	// push that lands first invalidates every merge result measured against the
+	// old mainline. With two workers landing at once and nothing serializing
+	// them, each one's push sends the other back to rebase and measure again,
+	// indefinitely — a livelock in which the work is sound, the gate passes
+	// every time, and nothing ever lands.
+	//
+	// So a backend serializes landing across everything sharing the mainline,
+	// which is a wider scope than the host-level serialization heavy gates
+	// need: one protects a machine's resources, the other protects a loop's
+	// ability to finish. Both are the backend's, because only it knows what
+	// shares a machine and what shares a mainline.
+	//
+	// Waiting is not failing here either.
 	Push(ctx context.Context) error
 
 	// RevParse resolves a revision to a commit SHA.
@@ -367,9 +383,53 @@ type Worktree interface {
 	// ...", long past where the real cause could have been named.
 	RevParse(ctx context.Context, rev string) (string, error)
 
-	// Validate runs the project's verify command in the worktree. Returns
-	// nil iff verify exits 0.
-	Validate(ctx context.Context) error
+	// Verify runs the project's verify COMMAND in the worktree. Returns nil iff
+	// it exits 0.
+	//
+	// It repairs what has one right answer — formatting and the like — and then
+	// measures, so it MAY MODIFY THE WORKTREE. A caller re-reads worktree state
+	// afterwards rather than assuming the tree is unchanged.
+	//
+	// A producing step works with this. No decision rests on it: it changed its
+	// own subject on the way to an answer, so "it passed" is a claim about a
+	// tree that no longer exists.
+	Verify(ctx context.Context) error
+
+	// RunGate runs the named GATE in the worktree. Returns nil iff it passes.
+	//
+	// A gate MODIFIES NOTHING it measures, which is what makes its answer
+	// reproducible by whoever runs it — a reviewer, a later bisect, a rebuild
+	// elsewhere. That is the entire reason a decision may rest on a gate and
+	// not on Verify.
+	//
+	// "Modifies nothing" covers AFTER the measurement as well as during it. An
+	// implementation that measures faithfully and then tidies the worktree is
+	// not a gate: a producing step asks a gate mid-work, and cleaning up behind
+	// the answer would discard the very work the step is in the middle of.
+	//
+	// The verdict run takes no parameters. A gate may accept options for other
+	// purposes, but the pass/fail question is asked one way and one way only,
+	// or two callers asking "did this pass" can get different answers and
+	// neither is wrong.
+	//
+	// Naming the gate rather than configuring a command is what makes the parts
+	// addressable: a step fixing one failing suite runs that suite, instead of
+	// paying for the whole set to learn about the part it is working on.
+	// The concept is closed; the instance after a colon is the project's, so
+	// "tested:wasm" and "tested:go" are both askable and both obviously tests.
+	// See GateName.
+	//
+	// A gate MAY WAIT before it runs. Some are too heavy to run beside another
+	// — a full suite saturating a machine measures its own contention as much
+	// as the code — so the backend serializes what has to be serialized. Which
+	// gates those are is known to whoever runs them on real hardware, not here.
+	//
+	// Waiting is not failing, and the difference must survive. A gate that
+	// queued and then ran is exactly as authoritative as one that ran at once;
+	// a gate that gave up waiting has not measured anything, and reporting that
+	// as a refusal marks a sound change unsound and sends someone to look for a
+	// defect that is not there.
+	RunGate(ctx context.Context, name GateName) error
 
 	// CapturePatch produces a unified diff of the current working tree.
 	// Handlers call it to attach work they have already verified; the

@@ -21,7 +21,8 @@ type Backend struct {
 	items           map[string]*itemRecord // keyed by item.ID
 	signals         []flow.SignalDef
 	clock           func() time.Time
-	verifyOK        bool // controls Worktree.Validate result
+	verifyOK        bool // controls Worktree.Verify result
+	gateOK          bool // controls Worktree.RunGate result
 	supportsRequest bool // controls whether Worktree.Request() returns non-nil
 	// supportedArtifacts is the backend's canonical artifact schema returned by
 	// SupportedArtifacts. nil (the default) means "use the standard vocabulary"
@@ -70,6 +71,7 @@ func New(signals ...flow.SignalDef) *Backend {
 		signals:         signals,
 		clock:           time.Now,
 		verifyOK:        true,
+		gateOK:          true,
 		supportsRequest: true,
 	}
 }
@@ -77,8 +79,13 @@ func New(signals ...flow.SignalDef) *Backend {
 // SetClock overrides the backend's time source. For deterministic tests.
 func (b *Backend) SetClock(c func() time.Time) { b.clock = c }
 
-// SetVerifyOK controls what Worktree.Validate returns. Default true.
+// SetVerifyOK controls what Worktree.Verify returns. Default true.
 func (b *Backend) SetVerifyOK(ok bool) { b.verifyOK = ok }
+
+// SetGateOK controls whether every gate passes. Separate from SetVerifyOK
+// because verify and gates are different things: a tree can be repairable by
+// verify and still fail the gate that decides.
+func (b *Backend) SetGateOK(ok bool) { b.gateOK = ok }
 
 // SetSupportsRequest controls whether Worktree.Request() returns a non-nil
 // RequestManager. Default true; set to false to exercise the "backend
@@ -508,6 +515,7 @@ func (b *Backend) Worktree(ctx context.Context, claim flow.Claim) (flow.Worktree
 		b.worktrees[id] = wt
 	}
 	wt.verifyOK = b.verifyOK
+	wt.gateOK = b.gateOK
 	wt.supportsRequest = b.supportsRequest
 	wt.nothingToCommit = b.nothingToCommit
 	return wt, nil
@@ -541,6 +549,7 @@ type fakeWorktree struct {
 	// branches records which branches exist, so Branch can report `created`
 	// truthfully across invocations.
 	branches        map[string]bool
+	gateOK          bool
 	verifyOK        bool
 	supportsRequest bool
 	branch          string
@@ -592,9 +601,21 @@ func (w *fakeWorktree) RevParse(ctx context.Context, rev string) (string, error)
 	}
 	return fmt.Sprintf("sha-%d", w.commits), nil
 }
-func (w *fakeWorktree) Validate(ctx context.Context) error {
+func (w *fakeWorktree) Verify(ctx context.Context) error {
 	if !w.verifyOK {
-		return errors.New("fake: validate failed")
+		return errors.New("fake: verify failed")
+	}
+	return nil
+}
+
+// RunGate answers for every gate name. The fake models the protocol, not a
+// project's gate set, so it does not pretend to know which names exist.
+func (w *fakeWorktree) RunGate(ctx context.Context, name flow.GateName) error {
+	if !name.Valid() {
+		return fmt.Errorf("fake: %q is not a declared gate name", name)
+	}
+	if !w.gateOK {
+		return fmt.Errorf("fake: gate %q failed", name)
 	}
 	return nil
 }

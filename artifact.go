@@ -2,6 +2,7 @@ package flow
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -143,4 +144,99 @@ type ArtifactRecord struct {
 	PromptsThisInvocation int
 	CostUSDSpent          float64
 	LastRunAt             time.Time
+}
+
+// GateName identifies a gate, as a declared concept and an optional instance:
+// "tested", or "tested:wasm".
+//
+// The CONCEPT is closed. The names below are the whole vocabulary, and a
+// project must not call one of them something else or use one for something it
+// does not name — a "formatted" that quietly reformats is worse than no gate,
+// because a decision gets made on its answer and the answer describes a state
+// that no longer exists.
+//
+// The INSTANCE is the project's. One concept commonly has several separately
+// runnable gates under it: a project with a host suite, a wasm suite and a
+// stress suite has three things that are all obviously tests and all worth
+// asking for individually. Collapsing them into one name would destroy the
+// property naming exists to provide — that a step fixing one failing suite
+// asks for that suite instead of paying for the whole set — and it would do so
+// on exactly the projects whose suites are most expensive.
+//
+// So the vocabulary is closed where it must be understood by everyone, and
+// open where only the project knows how its work divides.
+//
+// These are the names the FLOW asks for, not the names a project may have. A
+// project's gate set is usually larger — a size measurement watched for a
+// trend, a release invariant checked on a schedule — and those answer questions
+// about the project over time rather than about a change about to land. A gate
+// this vocabulary does not name is not a gap in it.
+//
+// Names describe the concern, not the tool that historically served it: `lint`
+// is a C utility from 1978 and `vet` is one language's spelling of the same
+// idea, and a reader who knows neither learns nothing from either.
+type GateName string
+
+const (
+	// GateFormatted — it is written the agreed way.
+	GateFormatted GateName = "formatted"
+	// GateBuilds — it compiles.
+	GateBuilds GateName = "builds"
+	// GateChecked — it compiles and is still probably wrong: an unused result,
+	// a shadowed name, a conversion that cannot be meant.
+	GateChecked GateName = "checked"
+	// GateTested — it behaves correctly when run. Usually several instances.
+	GateTested GateName = "tested"
+	// GateCovered — enough of it is exercised. Produces a measurement compared
+	// against a floor.
+	GateCovered GateName = "covered"
+	// GateIntegration — will the mainline still be green. The composition every
+	// decision to propose or to land rests on.
+	GateIntegration GateName = "integration"
+)
+
+// AllGateConcepts returns every declared concept, in declaration order.
+// Downstream consumers enumerate it rather than mirroring the set, which is how
+// two copies of one vocabulary drift.
+func AllGateConcepts() []GateName {
+	return []GateName{
+		GateFormatted, GateBuilds, GateChecked, GateTested, GateCovered, GateIntegration,
+	}
+}
+
+// Concept returns the declared part, without any instance.
+func (n GateName) Concept() GateName {
+	if i := strings.IndexByte(string(n), ':'); i >= 0 {
+		return GateName(n[:i])
+	}
+	return n
+}
+
+// Instance returns the project-supplied part, or "" when the name has none.
+func (n GateName) Instance() string {
+	if i := strings.IndexByte(string(n), ':'); i >= 0 {
+		return string(n[i+1:])
+	}
+	return ""
+}
+
+// Valid reports whether the concept is declared. The instance is the project's
+// and is not checked against anything: only the project knows how its work
+// divides, which is the entire reason instances exist.
+//
+// A trailing colon is NOT valid. "tested:" promises an instance and names
+// none, which is a typo rather than a request for the whole concept — and
+// silently treating it as "tested" would run every suite for someone who meant
+// to run one.
+func (n GateName) Valid() bool {
+	if strings.HasSuffix(string(n), ":") {
+		return false
+	}
+	c := n.Concept()
+	for _, k := range AllGateConcepts() {
+		if c == k {
+			return true
+		}
+	}
+	return false
 }

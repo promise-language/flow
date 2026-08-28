@@ -79,7 +79,7 @@ Re-running an item with an unanswered question consumes no budget and runs no ag
 
 A **gate** measures something and may refuse it. Every gate holds four properties, and they are what make one worth trusting:
 
-- **It measures; it never modifies what it measures.** A gate may write elsewhere — a build cache, a report — but the subject it reports on is exactly as it found it.
+- **It measures; it never modifies what it measures — including afterwards.** A gate may write elsewhere, a build cache or a report, but the subject it reports on is exactly as it found it and exactly as it leaves it. Measuring faithfully and then tidying up is not a gate: a producing step asks one mid-work, and cleaning behind the answer discards the work the step is in the middle of.
 - **Its verdict is pass or refuse.** There is no third answer and no partial one.
 - **It may also produce a measurement.** Coverage, size, duration — a number the verdict was derived from, by comparison against a baseline or a threshold. The verdict stays binary; what varies is whether the gate had to measure something to reach it.
 - **A refusal carries a reason a person can check.** A refusal that cannot be confirmed or overturned is indistinguishable from the gate having given up.

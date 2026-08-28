@@ -115,7 +115,7 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 		}
 		session = resp.SessionID
 
-		verr := wt.Validate(ctx.Context())
+		verr := wt.Verify(ctx.Context())
 		if verr == nil {
 			break
 		}
@@ -313,7 +313,7 @@ func (b *builder) stepVerifyImpl(ctx flow.StepCtx) error {
 	if err := b.onClaimBranch(ctx); err != nil {
 		return err
 	}
-	if verr := wt.Validate(ctx.Context()); verr != nil {
+	if verr := wt.Verify(ctx.Context()); verr != nil {
 		// Same reasoning as the implement loop: a ParkBlocked nothing refuses
 		// would just be re-dispatched next cycle.
 		return fmt.Errorf("verify failed on the branch as it now stands: %s", verifyTail(verr))

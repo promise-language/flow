@@ -158,9 +158,14 @@ type Config struct {
 	// BinaryName is the flow binary's name, used for label scoping.
 	BinaryName string
 
-	// VerifyCmd is the project's verify command. It reaches prompt bodies as
-	// PromptContext.VerifyCmd, so a template can name the command the agent is
-	// expected to make pass.
+	// VerifyCmd is the project's verify COMMAND: it repairs what has one right
+	// answer — formatting and the like — and then measures. It reaches prompt
+	// bodies as PromptContext.VerifyCmd, so a template can name the command the
+	// agent is expected to make pass.
+	//
+	// A producing step works with this. Nothing decides on it: it modifies the
+	// tree on its way to an answer, so "it passed" is a claim about a state
+	// that did not exist when the question was asked.
 	VerifyCmd []string
 
 	// DefaultType maps items with no explicit type onto one. It is a FALLBACK

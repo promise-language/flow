@@ -29,7 +29,9 @@ type Config struct {
 	// `gh auth token` then GITHUB_TOKEN.
 	Token string
 
-	// VerifyCmd is the project's verify command, run by Worktree.Validate.
+	// VerifyCmd is the project's verify COMMAND, run by Worktree.Verify. It
+	// repairs what has one right answer and then measures, so it may modify the
+	// worktree.
 	// Default: {"bash", "bin/verify.sh"}.
 	VerifyCmd []string
 

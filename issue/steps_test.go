@@ -42,6 +42,10 @@ type fakeWorktree struct {
 	// and coverage steps do. A Commit that lands clears it, as git does; a
 	// Commit that lands nothing (noCommit) leaves it, as git also does.
 	dirty []byte
+	// gatesRun records which gates were asked for; gateFails names those that
+	// refuse.
+	gatesRun  []flow.GateName
+	gateFails map[flow.GateName]bool
 }
 
 func newFakeWorktree() *fakeWorktree {
@@ -69,12 +73,26 @@ func (w *fakeWorktree) Commit(context.Context, string) error {
 }
 func (w *fakeWorktree) Stage(context.Context) error { w.staged = true; return nil }
 func (w *fakeWorktree) Push(context.Context) error  { w.pushed = true; return nil }
-func (w *fakeWorktree) Validate(context.Context) error {
+func (w *fakeWorktree) Verify(context.Context) error {
 	w.validates++
 	if w.validates > w.verifyAfter {
 		return nil
 	}
 	return w.verifyErr
+}
+
+// RunGate answers for any declared name. gateFails names the ones that refuse,
+// so a test can fail the integration gate while the verify command passes —
+// which is the whole point of their being different things.
+func (w *fakeWorktree) RunGate(_ context.Context, name flow.GateName) error {
+	if !name.Valid() {
+		return fmt.Errorf("fake: %q is not a declared gate name", name)
+	}
+	w.gatesRun = append(w.gatesRun, name)
+	if w.gateFails[name] {
+		return fmt.Errorf("fake: gate %q failed", name)
+	}
+	return nil
 }
 func (w *fakeWorktree) CapturePatch(context.Context) ([]byte, error) {
 	// Models `git diff HEAD`: untracked work is invisible until staged, and

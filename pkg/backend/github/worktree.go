@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"github.com/promise-language/flow"
@@ -98,7 +97,7 @@ func (w *worktree) Open(ctx context.Context, base, title, body string) (string, 
 	// dependency on the process working directory entirely, which the runner
 	// does not set.
 	args := []string{"--repo", w.b.cfg.repoFullName(), "pr", "create", "--base", base, "--title", title, "--body", body, "--head", expected}
-	stdout, stderr, err := w.b.git.runner(ctx, "gh", args...)
+	stdout, stderr, err := w.b.git.runner(ctx, "", "gh", args...)
 	if err != nil {
 		return "", fmt.Errorf("gh pr create: %w (stderr=%s)", err, strings.TrimSpace(string(stderr)))
 	}
@@ -117,7 +116,7 @@ func (w *worktree) Open(ctx context.Context, base, title, body string) (string, 
 func (w *worktree) Merge(ctx context.Context, url string) error {
 	// --repo, not -C: see Open. gh has no -C flag.
 	args := []string{"--repo", w.b.cfg.repoFullName(), "pr", "merge", url, "--squash", "--auto"}
-	_, stderr, err := w.b.git.runner(ctx, "gh", args...)
+	_, stderr, err := w.b.git.runner(ctx, "", "gh", args...)
 	if err != nil {
 		return fmt.Errorf("gh pr merge: %w (stderr=%s)", err, strings.TrimSpace(string(stderr)))
 	}
@@ -127,17 +126,40 @@ func (w *worktree) Merge(ctx context.Context, url string) error {
 	return nil
 }
 
-// Validate runs cfg.VerifyCmd in cfg.WorktreeDir. Exit-0 → success.
-func (w *worktree) Validate(ctx context.Context) error {
+// Verify runs cfg.VerifyCmd in cfg.WorktreeDir. Exit-0 → success.
+func (w *worktree) Verify(ctx context.Context) error {
 	if len(w.b.cfg.VerifyCmd) == 0 {
-		return errors.New("worktree.Validate: cfg.VerifyCmd is empty")
+		return errors.New("worktree.Verify: cfg.VerifyCmd is empty")
 	}
-	args := w.b.cfg.VerifyCmd
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	cmd.Dir = w.b.cfg.WorktreeDir
-	out, err := cmd.CombinedOutput()
+	return w.run(ctx, "verify", w.b.cfg.VerifyCmd)
+}
+
+// RunGate runs the named gate in cfg.WorktreeDir. Exit-0 → pass.
+//
+// Gates are reached through the project's gate entry point by name rather than
+// each being configured separately. That is what makes the parts addressable:
+// a step fixing one failing suite asks for that suite, without the project
+// having had to enumerate every part in advance.
+func (w *worktree) RunGate(ctx context.Context, name flow.GateName) error {
+	if !name.Valid() {
+		return fmt.Errorf("worktree.RunGate: %q is not a declared gate name", name)
+	}
+	return w.run(ctx, "gate "+string(name), append(append([]string{}, gateEntryPoint...), string(name)))
+}
+
+// gateEntryPoint is how a project exposes its gates. Not configurable: the
+// names are fixed, so the way to reach them is too.
+var gateEntryPoint = []string{"bin/gate"}
+
+// run executes one configured command in the worktree.
+//
+// Shared by Verify and Gate because the mechanics are identical — what differs
+// is what a caller may conclude, which is a property of the two names and not
+// of how they are spawned.
+func (w *worktree) run(ctx context.Context, what string, args []string) error {
+	stdout, stderr, err := w.b.git.runner(ctx, w.b.cfg.WorktreeDir, args[0], args[1:]...)
 	if err != nil {
-		return fmt.Errorf("verify failed: %w\noutput:\n%s", err, string(out))
+		return fmt.Errorf("%s failed: %w\noutput:\n%s%s", what, err, string(stdout), string(stderr))
 	}
 	return nil
 }
