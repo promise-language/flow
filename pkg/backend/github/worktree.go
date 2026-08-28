@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/promise-language/flow"
 )
@@ -67,7 +66,7 @@ func (w *worktree) Commit(ctx context.Context, msg string) error {
 }
 
 func (w *worktree) Push(ctx context.Context) error {
-	return w.b.git.Push(ctx)
+	return w.b.out.Push(ctx)
 }
 
 // Request exposes the pull-request management surface. The github backend
@@ -85,24 +84,14 @@ func (w *worktree) Open(ctx context.Context, base, title, body string) (string, 
 	if branch != expected {
 		return "", fmt.Errorf("worktree.Open: current branch %q != claim branch %q", branch, expected)
 	}
-	if err := w.b.git.Push(ctx); err != nil {
+	if err := w.b.out.Push(ctx); err != nil {
 		return "", err
 	}
 
-	// Use `gh pr create` to handle cross-repo (fork) cases cleanly. The Go
-	// client requires owner-qualified head; gh handles that natively.
-	// --repo, not -C: `-C` is git's flag for selecting a working directory and
-	// gh has no such flag — passing it fails argument validation before gh does
-	// anything ("unknown shorthand flag: 'C'"). --repo also removes the
-	// dependency on the process working directory entirely, which the runner
-	// does not set.
-	args := []string{"--repo", w.b.cfg.repoFullName(), "pr", "create", "--base", base, "--title", title, "--body", body, "--head", expected}
-	stdout, stderr, err := w.b.git.runner(ctx, "", "gh", args...)
+	url, err := w.b.out.OpenPullRequest(ctx, base, expected, title, body)
 	if err != nil {
-		return "", fmt.Errorf("gh pr create: %w (stderr=%s)", err, strings.TrimSpace(string(stderr)))
+		return "", err
 	}
-	// gh pr create prints the PR URL on stdout.
-	url := strings.TrimSpace(string(stdout))
 
 	// Side-effect: backend marks pr-open in the state comment.
 	if err := w.b.markSignalSetOnState(ctx, w.claim, "pr-open"); err != nil {
@@ -114,11 +103,8 @@ func (w *worktree) Open(ctx context.Context, base, title, body string) (string, 
 }
 
 func (w *worktree) Merge(ctx context.Context, url string) error {
-	// --repo, not -C: see Open. gh has no -C flag.
-	args := []string{"--repo", w.b.cfg.repoFullName(), "pr", "merge", url, "--squash", "--auto"}
-	_, stderr, err := w.b.git.runner(ctx, "", "gh", args...)
-	if err != nil {
-		return fmt.Errorf("gh pr merge: %w (stderr=%s)", err, strings.TrimSpace(string(stderr)))
+	if err := w.b.out.MergePullRequest(ctx, url); err != nil {
+		return err
 	}
 	if err := w.b.markSignalSetOnState(ctx, w.claim, "pr-merged"); err != nil {
 		_ = err

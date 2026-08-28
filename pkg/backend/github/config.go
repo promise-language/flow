@@ -86,11 +86,6 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
-// repoFullName returns "owner/repo" for log + Display strings.
-func (c Config) repoFullName() string {
-	return c.Owner + "/" + c.Repo
-}
-
 // validate returns an error if Config is missing fields NewBackend couldn't
 // fill in from the environment.
 func (c Config) validate() error {

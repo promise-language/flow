@@ -80,7 +80,7 @@ func (b *Backend) SeedState(ctx context.Context, claim flow.Claim, specs []flow.
 	}
 
 	// Idempotent label adds.
-	if _, _, err := b.gh.Issues.AddLabelsToIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{
+	if err := b.out.AddLabels(ctx, issueNum, []string{
 		b.labels.Seeded(),
 		b.labels.Binary(b.cfg.BinaryName),
 	}); err != nil {
@@ -252,7 +252,7 @@ func (b *Backend) ResolveArtifact(ctx context.Context, claim flow.Claim, id flow
 				return err
 			}
 		}
-		c, _, err := b.gh.Issues.CreateComment(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, &github.IssueComment{Body: &commentBody})
+		c, err := b.out.CreateComment(ctx, actArtifactComment, issueNum, commentBody)
 		if err != nil {
 			return fmt.Errorf("post artifact comment: %w", err)
 		}
@@ -363,7 +363,7 @@ func (b *Backend) removeParkLabel(ctx context.Context, claim flow.Claim, label s
 	if err != nil {
 		return
 	}
-	_, _ = b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, label)
+	_ = b.out.RemoveLabel(ctx, issueNum, label)
 }
 
 // mutateArtifact applies a mutation to one artifact entry of the state doc.
@@ -449,13 +449,13 @@ func (b *Backend) Park(ctx context.Context, claim flow.Claim, req flow.ParkReque
 	if err != nil {
 		return err
 	}
-	if _, _, err := b.gh.Issues.AddLabelsToIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{parkLabel(b.labels, &req)}); err != nil {
+	if err := b.out.AddLabels(ctx, issueNum, []string{parkLabel(b.labels, &req)}); err != nil {
 		return fmt.Errorf("add park label: %w", err)
 	}
 	// Post a comment with the park reason so the timeline carries a record.
 	parkBody, _ := json.Marshal(req)
 	body := "<!-- flow:park -->\n```json\n" + string(parkBody) + "\n```"
-	if _, _, err := b.gh.Issues.CreateComment(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, &github.IssueComment{Body: &body}); err != nil {
+	if _, err := b.out.CreateComment(ctx, actParkRecord, issueNum, body); err != nil {
 		return err
 	}
 	// Record it in the state doc. An item can be parked before it is seeded
@@ -497,7 +497,7 @@ func (b *Backend) AskQuestions(ctx context.Context, claim flow.Claim, qs []flow.
 	body := sb.String()
 	// Keep the created comment: its server-side CreatedAt is the only clock
 	// that can be compared against the answers' timestamps. See Question.AskedAt.
-	created, _, err := b.gh.Issues.CreateComment(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, &github.IssueComment{Body: &body})
+	created, err := b.out.CreateComment(ctx, actQuestion, issueNum, body)
 	if err != nil {
 		return nil, fmt.Errorf("post questions comment: %w", err)
 	}
@@ -505,7 +505,7 @@ func (b *Backend) AskQuestions(ctx context.Context, claim flow.Claim, qs []flow.
 	for i := range out {
 		out[i].AskedAt = askedAt
 	}
-	if _, _, err := b.gh.Issues.AddLabelsToIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{b.labels.NeedsAnswer()}); err != nil {
+	if err := b.out.AddLabels(ctx, issueNum, []string{b.labels.NeedsAnswer()}); err != nil {
 		return nil, fmt.Errorf("add needs-answer label: %w", err)
 	}
 	return out, nil
@@ -576,7 +576,7 @@ func (b *Backend) ReadAnswers(ctx context.Context, item flow.Item, since time.Ti
 	}
 	var out []flow.Answer
 	for {
-		comments, resp, err := b.gh.Issues.ListComments(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, opts)
+		comments, resp, err := b.out.ListCommentsPage(ctx, issueNum, opts)
 		if err != nil {
 			return nil, fmt.Errorf("list comments on #%d: %w", issueNum, err)
 		}
@@ -668,7 +668,7 @@ func (b *Backend) hydrateMarkdownBodies(ctx context.Context, issueNum int, state
 	opts := &github.IssueListCommentsOptions{ListOptions: github.ListOptions{PerPage: 100}}
 	seen := map[flow.ArtifactId]int{}
 	for {
-		comments, resp, err := b.gh.Issues.ListComments(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, opts)
+		comments, resp, err := b.out.ListCommentsPage(ctx, issueNum, opts)
 		if err != nil {
 			// Fatal, deliberately. Degrading to empty bodies would make an API
 			// outage indistinguishable from an artifact that genuinely has no
@@ -757,7 +757,7 @@ func (b *Backend) readArtifactFile(ctx context.Context, path string) (string, er
 	// DownloadContents, not GetContents: the latter inlines the bytes and caps
 	// at 1MB, which a spilled artifact can exceed — spilling is what happens to
 	// the large ones. This follows the download URL instead.
-	rc, _, err := b.gh.Repositories.DownloadContents(ctx, b.cfg.Owner, b.cfg.Repo, path,
+	rc, err := b.out.DownloadContents(ctx, path,
 		&github.RepositoryContentGetOptions{Ref: artifactsBranch})
 	if err != nil {
 		return "", fmt.Errorf("download %s@%s: %w", path, artifactsBranch, err)

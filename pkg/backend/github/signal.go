@@ -20,7 +20,7 @@ func (b *Backend) claimBranch(issueNum int) string {
 // repository (any state). Returns (nil, nil) if none exists.
 func (b *Backend) findPRForBranch(ctx context.Context, branch string) (*github.PullRequest, error) {
 	head := b.cfg.Owner + ":" + branch
-	prs, _, err := b.gh.PullRequests.List(ctx, b.cfg.Owner, b.cfg.Repo, &github.PullRequestListOptions{
+	prs, err := b.out.ListPullRequests(ctx, &github.PullRequestListOptions{
 		State:       "all",
 		Head:        head,
 		ListOptions: github.ListOptions{PerPage: 5},
@@ -68,7 +68,7 @@ func (b *Backend) refreshPRSignals(ctx context.Context, issueNum int, state *flo
 
 // prHasApprovedReview returns true if the latest review on the PR is APPROVED.
 func (b *Backend) prHasApprovedReview(ctx context.Context, prNum int) (bool, error) {
-	reviews, _, err := b.gh.PullRequests.ListReviews(ctx, b.cfg.Owner, b.cfg.Repo, prNum, &github.ListOptions{PerPage: 100})
+	reviews, err := b.out.ListReviews(ctx, prNum, &github.ListOptions{PerPage: 100})
 	if err != nil {
 		return false, err
 	}

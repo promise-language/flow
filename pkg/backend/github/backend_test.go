@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	ghclient "github.com/google/go-github/v68/github"
 	"github.com/promise-language/flow"
 )
 
@@ -48,6 +47,24 @@ type ghMock struct {
 	branchCreated    bool
 	branchCreateCall string // path of first file committed when creating
 	updateCalls      int
+
+	// mutations records every non-GET request the server received, whether or
+	// not a route existed for it. Recorded before routing on purpose: a write
+	// that reached the network is a disclosure even when GitHub rejects it.
+	mutations []string
+}
+
+// recordMutations counts the requests that change something, so a test can
+// assert that a refused disclosure sent nothing at all.
+func (m *ghMock) recordMutations(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			m.mu.Lock()
+			m.mutations = append(m.mutations, r.Method+" "+r.URL.Path)
+			m.mu.Unlock()
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 type ghMockFile struct {
@@ -159,7 +176,7 @@ func (m *ghMock) server() *httptest.Server {
 		writeJSON(w, map[string]any{"login": "alice"})
 	})
 
-	return httptest.NewServer(mux)
+	return httptest.NewServer(m.recordMutations(mux))
 }
 
 func (m *ghMock) handleIssue(w http.ResponseWriter, r *http.Request) {
@@ -494,6 +511,9 @@ func ghCommentJSON(c ghMockComment) map[string]any {
 func newMockedBackend(t *testing.T, mock *ghMock, srv *httptest.Server) *Backend {
 	t.Helper()
 	t.Setenv("FLOW_DIR", t.TempDir())
+	// One gitOps, shared with the seam: a test that substitutes b.git.runner
+	// must also be substituting what `gh` and the push go through.
+	git := newGitOps(".")
 	b := &Backend{
 		cfg: Config{
 			Owner:           mock.owner,
@@ -503,8 +523,8 @@ func newMockedBackend(t *testing.T, mock *ghMock, srv *httptest.Server) *Backend
 			LabelPrefix:     "flow:",
 			MaxCommentBytes: 60 * 1024,
 		},
-		gh:                ghclient.NewClient(nil).WithAuthToken("fake-token"),
-		git:               newGitOps("."),
+		out:               newOutward("fake-token", git, mock.owner, mock.repo),
+		git:               git,
 		labels:            newLabels("flow:"),
 		stateCommentCache: map[int]int64{},
 	}

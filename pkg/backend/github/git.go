@@ -167,17 +167,47 @@ func (g *gitOps) HasStaged(ctx context.Context) (bool, error) {
 	return false, err
 }
 
-// Push pushes the current branch to origin with -u (set upstream).
-func (g *gitOps) Push(ctx context.Context) error {
-	branch, err := g.CurrentBranch(ctx)
-	if err != nil {
-		return err
+// PushMaterial reports what pushing `branch` to origin would publish: the
+// message of every commit the remote does not already have, and those commits
+// as a patch. There is no Push here — it lives on outward, because a push is a
+// publication and must not be reachable without passing the seam.
+//
+// `--not --remotes=origin` rather than a diff against a base branch: it needs
+// no base, and is correct both for a first push (nothing on origin excludes
+// nothing, so every commit on the branch is reported) and for a later one
+// (only what is new). When the remote-tracking refs are stale it over-reports,
+// which is the safe direction — a guard shown more than will be sent can
+// refuse something publishable, and one shown less reports a safety it did not
+// establish.
+func (g *gitOps) PushMaterial(ctx context.Context, branch string) (messages []string, patch string, err error) {
+	// %x00 rather than a newline: a commit message contains newlines, so any
+	// text separator would split one message into several.
+	//
+	// The trailing `--` says the branch is a revision and there are no
+	// pathspecs. Without it git refuses any branch whose name is also a
+	// tracked path ("ambiguous argument"), and the claim branch is
+	// flow/issue-<n> — a name a repository can perfectly well also have a
+	// file at. `git push` never had to disambiguate, so this is a failure
+	// only the material query can hit, and it would fail a push that has
+	// nothing wrong with it.
+	logArgs := func(extra ...string) []string {
+		args := append([]string{"log", "--format=%B%x00"}, extra...)
+		return append(args, branch, "--not", "--remotes=origin", "--")
 	}
-	_, stderr, err := g.run(ctx, "push", "-u", "origin", branch)
+	stdout, stderr, err := g.run(ctx, logArgs()...)
 	if err != nil {
-		return fmt.Errorf("git push -u origin %s: %w (%s)", branch, err, string(stderr))
+		return nil, "", fmt.Errorf("git log %s --not --remotes=origin: %w (%s)", branch, err, string(stderr))
 	}
-	return nil
+	for _, m := range strings.Split(string(stdout), "\x00") {
+		if trimmed := strings.TrimSpace(m); trimmed != "" {
+			messages = append(messages, trimmed)
+		}
+	}
+	full, stderr, err := g.run(ctx, logArgs("--patch")...)
+	if err != nil {
+		return nil, "", fmt.Errorf("git log --patch %s --not --remotes=origin: %w (%s)", branch, err, string(stderr))
+	}
+	return messages, string(full), nil
 }
 
 // CapturePatch runs `git diff HEAD` and returns the unified diff. Untracked
