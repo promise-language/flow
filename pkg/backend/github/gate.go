@@ -79,6 +79,18 @@ func runGate(ctx context.Context, dir string, name flow.GateName, argv []string,
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return flow.GateRun{}, fmt.Errorf("gate %s: caller went away before the gate was spawned: %w", name, ctxErr)
 		}
+		if errors.Is(gateCtx.Err(), context.DeadlineExceeded) {
+			// Our own deadline expired before the process existed, and exec
+			// reports that through the same return as a missing program. The
+			// wait is the problem, not the tree: could-not-start would name
+			// whoever declared the gate or delivered the tree and send them
+			// hunting for a bin/gate that is sitting right there. An outcome
+			// that absorbs another attributes a failure to the wrong
+			// repository, which is the whole reason the set has five names.
+			run.Outcome = flow.OutcomeTimedOut
+			run.Detail = fmt.Sprintf("the declared timeout of %s expired before the gate was spawned", timeout)
+			return run, nil
+		}
 		run.Outcome = flow.OutcomeCouldNotStart
 		run.Detail = fmt.Sprintf("spawning %s in %s: %v", argv[0], dir, err)
 		return run, nil
@@ -135,8 +147,9 @@ func runGate(ctx context.Context, dir string, name flow.GateName, argv []string,
 	return run, nil
 }
 
-// parseEnvelope reports whether stdout carries exactly one JSON object and
-// nothing else. It returns io.EOF or io.ErrUnexpectedEOF for absence and
+// parseEnvelope reports whether stdout carries exactly one JSON object — not
+// null, not an array, not a scalar — and nothing else. It returns io.EOF or
+// io.ErrUnexpectedEOF for absence and
 // truncation — the two the caller must read as "died" rather than as a defect
 // in what the gate printed.
 func parseEnvelope(stdout []byte) error {
@@ -144,6 +157,17 @@ func parseEnvelope(stdout []byte) error {
 	var envelope map[string]any // a map, so an array or a scalar is refused
 	if err := dec.Decode(&envelope); err != nil {
 		return err
+	}
+	if envelope == nil {
+		// JSON `null` is the one scalar a map absorbs: it decodes without
+		// error and leaves the map nil. It is PRESENT, so it is not absence,
+		// and it is not an object either — it is a defect in what the gate
+		// printed. Reading it as a measurement is the safe-looking direction
+		// the contract warns about: a complete parse taken for a complete run,
+		// carrying no measurements and no stated reason for their absence,
+		// which is exactly what makes deriving completeness from a silent
+		// envelope safe everywhere else.
+		return errors.New("the envelope is null")
 	}
 	if dec.More() {
 		return errors.New("trailing content after the envelope")

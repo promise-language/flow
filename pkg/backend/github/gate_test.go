@@ -125,6 +125,18 @@ func TestRunGate_ClassifiesWhatItObserved(t *testing.T) {
 		outcome:  flow.OutcomeBrokeContract,
 		exitCode: 0,
 	}, {
+		// The one scalar a JSON object decodes from without complaint: null
+		// leaves the map nil and returns no error. A runner that asks only
+		// "did it parse" reports a complete run holding no measurements and
+		// stating no reason for their absence — the safe-looking direction,
+		// and indistinguishable downstream from a gate that measured nothing
+		// on purpose.
+		name:     "null parses, and it is still not an envelope",
+		script:   `echo null`,
+		outcome:  flow.OutcomeBrokeContract,
+		exitCode: 0,
+		stdout:   "null",
+	}, {
 		// Stdout carries the envelope and nothing else. A gate that also logs
 		// there has broken the contract, even though the first value parses.
 		name:     "an envelope with something after it",
@@ -264,6 +276,38 @@ func TestRunGate_EnforcesTheDeclaredTimeout(t *testing.T) {
 	}
 	if elapsed > 30*time.Second {
 		t.Errorf("returned after %s — the declared timeout did not bound the wait", elapsed)
+	}
+}
+
+// A deadline that expired before the process existed is the WAIT being wrong,
+// not a program the runner could not find — exec reports both through the same
+// return from Start, and only the runner knows which it was looking at.
+//
+// could-not-start naming this would send whoever declared the gate, or whoever
+// delivered the tree, hunting for a bin/gate that is sitting right there. It is
+// the outcome that must least be allowed to absorb another, and it absorbs just
+// as wrongly in this direction as in the one the retry loop cares about.
+//
+// A zero timeout is the deterministic way to reach the state; any declared
+// timeout short enough to elapse between the spawn being set up and exec
+// reaching the kernel lands in the same place, and GateTimeout is a project's
+// to set.
+func TestRunGate_ADeadlineThatExpiredBeforeTheSpawnIsATimeout(t *testing.T) {
+	requireRealProcesses(t)
+
+	w, dir := gateWorktree(t, "touch ran\necho '{}'", 0)
+	run, err := w.RunGate(context.Background(), flow.GateIntegration)
+	if err != nil {
+		t.Fatalf("RunGate: %v — the runner's own deadline is an outcome, not an error", err)
+	}
+	if run.Outcome != flow.OutcomeTimedOut {
+		t.Errorf("outcome = %q, want %q (detail: %s)", run.Outcome, flow.OutcomeTimedOut, run.Detail)
+	}
+	if run.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1 — nothing ran, so nothing exited", run.ExitCode)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ran")); err == nil {
+		t.Error("the gate ran, so the declared timeout did not bound it")
 	}
 }
 
