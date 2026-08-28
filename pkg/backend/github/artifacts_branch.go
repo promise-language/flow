@@ -55,11 +55,8 @@ func (b *Backend) putArtifactFile(ctx context.Context, path string, content []by
 	}
 	if prevSHA != "" {
 		opts.SHA = github.Ptr(prevSHA)
-		_, _, err = b.gh.Repositories.UpdateFile(ctx, b.cfg.Owner, b.cfg.Repo, path, opts)
-	} else {
-		_, _, err = b.gh.Repositories.CreateFile(ctx, b.cfg.Owner, b.cfg.Repo, path, opts)
 	}
-	if err != nil {
+	if err := b.out.PutFile(ctx, path, opts); err != nil {
 		return "", fmt.Errorf("put artifact file %s: %w", path, err)
 	}
 	return b.rawArtifactURL(path), nil
@@ -68,7 +65,7 @@ func (b *Backend) putArtifactFile(ctx context.Context, path string, content []by
 // artifactsBranchExists returns true if refs/heads/flow-artifacts is
 // resolvable in the repo.
 func (b *Backend) artifactsBranchExists(ctx context.Context) (bool, error) {
-	_, resp, err := b.gh.Git.GetRef(ctx, b.cfg.Owner, b.cfg.Repo, "heads/"+artifactsBranch)
+	_, resp, err := b.out.GetRef(ctx, "heads/"+artifactsBranch)
 	if err == nil {
 		return true, nil
 	}
@@ -83,7 +80,7 @@ func (b *Backend) artifactsBranchExists(ctx context.Context) (bool, error) {
 // Contents API has no way to create a parentless commit.
 func (b *Backend) createArtifactsBranch(ctx context.Context, path string, content []byte, commitMessage string) error {
 	// 1. Create the blob.
-	blob, _, err := b.gh.Git.CreateBlob(ctx, b.cfg.Owner, b.cfg.Repo, &github.Blob{
+	blob, err := b.out.CreateBlob(ctx, &github.Blob{
 		Content:  github.Ptr(string(content)),
 		Encoding: github.Ptr("utf-8"),
 	})
@@ -92,7 +89,7 @@ func (b *Backend) createArtifactsBranch(ctx context.Context, path string, conten
 	}
 
 	// 2. Create the tree.
-	tree, _, err := b.gh.Git.CreateTree(ctx, b.cfg.Owner, b.cfg.Repo, "", []*github.TreeEntry{{
+	tree, err := b.out.CreateTree(ctx, "", []*github.TreeEntry{{
 		Path: github.Ptr(path),
 		Mode: github.Ptr("100644"),
 		Type: github.Ptr("blob"),
@@ -103,21 +100,20 @@ func (b *Backend) createArtifactsBranch(ctx context.Context, path string, conten
 	}
 
 	// 3. Create the orphan commit (parents: []).
-	commit, _, err := b.gh.Git.CreateCommit(ctx, b.cfg.Owner, b.cfg.Repo, &github.Commit{
+	commit, err := b.out.CreateCommit(ctx, &github.Commit{
 		Message: github.Ptr(commitMessage),
 		Tree:    tree,
 		Parents: []*github.Commit{},
-	}, nil)
+	})
 	if err != nil {
 		return fmt.Errorf("create commit: %w", err)
 	}
 
 	// 4. Create the ref.
-	_, _, err = b.gh.Git.CreateRef(ctx, b.cfg.Owner, b.cfg.Repo, &github.Reference{
+	if err := b.out.CreateRef(ctx, &github.Reference{
 		Ref:    github.Ptr("refs/heads/" + artifactsBranch),
 		Object: &github.GitObject{SHA: commit.SHA},
-	})
-	if err != nil {
+	}); err != nil {
 		return fmt.Errorf("create ref heads/%s: %w", artifactsBranch, err)
 	}
 	return nil
@@ -126,7 +122,7 @@ func (b *Backend) createArtifactsBranch(ctx context.Context, path string, conten
 // getArtifactFileSHA returns the current blob SHA at `path` on the orphan
 // branch, or empty string if the file doesn't exist there yet.
 func (b *Backend) getArtifactFileSHA(ctx context.Context, path string) (string, error) {
-	file, _, resp, err := b.gh.Repositories.GetContents(ctx, b.cfg.Owner, b.cfg.Repo, path, &github.RepositoryContentGetOptions{Ref: artifactsBranch})
+	file, resp, err := b.out.GetContents(ctx, path, &github.RepositoryContentGetOptions{Ref: artifactsBranch})
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
 			return "", nil

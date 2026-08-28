@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -19,8 +18,10 @@ import (
 
 // Backend is the GitHub-Issues-backed flow.Backend.
 type Backend struct {
-	cfg    Config
-	gh     *github.Client
+	cfg Config
+	// out is the only route from this backend to GitHub — API, `gh`, and the
+	// push alike. See outward.
+	out    *outward
 	git    *gitOps
 	labels labels
 
@@ -64,38 +65,13 @@ func NewBackend(cfg Config) (*Backend, error) {
 		return nil, err
 	}
 
-	client := github.NewClient(nil).WithAuthToken(token)
 	return &Backend{
 		cfg:               cfg,
-		gh:                client,
+		out:               newOutward(token, git, cfg.Owner, cfg.Repo),
 		git:               git,
 		labels:            newLabels(cfg.LabelPrefix),
 		stateCommentCache: map[int]int64{},
 	}, nil
-}
-
-// WithHTTPClient is a test seam: replaces the underlying http.Client. Used
-// by unit tests that drive the github backend via httptest.Server.
-func (b *Backend) WithHTTPClient(c *http.Client) *Backend {
-	b.gh = github.NewClient(c).WithAuthToken(b.cfg.Token)
-	return b
-}
-
-// WithBaseURL is a test seam: overrides the API base URL so tests can point
-// at an httptest.Server. Sets the URL fields directly (avoids the
-// /api/v3/ suffix that WithEnterpriseURLs injects for GitHub Enterprise).
-func (b *Backend) WithBaseURL(baseURL, uploadURL string) (*Backend, error) {
-	base, err := url.Parse(baseURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse base URL: %w", err)
-	}
-	upload, err := url.Parse(uploadURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse upload URL: %w", err)
-	}
-	b.gh.BaseURL = base
-	b.gh.UploadURL = upload
-	return b, nil
 }
 
 func (b *Backend) Name() string { return "github" }
@@ -149,7 +125,7 @@ func (b *Backend) ListEligible(ctx context.Context) ([]flow.ItemRef, error) {
 	// `is:open is:issue label:flow:<binary> assignee:@me` via Search.
 	q := fmt.Sprintf("repo:%s/%s is:issue is:open label:%s assignee:@me",
 		b.cfg.Owner, b.cfg.Repo, b.labels.Binary(b.cfg.BinaryName))
-	result, _, err := b.gh.Search.Issues(ctx, q, &github.SearchOptions{ListOptions: github.ListOptions{PerPage: 100}})
+	result, err := b.out.SearchIssues(ctx, q, &github.SearchOptions{ListOptions: github.ListOptions{PerPage: 100}})
 	if err != nil {
 		return nil, fmt.Errorf("search issues: %w", err)
 	}
@@ -216,7 +192,7 @@ func (b *Backend) LoadState(ctx context.Context, claim flow.Claim) (*flow.ItemSt
 		return nil, err
 	}
 
-	issue, _, err := b.gh.Issues.Get(ctx, b.cfg.Owner, b.cfg.Repo, issueNum)
+	issue, err := b.out.GetIssue(ctx, issueNum)
 	if err != nil {
 		return nil, fmt.Errorf("get issue %d: %w", issueNum, err)
 	}
@@ -288,7 +264,7 @@ func (b *Backend) LoadState(ctx context.Context, claim flow.Claim) (*flow.ItemSt
 // nothing matched (item not yet seeded).
 func (b *Backend) fetchStateComment(ctx context.Context, issueNum int, cachedID int64) (body string, id int64, err error) {
 	if cachedID != 0 {
-		c, _, err := b.gh.Issues.GetComment(ctx, b.cfg.Owner, b.cfg.Repo, cachedID)
+		c, err := b.out.GetComment(ctx, cachedID)
 		if err == nil {
 			return c.GetBody(), cachedID, nil
 		}
@@ -304,7 +280,7 @@ func (b *Backend) fetchStateComment(ctx context.Context, issueNum int, cachedID 
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
 	for {
-		comments, resp, err := b.gh.Issues.ListComments(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, opt)
+		comments, resp, err := b.out.ListCommentsPage(ctx, issueNum, opt)
 		if err != nil {
 			return "", 0, fmt.Errorf("list comments: %w", err)
 		}
@@ -372,7 +348,7 @@ func (b *Backend) Doctor(ctx context.Context) error {
 // one to be set. Doctor uses it as a health check; the issue package uses it to
 // pick a step set (see issue.RoleProber).
 func (b *Backend) RepoPermissions(ctx context.Context) (flow.RepoPermissions, error) {
-	repo, _, err := b.gh.Repositories.Get(ctx, b.cfg.Owner, b.cfg.Repo)
+	repo, err := b.out.GetRepo(ctx)
 	if err != nil {
 		return flow.RepoPermissions{}, fmt.Errorf("repository %s/%s: %w", b.cfg.Owner, b.cfg.Repo, err)
 	}
@@ -391,7 +367,7 @@ func (b *Backend) RepoPermissions(ctx context.Context) (flow.RepoPermissions, er
 // literal, and a branch cut from the wrong base is not discovered until the PR
 // is opened against it.
 func (b *Backend) DefaultBranch(ctx context.Context) (string, error) {
-	repo, _, err := b.gh.Repositories.Get(ctx, b.cfg.Owner, b.cfg.Repo)
+	repo, err := b.out.GetRepo(ctx)
 	if err != nil {
 		return "", fmt.Errorf("repository %s/%s: %w", b.cfg.Owner, b.cfg.Repo, err)
 	}
@@ -432,8 +408,7 @@ func (b *Backend) updateStateComment(ctx context.Context, issueNum int, commentI
 	if err != nil {
 		return "", err
 	}
-	_, _, err = b.gh.Issues.EditComment(ctx, b.cfg.Owner, b.cfg.Repo, commentID, &github.IssueComment{Body: &body})
-	if err != nil {
+	if err := b.out.EditComment(ctx, actStateComment, issueNum, commentID, body); err != nil {
 		return "", fmt.Errorf("patch state comment %d: %w", commentID, err)
 	}
 	return body, nil
@@ -445,7 +420,7 @@ func (b *Backend) postStateComment(ctx context.Context, issueNum int, doc stateD
 	if err != nil {
 		return 0, "", err
 	}
-	comment, _, err := b.gh.Issues.CreateComment(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, &github.IssueComment{Body: &body})
+	comment, err := b.out.CreateComment(ctx, actStateComment, issueNum, body)
 	if err != nil {
 		return 0, "", fmt.Errorf("post state comment: %w", err)
 	}

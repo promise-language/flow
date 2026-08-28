@@ -34,7 +34,7 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, for
 
 	// Preflight: refuse if the issue is owned by another flow binary or
 	// explicitly disabled.
-	issue, _, err := b.gh.Issues.Get(ctx, b.cfg.Owner, b.cfg.Repo, issueNum)
+	issue, err := b.out.GetIssue(ctx, issueNum)
 	if err != nil {
 		return flow.Claim{}, fmt.Errorf("get issue %d: %w", issueNum, err)
 	}
@@ -49,14 +49,14 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, for
 	// Phase 1: post a random claim label.
 	token := randomClaimToken()
 	claimLabel := b.labels.ClaimToken(token)
-	if _, _, err := b.gh.Issues.AddLabelsToIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{claimLabel}); err != nil {
+	if err := b.out.AddLabels(ctx, issueNum, []string{claimLabel}); err != nil {
 		return flow.Claim{}, fmt.Errorf("add claim label: %w", err)
 	}
 
 	// Phase 2: re-fetch labels; check race.
-	issue2, _, err := b.gh.Issues.Get(ctx, b.cfg.Owner, b.cfg.Repo, issueNum)
+	issue2, err := b.out.GetIssue(ctx, issueNum)
 	if err != nil {
-		_, _ = b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, claimLabel)
+		_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
 		return flow.Claim{}, fmt.Errorf("get issue (post-claim): %w", err)
 	}
 	contenders := b.claimContenders(labelNamesOf(issue2.Labels))
@@ -67,30 +67,30 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, for
 	sort.Strings(contenders)
 	if contenders[0] != token {
 		// Lost the race — clean up our label.
-		_, _ = b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, claimLabel)
+		_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
 		return flow.Claim{}, fmt.Errorf("claim race lost to %s", contenders[0])
 	}
 
 	// Phase 3: assert ownership.
-	if _, _, err := b.gh.Issues.AddAssignees(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{owner}); err != nil {
-		_, _ = b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, claimLabel)
+	if err := b.out.AddAssignees(ctx, issueNum, []string{owner}); err != nil {
+		_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
 		return flow.Claim{}, fmt.Errorf("add assignee: %w", err)
 	}
 	// Clear any stale owner labels first (other than our own).
 	for _, name := range labelNamesOf(issue2.Labels) {
 		if login, ok := b.labels.OwnerFromLabel(name); ok && login != owner {
-			_, _ = b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, name)
+			_ = b.out.RemoveLabel(ctx, issueNum, name)
 		}
 	}
-	if _, _, err := b.gh.Issues.AddLabelsToIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{
+	if err := b.out.AddLabels(ctx, issueNum, []string{
 		b.labels.Owner(owner),
 		b.labels.Binary(b.cfg.BinaryName),
 	}); err != nil {
 		// Best-effort cleanup, then surface.
-		_, _ = b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, claimLabel)
+		_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
 		return flow.Claim{}, fmt.Errorf("add owner/binary labels: %w", err)
 	}
-	if _, err := b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, claimLabel); err != nil {
+	if err := b.out.RemoveLabel(ctx, issueNum, claimLabel); err != nil {
 		// Non-fatal — the claim label is just transient.
 		_ = err
 	}
@@ -131,8 +131,8 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, for
 	// CLI commands that consume the active claim can find it.
 	if err := clistate.Save(c); err != nil {
 		// Best-effort rollback of the github-side ownership we just took.
-		_, _ = b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, b.labels.Owner(owner))
-		_, _, _ = b.gh.Issues.RemoveAssignees(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{owner})
+		_ = b.out.RemoveLabel(ctx, issueNum, b.labels.Owner(owner))
+		_ = b.out.RemoveAssignees(ctx, issueNum, []string{owner})
 		return flow.Claim{}, fmt.Errorf("github.Claim: save active claim: %w", err)
 	}
 	return c, nil
@@ -145,10 +145,10 @@ func (b *Backend) Release(ctx context.Context, claim flow.Claim) error {
 	if err != nil {
 		return err
 	}
-	if _, err := b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, b.labels.Owner(claim.Owner)); err != nil && !isNotFound(err) {
+	if err := b.out.RemoveLabel(ctx, issueNum, b.labels.Owner(claim.Owner)); err != nil && !isNotFound(err) {
 		return fmt.Errorf("remove owner label: %w", err)
 	}
-	if _, _, err := b.gh.Issues.RemoveAssignees(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{claim.Owner}); err != nil && !isNotFound(err) {
+	if err := b.out.RemoveAssignees(ctx, issueNum, []string{claim.Owner}); err != nil && !isNotFound(err) {
 		return fmt.Errorf("remove assignee: %w", err)
 	}
 	if err := clistate.Clear(); err != nil {
@@ -188,7 +188,7 @@ func (b *Backend) LookupClaim(ctx context.Context, ref flow.ItemRef) (*flow.Clai
 	if err != nil {
 		return nil, err
 	}
-	issue, _, err := b.gh.Issues.Get(ctx, b.cfg.Owner, b.cfg.Repo, issueNum)
+	issue, err := b.out.GetIssue(ctx, issueNum)
 	if err != nil {
 		return nil, fmt.Errorf("get issue %d: %w", issueNum, err)
 	}
