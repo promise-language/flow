@@ -271,10 +271,17 @@ func ParseGateArgs(args []string) (name string, envelope bool, err error) {
 		return "", false, fmt.Errorf("no gate named; known gates: %s", strings.Join(GateNames(), ", "))
 	}
 	if !KnownGate(name) {
-		return "", false, fmt.Errorf("no gate named %q in this project; known gates: %s",
-			name, strings.Join(GateNames(), ", "))
+		return "", false, unknownGate(name)
 	}
 	return name, envelope, nil
+}
+
+// unknownGate is the refusal every entry point gives for a name this project
+// does not have. One wording, because a caller that mistyped a gate name is
+// told the same thing whichever program it typed it at.
+func unknownGate(name string) error {
+	return fmt.Errorf("no gate named %q in this project; known gates: %s",
+		name, strings.Join(GateNames(), ", "))
 }
 
 // measureFormatted counts files gofmt would rewrite. `-l` lists them; `-w`

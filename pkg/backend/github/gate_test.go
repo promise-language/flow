@@ -40,7 +40,7 @@ func gateWorktree(t *testing.T, script string, timeout time.Duration) (*worktree
 		t.Fatal(err)
 	}
 	if script != "" {
-		writeGateScript(t, dir, script, 0o755)
+		writeScript(t, dir, "gate", script, 0o755)
 	}
 	b := &Backend{cfg: Config{WorktreeDir: dir, GateTimeout: timeout}}
 	// A gate does not go through the configured-command seam: that seam reports
@@ -52,10 +52,13 @@ func gateWorktree(t *testing.T, script string, timeout time.Duration) (*worktree
 	return &worktree{b: b}, dir
 }
 
-func writeGateScript(t *testing.T, dir, script string, mode os.FileMode) {
+// writeScript drops one entry point into the tree's bin/. The name is a
+// parameter because a project exposes more than one — the gate that measures,
+// and the judge that holds the thresholds — and both are reached the same way.
+func writeScript(t *testing.T, dir, name, body string, mode os.FileMode) {
 	t.Helper()
-	path := filepath.Join(dir, "bin", "gate")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), mode); err != nil {
+	path := filepath.Join(dir, "bin", name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), mode); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(path, mode); err != nil { // WriteFile respects umask; Chmod does not
@@ -217,7 +220,7 @@ func TestRunGate_CouldNotStartIsNotDied(t *testing.T) {
 	}, {
 		name: "present but not executable",
 		setup: func(t *testing.T, dir string) {
-			writeGateScript(t, dir, `echo '{}'`, 0o644)
+			writeScript(t, dir, "gate", `echo '{}'`, 0o644)
 		},
 	}, {
 		name: "a directory where the program should be",

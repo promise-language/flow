@@ -95,6 +95,15 @@ func (w *fakeWorktree) RunGate(_ context.Context, name flow.GateName) (flow.Gate
 	}
 	return flow.GateRun{Gate: name, Outcome: outcome, ExitCode: -1}, nil
 }
+
+// Judge answers about a measured run and refuses anything else — the project
+// holds the thresholds, so nothing here computes one.
+func (w *fakeWorktree) Judge(_ context.Context, run flow.GateRun) (flow.GateVerdict, error) {
+	if run.Outcome != flow.OutcomeMeasured {
+		return flow.GateVerdict{}, fmt.Errorf("fake: %q measured nothing, so there is nothing to judge", run.Gate)
+	}
+	return flow.GateVerdict{Run: run, Acceptable: true, Thresholds: []byte("{}")}, nil
+}
 func (w *fakeWorktree) CapturePatch(context.Context) ([]byte, error) {
 	// Models `git diff HEAD`: untracked work is invisible until staged, and
 	// nothing is left to see once it has been committed.

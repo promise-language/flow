@@ -380,6 +380,79 @@ func TestBackend_GateMeasuresByDefaultAndPrintsSomethingThatParses(t *testing.T)
 	}
 }
 
+// measuredRun is a run the fake's judge will answer about: the only kind
+// anything may be asked to judge.
+func measuredRun(gate flow.GateName) flow.GateRun {
+	return flow.GateRun{Gate: gate, Outcome: flow.OutcomeMeasured, Stdout: []byte(`{}`)}
+}
+
+// The default has to let an unrelated test get on with its subject, and the
+// terms it reports have to parse: the fake models the protocol, so a caller
+// that carries a verdict's thresholds is written against a shape a real judge
+// produces.
+func TestBackend_JudgesAcceptableByDefaultWithTermsThatParse(t *testing.T) {
+	run := measuredRun(flow.GateTested)
+	v, err := gateWorktree(t, fake.New()).Judge(context.Background(), run)
+	if err != nil {
+		t.Fatalf("Judge: %v", err)
+	}
+	if !v.Acceptable {
+		t.Error("Acceptable = false, want the default")
+	}
+	var thresholds map[string]any
+	if err := json.Unmarshal(v.Thresholds, &thresholds); err != nil || thresholds == nil {
+		t.Errorf("Thresholds = %q, want one JSON object: %v", v.Thresholds, err)
+	}
+	// The measurement travels with the verdict, or nothing can re-check it.
+	if v.Run.Gate != run.Gate || v.Run.Outcome != run.Outcome {
+		t.Errorf("Run = %+v, want the measurement that was judged", v.Run)
+	}
+}
+
+// A REFUSAL IS A VERDICT. A fake that returned one as an error would let a
+// caller be written that cannot tell "the project says no" from "the judge
+// could not answer" — and that caller would treat a broken judging layer as a
+// failing tree, refusing sound changes for a reason nowhere in them.
+func TestBackend_SetGateVerdictRefusesWithoutErroring(t *testing.T) {
+	b := fake.New()
+	b.SetGateVerdict(false)
+	v, err := gateWorktree(t, b).Judge(context.Background(), measuredRun(flow.GateIntegration))
+	if err != nil {
+		t.Fatalf("Judge: %v — a refusal is an answer, not an error", err)
+	}
+	if v.Acceptable {
+		t.Error("Acceptable = true, want the refusal that was configured")
+	}
+}
+
+// The two requests no judge could answer. Only a measured run may be judged:
+// the other outcomes mean no measurement exists, and a judge asked about one
+// would have to invent an answer — which, read as a refusal, blames a change
+// for a gate that never ran.
+func TestBackend_JudgeRefusesWhatCannotBeJudged(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		run  flow.GateRun
+	}{
+		{"a run that measured nothing", flow.GateRun{Gate: flow.GateTested, Outcome: flow.OutcomeDied}},
+		{"a run carrying no outcome at all", flow.GateRun{Gate: flow.GateTested}},
+		{"an undeclared gate name", measuredRun("lint")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			v, err := gateWorktree(t, fake.New()).Judge(context.Background(), c.run)
+			if err == nil {
+				t.Fatal("Judge answered a request no judge could answer")
+			}
+			if v.Acceptable {
+				t.Error("Acceptable = true beside an error")
+			}
+			if v.Thresholds != nil {
+				t.Errorf("Thresholds = %q, want none — nothing was compared", v.Thresholds)
+			}
+		})
+	}
+}
+
 // An undeclared name is a request no runner could attempt, so it is the one
 // thing that is an error — and the GateRun beside it must carry no outcome. A
 // caller that read a measurement out of it would act on a gate that never ran.
