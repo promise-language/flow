@@ -182,9 +182,17 @@ func (g *gitOps) HasStaged(ctx context.Context) (bool, error) {
 func (g *gitOps) PushMaterial(ctx context.Context, branch string) (messages []string, patch string, err error) {
 	// %x00 rather than a newline: a commit message contains newlines, so any
 	// text separator would split one message into several.
+	//
+	// The trailing `--` says the branch is a revision and there are no
+	// pathspecs. Without it git refuses any branch whose name is also a
+	// tracked path ("ambiguous argument"), and the claim branch is
+	// flow/issue-<n> — a name a repository can perfectly well also have a
+	// file at. `git push` never had to disambiguate, so this is a failure
+	// only the material query can hit, and it would fail a push that has
+	// nothing wrong with it.
 	logArgs := func(extra ...string) []string {
 		args := append([]string{"log", "--format=%B%x00"}, extra...)
-		return append(args, branch, "--not", "--remotes=origin")
+		return append(args, branch, "--not", "--remotes=origin", "--")
 	}
 	stdout, stderr, err := g.run(ctx, logArgs()...)
 	if err != nil {
