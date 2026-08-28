@@ -1,0 +1,1752 @@
+diff --git a/pkg/backend/github/artifact.go b/pkg/backend/github/artifact.go
+index 02ceef5..27c4513 100644
+--- a/pkg/backend/github/artifact.go
++++ b/pkg/backend/github/artifact.go
+@@ -80,7 +80,7 @@ func (b *Backend) SeedState(ctx context.Context, claim flow.Claim, specs []flow.
+ 	}
+ 
+ 	// Idempotent label adds.
+-	if _, _, err := b.gh.Issues.AddLabelsToIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{
++	if err := b.out.AddLabels(ctx, issueNum, []string{
+ 		b.labels.Seeded(),
+ 		b.labels.Binary(b.cfg.BinaryName),
+ 	}); err != nil {
+@@ -252,7 +252,7 @@ func (b *Backend) ResolveArtifact(ctx context.Context, claim flow.Claim, id flow
+ 				return err
+ 			}
+ 		}
+-		c, _, err := b.gh.Issues.CreateComment(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, &github.IssueComment{Body: &commentBody})
++		c, err := b.out.CreateComment(ctx, actArtifactComment, issueNum, commentBody)
+ 		if err != nil {
+ 			return fmt.Errorf("post artifact comment: %w", err)
+ 		}
+@@ -363,7 +363,7 @@ func (b *Backend) removeParkLabel(ctx context.Context, claim flow.Claim, label s
+ 	if err != nil {
+ 		return
+ 	}
+-	_, _ = b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, label)
++	_ = b.out.RemoveLabel(ctx, issueNum, label)
+ }
+ 
+ // mutateArtifact applies a mutation to one artifact entry of the state doc.
+@@ -449,13 +449,13 @@ func (b *Backend) Park(ctx context.Context, claim flow.Claim, req flow.ParkReque
+ 	if err != nil {
+ 		return err
+ 	}
+-	if _, _, err := b.gh.Issues.AddLabelsToIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{parkLabel(b.labels, &req)}); err != nil {
++	if err := b.out.AddLabels(ctx, issueNum, []string{parkLabel(b.labels, &req)}); err != nil {
+ 		return fmt.Errorf("add park label: %w", err)
+ 	}
+ 	// Post a comment with the park reason so the timeline carries a record.
+ 	parkBody, _ := json.Marshal(req)
+ 	body := "<!-- flow:park -->\n```json\n" + string(parkBody) + "\n```"
+-	if _, _, err := b.gh.Issues.CreateComment(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, &github.IssueComment{Body: &body}); err != nil {
++	if _, err := b.out.CreateComment(ctx, actParkRecord, issueNum, body); err != nil {
+ 		return err
+ 	}
+ 	// Record it in the state doc. An item can be parked before it is seeded
+@@ -497,7 +497,7 @@ func (b *Backend) AskQuestions(ctx context.Context, claim flow.Claim, qs []flow.
+ 	body := sb.String()
+ 	// Keep the created comment: its server-side CreatedAt is the only clock
+ 	// that can be compared against the answers' timestamps. See Question.AskedAt.
+-	created, _, err := b.gh.Issues.CreateComment(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, &github.IssueComment{Body: &body})
++	created, err := b.out.CreateComment(ctx, actQuestion, issueNum, body)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("post questions comment: %w", err)
+ 	}
+@@ -505,7 +505,7 @@ func (b *Backend) AskQuestions(ctx context.Context, claim flow.Claim, qs []flow.
+ 	for i := range out {
+ 		out[i].AskedAt = askedAt
+ 	}
+-	if _, _, err := b.gh.Issues.AddLabelsToIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{b.labels.NeedsAnswer()}); err != nil {
++	if err := b.out.AddLabels(ctx, issueNum, []string{b.labels.NeedsAnswer()}); err != nil {
+ 		return nil, fmt.Errorf("add needs-answer label: %w", err)
+ 	}
+ 	return out, nil
+@@ -576,7 +576,7 @@ func (b *Backend) ReadAnswers(ctx context.Context, item flow.Item, since time.Ti
+ 	}
+ 	var out []flow.Answer
+ 	for {
+-		comments, resp, err := b.gh.Issues.ListComments(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, opts)
++		comments, resp, err := b.out.ListCommentsPage(ctx, issueNum, opts)
+ 		if err != nil {
+ 			return nil, fmt.Errorf("list comments on #%d: %w", issueNum, err)
+ 		}
+@@ -668,7 +668,7 @@ func (b *Backend) hydrateMarkdownBodies(ctx context.Context, issueNum int, state
+ 	opts := &github.IssueListCommentsOptions{ListOptions: github.ListOptions{PerPage: 100}}
+ 	seen := map[flow.ArtifactId]int{}
+ 	for {
+-		comments, resp, err := b.gh.Issues.ListComments(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, opts)
++		comments, resp, err := b.out.ListCommentsPage(ctx, issueNum, opts)
+ 		if err != nil {
+ 			// Fatal, deliberately. Degrading to empty bodies would make an API
+ 			// outage indistinguishable from an artifact that genuinely has no
+@@ -757,7 +757,7 @@ func (b *Backend) readArtifactFile(ctx context.Context, path string) (string, er
+ 	// DownloadContents, not GetContents: the latter inlines the bytes and caps
+ 	// at 1MB, which a spilled artifact can exceed — spilling is what happens to
+ 	// the large ones. This follows the download URL instead.
+-	rc, _, err := b.gh.Repositories.DownloadContents(ctx, b.cfg.Owner, b.cfg.Repo, path,
++	rc, err := b.out.DownloadContents(ctx, path,
+ 		&github.RepositoryContentGetOptions{Ref: artifactsBranch})
+ 	if err != nil {
+ 		return "", fmt.Errorf("download %s@%s: %w", path, artifactsBranch, err)
+diff --git a/pkg/backend/github/artifacts_branch.go b/pkg/backend/github/artifacts_branch.go
+index 889e7da..6fa89d6 100644
+--- a/pkg/backend/github/artifacts_branch.go
++++ b/pkg/backend/github/artifacts_branch.go
+@@ -55,11 +55,8 @@ func (b *Backend) putArtifactFile(ctx context.Context, path string, content []by
+ 	}
+ 	if prevSHA != "" {
+ 		opts.SHA = github.Ptr(prevSHA)
+-		_, _, err = b.gh.Repositories.UpdateFile(ctx, b.cfg.Owner, b.cfg.Repo, path, opts)
+-	} else {
+-		_, _, err = b.gh.Repositories.CreateFile(ctx, b.cfg.Owner, b.cfg.Repo, path, opts)
+ 	}
+-	if err != nil {
++	if err := b.out.PutFile(ctx, path, opts); err != nil {
+ 		return "", fmt.Errorf("put artifact file %s: %w", path, err)
+ 	}
+ 	return b.rawArtifactURL(path), nil
+@@ -68,7 +65,7 @@ func (b *Backend) putArtifactFile(ctx context.Context, path string, content []by
+ // artifactsBranchExists returns true if refs/heads/flow-artifacts is
+ // resolvable in the repo.
+ func (b *Backend) artifactsBranchExists(ctx context.Context) (bool, error) {
+-	_, resp, err := b.gh.Git.GetRef(ctx, b.cfg.Owner, b.cfg.Repo, "heads/"+artifactsBranch)
++	_, resp, err := b.out.GetRef(ctx, "heads/"+artifactsBranch)
+ 	if err == nil {
+ 		return true, nil
+ 	}
+@@ -83,7 +80,7 @@ func (b *Backend) artifactsBranchExists(ctx context.Context) (bool, error) {
+ // Contents API has no way to create a parentless commit.
+ func (b *Backend) createArtifactsBranch(ctx context.Context, path string, content []byte, commitMessage string) error {
+ 	// 1. Create the blob.
+-	blob, _, err := b.gh.Git.CreateBlob(ctx, b.cfg.Owner, b.cfg.Repo, &github.Blob{
++	blob, err := b.out.CreateBlob(ctx, &github.Blob{
+ 		Content:  github.Ptr(string(content)),
+ 		Encoding: github.Ptr("utf-8"),
+ 	})
+@@ -92,7 +89,7 @@ func (b *Backend) createArtifactsBranch(ctx context.Context, path string, conten
+ 	}
+ 
+ 	// 2. Create the tree.
+-	tree, _, err := b.gh.Git.CreateTree(ctx, b.cfg.Owner, b.cfg.Repo, "", []*github.TreeEntry{{
++	tree, err := b.out.CreateTree(ctx, "", []*github.TreeEntry{{
+ 		Path: github.Ptr(path),
+ 		Mode: github.Ptr("100644"),
+ 		Type: github.Ptr("blob"),
+@@ -103,21 +100,20 @@ func (b *Backend) createArtifactsBranch(ctx context.Context, path string, conten
+ 	}
+ 
+ 	// 3. Create the orphan commit (parents: []).
+-	commit, _, err := b.gh.Git.CreateCommit(ctx, b.cfg.Owner, b.cfg.Repo, &github.Commit{
++	commit, err := b.out.CreateCommit(ctx, &github.Commit{
+ 		Message: github.Ptr(commitMessage),
+ 		Tree:    tree,
+ 		Parents: []*github.Commit{},
+-	}, nil)
++	})
+ 	if err != nil {
+ 		return fmt.Errorf("create commit: %w", err)
+ 	}
+ 
+ 	// 4. Create the ref.
+-	_, _, err = b.gh.Git.CreateRef(ctx, b.cfg.Owner, b.cfg.Repo, &github.Reference{
++	if err := b.out.CreateRef(ctx, &github.Reference{
+ 		Ref:    github.Ptr("refs/heads/" + artifactsBranch),
+ 		Object: &github.GitObject{SHA: commit.SHA},
+-	})
+-	if err != nil {
++	}); err != nil {
+ 		return fmt.Errorf("create ref heads/%s: %w", artifactsBranch, err)
+ 	}
+ 	return nil
+@@ -126,7 +122,7 @@ func (b *Backend) createArtifactsBranch(ctx context.Context, path string, conten
+ // getArtifactFileSHA returns the current blob SHA at `path` on the orphan
+ // branch, or empty string if the file doesn't exist there yet.
+ func (b *Backend) getArtifactFileSHA(ctx context.Context, path string) (string, error) {
+-	file, _, resp, err := b.gh.Repositories.GetContents(ctx, b.cfg.Owner, b.cfg.Repo, path, &github.RepositoryContentGetOptions{Ref: artifactsBranch})
++	file, resp, err := b.out.GetContents(ctx, path, &github.RepositoryContentGetOptions{Ref: artifactsBranch})
+ 	if err != nil {
+ 		if resp != nil && resp.StatusCode == http.StatusNotFound {
+ 			return "", nil
+diff --git a/pkg/backend/github/auth.go b/pkg/backend/github/auth.go
+deleted file mode 100644
+index 61d1ded..0000000
+--- a/pkg/backend/github/auth.go
++++ /dev/null
+@@ -1,53 +0,0 @@
+-package github
+-
+-import (
+-	"context"
+-	"errors"
+-	"fmt"
+-	"os"
+-	"os/exec"
+-	"strings"
+-)
+-
+-// resolveToken returns a GitHub token, preferring the explicit override,
+-// then `gh auth token`, then GITHUB_TOKEN.
+-func resolveToken(ctx context.Context, override string) (string, error) {
+-	if override != "" {
+-		return override, nil
+-	}
+-	if tok, err := ghAuthToken(ctx); err == nil && tok != "" {
+-		return tok, nil
+-	}
+-	if tok := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); tok != "" {
+-		return tok, nil
+-	}
+-	return "", errors.New("no GitHub token found; run `gh auth login` or set GITHUB_TOKEN")
+-}
+-
+-// ghAuthToken runs `gh auth token` and returns the trimmed output. Returns a
+-// useful error message when gh is not installed.
+-func ghAuthToken(ctx context.Context) (string, error) {
+-	if _, err := exec.LookPath("gh"); err != nil {
+-		return "", fmt.Errorf("gh CLI not installed (see https://cli.github.com/)")
+-	}
+-	out, err := exec.CommandContext(ctx, "gh", "auth", "token").Output()
+-	if err != nil {
+-		return "", fmt.Errorf("gh auth token: %w", err)
+-	}
+-	return strings.TrimSpace(string(out)), nil
+-}
+-
+-// resolveLogin returns the authenticated gh login (used as the claim
+-// owner when the caller didn't override). Falls back to "" when gh is
+-// absent — the cli/app.go layer derives a fallback from $USER.
+-func resolveLogin(ctx context.Context) (string, error) {
+-	if _, err := exec.LookPath("gh"); err != nil {
+-		return "", nil
+-	}
+-	// `gh api user --jq .login` is the simplest path.
+-	out, err := exec.CommandContext(ctx, "gh", "api", "user", "--jq", ".login").Output()
+-	if err != nil {
+-		return "", fmt.Errorf("gh api user: %w", err)
+-	}
+-	return strings.TrimSpace(string(out)), nil
+-}
+diff --git a/pkg/backend/github/backend.go b/pkg/backend/github/backend.go
+index 24cd7a2..4de4047 100644
+--- a/pkg/backend/github/backend.go
++++ b/pkg/backend/github/backend.go
+@@ -6,7 +6,6 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"net/http"
+-	"net/url"
+ 	"os"
+ 	"strconv"
+ 	"strings"
+@@ -19,8 +18,10 @@ import (
+ 
+ // Backend is the GitHub-Issues-backed flow.Backend.
+ type Backend struct {
+-	cfg    Config
+-	gh     *github.Client
++	cfg Config
++	// out is the only route from this backend to GitHub — API, `gh`, and the
++	// push alike. See outward.
++	out    *outward
+ 	git    *gitOps
+ 	labels labels
+ 
+@@ -64,40 +65,15 @@ func NewBackend(cfg Config) (*Backend, error) {
+ 		return nil, err
+ 	}
+ 
+-	client := github.NewClient(nil).WithAuthToken(token)
+ 	return &Backend{
+ 		cfg:               cfg,
+-		gh:                client,
++		out:               newOutward(token, git, cfg.Owner, cfg.Repo),
+ 		git:               git,
+ 		labels:            newLabels(cfg.LabelPrefix),
+ 		stateCommentCache: map[int]int64{},
+ 	}, nil
+ }
+ 
+-// WithHTTPClient is a test seam: replaces the underlying http.Client. Used
+-// by unit tests that drive the github backend via httptest.Server.
+-func (b *Backend) WithHTTPClient(c *http.Client) *Backend {
+-	b.gh = github.NewClient(c).WithAuthToken(b.cfg.Token)
+-	return b
+-}
+-
+-// WithBaseURL is a test seam: overrides the API base URL so tests can point
+-// at an httptest.Server. Sets the URL fields directly (avoids the
+-// /api/v3/ suffix that WithEnterpriseURLs injects for GitHub Enterprise).
+-func (b *Backend) WithBaseURL(baseURL, uploadURL string) (*Backend, error) {
+-	base, err := url.Parse(baseURL)
+-	if err != nil {
+-		return nil, fmt.Errorf("parse base URL: %w", err)
+-	}
+-	upload, err := url.Parse(uploadURL)
+-	if err != nil {
+-		return nil, fmt.Errorf("parse upload URL: %w", err)
+-	}
+-	b.gh.BaseURL = base
+-	b.gh.UploadURL = upload
+-	return b, nil
+-}
+-
+ func (b *Backend) Name() string { return "github" }
+ 
+ func (b *Backend) SupportedSignals() []flow.SignalDef {
+@@ -149,7 +125,7 @@ func (b *Backend) ListEligible(ctx context.Context) ([]flow.ItemRef, error) {
+ 	// `is:open is:issue label:flow:<binary> assignee:@me` via Search.
+ 	q := fmt.Sprintf("repo:%s/%s is:issue is:open label:%s assignee:@me",
+ 		b.cfg.Owner, b.cfg.Repo, b.labels.Binary(b.cfg.BinaryName))
+-	result, _, err := b.gh.Search.Issues(ctx, q, &github.SearchOptions{ListOptions: github.ListOptions{PerPage: 100}})
++	result, err := b.out.SearchIssues(ctx, q, &github.SearchOptions{ListOptions: github.ListOptions{PerPage: 100}})
+ 	if err != nil {
+ 		return nil, fmt.Errorf("search issues: %w", err)
+ 	}
+@@ -216,7 +192,7 @@ func (b *Backend) LoadState(ctx context.Context, claim flow.Claim) (*flow.ItemSt
+ 		return nil, err
+ 	}
+ 
+-	issue, _, err := b.gh.Issues.Get(ctx, b.cfg.Owner, b.cfg.Repo, issueNum)
++	issue, err := b.out.GetIssue(ctx, issueNum)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("get issue %d: %w", issueNum, err)
+ 	}
+@@ -288,7 +264,7 @@ func (b *Backend) LoadState(ctx context.Context, claim flow.Claim) (*flow.ItemSt
+ // nothing matched (item not yet seeded).
+ func (b *Backend) fetchStateComment(ctx context.Context, issueNum int, cachedID int64) (body string, id int64, err error) {
+ 	if cachedID != 0 {
+-		c, _, err := b.gh.Issues.GetComment(ctx, b.cfg.Owner, b.cfg.Repo, cachedID)
++		c, err := b.out.GetComment(ctx, cachedID)
+ 		if err == nil {
+ 			return c.GetBody(), cachedID, nil
+ 		}
+@@ -304,7 +280,7 @@ func (b *Backend) fetchStateComment(ctx context.Context, issueNum int, cachedID
+ 		ListOptions: github.ListOptions{PerPage: 100},
+ 	}
+ 	for {
+-		comments, resp, err := b.gh.Issues.ListComments(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, opt)
++		comments, resp, err := b.out.ListCommentsPage(ctx, issueNum, opt)
+ 		if err != nil {
+ 			return "", 0, fmt.Errorf("list comments: %w", err)
+ 		}
+@@ -372,7 +348,7 @@ func (b *Backend) Doctor(ctx context.Context) error {
+ // one to be set. Doctor uses it as a health check; the issue package uses it to
+ // pick a step set (see issue.RoleProber).
+ func (b *Backend) RepoPermissions(ctx context.Context) (flow.RepoPermissions, error) {
+-	repo, _, err := b.gh.Repositories.Get(ctx, b.cfg.Owner, b.cfg.Repo)
++	repo, err := b.out.GetRepo(ctx)
+ 	if err != nil {
+ 		return flow.RepoPermissions{}, fmt.Errorf("repository %s/%s: %w", b.cfg.Owner, b.cfg.Repo, err)
+ 	}
+@@ -391,7 +367,7 @@ func (b *Backend) RepoPermissions(ctx context.Context) (flow.RepoPermissions, er
+ // literal, and a branch cut from the wrong base is not discovered until the PR
+ // is opened against it.
+ func (b *Backend) DefaultBranch(ctx context.Context) (string, error) {
+-	repo, _, err := b.gh.Repositories.Get(ctx, b.cfg.Owner, b.cfg.Repo)
++	repo, err := b.out.GetRepo(ctx)
+ 	if err != nil {
+ 		return "", fmt.Errorf("repository %s/%s: %w", b.cfg.Owner, b.cfg.Repo, err)
+ 	}
+@@ -432,8 +408,7 @@ func (b *Backend) updateStateComment(ctx context.Context, issueNum int, commentI
+ 	if err != nil {
+ 		return "", err
+ 	}
+-	_, _, err = b.gh.Issues.EditComment(ctx, b.cfg.Owner, b.cfg.Repo, commentID, &github.IssueComment{Body: &body})
+-	if err != nil {
++	if err := b.out.EditComment(ctx, actStateComment, issueNum, commentID, body); err != nil {
+ 		return "", fmt.Errorf("patch state comment %d: %w", commentID, err)
+ 	}
+ 	return body, nil
+@@ -445,7 +420,7 @@ func (b *Backend) postStateComment(ctx context.Context, issueNum int, doc stateD
+ 	if err != nil {
+ 		return 0, "", err
+ 	}
+-	comment, _, err := b.gh.Issues.CreateComment(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, &github.IssueComment{Body: &body})
++	comment, err := b.out.CreateComment(ctx, actStateComment, issueNum, body)
+ 	if err != nil {
+ 		return 0, "", fmt.Errorf("post state comment: %w", err)
+ 	}
+diff --git a/pkg/backend/github/backend_test.go b/pkg/backend/github/backend_test.go
+index 341a1d1..1dde9d6 100644
+--- a/pkg/backend/github/backend_test.go
++++ b/pkg/backend/github/backend_test.go
+@@ -10,7 +10,6 @@ import (
+ 	"testing"
+ 	"time"
+ 
+-	ghclient "github.com/google/go-github/v68/github"
+ 	"github.com/promise-language/flow"
+ )
+ 
+@@ -48,6 +47,24 @@ type ghMock struct {
+ 	branchCreated    bool
+ 	branchCreateCall string // path of first file committed when creating
+ 	updateCalls      int
++
++	// mutations records every non-GET request the server received, whether or
++	// not a route existed for it. Recorded before routing on purpose: a write
++	// that reached the network is a disclosure even when GitHub rejects it.
++	mutations []string
++}
++
++// recordMutations counts the requests that change something, so a test can
++// assert that a refused disclosure sent nothing at all.
++func (m *ghMock) recordMutations(next http.Handler) http.Handler {
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodGet {
++			m.mu.Lock()
++			m.mutations = append(m.mutations, r.Method+" "+r.URL.Path)
++			m.mu.Unlock()
++		}
++		next.ServeHTTP(w, r)
++	})
+ }
+ 
+ type ghMockFile struct {
+@@ -159,7 +176,7 @@ func (m *ghMock) server() *httptest.Server {
+ 		writeJSON(w, map[string]any{"login": "alice"})
+ 	})
+ 
+-	return httptest.NewServer(mux)
++	return httptest.NewServer(m.recordMutations(mux))
+ }
+ 
+ func (m *ghMock) handleIssue(w http.ResponseWriter, r *http.Request) {
+@@ -494,6 +511,9 @@ func ghCommentJSON(c ghMockComment) map[string]any {
+ func newMockedBackend(t *testing.T, mock *ghMock, srv *httptest.Server) *Backend {
+ 	t.Helper()
+ 	t.Setenv("FLOW_DIR", t.TempDir())
++	// One gitOps, shared with the seam: a test that substitutes b.git.runner
++	// must also be substituting what `gh` and the push go through.
++	git := newGitOps(".")
+ 	b := &Backend{
+ 		cfg: Config{
+ 			Owner:           mock.owner,
+@@ -503,8 +523,8 @@ func newMockedBackend(t *testing.T, mock *ghMock, srv *httptest.Server) *Backend
+ 			LabelPrefix:     "flow:",
+ 			MaxCommentBytes: 60 * 1024,
+ 		},
+-		gh:                ghclient.NewClient(nil).WithAuthToken("fake-token"),
+-		git:               newGitOps("."),
++		out:               newOutward("fake-token", git, mock.owner, mock.repo),
++		git:               git,
+ 		labels:            newLabels("flow:"),
+ 		stateCommentCache: map[int]int64{},
+ 	}
+diff --git a/pkg/backend/github/claim.go b/pkg/backend/github/claim.go
+index a8cc8d0..450a6ef 100644
+--- a/pkg/backend/github/claim.go
++++ b/pkg/backend/github/claim.go
+@@ -34,7 +34,7 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, for
+ 
+ 	// Preflight: refuse if the issue is owned by another flow binary or
+ 	// explicitly disabled.
+-	issue, _, err := b.gh.Issues.Get(ctx, b.cfg.Owner, b.cfg.Repo, issueNum)
++	issue, err := b.out.GetIssue(ctx, issueNum)
+ 	if err != nil {
+ 		return flow.Claim{}, fmt.Errorf("get issue %d: %w", issueNum, err)
+ 	}
+@@ -49,14 +49,14 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, for
+ 	// Phase 1: post a random claim label.
+ 	token := randomClaimToken()
+ 	claimLabel := b.labels.ClaimToken(token)
+-	if _, _, err := b.gh.Issues.AddLabelsToIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{claimLabel}); err != nil {
++	if err := b.out.AddLabels(ctx, issueNum, []string{claimLabel}); err != nil {
+ 		return flow.Claim{}, fmt.Errorf("add claim label: %w", err)
+ 	}
+ 
+ 	// Phase 2: re-fetch labels; check race.
+-	issue2, _, err := b.gh.Issues.Get(ctx, b.cfg.Owner, b.cfg.Repo, issueNum)
++	issue2, err := b.out.GetIssue(ctx, issueNum)
+ 	if err != nil {
+-		_, _ = b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, claimLabel)
++		_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
+ 		return flow.Claim{}, fmt.Errorf("get issue (post-claim): %w", err)
+ 	}
+ 	contenders := b.claimContenders(labelNamesOf(issue2.Labels))
+@@ -67,30 +67,30 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, for
+ 	sort.Strings(contenders)
+ 	if contenders[0] != token {
+ 		// Lost the race — clean up our label.
+-		_, _ = b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, claimLabel)
++		_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
+ 		return flow.Claim{}, fmt.Errorf("claim race lost to %s", contenders[0])
+ 	}
+ 
+ 	// Phase 3: assert ownership.
+-	if _, _, err := b.gh.Issues.AddAssignees(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{owner}); err != nil {
+-		_, _ = b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, claimLabel)
++	if err := b.out.AddAssignees(ctx, issueNum, []string{owner}); err != nil {
++		_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
+ 		return flow.Claim{}, fmt.Errorf("add assignee: %w", err)
+ 	}
+ 	// Clear any stale owner labels first (other than our own).
+ 	for _, name := range labelNamesOf(issue2.Labels) {
+ 		if login, ok := b.labels.OwnerFromLabel(name); ok && login != owner {
+-			_, _ = b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, name)
++			_ = b.out.RemoveLabel(ctx, issueNum, name)
+ 		}
+ 	}
+-	if _, _, err := b.gh.Issues.AddLabelsToIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{
++	if err := b.out.AddLabels(ctx, issueNum, []string{
+ 		b.labels.Owner(owner),
+ 		b.labels.Binary(b.cfg.BinaryName),
+ 	}); err != nil {
+ 		// Best-effort cleanup, then surface.
+-		_, _ = b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, claimLabel)
++		_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
+ 		return flow.Claim{}, fmt.Errorf("add owner/binary labels: %w", err)
+ 	}
+-	if _, err := b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, claimLabel); err != nil {
++	if err := b.out.RemoveLabel(ctx, issueNum, claimLabel); err != nil {
+ 		// Non-fatal — the claim label is just transient.
+ 		_ = err
+ 	}
+@@ -131,8 +131,8 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, for
+ 	// CLI commands that consume the active claim can find it.
+ 	if err := clistate.Save(c); err != nil {
+ 		// Best-effort rollback of the github-side ownership we just took.
+-		_, _ = b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, b.labels.Owner(owner))
+-		_, _, _ = b.gh.Issues.RemoveAssignees(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{owner})
++		_ = b.out.RemoveLabel(ctx, issueNum, b.labels.Owner(owner))
++		_ = b.out.RemoveAssignees(ctx, issueNum, []string{owner})
+ 		return flow.Claim{}, fmt.Errorf("github.Claim: save active claim: %w", err)
+ 	}
+ 	return c, nil
+@@ -145,10 +145,10 @@ func (b *Backend) Release(ctx context.Context, claim flow.Claim) error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	if _, err := b.gh.Issues.RemoveLabelForIssue(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, b.labels.Owner(claim.Owner)); err != nil && !isNotFound(err) {
++	if err := b.out.RemoveLabel(ctx, issueNum, b.labels.Owner(claim.Owner)); err != nil && !isNotFound(err) {
+ 		return fmt.Errorf("remove owner label: %w", err)
+ 	}
+-	if _, _, err := b.gh.Issues.RemoveAssignees(ctx, b.cfg.Owner, b.cfg.Repo, issueNum, []string{claim.Owner}); err != nil && !isNotFound(err) {
++	if err := b.out.RemoveAssignees(ctx, issueNum, []string{claim.Owner}); err != nil && !isNotFound(err) {
+ 		return fmt.Errorf("remove assignee: %w", err)
+ 	}
+ 	if err := clistate.Clear(); err != nil {
+@@ -188,7 +188,7 @@ func (b *Backend) LookupClaim(ctx context.Context, ref flow.ItemRef) (*flow.Clai
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	issue, _, err := b.gh.Issues.Get(ctx, b.cfg.Owner, b.cfg.Repo, issueNum)
++	issue, err := b.out.GetIssue(ctx, issueNum)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("get issue %d: %w", issueNum, err)
+ 	}
+diff --git a/pkg/backend/github/config.go b/pkg/backend/github/config.go
+index e1417c1..c3cfd73 100644
+--- a/pkg/backend/github/config.go
++++ b/pkg/backend/github/config.go
+@@ -86,11 +86,6 @@ func (c Config) withDefaults() Config {
+ 	return c
+ }
+ 
+-// repoFullName returns "owner/repo" for log + Display strings.
+-func (c Config) repoFullName() string {
+-	return c.Owner + "/" + c.Repo
+-}
+-
+ // validate returns an error if Config is missing fields NewBackend couldn't
+ // fill in from the environment.
+ func (c Config) validate() error {
+diff --git a/pkg/backend/github/git.go b/pkg/backend/github/git.go
+index 69ed479..6dc1fc9 100644
+--- a/pkg/backend/github/git.go
++++ b/pkg/backend/github/git.go
+@@ -167,17 +167,39 @@ func (g *gitOps) HasStaged(ctx context.Context) (bool, error) {
+ 	return false, err
+ }
+ 
+-// Push pushes the current branch to origin with -u (set upstream).
+-func (g *gitOps) Push(ctx context.Context) error {
+-	branch, err := g.CurrentBranch(ctx)
++// PushMaterial reports what pushing `branch` to origin would publish: the
++// message of every commit the remote does not already have, and those commits
++// as a patch. There is no Push here — it lives on outward, because a push is a
++// publication and must not be reachable without passing the seam.
++//
++// `--not --remotes=origin` rather than a diff against a base branch: it needs
++// no base, and is correct both for a first push (nothing on origin excludes
++// nothing, so every commit on the branch is reported) and for a later one
++// (only what is new). When the remote-tracking refs are stale it over-reports,
++// which is the safe direction — a guard shown more than will be sent can
++// refuse something publishable, and one shown less reports a safety it did not
++// establish.
++func (g *gitOps) PushMaterial(ctx context.Context, branch string) (messages []string, patch string, err error) {
++	// %x00 rather than a newline: a commit message contains newlines, so any
++	// text separator would split one message into several.
++	logArgs := func(extra ...string) []string {
++		args := append([]string{"log", "--format=%B%x00"}, extra...)
++		return append(args, branch, "--not", "--remotes=origin")
++	}
++	stdout, stderr, err := g.run(ctx, logArgs()...)
+ 	if err != nil {
+-		return err
++		return nil, "", fmt.Errorf("git log %s --not --remotes=origin: %w (%s)", branch, err, string(stderr))
++	}
++	for _, m := range strings.Split(string(stdout), "\x00") {
++		if trimmed := strings.TrimSpace(m); trimmed != "" {
++			messages = append(messages, trimmed)
++		}
+ 	}
+-	_, stderr, err := g.run(ctx, "push", "-u", "origin", branch)
++	full, stderr, err := g.run(ctx, logArgs("--patch")...)
+ 	if err != nil {
+-		return fmt.Errorf("git push -u origin %s: %w (%s)", branch, err, string(stderr))
++		return nil, "", fmt.Errorf("git log --patch %s --not --remotes=origin: %w (%s)", branch, err, string(stderr))
+ 	}
+-	return nil
++	return messages, string(full), nil
+ }
+ 
+ // CapturePatch runs `git diff HEAD` and returns the unified diff. Untracked
+diff --git a/pkg/backend/github/outward.go b/pkg/backend/github/outward.go
+new file mode 100644
+index 0000000..50cd335
+--- /dev/null
++++ b/pkg/backend/github/outward.go
+@@ -0,0 +1,452 @@
++package github
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"net/url"
++	"os"
++	"os/exec"
++	"strings"
++
++	"github.com/google/go-github/v68/github"
++)
++
++// outward is the boundary between this backend and GitHub.
++//
++// docs/disclosure.md requires every byte the flow sends outward to pass a
++// guard at ONE seam, and says why: "A guard installed at six call sites is a
++// guard absent from the seventh, and the seventh is the one someone adds later
++// without knowing this document exists."
++//
++// This type is that seam. It holds the package's only *github.Client, and it
++// is the only route to `gh` and to `git push` — so the property is not that
++// publish is convenient to call, it is that there is nothing else to call.
++// Reaching GitHub from elsewhere in the package would mean building a second
++// client or spawning gh directly, which TestNoSecondRouteToGitHub fails.
++//
++// Reads live here too. Not because they publish anything, but so that no other
++// file in the package needs the client at all — a file holding a client for its
++// reads is a file that can write with it.
++type outward struct {
++	client *github.Client
++	git    *gitOps
++	owner  string
++	repo   string
++
++	// guard is consulted before every outward write and may refuse it.
++	//
++	// Nil until #49 installs one. A nil guard allows, which is the behaviour
++	// this package had before the seam existed and not a bypass: nothing
++	// reads configuration to decide, and an installed guard cannot be
++	// switched off — see docs/disclosure.md § "There is no bypass to
++	// configure".
++	guard func(context.Context, disclosure) error
++}
++
++// newOutward builds the seam and the client it owns. Construction lives here
++// too: a file that can build a client is a file that can write with one, so
++// NewBackend hands over a token rather than a client.
++func newOutward(token string, git *gitOps, owner, repo string) *outward {
++	return &outward{
++		client: github.NewClient(nil).WithAuthToken(token),
++		git:    git,
++		owner:  owner,
++		repo:   repo,
++	}
++}
++
++func (o *outward) repoFullName() string { return o.owner + "/" + o.repo }
++
++// act names what is being published. The set is closed: a write whose act is
++// not named here does not exist, and adding one means adding it here.
++type act string
++
++const (
++	actArtifactComment act = "artifact-comment"
++	actStateComment    act = "state-comment"
++	actParkRecord      act = "park-record"
++	actQuestion        act = "question"
++	actLabel           act = "label"
++	actPullRequest     act = "pull-request"
++	actMerge           act = "pull-request-merge"
++	actPush            act = "push"
++
++	// actAssignee and actArtifactFile are writes this backend performs that
++	// docs/disclosure.md's surface table — which declares itself closed —
++	// does not list. The gap predates the seam; making the writes explicit
++	// only made it visible. These names are the interim vocabulary, and they
++	// should be renamed after the document's rows once #50 settles what those
++	// rows are.
++	actAssignee     act = "assignee"
++	actArtifactFile act = "artifact-file"
++)
++
++// disclosure is one proposed outward write: the final bytes, plus enough
++// provenance to say where they were going.
++//
++// Final is the load-bearing word. A guard examining a template, or an artifact
++// before assembly, reports a safety it did not establish — so text holds the
++// strings as they will be sent, after every truncation, notice and marker this
++// package appends.
++type disclosure struct {
++	act   act
++	owner string
++	repo  string
++	issue int      // the issue being written to, or 0 when not issue-scoped
++	ref   string   // the git ref or branch being written to, or ""
++	text  []string // every string this write publishes, as it will be sent
++}
++
++// publish is the funnel. Every method on outward that writes wraps its call in
++// it; nothing else in this package reaches GitHub.
++func (o *outward) publish(ctx context.Context, d disclosure, do func(context.Context) error) error {
++	d.owner, d.repo = o.owner, o.repo
++	if o.guard != nil {
++		if err := o.guard(ctx, d); err != nil {
++			return fmt.Errorf("disclosure refused (%s): %w", d.act, err)
++		}
++	}
++	return do(ctx)
++}
++
++// ---------------------------------------------------------------------------
++// Writes. Each one goes through publish.
++// ---------------------------------------------------------------------------
++
++// CreateComment posts a comment on an issue. The act says which of the
++// backend's comment kinds this is; the body is the comment as it will appear.
++func (o *outward) CreateComment(ctx context.Context, a act, issue int, body string) (*github.IssueComment, error) {
++	var created *github.IssueComment
++	err := o.publish(ctx, disclosure{act: a, issue: issue, text: []string{body}}, func(ctx context.Context) error {
++		c, _, err := o.client.Issues.CreateComment(ctx, o.owner, o.repo, issue, &github.IssueComment{Body: &body})
++		created = c
++		return err
++	})
++	if err != nil {
++		return nil, err
++	}
++	return created, nil
++}
++
++// EditComment rewrites an existing comment in place.
++func (o *outward) EditComment(ctx context.Context, a act, issue int, commentID int64, body string) error {
++	return o.publish(ctx, disclosure{act: a, issue: issue, text: []string{body}}, func(ctx context.Context) error {
++		_, _, err := o.client.Issues.EditComment(ctx, o.owner, o.repo, commentID, &github.IssueComment{Body: &body})
++		return err
++	})
++}
++
++// AddLabels adds labels to an issue. Label names are the case that looks
++// exempt and is not: the flow CONSTRUCTS them — flow:owner:<login>,
++// flow:budget-exhausted:<step-id> — so a name is text the flow chose to
++// publish.
++func (o *outward) AddLabels(ctx context.Context, issue int, names []string) error {
++	d := disclosure{act: actLabel, issue: issue, text: append([]string(nil), names...)}
++	return o.publish(ctx, d, func(ctx context.Context) error {
++		_, _, err := o.client.Issues.AddLabelsToIssue(ctx, o.owner, o.repo, issue, names)
++		return err
++	})
++}
++
++// RemoveLabel drops one label from an issue.
++func (o *outward) RemoveLabel(ctx context.Context, issue int, name string) error {
++	d := disclosure{act: actLabel, issue: issue, text: []string{name}}
++	return o.publish(ctx, d, func(ctx context.Context) error {
++		_, err := o.client.Issues.RemoveLabelForIssue(ctx, o.owner, o.repo, issue, name)
++		return err
++	})
++}
++
++func (o *outward) AddAssignees(ctx context.Context, issue int, logins []string) error {
++	d := disclosure{act: actAssignee, issue: issue, text: append([]string(nil), logins...)}
++	return o.publish(ctx, d, func(ctx context.Context) error {
++		_, _, err := o.client.Issues.AddAssignees(ctx, o.owner, o.repo, issue, logins)
++		return err
++	})
++}
++
++func (o *outward) RemoveAssignees(ctx context.Context, issue int, logins []string) error {
++	d := disclosure{act: actAssignee, issue: issue, text: append([]string(nil), logins...)}
++	return o.publish(ctx, d, func(ctx context.Context) error {
++		_, _, err := o.client.Issues.RemoveAssignees(ctx, o.owner, o.repo, issue, logins)
++		return err
++	})
++}
++
++// PutFile commits content to path on the artifacts branch. A non-empty
++// opts.SHA updates the file already there; an empty one creates it.
++func (o *outward) PutFile(ctx context.Context, path string, opts *github.RepositoryContentFileOptions) error {
++	d := disclosure{
++		act:  actArtifactFile,
++		ref:  opts.GetBranch(),
++		text: []string{path, opts.GetMessage(), string(opts.Content)},
++	}
++	return o.publish(ctx, d, func(ctx context.Context) error {
++		var err error
++		if opts.GetSHA() != "" {
++			_, _, err = o.client.Repositories.UpdateFile(ctx, o.owner, o.repo, path, opts)
++		} else {
++			_, _, err = o.client.Repositories.CreateFile(ctx, o.owner, o.repo, path, opts)
++		}
++		return err
++	})
++}
++
++func (o *outward) CreateBlob(ctx context.Context, blob *github.Blob) (*github.Blob, error) {
++	var created *github.Blob
++	d := disclosure{act: actArtifactFile, text: []string{blob.GetContent()}}
++	err := o.publish(ctx, d, func(ctx context.Context) error {
++		b, _, err := o.client.Git.CreateBlob(ctx, o.owner, o.repo, blob)
++		created = b
++		return err
++	})
++	if err != nil {
++		return nil, err
++	}
++	return created, nil
++}
++
++func (o *outward) CreateTree(ctx context.Context, baseTree string, entries []*github.TreeEntry) (*github.Tree, error) {
++	paths := make([]string, 0, len(entries))
++	for _, e := range entries {
++		paths = append(paths, e.GetPath())
++	}
++	var created *github.Tree
++	d := disclosure{act: actArtifactFile, text: paths}
++	err := o.publish(ctx, d, func(ctx context.Context) error {
++		tr, _, err := o.client.Git.CreateTree(ctx, o.owner, o.repo, baseTree, entries)
++		created = tr
++		return err
++	})
++	if err != nil {
++		return nil, err
++	}
++	return created, nil
++}
++
++func (o *outward) CreateCommit(ctx context.Context, commit *github.Commit) (*github.Commit, error) {
++	var created *github.Commit
++	d := disclosure{act: actArtifactFile, text: []string{commit.GetMessage()}}
++	err := o.publish(ctx, d, func(ctx context.Context) error {
++		c, _, err := o.client.Git.CreateCommit(ctx, o.owner, o.repo, commit, nil)
++		created = c
++		return err
++	})
++	if err != nil {
++		return nil, err
++	}
++	return created, nil
++}
++
++func (o *outward) CreateRef(ctx context.Context, ref *github.Reference) error {
++	d := disclosure{act: actArtifactFile, ref: ref.GetRef(), text: []string{ref.GetRef()}}
++	return o.publish(ctx, d, func(ctx context.Context) error {
++		_, _, err := o.client.Git.CreateRef(ctx, o.owner, o.repo, ref)
++		return err
++	})
++}
++
++// OpenPullRequest opens a PR for head against base and returns its URL.
++//
++// `gh pr create` rather than the Go client: the client requires an
++// owner-qualified head, and gh handles the cross-repo (fork) case natively.
++// --repo, not -C: `-C` is git's flag for selecting a working directory and gh
++// has no such flag — passing it fails argument validation before gh does
++// anything ("unknown shorthand flag: 'C'"). --repo also removes the dependency
++// on the process working directory entirely, which the runner does not set.
++func (o *outward) OpenPullRequest(ctx context.Context, base, head, title, body string) (string, error) {
++	var prURL string
++	d := disclosure{act: actPullRequest, ref: head, text: []string{title, body, base, head}}
++	err := o.publish(ctx, d, func(ctx context.Context) error {
++		args := []string{"--repo", o.repoFullName(), "pr", "create",
++			"--base", base, "--title", title, "--body", body, "--head", head}
++		stdout, stderr, err := o.git.runner(ctx, "", "gh", args...)
++		if err != nil {
++			return fmt.Errorf("gh pr create: %w (stderr=%s)", err, strings.TrimSpace(string(stderr)))
++		}
++		// gh pr create prints the PR URL on stdout.
++		prURL = strings.TrimSpace(string(stdout))
++		return nil
++	})
++	if err != nil {
++		return "", err
++	}
++	return prURL, nil
++}
++
++// MergePullRequest queues an auto-squash-merge of the PR at prURL.
++func (o *outward) MergePullRequest(ctx context.Context, prURL string) error {
++	d := disclosure{act: actMerge, text: []string{prURL}}
++	return o.publish(ctx, d, func(ctx context.Context) error {
++		// --repo, not -C: see OpenPullRequest. gh has no -C flag.
++		args := []string{"--repo", o.repoFullName(), "pr", "merge", prURL, "--squash", "--auto"}
++		_, stderr, err := o.git.runner(ctx, "", "gh", args...)
++		if err != nil {
++			return fmt.Errorf("gh pr merge: %w (stderr=%s)", err, strings.TrimSpace(string(stderr)))
++		}
++		return nil
++	})
++}
++
++// Push pushes the current branch to origin with -u (set upstream).
++//
++// It lives here, and gitOps has no Push, because a push IS a publication:
++// docs/disclosure.md lists commit messages and the diff on the surface, and
++// notes they are the ones most easily forgotten because they reach the public
++// through git rather than through an API call. The guard therefore has to see
++// what the push would carry, which is what PushMaterial computes.
++func (o *outward) Push(ctx context.Context) error {
++	branch, err := o.git.CurrentBranch(ctx)
++	if err != nil {
++		return err
++	}
++	messages, patch, err := o.git.PushMaterial(ctx, branch)
++	if err != nil {
++		return err
++	}
++	text := make([]string, 0, len(messages)+2)
++	text = append(text, branch)
++	text = append(text, messages...)
++	text = append(text, patch)
++	return o.publish(ctx, disclosure{act: actPush, ref: branch, text: text}, func(ctx context.Context) error {
++		_, stderr, err := o.git.run(ctx, "push", "-u", "origin", branch)
++		if err != nil {
++			return fmt.Errorf("git push -u origin %s: %w (%s)", branch, err, string(stderr))
++		}
++		return nil
++	})
++}
++
++// ---------------------------------------------------------------------------
++// Reads. These publish nothing and do not go through publish; they are here so
++// that no other file in the package holds the client.
++// ---------------------------------------------------------------------------
++
++func (o *outward) SearchIssues(ctx context.Context, query string, opt *github.SearchOptions) (*github.IssuesSearchResult, error) {
++	result, _, err := o.client.Search.Issues(ctx, query, opt)
++	return result, err
++}
++
++func (o *outward) GetIssue(ctx context.Context, issue int) (*github.Issue, error) {
++	iss, _, err := o.client.Issues.Get(ctx, o.owner, o.repo, issue)
++	return iss, err
++}
++
++func (o *outward) GetComment(ctx context.Context, commentID int64) (*github.IssueComment, error) {
++	c, _, err := o.client.Issues.GetComment(ctx, o.owner, o.repo, commentID)
++	return c, err
++}
++
++// ListCommentsPage returns ONE page of an issue's comments plus the response
++// its callers page with. Deliberately not a collect-all-pages helper: the
++// state-comment scan stops at the first match, and collapsing that into a full
++// walk would change how many requests this backend makes.
++func (o *outward) ListCommentsPage(ctx context.Context, issue int, opt *github.IssueListCommentsOptions) ([]*github.IssueComment, *github.Response, error) {
++	return o.client.Issues.ListComments(ctx, o.owner, o.repo, issue, opt)
++}
++
++func (o *outward) GetRepo(ctx context.Context) (*github.Repository, error) {
++	repo, _, err := o.client.Repositories.Get(ctx, o.owner, o.repo)
++	return repo, err
++}
++
++func (o *outward) DownloadContents(ctx context.Context, path string, opt *github.RepositoryContentGetOptions) (io.ReadCloser, error) {
++	rc, _, err := o.client.Repositories.DownloadContents(ctx, o.owner, o.repo, path, opt)
++	return rc, err
++}
++
++func (o *outward) GetContents(ctx context.Context, path string, opt *github.RepositoryContentGetOptions) (*github.RepositoryContent, *github.Response, error) {
++	file, _, resp, err := o.client.Repositories.GetContents(ctx, o.owner, o.repo, path, opt)
++	return file, resp, err
++}
++
++func (o *outward) GetRef(ctx context.Context, ref string) (*github.Reference, *github.Response, error) {
++	return o.client.Git.GetRef(ctx, o.owner, o.repo, ref)
++}
++
++func (o *outward) ListPullRequests(ctx context.Context, opt *github.PullRequestListOptions) ([]*github.PullRequest, error) {
++	prs, _, err := o.client.PullRequests.List(ctx, o.owner, o.repo, opt)
++	return prs, err
++}
++
++func (o *outward) ListReviews(ctx context.Context, prNum int, opt *github.ListOptions) ([]*github.PullRequestReview, error) {
++	reviews, _, err := o.client.PullRequests.ListReviews(ctx, o.owner, o.repo, prNum, opt)
++	return reviews, err
++}
++
++// ---------------------------------------------------------------------------
++// Client construction and the `gh` invocations that precede a backend.
++// ---------------------------------------------------------------------------
++
++// WithHTTPClient is a test seam: replaces the underlying http.Client. Used
++// by unit tests that drive the github backend via httptest.Server.
++func (b *Backend) WithHTTPClient(c *http.Client) *Backend {
++	b.out.client = github.NewClient(c).WithAuthToken(b.cfg.Token)
++	return b
++}
++
++// WithBaseURL is a test seam: overrides the API base URL so tests can point
++// at an httptest.Server. Sets the URL fields directly (avoids the
++// /api/v3/ suffix that WithEnterpriseURLs injects for GitHub Enterprise).
++func (b *Backend) WithBaseURL(baseURL, uploadURL string) (*Backend, error) {
++	base, err := url.Parse(baseURL)
++	if err != nil {
++		return nil, fmt.Errorf("parse base URL: %w", err)
++	}
++	upload, err := url.Parse(uploadURL)
++	if err != nil {
++		return nil, fmt.Errorf("parse upload URL: %w", err)
++	}
++	b.out.client.BaseURL = base
++	b.out.client.UploadURL = upload
++	return b, nil
++}
++
++// resolveToken returns a GitHub token, preferring the explicit override,
++// then `gh auth token`, then GITHUB_TOKEN.
++//
++// Here rather than in a file of its own so that `gh` is spawned in exactly one
++// file, with no exemption list to remember.
++func resolveToken(ctx context.Context, override string) (string, error) {
++	if override != "" {
++		return override, nil
++	}
++	if tok, err := ghAuthToken(ctx); err == nil && tok != "" {
++		return tok, nil
++	}
++	if tok := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); tok != "" {
++		return tok, nil
++	}
++	return "", errors.New("no GitHub token found; run `gh auth login` or set GITHUB_TOKEN")
++}
++
++// ghAuthToken runs `gh auth token` and returns the trimmed output. Returns a
++// useful error message when gh is not installed.
++func ghAuthToken(ctx context.Context) (string, error) {
++	if _, err := exec.LookPath("gh"); err != nil {
++		return "", fmt.Errorf("gh CLI not installed (see https://cli.github.com/)")
++	}
++	out, err := exec.CommandContext(ctx, "gh", "auth", "token").Output()
++	if err != nil {
++		return "", fmt.Errorf("gh auth token: %w", err)
++	}
++	return strings.TrimSpace(string(out)), nil
++}
++
++// resolveLogin returns the authenticated gh login (used as the claim
++// owner when the caller didn't override). Falls back to "" when gh is
++// absent — the cli/app.go layer derives a fallback from $USER.
++func resolveLogin(ctx context.Context) (string, error) {
++	if _, err := exec.LookPath("gh"); err != nil {
++		return "", nil
++	}
++	// `gh api user --jq .login` is the simplest path.
++	out, err := exec.CommandContext(ctx, "gh", "api", "user", "--jq", ".login").Output()
++	if err != nil {
++		return "", fmt.Errorf("gh api user: %w", err)
++	}
++	return strings.TrimSpace(string(out)), nil
++}
+diff --git a/pkg/backend/github/outward_test.go b/pkg/backend/github/outward_test.go
+new file mode 100644
+index 0000000..b08c61c
+--- /dev/null
++++ b/pkg/backend/github/outward_test.go
+@@ -0,0 +1,585 @@
++package github
++
++import (
++	"context"
++	"errors"
++	"go/ast"
++	"go/parser"
++	"go/token"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"reflect"
++	"slices"
++	"strings"
++	"sync"
++	"testing"
++
++	ghclient "github.com/google/go-github/v68/github"
++	"github.com/promise-language/flow"
++)
++
++// errGuardRefused is what the refusing guard answers with. A sentinel rather
++// than a message so the assertions match on identity.
++var errGuardRefused = errors.New("guard says no")
++
++// spawnTape records every process the backend would have started, and answers
++// plausibly enough for the callers that read the output.
++type spawnTape struct {
++	mu    sync.Mutex
++	calls [][]string // name followed by its arguments
++}
++
++func (s *spawnTape) run(_ context.Context, _ string, name string, args ...string) ([]byte, []byte, error) {
++	s.mu.Lock()
++	s.calls = append(s.calls, append([]string{name}, args...))
++	s.mu.Unlock()
++	switch {
++	case name == "gh":
++		return []byte("https://github.com/o/r/pull/1\n"), nil, nil
++	case slices.Contains(args, "rev-parse"):
++		return []byte("flow/issue-42\n"), nil, nil
++	case slices.Contains(args, "log"):
++		return []byte("a commit message\x00"), nil, nil
++	}
++	return nil, nil, nil
++}
++
++// outward returns the spawns that publish something: any `gh`, and any git
++// push. Reads (rev-parse, log) are how the seam learns what a push would
++// carry, so they are expected even when the guard refuses.
++func (s *spawnTape) publishing() [][]string {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	var out [][]string
++	for _, c := range s.calls {
++		if c[0] == "gh" || slices.Contains(c, "push") {
++			out = append(out, c)
++		}
++	}
++	return out
++}
++
++func (s *spawnTape) reset() {
++	s.mu.Lock()
++	s.calls = nil
++	s.mu.Unlock()
++}
++
++// newSeamBackend wires a Backend at the mock server with every process spawn
++// intercepted, so a test can watch both halves of the boundary at once.
++func newSeamBackend(t *testing.T) (*Backend, *ghMock, *spawnTape) {
++	t.Helper()
++	mock := newGHMock(t)
++	srv := mock.server()
++	t.Cleanup(srv.Close)
++	b := newMockedBackend(t, mock, srv)
++	tape := &spawnTape{}
++	b.git.runner = tape.run
++	// One pre-existing comment, so the drive for EditComment has something to
++	// edit. Carries no flow marker, so the state-comment scan ignores it.
++	mock.mu.Lock()
++	mock.nextCommentID++
++	if mock.nextCommentID != seedCommentID {
++		t.Fatalf("ghMock numbered the seed comment %d, not %d — fix seedCommentID",
++			mock.nextCommentID, seedCommentID)
++	}
++	mock.comments = append(mock.comments, ghMockComment{
++		ID: seedCommentID, Body: "a human said something", User: "carol",
++	})
++	mock.mu.Unlock()
++	return b, mock, tape
++}
++
++// seedCommentID is the id ghMock gives that pre-existing comment. A constant
++// because the drive table below takes no fixture argument; newSeamBackend
++// checks the mock still agrees.
++const seedCommentID = 1001
++
++// outwardWrites drives every writing method on *outward. The map is the point
++// of the test below: a write added later that does not appear here fails the
++// closure check, and one that does appear but skips publish fails the refusal
++// check.
++func outwardWrites() map[string]func(context.Context, *outward) error {
++	return map[string]func(context.Context, *outward) error{
++		"CreateComment": func(ctx context.Context, o *outward) error {
++			_, err := o.CreateComment(ctx, actArtifactComment, 42, "a body")
++			return err
++		},
++		"EditComment": func(ctx context.Context, o *outward) error {
++			return o.EditComment(ctx, actStateComment, 42, seedCommentID, "a body")
++		},
++		"AddLabels": func(ctx context.Context, o *outward) error {
++			return o.AddLabels(ctx, 42, []string{"flow:seeded"})
++		},
++		"RemoveLabel": func(ctx context.Context, o *outward) error {
++			return o.RemoveLabel(ctx, 42, "flow:seeded")
++		},
++		"AddAssignees": func(ctx context.Context, o *outward) error {
++			return o.AddAssignees(ctx, 42, []string{"alice"})
++		},
++		"RemoveAssignees": func(ctx context.Context, o *outward) error {
++			return o.RemoveAssignees(ctx, 42, []string{"alice"})
++		},
++		"PutFile": func(ctx context.Context, o *outward) error {
++			return o.PutFile(ctx, artifactFilePath(42, "plan", "body.md"), &ghclient.RepositoryContentFileOptions{
++				Message: ghclient.Ptr("flow: issue-42 plan/body.md"),
++				Content: []byte("the plan"),
++				Branch:  ghclient.Ptr(artifactsBranch),
++			})
++		},
++		"CreateBlob": func(ctx context.Context, o *outward) error {
++			_, err := o.CreateBlob(ctx, &ghclient.Blob{
++				Content:  ghclient.Ptr("the plan"),
++				Encoding: ghclient.Ptr("utf-8"),
++			})
++			return err
++		},
++		"CreateTree": func(ctx context.Context, o *outward) error {
++			_, err := o.CreateTree(ctx, "", []*ghclient.TreeEntry{{
++				Path: ghclient.Ptr(artifactFilePath(42, "plan", "body.md")),
++				Mode: ghclient.Ptr("100644"),
++				Type: ghclient.Ptr("blob"),
++				SHA:  ghclient.Ptr("blob000001"),
++			}})
++			return err
++		},
++		"CreateCommit": func(ctx context.Context, o *outward) error {
++			_, err := o.CreateCommit(ctx, &ghclient.Commit{
++				Message: ghclient.Ptr("flow: issue-42 plan/body.md"),
++				Parents: []*ghclient.Commit{},
++			})
++			return err
++		},
++		"CreateRef": func(ctx context.Context, o *outward) error {
++			return o.CreateRef(ctx, &ghclient.Reference{
++				Ref:    ghclient.Ptr("refs/heads/" + artifactsBranch),
++				Object: &ghclient.GitObject{SHA: ghclient.Ptr("commit000001")},
++			})
++		},
++		"OpenPullRequest": func(ctx context.Context, o *outward) error {
++			_, err := o.OpenPullRequest(ctx, "main", "flow/issue-42", "a title", "a body")
++			return err
++		},
++		"MergePullRequest": func(ctx context.Context, o *outward) error {
++			return o.MergePullRequest(ctx, "https://github.com/o/r/pull/1")
++		},
++		"Push": func(ctx context.Context, o *outward) error {
++			return o.Push(ctx)
++		},
++	}
++}
++
++// outwardReads names the methods on *outward that only read. Every exported
++// method must be in exactly one of these two sets.
++var outwardReads = map[string]bool{
++	"SearchIssues":     true,
++	"GetIssue":         true,
++	"GetComment":       true,
++	"ListCommentsPage": true,
++	"GetRepo":          true,
++	"DownloadContents": true,
++	"GetContents":      true,
++	"GetRef":           true,
++	"ListPullRequests": true,
++	"ListReviews":      true,
++}
++
++// The load-bearing test. docs/disclosure.md requires the guard to be
++// unavoidable — "a guard that is consulted is a convention; a guard that
++// cannot be gone around is a guarantee" — so this drives EVERY writing method
++// with a refusing guard and asserts the mock server saw no mutating request
++// and no publishing process was spawned.
++//
++// Each method is driven twice. Once with no guard, to prove the drive actually
++// reaches GitHub — without that, a method that errored on its arguments would
++// satisfy the refusal assertion vacuously. Then once refusing, where nothing
++// may leave.
++func TestEveryOutwardWriteIsRefusable(t *testing.T) {
++	writes := outwardWrites()
++	for name, drive := range writes {
++		t.Run(name, func(t *testing.T) {
++			b, mock, tape := newSeamBackend(t)
++
++			// Allowed: something must actually go out.
++			if err := drive(t.Context(), b.out); err != nil {
++				t.Fatalf("%s with no guard: %v", name, err)
++			}
++			mock.mu.Lock()
++			sent := len(mock.mutations)
++			mock.mu.Unlock()
++			if sent == 0 && len(tape.publishing()) == 0 {
++				t.Fatalf("%s sent nothing even unguarded — the drive does not reach GitHub, "+
++					"so the refusal below would prove nothing", name)
++			}
++
++			// Refused: nothing may.
++			mock.mu.Lock()
++			mock.mutations = nil
++			mock.mu.Unlock()
++			tape.reset()
++			b.out.guard = func(context.Context, disclosure) error { return errGuardRefused }
++
++			err := drive(t.Context(), b.out)
++			if !errors.Is(err, errGuardRefused) {
++				t.Errorf("%s refused: err = %v, want the guard's refusal", name, err)
++			}
++			mock.mu.Lock()
++			leaked := append([]string(nil), mock.mutations...)
++			mock.mu.Unlock()
++			if len(leaked) > 0 {
++				t.Errorf("%s reached GitHub despite a refusing guard: %v", name, leaked)
++			}
++			if spawned := tape.publishing(); len(spawned) > 0 {
++				t.Errorf("%s spawned a publishing process despite a refusing guard: %v", name, spawned)
++			}
++		})
++	}
++}
++
++// The seam is only one seam if every write is on it. Reflection closes the set:
++// a method added to *outward that is in neither table fails here until it is
++// classified, and classifying it as a write puts it under the refusal test
++// above.
++func TestOutwardMethodsAreAllClassified(t *testing.T) {
++	writes := outwardWrites()
++	typ := reflect.TypeOf(&outward{})
++	for i := range typ.NumMethod() {
++		name := typ.Method(i).Name
++		_, isWrite := writes[name]
++		switch {
++		case isWrite && outwardReads[name]:
++			t.Errorf("outward.%s is listed as both a read and a write", name)
++		case !isWrite && !outwardReads[name]:
++			t.Errorf("outward.%s is neither driven by outwardWrites nor listed in outwardReads; "+
++				"if it writes, add it to outwardWrites so TestEveryOutwardWriteIsRefusable covers it", name)
++		}
++	}
++}
++
++// recordingGuard captures what the seam was shown, and allows.
++type recordingGuard struct {
++	mu   sync.Mutex
++	seen []disclosure
++}
++
++func (g *recordingGuard) fn(_ context.Context, d disclosure) error {
++	g.mu.Lock()
++	g.seen = append(g.seen, d)
++	g.mu.Unlock()
++	return nil
++}
++
++func (g *recordingGuard) of(a act) []disclosure {
++	g.mu.Lock()
++	defer g.mu.Unlock()
++	var out []disclosure
++	for _, d := range g.seen {
++		if d.act == a {
++			out = append(out, d)
++		}
++	}
++	return out
++}
++
++// docs/disclosure.md: "It sees the final bytes. Not the template, not the
++// artifact before assembly, not the prose before the SDK wrapped it in a
++// heading."
++//
++// A markdown artifact over MaxCommentBytes is the case where that bites: what
++// is published is neither the artifact nor a template but a THIRD string —
++// the marker line, a 4KiB truncation of the prose, and a spill notice pointing
++// at the orphan branch. A guard shown the artifact would be examining text
++// that is never published, and missing the URL that is.
++func TestGuardSeesTheAssembledCommentAndNotTheArtifact(t *testing.T) {
++	b, _, _ := newSeamBackend(t)
++	b.cfg.MaxCommentBytes = 512
++	ctx := t.Context()
++
++	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
++	if err != nil {
++		t.Fatalf("Claim: %v", err)
++	}
++	if err := b.SeedState(ctx, claim, []flow.ArtifactSpec{{Id: "plan", Type: flow.ArtifactMarkdown}}); err != nil {
++		t.Fatalf("SeedState: %v", err)
++	}
++
++	guard := &recordingGuard{}
++	b.out.guard = guard.fn
++
++	prose := strings.Repeat("plan prose. ", 900) // comfortably over 4KiB
++	if err := b.ResolveArtifact(ctx, claim, "plan", flow.ArtifactBody{
++		Type:     flow.ArtifactMarkdown,
++		Markdown: prose,
++	}); err != nil {
++		t.Fatalf("ResolveArtifact: %v", err)
++	}
++
++	comments := guard.of(actArtifactComment)
++	if len(comments) != 1 {
++		t.Fatalf("guard saw %d artifact comments, want 1", len(comments))
++	}
++	body := comments[0].text[0]
++	if !strings.HasPrefix(body, artifactCommentMarkerPrefix) {
++		t.Errorf("guard was shown the prose, not the assembled comment: %.60q", body)
++	}
++	if !strings.Contains(body, spillNoticePrefix) {
++		t.Error("guard was not shown the spill notice, which is text the SDK appended after assembly")
++	}
++	if strings.Contains(body, prose) {
++		t.Error("guard was shown the whole artifact; the published comment carries a truncated preview")
++	}
++	if comments[0].issue != 42 {
++		t.Errorf("disclosure names issue %d, want 42", comments[0].issue)
++	}
++
++	// The spilled bytes are their own disclosure — the comment holds only a
++	// preview, so a guard that saw the comment alone would never see the rest.
++	files := guard.of(actArtifactFile)
++	if len(files) == 0 {
++		t.Fatal("the spill to the artifacts branch never reached the guard")
++	}
++	if !slices.ContainsFunc(files, func(d disclosure) bool {
++		return slices.Contains(d.text, prose)
++	}) {
++		t.Error("the spill disclosure does not carry the artifact's bytes")
++	}
++}
++
++// "The labels are the case that looks exempt and is not: the flow constructs
++// label names, and a constructed name is text the flow chose to publish."
++func TestGuardSeesConstructedLabelNames(t *testing.T) {
++	b, _, _ := newSeamBackend(t)
++	ctx := t.Context()
++
++	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
++	if err != nil {
++		t.Fatalf("Claim: %v", err)
++	}
++	if err := b.SeedState(ctx, claim, []flow.ArtifactSpec{{Id: "implement", Type: flow.ArtifactMarkdown}}); err != nil {
++		t.Fatalf("SeedState: %v", err)
++	}
++
++	guard := &recordingGuard{}
++	b.out.guard = guard.fn
++
++	if err := b.Park(ctx, claim, flow.ParkRequest{
++		Kind:   flow.ParkBudgetExhausted,
++		Step:   "implement",
++		Reason: "spent the budget",
++	}); err != nil {
++		t.Fatalf("Park: %v", err)
++	}
++
++	want := b.labels.BudgetExhausted("implement")
++	if !slices.ContainsFunc(guard.of(actLabel), func(d disclosure) bool {
++		return slices.Contains(d.text, want)
++	}) {
++		t.Errorf("guard never saw the constructed label %q; saw %v", want, guard.of(actLabel))
++	}
++	if len(guard.of(actParkRecord)) != 1 {
++		t.Errorf("guard saw %d park records, want 1", len(guard.of(actParkRecord)))
++	}
++}
++
++// A refusal must reach the caller rather than being absorbed on the way out.
++func TestRefusedWriteFailsTheBackendCall(t *testing.T) {
++	b, mock, _ := newSeamBackend(t)
++	ctx := t.Context()
++
++	b.out.guard = func(context.Context, disclosure) error { return errGuardRefused }
++	_, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
++	if !errors.Is(err, errGuardRefused) {
++		t.Errorf("Claim under a refusing guard: err = %v, want the refusal", err)
++	}
++	mock.mu.Lock()
++	defer mock.mu.Unlock()
++	if len(mock.mutations) > 0 {
++		t.Errorf("Claim wrote to GitHub despite a refusing guard: %v", mock.mutations)
++	}
++}
++
++// ---------------------------------------------------------------------------
++// What a push would publish.
++// ---------------------------------------------------------------------------
++
++func gitInTest(t *testing.T, dir string, args ...string) string {
++	t.Helper()
++	cmd := exec.Command("git", args...)
++	cmd.Dir = dir
++	cmd.Env = append(os.Environ(),
++		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid",
++		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid",
++		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
++	)
++	out, err := cmd.CombinedOutput()
++	if err != nil {
++		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
++	}
++	return string(out)
++}
++
++func commitFile(t *testing.T, dir, name, content, message string) {
++	t.Helper()
++	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	gitInTest(t, dir, "add", name)
++	gitInTest(t, dir, "commit", "-m", message)
++}
++
++// PushMaterial is what the guard is shown before a push, so it has to be right
++// against a real repository: a mocked answer would agree with whatever the
++// implementation happened to ask for.
++func TestPushMaterial(t *testing.T) {
++	if _, err := exec.LookPath("git"); err != nil {
++		t.Skip("git not on PATH")
++	}
++	dir := t.TempDir()
++	origin := t.TempDir()
++	gitInTest(t, origin, "init", "--bare", "-b", "main", ".")
++	gitInTest(t, dir, "init", "-b", "main", ".")
++	commitFile(t, dir, "a.txt", "first\n", "already published")
++
++	g := newGitOps(dir)
++	ctx := t.Context()
++
++	// No origin refs at all — the first push publishes the whole branch, and
++	// `--not --remotes=origin` excludes nothing, so it is all reported.
++	msgs, patch, err := g.PushMaterial(ctx, "main")
++	if err != nil {
++		t.Fatalf("PushMaterial (no origin): %v", err)
++	}
++	if !slices.Equal(msgs, []string{"already published"}) {
++		t.Errorf("no origin: messages = %v, want the branch's only commit", msgs)
++	}
++	if !strings.Contains(patch, "first") {
++		t.Errorf("no origin: patch does not carry the commit's content:\n%s", patch)
++	}
++
++	// Everything on origin — a push publishes nothing new.
++	gitInTest(t, dir, "remote", "add", "origin", origin)
++	gitInTest(t, dir, "push", "origin", "main")
++	msgs, patch, err = g.PushMaterial(ctx, "main")
++	if err != nil {
++		t.Fatalf("PushMaterial (up to date): %v", err)
++	}
++	if len(msgs) != 0 {
++		t.Errorf("up to date: messages = %v, want none", msgs)
++	}
++	if strings.TrimSpace(patch) != "" {
++		t.Errorf("up to date: patch = %q, want empty", patch)
++	}
++
++	// Two new commits — exactly those, newest first, and not the one already
++	// on origin.
++	commitFile(t, dir, "b.txt", "second\n", "unpublished one")
++	commitFile(t, dir, "c.txt", "third\n", "unpublished two")
++	msgs, patch, err = g.PushMaterial(ctx, "main")
++	if err != nil {
++		t.Fatalf("PushMaterial (two ahead): %v", err)
++	}
++	if !slices.Equal(msgs, []string{"unpublished two", "unpublished one"}) {
++		t.Errorf("two ahead: messages = %v", msgs)
++	}
++	for _, want := range []string{"second", "third"} {
++		if !strings.Contains(patch, want) {
++			t.Errorf("two ahead: patch is missing %q:\n%s", want, patch)
++		}
++	}
++	if strings.Contains(patch, "already published") {
++		t.Error("two ahead: patch carries a commit origin already has")
++	}
++}
++
++// A branch git cannot resolve is an error, not an empty answer. Reporting
++// "nothing to disclose" for a repository it could not read is exactly the
++// failure docs/disclosure.md calls worse than no guard at all.
++func TestPushMaterialFailsRatherThanReportNothing(t *testing.T) {
++	if _, err := exec.LookPath("git"); err != nil {
++		t.Skip("git not on PATH")
++	}
++	dir := t.TempDir()
++	gitInTest(t, dir, "init", "-b", "main", ".")
++	commitFile(t, dir, "a.txt", "first\n", "only commit")
++
++	msgs, patch, err := newGitOps(dir).PushMaterial(t.Context(), "no-such-branch")
++	if err == nil {
++		t.Fatalf("PushMaterial on an unknown branch returned (%v, %q, nil)", msgs, patch)
++	}
++	if msgs != nil || patch != "" {
++		t.Errorf("PushMaterial errored but still returned material: %v / %q", msgs, patch)
++	}
++}
++
++// A refused push must not push. Pairs with the refusal table above by driving
++// it through the worktree, which is how the SDK reaches it.
++func TestRefusedPushDoesNotPush(t *testing.T) {
++	b, _, tape := newSeamBackend(t)
++	b.out.guard = func(context.Context, disclosure) error { return errGuardRefused }
++
++	w := &worktree{b: b, issueNum: 42}
++	if err := w.Push(t.Context()); !errors.Is(err, errGuardRefused) {
++		t.Errorf("worktree.Push under a refusing guard: err = %v, want the refusal", err)
++	}
++	if spawned := tape.publishing(); len(spawned) > 0 {
++		t.Errorf("a refused push still ran %v", spawned)
++	}
++}
++
++// ---------------------------------------------------------------------------
++// No second route.
++// ---------------------------------------------------------------------------
++
++// The seam is a guarantee only while it is the ONLY way out. This fails any
++// file in the package that holds a GitHub client of its own, or that names
++// `gh` or `push` as an argument to something it spawns.
++//
++// _test.go is the one exemption: newMockedBackend builds a client on purpose,
++// and the tables above name the very commands this forbids elsewhere.
++func TestNoSecondRouteToGitHub(t *testing.T) {
++	entries, err := os.ReadDir(".")
++	if err != nil {
++		t.Fatal(err)
++	}
++	fset := token.NewFileSet()
++	checked := 0
++	for _, e := range entries {
++		name := e.Name()
++		if e.IsDir() || !strings.HasSuffix(name, ".go") ||
++			strings.HasSuffix(name, "_test.go") || name == "outward.go" {
++			continue
++		}
++		checked++
++		file, err := parser.ParseFile(fset, name, nil, 0)
++		if err != nil {
++			t.Fatalf("parse %s: %v", name, err)
++		}
++		ast.Inspect(file, func(n ast.Node) bool {
++			switch node := n.(type) {
++			case *ast.SelectorExpr:
++				pkg, ok := node.X.(*ast.Ident)
++				if ok && pkg.Name == "github" &&
++					(node.Sel.Name == "Client" || node.Sel.Name == "NewClient") {
++					t.Errorf("%s: %s holds a second GitHub client; the only one lives in outward.go",
++						fset.Position(node.Pos()), name)
++				}
++			case *ast.CallExpr:
++				for _, arg := range node.Args {
++					lit, ok := arg.(*ast.BasicLit)
++					if !ok || lit.Kind != token.STRING {
++						continue
++					}
++					if lit.Value == `"gh"` || lit.Value == `"push"` {
++						t.Errorf("%s: %s reaches GitHub with %s outside the seam; "+
++							"add a method to outward.go instead", fset.Position(lit.Pos()), name, lit.Value)
++					}
++				}
++			}
++			return true
++		})
++	}
++	if checked == 0 {
++		t.Fatal("scanned no files — the check is not running")
++	}
++}
+diff --git a/pkg/backend/github/signal.go b/pkg/backend/github/signal.go
+index 80b9640..3b17ec5 100644
+--- a/pkg/backend/github/signal.go
++++ b/pkg/backend/github/signal.go
+@@ -20,7 +20,7 @@ func (b *Backend) claimBranch(issueNum int) string {
+ // repository (any state). Returns (nil, nil) if none exists.
+ func (b *Backend) findPRForBranch(ctx context.Context, branch string) (*github.PullRequest, error) {
+ 	head := b.cfg.Owner + ":" + branch
+-	prs, _, err := b.gh.PullRequests.List(ctx, b.cfg.Owner, b.cfg.Repo, &github.PullRequestListOptions{
++	prs, err := b.out.ListPullRequests(ctx, &github.PullRequestListOptions{
+ 		State:       "all",
+ 		Head:        head,
+ 		ListOptions: github.ListOptions{PerPage: 5},
+@@ -68,7 +68,7 @@ func (b *Backend) refreshPRSignals(ctx context.Context, issueNum int, state *flo
+ 
+ // prHasApprovedReview returns true if the latest review on the PR is APPROVED.
+ func (b *Backend) prHasApprovedReview(ctx context.Context, prNum int) (bool, error) {
+-	reviews, _, err := b.gh.PullRequests.ListReviews(ctx, b.cfg.Owner, b.cfg.Repo, prNum, &github.ListOptions{PerPage: 100})
++	reviews, err := b.out.ListReviews(ctx, prNum, &github.ListOptions{PerPage: 100})
+ 	if err != nil {
+ 		return false, err
+ 	}
+diff --git a/pkg/backend/github/worktree.go b/pkg/backend/github/worktree.go
+index 8ae6020..a9fdc09 100644
+--- a/pkg/backend/github/worktree.go
++++ b/pkg/backend/github/worktree.go
+@@ -4,7 +4,6 @@ import (
+ 	"context"
+ 	"errors"
+ 	"fmt"
+-	"strings"
+ 
+ 	"github.com/promise-language/flow"
+ )
+@@ -67,7 +66,7 @@ func (w *worktree) Commit(ctx context.Context, msg string) error {
+ }
+ 
+ func (w *worktree) Push(ctx context.Context) error {
+-	return w.b.git.Push(ctx)
++	return w.b.out.Push(ctx)
+ }
+ 
+ // Request exposes the pull-request management surface. The github backend
+@@ -85,24 +84,14 @@ func (w *worktree) Open(ctx context.Context, base, title, body string) (string,
+ 	if branch != expected {
+ 		return "", fmt.Errorf("worktree.Open: current branch %q != claim branch %q", branch, expected)
+ 	}
+-	if err := w.b.git.Push(ctx); err != nil {
++	if err := w.b.out.Push(ctx); err != nil {
+ 		return "", err
+ 	}
+ 
+-	// Use `gh pr create` to handle cross-repo (fork) cases cleanly. The Go
+-	// client requires owner-qualified head; gh handles that natively.
+-	// --repo, not -C: `-C` is git's flag for selecting a working directory and
+-	// gh has no such flag — passing it fails argument validation before gh does
+-	// anything ("unknown shorthand flag: 'C'"). --repo also removes the
+-	// dependency on the process working directory entirely, which the runner
+-	// does not set.
+-	args := []string{"--repo", w.b.cfg.repoFullName(), "pr", "create", "--base", base, "--title", title, "--body", body, "--head", expected}
+-	stdout, stderr, err := w.b.git.runner(ctx, "", "gh", args...)
++	url, err := w.b.out.OpenPullRequest(ctx, base, expected, title, body)
+ 	if err != nil {
+-		return "", fmt.Errorf("gh pr create: %w (stderr=%s)", err, strings.TrimSpace(string(stderr)))
++		return "", err
+ 	}
+-	// gh pr create prints the PR URL on stdout.
+-	url := strings.TrimSpace(string(stdout))
+ 
+ 	// Side-effect: backend marks pr-open in the state comment.
+ 	if err := w.b.markSignalSetOnState(ctx, w.claim, "pr-open"); err != nil {
+@@ -114,11 +103,8 @@ func (w *worktree) Open(ctx context.Context, base, title, body string) (string,
+ }
+ 
+ func (w *worktree) Merge(ctx context.Context, url string) error {
+-	// --repo, not -C: see Open. gh has no -C flag.
+-	args := []string{"--repo", w.b.cfg.repoFullName(), "pr", "merge", url, "--squash", "--auto"}
+-	_, stderr, err := w.b.git.runner(ctx, "", "gh", args...)
+-	if err != nil {
+-		return fmt.Errorf("gh pr merge: %w (stderr=%s)", err, strings.TrimSpace(string(stderr)))
++	if err := w.b.out.MergePullRequest(ctx, url); err != nil {
++		return err
+ 	}
+ 	if err := w.b.markSignalSetOnState(ctx, w.claim, "pr-merged"); err != nil {
+ 		_ = err
+diff --git a/pkg/backend/github/worktree_gh_test.go b/pkg/backend/github/worktree_gh_test.go
+index 56ee737..dfd51a6 100644
+--- a/pkg/backend/github/worktree_gh_test.go
++++ b/pkg/backend/github/worktree_gh_test.go
+@@ -34,6 +34,7 @@ func ghArgsFor(t *testing.T, invoke func(*worktree) error) []string {
+ 			return nil, nil, nil
+ 		},
+ 	}
++	b.out = newOutward("", b.git, b.cfg.Owner, b.cfg.Repo)
+ 	_ = invoke(&worktree{b: b, issueNum: 42})
+ 	if got == nil {
+ 		t.Fatal("gh was never invoked")
