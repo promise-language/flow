@@ -181,7 +181,15 @@ That is also why a gate keeps exactly one output mode. A gate that pretty-printe
 
 A gate cannot be asked for a verdict, and neither can a runner: `measured` says a measurement exists, not that it is acceptable.
 
-The verdict is computed by whoever is deciding, from two inputs:
+**The SDK does not compute one either. It asks the project.**
+
+That is not a concession to convenience. The thresholds are the project's — what its coverage floor is, which gates block a change, what a baseline ratchets to — and an SDK that computed a verdict would have to hold them, which is the same mistake as a gate holding them one layer up. It would also have to hold them for every project it is ever pointed at.
+
+So the project supplies a **judging entry point** beside its gates, and the SDK asks it. What the SDK contributes is the measurement: it spawns the gate, so it is the runner, and it hands the judge an envelope the judge did not produce. The judge holds the thresholds and answers.
+
+**The judge is a tree artifact, and that is not a weakness.** So is the gate. Neither is protected by living outside the tree — a threshold outside it is *worse*, because it stops being a function of the subject. Both are protected the same way: a resolution's diff may not author a change to either. That is the artifact rule, and it is about the author rather than the location.
+
+The verdict is computed from two inputs:
 
 | Input | From | Says |
 |---|---|---|
@@ -189,6 +197,17 @@ The verdict is computed by whoever is deciding, from two inputs:
 | The thresholds | The project, out of the subject's reach | What would be acceptable |
 
 **The thresholds are a distinct artefact from the gates.** Which gates must be green before a change may proceed, what floor coverage must clear, which baselines ratchet — that is a manifest the project provides alongside its gates, and no gate reads it.
+
+**A threshold is a baseline**, and where it lives follows from when the gate runs:
+
+| Gate | Measured | Baseline lives | Moved by |
+|---|---|---|---|
+| **Integration** | During a resolution, before the change lands | In the project, versioned with the tree | The change that lands |
+| **Periodic** | On a cadence, against what already landed | Wherever the orchestrator keeps it — which may be the same baseline | The orchestrator's own run |
+
+The split is not a preference. An integration baseline has to be a function of the subject: the commit carries the terms it was judged on, so any machine reaches the same verdict for that commit, offline. A periodic gate cannot work that way — a two-hour stress run or a nightly size check reports about a commit several behind, so there is nothing left to amend it into and nothing to refuse. Forcing it into the tree means blocking every landing for two hours, or committing a number about the wrong commit.
+
+**This SDK only ever asks about the first kind.** A resolution proposes a change and needs to know whether it may land; what a periodic gate found about last week's trunk is the orchestrator's business and reaches a resolution, if at all, as work rather than as a verdict.
 
 **A gate holding its thresholds can be passed by editing the gate.** When the subject is a change written by an agent, the agent can edit it, and a gate must not be able to acquit the thing it is measuring. That is the artifact rule, and it is why the thresholds are a separate artefact.
 
