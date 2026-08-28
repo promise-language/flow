@@ -1,0 +1,1933 @@
+diff --git a/README.md b/README.md
+index 9409812..6a02def 100644
+--- a/README.md
++++ b/README.md
+@@ -300,6 +300,15 @@ ctx.Park(req)                    // blocked / waiting; structured reason
+ ctx.AskQuestions(q1, q2, ...)    // park until the user answers (see below)
+ ctx.MarkStale(id)                // force a prior artifact to re-run
+ 
++// Work in progress — what THIS step keeps when it stops without completing,
++// so the next dispatch continues rather than restarts. Scaffolding, not a
++// result: it resolves nothing, no other step reads it, it is never published,
++// and it is cleared when the step resolves. Needs a backend implementing
++// WorkInProgress; without one, reads are empty and the write returns
++// ErrWorkInProgressUnsupported.
++ctx.WorkInProgress()             // (body, error) — "" when nothing was stashed
++ctx.RecordWorkInProgress(body)   // stash it for the next invocation
++
+ ctx.Agent()          // the metered LLM handle — the ONLY spend chokepoint
+ ctx.Worktree()       // lazily-acquired git surface for this claim
+ ctx.Notify(step, detail) // progress telemetry (NOT a liveness signal)
+@@ -628,6 +637,7 @@ The CLI feature-detects these — implement the ones that fit your store:
+ | `RefResolver` | `ResolveRef(ctx, id) (ItemRef, error)` | `claim <id>` builds the ref directly (no `ListEligible` scan), and can claim any item regardless of current status. Implement when your ref *is* the id. |
+ | `StateInspector` | `LoadStateByRef(ctx, ref) (*ItemState, error)` | `status <id>` inspects any item read-only, with no claim. |
+ | `Finalizer` | `Finalize(ctx, claim) error` | On flow completion (or a completed manual run), the SDK marks the item finalized and releases the claim — instead of leaving it un-finalized with the lease held. |
++| `WorkInProgress` | `Save/Load/ClearWorkInProgress(ctx, claim, step[, body])` | A step that parks — on a question, or on a refused write — keeps what it worked out, and its next dispatch continues from it. Key by **item and step**, read only when both match, and never publish it: a record that crossed items would feed one item's reasoning to another item's agent. |
+ 
+ ### Preflight
+ 
+@@ -758,7 +768,7 @@ usage and exits 0 without running it.
+ ├── stepctx.go              StepCtx interface — typed read/Resolve* surface, Agent(), Worktree(), AskQuestions
+ ├── artifact.go             ArtifactDef/ArtifactType (the six types), ArtifactRecord, PatchBody/FileBody
+ ├── signal.go               SignalDef + SignalState
+-├── backend.go              Backend, Worktree, RequestManager, Item, Claim, ItemRef, ItemState; RefResolver/StateInspector/Finalizer
++├── backend.go              Backend, Worktree, RequestManager, Item, Claim, ItemRef, ItemState; RefResolver/StateInspector/Finalizer/WorkInProgress
+ ├── budget.go               StepBudget + defaults {3, 1, $10, 30m}
+ ├── agent.go                Agent interface + AgentRequest/Response/Failure
+ ├── preflight.go            PreflightFunc + ChainPreflight
+diff --git a/backend.go b/backend.go
+index ec09911..c35b68c 100644
+--- a/backend.go
++++ b/backend.go
+@@ -92,6 +92,40 @@ type StateInspector interface {
+ 	LoadStateByRef(ctx context.Context, ref ItemRef) (*ItemState, error)
+ }
+ 
++// WorkInProgress is an optional Backend capability: somewhere for a step to
++// leave what it worked out when it stops without completing, so the next
++// dispatch continues rather than restarts.
++//
++// `step` is the step's RESULT ID (LifecycleItem.Result()) — the same identity
++// that keys the budget record and that `grant` accepts, so nothing has to
++// translate between two names for one step.
++//
++// The contract is on the implementation:
++//
++//   - A record is keyed by the claim's ITEM and by `step`, and a stored record
++//     naming a different item or step is not this step's: LoadWorkInProgress
++//     returns "" for it. Keying is the correctness property, not clearing —
++//     every path that skips the cleanup (a crash, a kill, a `.flow` left by an
++//     abandoned run) would otherwise feed one item's reasoning to another
++//     item's agent, arriving with origin OriginAgent and indistinguishable
++//     from that agent's own thinking.
++//   - Absence is ("", nil), not an error. A step that never stashed anything
++//     is the ordinary case, and it is exactly today's behaviour.
++//   - NOTHING HERE IS EVER PUBLISHED. The record is the step's own scratch
++//     state. For a refused write the text to store IS the text a disclosure
++//     guard refused, so a store that could go outward is a store that cannot
++//     hold it.
++//   - ClearWorkInProgress is idempotent: clearing what is not there is nil.
++//
++// Where the record physically lives is the backend's business. A local
++// backend keeps it beside its claim state; a server-backed one keeps it with
++// the claim, where an arena can lose its disk without losing the record.
++type WorkInProgress interface {
++	SaveWorkInProgress(ctx context.Context, claim Claim, step, body string) error
++	LoadWorkInProgress(ctx context.Context, claim Claim, step string) (string, error)
++	ClearWorkInProgress(ctx context.Context, claim Claim, step string) error
++}
++
+ // Claim is the credentialed handle returned by Backend.Claim. Holds the
+ // backend-internal token used by subsequent write ops; the SDK serializes
+ // this to .flow/active.json.
+diff --git a/cli/orchestrator.go b/cli/orchestrator.go
+index 987ad31..039897f 100644
+--- a/cli/orchestrator.go
++++ b/cli/orchestrator.go
+@@ -506,6 +506,12 @@ type stepCtx struct {
+ 	wtErr    error
+ 	agent    *meteredAgent
+ 	resolved bool
++	// wip memoises the step's work-in-progress record for this invocation. A
++	// step that never asks never loads, which is what makes the record cost
++	// nothing to not use.
++	wip       string
++	wipLoaded bool
++	wipErr    error
+ 	// startedAt and timeout back the timeout axis of a park-time snapshot:
+ 	// elapsed-vs-cap is the one axis with no counter on the record.
+ 	startedAt time.Time
+@@ -673,6 +679,21 @@ func (s *stepCtx) writeResolve(body flow.ArtifactBody) error {
+ 		return err
+ 	}
+ 	s.resolved = true
++	// The step has a result now, so its scaffolding is done. Clearing lives
++	// HERE and nowhere else: one place that runs whichever Resolve* the step
++	// called, so no handler can complete while leaving stale prose behind for a
++	// later reader to mistake for a record.
++	//
++	// Best-effort, and deliberately so. The artifact has already landed, so
++	// failing the step now would report a failure for work that is recorded —
++	// and a record that outlives its step is harmless anyway, because keying by
++	// (item, step) means the next dispatch of a resolved step never reads it.
++	// Keying is the correctness property; clearing is hygiene.
++	if store, ok := s.app.Backend.(flow.WorkInProgress); ok {
++		if err := store.ClearWorkInProgress(s.ctx, s.claim, s.li.Result()); err != nil {
++			s.Notify("", "could not clear work in progress: "+err.Error())
++		}
++	}
+ 	return nil
+ }
+ 
+@@ -699,6 +720,45 @@ func (s *stepCtx) ParkedOn() *flow.ParkRequest {
+ 	return s.state.Park
+ }
+ 
++// WorkInProgress returns what this step stashed on an earlier invocation.
++//
++// A backend with no store reads as absence rather than as an error: the record
++// is optional, and a step that has to distinguish "nothing stashed" from "no
++// store" to build its prompt would be a step no backend without one could run.
++func (s *stepCtx) WorkInProgress() (string, error) {
++	if s.wipLoaded {
++		return s.wip, s.wipErr
++	}
++	s.wipLoaded = true
++	store, ok := s.app.Backend.(flow.WorkInProgress)
++	if !ok {
++		return "", nil
++	}
++	s.wip, s.wipErr = store.LoadWorkInProgress(s.ctx, s.claim, s.li.Result())
++	return s.wip, s.wipErr
++}
++
++// RecordWorkInProgress stashes work for this step's next invocation, keyed by
++// the same result id its budget is metered against.
++//
++// A missing store is named here and only here. A caller that believed it
++// stashed something and did not would park expecting to resume from a draft
++// that was never written — which is the failure this whole surface exists to
++// stop, silently reintroduced.
++func (s *stepCtx) RecordWorkInProgress(body string) error {
++	store, ok := s.app.Backend.(flow.WorkInProgress)
++	if !ok {
++		return flow.ErrWorkInProgressUnsupported
++	}
++	if err := store.SaveWorkInProgress(s.ctx, s.claim, s.li.Result(), body); err != nil {
++		return err
++	}
++	// Keep the memo honest: a later read in this same invocation must see what
++	// was just written, not a load from before it.
++	s.wip, s.wipLoaded, s.wipErr = body, true, nil
++	return nil
++}
++
+ func (s *stepCtx) Notify(step, detail string) {
+ 	if s.app.Telemetry == nil {
+ 		return
+diff --git a/cli/work_in_progress_test.go b/cli/work_in_progress_test.go
+new file mode 100644
+index 0000000..92fe2cf
+--- /dev/null
++++ b/cli/work_in_progress_test.go
+@@ -0,0 +1,209 @@
++package cli
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	"github.com/promise-language/flow"
++	"github.com/promise-language/flow/pkg/backend/fake"
++)
++
++// noWorkBackend hides the fake's work-in-progress store by wrapping it in the
++// interface every backend must satisfy. A backend that simply does not
++// implement the optional one is the case a step has to keep working against.
++type noWorkBackend struct{ flow.Backend }
++
++// clearFailsBackend answers every clear with an error. The artifact has landed
++// by the time the clear runs, so this is the case that must NOT be reported as
++// a failed step.
++type clearFailsBackend struct {
++	*fake.Backend
++	err error
++}
++
++func (b clearFailsBackend) ClearWorkInProgress(context.Context, flow.Claim, string) error {
++	return b.err
++}
++
++// A backend with no store reads as absence and refuses a write by name. Reads
++// degrade because the record is optional; the write says so because a caller
++// that believed it stashed something and did not would park expecting to
++// resume from a draft that was never written.
++func TestWorkInProgress_BackendWithoutAStore(t *testing.T) {
++	var (
++		gotBody string
++		gotErr  error
++		saveErr error
++	)
++	app, _, claim := testApp(t, func(f *flow.Flow) {
++		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
++			gotBody, gotErr = ctx.WorkInProgress()
++			saveErr = ctx.RecordWorkInProgress("half a plan")
++			return ctx.ResolveMarkdown("the plan")
++		}, flow.StepConfig{})
++	}, &stubAgent{name: "stub"})
++	app.Backend = noWorkBackend{app.Backend}
++
++	res, err := RunOne(context.Background(), app, claim)
++	if err != nil {
++		t.Fatalf("RunOne: %v", err)
++	}
++	if res.Status != "done" {
++		t.Errorf("res = %+v, want done — a missing store must not stop a step", res)
++	}
++	if gotBody != "" || gotErr != nil {
++		t.Errorf("WorkInProgress() = (%q, %v), want (\"\", nil) with no store", gotBody, gotErr)
++	}
++	if !errors.Is(saveErr, flow.ErrWorkInProgressUnsupported) {
++		t.Errorf("RecordWorkInProgress = %v, want ErrWorkInProgressUnsupported", saveErr)
++	}
++}
++
++// The record has to reach the NEXT dispatch — that is the whole point — and it
++// has to be readable inside the invocation that wrote it, or a step cannot
++// build on what it just stashed.
++func TestWorkInProgress_SurvivesToTheNextDispatch(t *testing.T) {
++	var (
++		sameInvocation string
++		nextInvocation string
++		dispatches     int
++	)
++	app, _, claim := testApp(t, func(f *flow.Flow) {
++		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
++			dispatches++
++			seen, err := ctx.WorkInProgress()
++			if err != nil {
++				return err
++			}
++			if dispatches == 1 {
++				if err := ctx.RecordWorkInProgress("what I worked out"); err != nil {
++					return err
++				}
++				sameInvocation, _ = ctx.WorkInProgress()
++				return ctx.Park(flow.ParkRequest{Kind: flow.ParkQuestion, Reason: "question: which one?"})
++			}
++			nextInvocation = seen
++			return ctx.ResolveMarkdown("the plan")
++		}, flow.StepConfig{})
++	}, &stubAgent{name: "stub"})
++
++	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "parked" {
++		t.Fatalf("first RunOne = (%+v, %v), want parked", res, err)
++	}
++	if sameInvocation != "what I worked out" {
++		t.Errorf("read back in the same invocation = %q, want the body just recorded", sameInvocation)
++	}
++	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
++		t.Fatalf("second RunOne = (%+v, %v), want done", res, err)
++	}
++	if nextInvocation != "what I worked out" {
++		t.Errorf("read on the next dispatch = %q, want the stashed body", nextInvocation)
++	}
++}
++
++// Scaffolding that outlives its work becomes stale prose a later reader
++// mistakes for a record.
++func TestWorkInProgress_ClearedWhenTheStepResolves(t *testing.T) {
++	app, be, claim := testApp(t, func(f *flow.Flow) {
++		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
++			if err := ctx.RecordWorkInProgress("half a plan"); err != nil {
++				return err
++			}
++			return ctx.ResolveMarkdown("the plan")
++		}, flow.StepConfig{})
++	}, &stubAgent{name: "stub"})
++
++	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
++		t.Fatalf("RunOne = (%+v, %v), want done", res, err)
++	}
++	got, err := be.LoadWorkInProgress(context.Background(), claim, "plan")
++	if err != nil {
++		t.Fatalf("LoadWorkInProgress: %v", err)
++	}
++	if got != "" {
++		t.Errorf("record after resolve = %q, want it cleared", got)
++	}
++}
++
++// The artifact is already written when the clear runs, so a failure there
++// cannot make the invocation a failure: that would report a failed step for
++// work that landed. Keying, not clearing, is what makes a leftover harmless.
++func TestWorkInProgress_ClearFailureDoesNotFailTheStep(t *testing.T) {
++	tel := &recordingTelemetry{}
++	app, be, claim := testApp(t, func(f *flow.Flow) {
++		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
++			if err := ctx.RecordWorkInProgress("half a plan"); err != nil {
++				return err
++			}
++			return ctx.ResolveMarkdown("the plan")
++		}, flow.StepConfig{})
++	}, &stubAgent{name: "stub"})
++	app.Telemetry = tel
++	app.Backend = clearFailsBackend{Backend: be, err: errors.New("disk went away")}
++
++	res, err := RunOne(context.Background(), app, claim)
++	if err != nil {
++		t.Fatalf("RunOne: %v", err)
++	}
++	if res.Status != "done" {
++		t.Errorf("res = %+v, want done — the artifact landed", res)
++	}
++	state, _ := be.LoadState(context.Background(), claim)
++	if rec := state.Artifact("plan"); !rec.Resolved {
++		t.Error("plan is not resolved, but ResolveArtifact succeeded")
++	}
++	var reported bool
++	for _, e := range tel.events {
++		if e.Detail == "could not clear work in progress: disk went away" {
++			reported = true
++		}
++	}
++	if !reported {
++		t.Errorf("the failed clear was never reported; events = %+v", tel.events)
++	}
++}
++
++// A record belongs to the step that wrote it. Reading another step's would
++// hand one step reasoning it did not produce and cannot judge — and the record
++// left here is exactly what a crash between resolve and clear leaves behind.
++func TestWorkInProgress_IsNotVisibleToAnotherStep(t *testing.T) {
++	var reviewSaw string
++	app, be, claim := testApp(t, func(f *flow.Flow) {
++		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
++			if err := ctx.RecordWorkInProgress("the plan step's reasoning"); err != nil {
++				return err
++			}
++			return ctx.Park(flow.ParkRequest{Kind: flow.ParkQuestion, Reason: "question: which one?"})
++		}, flow.StepConfig{})
++	}, &stubAgent{name: "stub"})
++	// A second step, added after the helper's own validate so the artifact it
++	// produces can be declared alongside it.
++	app.Flows[0].AddStep("review", "review", func(ctx flow.StepCtx) error {
++		reviewSaw, _ = ctx.WorkInProgress()
++		return ctx.ResolveMarkdown("the review")
++	}, flow.StepConfig{})
++	app.Artifacts = append(app.Artifacts, flow.Artifact("review", flow.ArtifactMarkdown))
++	if err := app.validate(); err != nil {
++		t.Fatalf("validate: %v", err)
++	}
++
++	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "parked" {
++		t.Fatalf("first RunOne = (%+v, %v), want parked", res, err)
++	}
++	// Resolve the plan through the backend, which does NOT clear the record —
++	// the state a run killed between the write and the cleanup leaves behind.
++	if err := be.ResolveArtifact(context.Background(), claim, "plan",
++		flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"}); err != nil {
++		t.Fatalf("ResolveArtifact: %v", err)
++	}
++	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Step != "review" {
++		t.Fatalf("second RunOne = (%+v, %v), want the review step", res, err)
++	}
++	if reviewSaw != "" {
++		t.Errorf("review read %q — that is the plan step's reasoning", reviewSaw)
++	}
++	if got, _ := be.LoadWorkInProgress(context.Background(), claim, "plan"); got == "" {
++		t.Fatal("the plan's record is gone, so this proved nothing about keying")
++	}
++}
+diff --git a/docs/issue-flow.md b/docs/issue-flow.md
+index 6c2756d..9b1ce39 100644
+--- a/docs/issue-flow.md
++++ b/docs/issue-flow.md
+@@ -68,9 +68,7 @@ The set is closed. A refusal fitting none of these means the vocabulary is wrong
+ 
+ A step that stops this way **keeps as much of its work as it can**, and continues from it when it resumes. How much survives depends on what the work was: implement's changes are in the worktree, so a run cut off mid-step — by a park, a crash, or a power failure — leaves them there to resume from. The plan step has no such durable half-product, so it needs somewhere to put one. The question exists because of that work: the step read enough to find the ambiguity, and discarding it means re-deriving the same reasoning to arrive at the same question, now answered. The plan step is where this matters most, because it changes no files — a park with nothing kept erases the step entirely.
+ 
+-What it keeps is scaffolding, not a result: it does not resolve the step, only the step that wrote it reads it, and it is discarded once the step completes.
+-
+-> Not implemented — [#31](https://github.com/promise-language/flow/issues/31).
++What it keeps is scaffolding, not a result: it does not resolve the step, only the step that wrote it reads it, and it is discarded once the step completes. `resolution.md` § "Work in progress" states the general rule.
+ 
+ ### A step's write contract is checked, not merely stated
+ 
+diff --git a/docs/resolution.md b/docs/resolution.md
+index 913fdf1..02d96c1 100644
+--- a/docs/resolution.md
++++ b/docs/resolution.md
+@@ -62,6 +62,8 @@ That is the shape to check any retry against: **a retry that cannot differ from
+ 
+ So an attempt stopped by something correctable hands the correction back. A refused write returns to the step that produced the text, carrying what was refused and why, so the next attempt is answering something the last one did not know.
+ 
++**A correction round costs a prompt, not an invocation.** An invocation is an attempt at the step; a refused *expression* of finished work is not a failed attempt. Charging one exhausts a three-invocation grant in three sentences and then reports a budget cap — naming the wrong problem, which is exactly what this section is about. It must cost something: a correction that were free is a loop against whatever refused it, with nothing bounding it at all.
++
+ ## Parking
+ 
+ A park records that a step stopped without completing, and why. Every park names the step it belongs to.
+@@ -73,6 +75,21 @@ Parks divide into two kinds, and the division is what an operator acts on:
+ 
+ A park that advertises a condition **stops advertising it the moment the condition ends**. A marker outliving its condition is worse than no marker, because it is read as current.
+ 
++## Work in progress
++
++A step that stops without completing may leave **what it worked out** where its own next invocation finds it. That is what makes an invocation that could not finish still produce progress: the work that led to the question, or to the refused sentence, is the expensive part, and it is exactly the part a stop would otherwise discard.
++
++The record is **scaffolding, not a result**:
++
++- **It does not resolve the step.** An unfinished plan stored as the plan artifact would mark the step done and let the resolution proceed against a plan that was never finished — a worse outcome than losing it.
++- **It decides nothing.** The next step is still derived from artifacts and signals; a record is read by the step that wrote it and by nothing else. It is not part of what a reviewer reads, and it does not appear in what is proposed.
++- **It is keyed by item and step, and read only when both match.** Keying is the correctness property; clearing is hygiene. Every path that skips a cleanup — a crash, a kill, a lost machine, a working directory left by an abandoned run — would otherwise feed one item's reasoning to another item's agent, where it arrives indistinguishable from that agent's own thinking. A missing record costs a re-derivation, which is the cost of not having the mechanism at all; a wrong record costs a plan built on another item's reasoning, published under this item's number. Every ambiguity resolves toward discarding.
++- **It is never published.** For a refused write the text to keep *is* the text a guard refused, so a store that could go outward is a store that cannot hold it.
++- **It is cleared when the step resolves**, and when the claim is released or finalized. Scaffolding that outlives its work becomes stale prose a later reader mistakes for a record; reasoning left behind after the work is over is a disclosure sitting around for no benefit.
++- **It is optional.** A step that does not use it behaves exactly as one would without the mechanism.
++
++Where the record physically lives is the backend's: beside its claim state on a machine that holds one, or with the claim on a server, so that an arena can lose its disk without losing the record.
++
+ ## Questions
+ 
+ A step that needs a human decision asks a question and parks. It asks **in the open**, where the humans already are — an answer from anyone counts, not only from whoever filed the item.
+diff --git a/errs.go b/errs.go
+index 6889e33..3655497 100644
+--- a/errs.go
++++ b/errs.go
+@@ -17,6 +17,12 @@ var ErrRequestNotSupported = errors.New("flow: backend does not support pull req
+ // "intentionally not supported" from a transient failure.
+ var ErrResetSeedUnsupported = errors.New("flow: backend does not support ResetSeed")
+ 
++// ErrWorkInProgressUnsupported — the backend has no work-in-progress store, so
++// there is nowhere for a step to leave what it worked out. Reads report absence
++// instead; only a WRITE says so, because a caller that believed it stashed
++// something and did not is the case worth naming.
++var ErrWorkInProgressUnsupported = errors.New("flow: backend does not support work in progress")
++
+ // ErrTransient — handler-returned sentinel for infrastructure failures
+ // observed by the handler (e.g. a Worktree HTTP call against a remote
+ // runner that's offline). The orchestrator translates this to:
+diff --git a/issue/issue.go b/issue/issue.go
+index f8e010f..8184e5b 100644
+--- a/issue/issue.go
++++ b/issue/issue.go
+@@ -81,6 +81,15 @@ const (
+ 	// inside the implement step. PromptContext.VerifyOutput carries the
+ 	// failing tail, and is non-empty only when this prompt is rendered.
+ 	PromptImplementFix PromptID = "implementation:fix"
++
++	// PromptRevise is the re-prompt issued when the disclosure guard refuses a
++	// step's prose. PromptContext.Refusal and RefusedText carry what was
++	// refused and why, and are non-empty only when this prompt is rendered.
++	//
++	// Like PromptImplementFix it is a slot, not a step — but unlike it, it
++	// belongs to no single step, because every step that publishes prose can be
++	// refused.
++	PromptRevise PromptID = "revise"
+ )
+ 
+ // Role is the capability the authenticated principal holds on the repository,
+@@ -220,6 +229,19 @@ type Deps struct {
+ // looping.
+ const DefaultMaxFixRounds = 5
+ 
++// maxDisclosureRevisions bounds how many times a step re-prompts its agent to
++// revise prose the disclosure guard refused.
++//
++// The step's prompt budget is the real bound — a revision costs a prompt, not
++// an invocation, which is what keeps a refused sentence from consuming an
++// attempt at the step. This is the project-independent floor under it, so a
++// loop against the guard stops before it has eaten the whole prompt cap and
++// left nothing for the work.
++//
++// Not a Config knob: one fewer thing to get wrong, and the budget axes are
++// already the operator's lever over it.
++const maxDisclosureRevisions = 3
++
+ // verifyTailLines is how much of a failing verify's output is fed back to the
+ // agent in the fix re-prompt. The tail, not the head: a build log's useful part
+ // is the failure at the end, and the head is setup noise.
+diff --git a/issue/issue_test.go b/issue/issue_test.go
+index 2c4102e..c0749bd 100644
+--- a/issue/issue_test.go
++++ b/issue/issue_test.go
+@@ -698,11 +698,18 @@ func TestAnswersReachEveryResumableDefaultPrompt(t *testing.T) {
+ 	// this test named the exact failure it guards against and then omitted the
+ 	// verify-impl slot, which parks like any other.
+ 	//
+-	// The fix re-prompt is the one exclusion: it runs inside a single implement
+-	// invocation, where the answer already reached that session's opening
+-	// prompt.
++	// The two re-prompts are the exclusions: each runs inside a single
++	// invocation of the step it belongs to, resuming that session, where the
++	// answer already reached the opening prompt. Repeating it would re-state
++	// the answer to an agent that has it in context, and the revise prompt in
++	// particular asks for one thing — the revised text — so anything else in it
++	// is competing with that.
++	inSessionReprompts := map[PromptID]bool{
++		PromptImplementFix: true,
++		PromptRevise:       true,
++	}
+ 	for id := range defaultPrompts {
+-		if id == PromptImplementFix {
++		if inSessionReprompts[id] {
+ 			continue
+ 		}
+ 		t.Run(string(id), func(t *testing.T) {
+@@ -807,3 +814,85 @@ func TestBuildApp_AcceptsEveryRealPromptKey(t *testing.T) {
+ 		t.Errorf("BuildApp = %v, want every real slot accepted", err)
+ 	}
+ }
++
++// The stashed work has to reach the prompt of every step that can stop short,
++// for the same reason the answers do: a body that renders neither re-derives
++// what the earlier invocation already paid for — and for the plan step, which
++// changes no files, that is the entire step.
++func TestWorkInProgressReachesEveryResumableDefaultPrompt(t *testing.T) {
++	pc := PromptContext{
++		Prior:          map[StepID]flow.ArtifactRecord{},
++		WorkInProgress: "what I worked out before I stopped",
++	}
++	pc.VerifyCmd = "make check"
++	if err := pc.Context.Render(); err != nil {
++		t.Fatalf("Render: %v", err)
++	}
++	// The two re-prompts are excluded for the same reason as in the answers
++	// test: each resumes the session that produced the text, which already has
++	// the working-out in context.
++	inSessionReprompts := map[PromptID]bool{
++		PromptImplementFix: true,
++		PromptRevise:       true,
++	}
++	for id := range defaultPrompts {
++		if inSessionReprompts[id] {
++			continue
++		}
++		t.Run(string(id), func(t *testing.T) {
++			got, err := renderPrompt(Config{}, id, pc)
++			if err != nil {
++				t.Fatalf("renderPrompt: %v", err)
++			}
++			if !strings.Contains(got, "what I worked out before I stopped") {
++				t.Errorf("default prompt %q does not render the stashed work — a resumed step would re-derive it", id)
++			}
++		})
++	}
++}
++
++func TestWorkInProgressBlock(t *testing.T) {
++	t.Run("empty on a first run", func(t *testing.T) {
++		if got := (PromptContext{}).WorkInProgressBlock(); got != "" {
++			t.Errorf("got %q, want empty when nothing was stashed", got)
++		}
++	})
++	t.Run("says the notes are not a result", func(t *testing.T) {
++		got := PromptContext{WorkInProgress: "half a plan"}.WorkInProgressBlock()
++		if !strings.Contains(got, "half a plan") {
++			t.Errorf("block does not carry the notes: %q", got)
++		}
++		// The framing is load-bearing: an agent that read them as a finished
++		// result would defend them instead of finishing the step.
++		if !strings.Contains(got, "not a result") {
++			t.Errorf("block does not say the notes are scaffolding: %q", got)
++		}
++	})
++}
++
++// The revise prompt has one job, and its reply is recorded verbatim. Anything
++// that invites commentary produces an artifact that opens with an explanation
++// of what changed.
++func TestRevisePromptCarriesTheRefusalAndTheText(t *testing.T) {
++	pc := PromptContext{
++		Prior:       map[StepID]flow.ArtifactRecord{},
++		Refusal:     `disclosure refused (artifact-comment): found "/home/someone/"`,
++		RefusedText: "the plan, mentioning /home/someone/",
++	}
++	if err := pc.Context.Render(); err != nil {
++		t.Fatalf("Render: %v", err)
++	}
++	got, err := renderPrompt(Config{}, PromptRevise, pc)
++	if err != nil {
++		t.Fatalf("renderPrompt: %v", err)
++	}
++	for _, want := range []string{
++		`found "/home/someone/"`,              // what the guard caught
++		"the plan, mentioning /home/someone/", // what it caught it in
++		"FULL revised text",                   // what the reply must be
++	} {
++		if !strings.Contains(got, want) {
++			t.Errorf("revise prompt is missing %q:\n%s", want, got)
++		}
++	}
++}
+diff --git a/issue/prompt.go b/issue/prompt.go
+index cf9a565..f9e5dd8 100644
+--- a/issue/prompt.go
++++ b/issue/prompt.go
+@@ -30,6 +30,22 @@ type PromptContext struct {
+ 	// when rendering PromptImplementFix.
+ 	VerifyOutput string
+ 
++	// WorkInProgress is what THIS step stashed on an earlier invocation that
++	// stopped without completing. Non-empty ONLY on a resume that found a
++	// record; a first run sees "". Notes, not a result — see WorkInProgressBlock.
++	WorkInProgress string
++
++	// Refusal is the disclosure guard's own answer, carried unchanged: it
++	// already names what was found, where, and what would satisfy the rule.
++	// Non-empty ONLY when rendering PromptRevise.
++	Refusal string
++
++	// RefusedText is the body the guard refused, so the re-prompt does not
++	// depend on the agent substrate honouring ResumeSessionID — which
++	// flow.AgentRequest documents as best-effort. Non-empty ONLY when rendering
++	// PromptRevise.
++	RefusedText string
++
+ 	// Prior carries upstream artifacts as records rather than strings, so a
+ 	// body cannot silently interpolate a patch into a markdown slot. Read them
+ 	// through PriorMarkdown / PriorPatch / PriorJSON.
+@@ -182,6 +198,8 @@ var defaultPrompts = map[PromptID]string{
+ 
+ Produce an implementation plan as concise markdown.
+ 
++{{.WorkInProgressBlock}}
++
+ {{.AnswersBlock}}
+ 
+ {{.PlanStepResolution}}
+@@ -196,6 +214,8 @@ Implement this plan:
+ 
+ Make {{.VerifyCmd}} pass. {{.DeferCommit}}
+ 
++{{.WorkInProgressBlock}}
++
+ {{.AnswersBlock}}
+ 
+ {{.AskGuidance}}`,
+@@ -221,6 +241,8 @@ left alone and what needs a human decision. Someone will read this to review
+ the change, so write for them: what you looked for, what you changed, what
+ they should still judge.
+ 
++{{.WorkInProgressBlock}}
++
+ {{.AnswersBlock}}`,
+ 
+ 	PromptCoverage: `Bring the changes on the current branch up to this project's testing standard.
+@@ -244,12 +266,38 @@ Keep {{.VerifyCmd}} passing. {{.DeferCommit}}
+ Report what you added and what you restructured, so the person reviewing the
+ change can see what you did rather than reconstruct it from the diff.
+ 
++{{.WorkInProgressBlock}}
++
+ {{.AnswersBlock}}`,
+ 
+ 	PromptVerifyImpl: `Summarize the verification run for the pull request body: what was run, what
+ passed, and anything a reviewer should still check by hand.
+ 
++{{.WorkInProgressBlock}}
++
+ {{.AnswersBlock}}`,
++
++	PromptRevise: `The text you just produced was NOT published. A guard examines everything this
++flow writes outward before it is sent, and it refused this:
++
++` + "```" + `
++{{.Refusal}}
++` + "```" + `
++
++This is not a judgement on the work — the work is done and paid for, and only
++its expression is wrong. Express the refused detail another way (a
++repository-relative path instead of an absolute one, for instance) rather than
++re-deriving anything or dropping the substance.
++
++This is what was refused:
++
++` + "```" + `
++{{.RefusedText}}
++` + "```" + `
++
++Reply with the FULL revised text and nothing else — no preamble, no
++explanation of what you changed. Your reply is recorded verbatim as the step's
++result.`,
+ }
+ 
+ // AnswersBlock renders the human replies this step is resuming on, or "" when
+@@ -288,6 +336,30 @@ func (c PromptContext) AnswersBlock() string {
+ 	return strings.TrimSpace(b.String())
+ }
+ 
++// WorkInProgressBlock renders the notes this step left itself on an earlier
++// invocation that stopped without completing, or "" when there are none.
++//
++// A method rather than leaving `{{.WorkInProgress}}` to every project, for the
++// same reason as AnswersBlock: this text is what makes a resumed step continue
++// rather than restart, and a body that forgets to render it re-derives
++// everything the earlier invocation already paid for — which for the plan step
++// is the entire step.
++//
++// The framing is load-bearing. These are notes, not a result: the step still
++// has to produce its artifact, and anything the reply supersedes should be
++// dropped rather than defended.
++func (c PromptContext) WorkInProgressBlock() string {
++	notes := strings.TrimSpace(c.WorkInProgress)
++	if notes == "" {
++		return ""
++	}
++	return "You stopped part-way through this step on an earlier run, and these " +
++		"are the notes you left yourself. They are your own working-out, not a " +
++		"result: nothing was recorded and the step still has to produce its " +
++		"answer. Continue from them rather than starting over, and discard " +
++		"whatever they got wrong.\n\n" + notes
++}
++
+ // PlanBody is referenced by the default implement prompt. It is a method rather
+ // than a field so the default template has something to call without every
+ // project having to populate a field it may not use.
+diff --git a/issue/steps.go b/issue/steps.go
+index 5ef3305..4ded845 100644
+--- a/issue/steps.go
++++ b/issue/steps.go
+@@ -1,6 +1,7 @@
+ package issue
+ 
+ import (
++	"errors"
+ 	"fmt"
+ 	"strings"
+ 	"sync/atomic"
+@@ -52,7 +53,7 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
+ 	if strings.TrimSpace(resp.LastText) == "" {
+ 		return fmt.Errorf("agent returned an empty plan")
+ 	}
+-	return ctx.ResolveMarkdown(resp.LastText)
++	return b.resolveMarkdown(ctx, pc, resp.SessionID, resp.LastText)
+ }
+ 
+ // stepImplement makes the change and drives it to a passing gate.
+@@ -281,7 +282,7 @@ func (b *builder) producingMarkdownStep(ctx flow.StepCtx, id PromptID, label str
+ 	if err := b.recordStepWork(ctx, wt, label); err != nil {
+ 		return err
+ 	}
+-	return ctx.ResolveMarkdown(resp.LastText)
++	return b.resolveMarkdown(ctx, pc, resp.SessionID, resp.LastText)
+ }
+ 
+ // stepReview asks for a critique of the change.
+@@ -333,9 +334,10 @@ func (b *builder) stepVerifyImpl(ctx flow.StepCtx) error {
+ 	if strings.TrimSpace(resp.LastText) == "" {
+ 		// The gate passing is the fact worth recording; the summary is a
+ 		// convenience. Don't fail the step over prose.
+-		return ctx.ResolveMarkdown(fmt.Sprintf("verify passed (%s)", strings.Join(b.cfg.VerifyCmd, " ")))
++		return b.resolveMarkdown(ctx, pc, resp.SessionID,
++			fmt.Sprintf("verify passed (%s)", strings.Join(b.cfg.VerifyCmd, " ")))
+ 	}
+-	return ctx.ResolveMarkdown(resp.LastText)
++	return b.resolveMarkdown(ctx, pc, resp.SessionID, resp.LastText)
+ }
+ 
+ // stepOpenPR opens the pull request. The pr-open signal is set by the backend
+@@ -468,6 +470,18 @@ func (b *builder) runAgent(ctx flow.StepCtx, req flow.AgentRequest) (*flow.Agent
+ 		return nil, fmt.Errorf("agent returned no response")
+ 	}
+ 	if header, body, ok := detectQuestion(resp.LastText); ok {
++		// The turn that found the ambiguity is the turn that produced the
++		// reasoning behind it: a step does not ask at the start, it asks once it
++		// has read enough to find the question. Stashing the whole final message
++		// is what makes the resumed step continue instead of paying for the same
++		// analysis again to arrive at the question it now has an answer to.
++		//
++		// Best-effort: a stash that failed costs a re-derivation, which is the
++		// old behaviour, and turning it into a step failure would lose the park
++		// as well as the work.
++		if err := ctx.RecordWorkInProgress(resp.LastText); err != nil {
++			ctx.Notify("", "could not record work in progress: "+err.Error())
++		}
+ 		// Header is the question; Text is the evidence behind it. The step's
+ 		// own identity is not repeated here — the park record already names the
+ 		// step, and a header that led with it would push the actual question
+@@ -495,7 +509,95 @@ func (b *builder) agentMarkdownStep(ctx flow.StepCtx, id PromptID) error {
+ 	if strings.TrimSpace(resp.LastText) == "" {
+ 		return fmt.Errorf("agent returned nothing for %q", id)
+ 	}
+-	return ctx.ResolveMarkdown(resp.LastText)
++	return b.resolveMarkdown(ctx, pc, resp.SessionID, resp.LastText)
++}
++
++// resolveMarkdown records prose as this step's artifact, re-prompting the agent
++// to revise when the disclosure guard refuses to publish it.
++//
++// docs/disclosure.md: "A refusal is not a failure of the step. The text is
++// revised and re-offered." What was refused is an expression of work already
++// done and paid for, so the agent is asked to fix the SENTENCE in the session
++// it is already holding — not re-run to re-derive the plan. A revision costs a
++// prompt, not an invocation, which is what stops three refused sentences from
++// exhausting a three-invocation grant and then reporting a budget cap — naming
++// the wrong problem entirely.
++//
++// Every step that publishes prose goes through this one copy. A step that
++// called ctx.ResolveMarkdown directly would fail on a refusal instead, and lose
++// the work that produced the text.
++func (b *builder) resolveMarkdown(ctx flow.StepCtx, pc PromptContext, session, body string) error {
++	for round := 0; ; round++ {
++		err := ctx.ResolveMarkdown(body)
++		if err == nil {
++			return nil
++		}
++		var refused flow.ErrDisclosureRefused
++		if !errors.As(err, &refused) {
++			// Anything else is a real failure of the write. Returning it
++			// unchanged keeps a broken backend from being reported as a
++			// disclosure problem.
++			return err
++		}
++		// Stash BEFORE anything else can go wrong. This is the case the store
++		// earns itself on: the text was refused, so an issue comment is the one
++		// place it cannot go, and losing it here would spend the whole step's
++		// cost again to reach the same sentence.
++		if werr := ctx.RecordWorkInProgress(refusedRecord(refused, body)); werr != nil {
++			ctx.Notify("", "could not record refused text: "+werr.Error())
++		}
++		if round >= maxDisclosureRevisions {
++			// A guard's answer may run to several lines; a park reason is read
++			// as one. The whole answer is in the stashed record, which is where
++			// the next invocation reads it from anyway.
++			last, _, _ := strings.Cut(refused.Error(), "\n")
++			// A park, not a failure: the work is sound and a person has to
++			// decide. And a re-run after this park is not the identical retry —
++			// it starts from the stashed draft and the refusal, which is exactly
++			// what the previous attempt did not have.
++			return ctx.Park(flow.ParkRequest{
++				Kind: flow.ParkBlocked,
++				Reason: fmt.Sprintf(
++					"the disclosure guard refused this step's text %d times; last refusal: %s",
++					round+1, last),
++			})
++		}
++		ctx.Notify("", fmt.Sprintf("disclosure refused — revising (round %d)", round+1))
++		rpc := pc
++		rpc.Refusal = refused.Error()
++		rpc.RefusedText = body
++		prompt, rerr := renderPrompt(b.cfg, PromptRevise, rpc)
++		if rerr != nil {
++			return rerr
++		}
++		resp, rerr := b.runAgent(ctx, flow.AgentRequest{
++			Prompt: prompt,
++			// The wording is what is wrong, not the tree — and by this point a
++			// producing step has already committed. A revision that edited
++			// files would put work into the branch after the commit that was
++			// supposed to carry it.
++			PermissionMode:  "plan",
++			ResumeSessionID: session,
++		})
++		if rerr != nil {
++			return rerr
++		}
++		if strings.TrimSpace(resp.LastText) == "" {
++			return fmt.Errorf("agent returned nothing when asked to revise refused text")
++		}
++		session = resp.SessionID
++		body = resp.LastText
++	}
++}
++
++// refusedRecord is what a refused offer leaves behind for the next invocation:
++// the text, and the guard's answer about it. Both, because the text alone would
++// be re-offered unchanged and refused identically.
++func refusedRecord(refused flow.ErrDisclosureRefused, body string) string {
++	return fmt.Sprintf(
++		"An earlier run produced this text and the disclosure guard refused to publish it.\n\n"+
++			"The refusal:\n\n%s\n\nThe text that was refused:\n\n%s",
++		refused.Error(), body)
+ }
+ 
+ // promptContext builds the render context, exposing every upstream contributor
+@@ -512,9 +614,28 @@ func (b *builder) promptContext(ctx flow.StepCtx) (PromptContext, error) {
+ 	// again with a fresh timestamp that excludes the answer just given — a
+ 	// stall no amount of answering can clear.
+ 	pc.Answers = b.answersFor(ctx)
++	// What this step left itself last time it stopped short. Without it the
++	// resumed step renders the same prompt against the same context and
++	// re-derives the reasoning it already paid for — worst for the plan step,
++	// which changes no files and so keeps nothing else at all.
++	pc.WorkInProgress = b.workInProgressFor(ctx)
+ 	return pc, nil
+ }
+ 
++// workInProgressFor returns what this step stashed on an earlier invocation.
++//
++// Best-effort for the same reason as answersFor: a failure here costs the
++// prompt some context — the step re-derives, which is what it did before this
++// existed — and must not fail a step that is otherwise ready to run.
++func (b *builder) workInProgressFor(ctx flow.StepCtx) string {
++	wip, err := ctx.WorkInProgress()
++	if err != nil {
++		ctx.Notify("", "could not read work in progress: "+err.Error())
++		return ""
++	}
++	return wip
++}
++
+ // answersFor returns the human replies to a question this item is parked on.
+ //
+ // Best-effort by design: the answer gate has already decided the step may run,
+diff --git a/issue/steps_test.go b/issue/steps_test.go
+index 92b3c61..0098276 100644
+--- a/issue/steps_test.go
++++ b/issue/steps_test.go
+@@ -145,6 +145,19 @@ type fakeCtx struct {
+ 	resolved   flow.ArtifactBody
+ 	didResolve bool
+ 	asked      []flow.AgentQuestion
++	// wip is this step's work-in-progress record. wipErr / wipSaveErr model a
++	// backend that cannot read or cannot write one — the paths that must cost
++	// context and nothing more.
++	wip        string
++	wipErr     error
++	wipSaveErr error
++	wipSaves   []string
++	// resolveErrs is what ResolveMarkdown returns on successive calls, so a
++	// test can script a disclosure refusal followed by an acceptance. A shorter
++	// slice than the number of calls means every later call succeeds.
++	resolveErrs []error
++	resolves    []string
++	notices     []string
+ }
+ 
+ func (c *fakeCtx) Context() context.Context { return context.Background() }
+@@ -173,6 +186,12 @@ func (c *fakeCtx) ParkedOn() *flow.ParkRequest                  { return c.park
+ func (c *fakeCtx) ResolveFlag() error                           { c.didResolve = true; return nil }
+ func (c *fakeCtx) ResolveCommitHash(string) error               { c.didResolve = true; return nil }
+ func (c *fakeCtx) ResolveMarkdown(b string) error {
++	c.resolves = append(c.resolves, b)
++	if n := len(c.resolves) - 1; n < len(c.resolveErrs) && c.resolveErrs[n] != nil {
++		// A refused offer leaves the step re-offerable, as the real StepCtx
++		// does: writeResolve marks it resolved only when the write lands.
++		return c.resolveErrs[n]
++	}
+ 	c.didResolve, c.resolved = true, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: b}
+ 	return nil
+ }
+@@ -192,7 +211,16 @@ func (c *fakeCtx) AskQuestions(qs ...flow.AgentQuestion) error {
+ 	c.asked = append(c.asked, qs...)
+ 	return errors.New("asked")
+ }
+-func (c *fakeCtx) Notify(string, string)            {}
++func (c *fakeCtx) WorkInProgress() (string, error) { return c.wip, c.wipErr }
++func (c *fakeCtx) RecordWorkInProgress(body string) error {
++	if c.wipSaveErr != nil {
++		return c.wipSaveErr
++	}
++	c.wipSaves = append(c.wipSaves, body)
++	c.wip = body
++	return nil
++}
++func (c *fakeCtx) Notify(_, detail string)          { c.notices = append(c.notices, detail) }
+ func (c *fakeCtx) Agent() flow.Agent                { return c.agent }
+ func (c *fakeCtx) Worktree() (flow.Worktree, error) { return c.wt, nil }
+ func (c *fakeCtx) Claim() flow.Claim                { return flow.Claim{} }
+@@ -203,11 +231,16 @@ type scriptedAgent struct {
+ 	replies []string
+ 	calls   int
+ 	prompts []string
++	// reqs is every request as it arrived, so a test can assert what a
++	// re-prompt was allowed to do — a revision that could edit the tree would
++	// put work into the branch after the commit meant to carry it.
++	reqs []flow.AgentRequest
+ }
+ 
+ func (a *scriptedAgent) Name() string { return "scripted" }
+ func (a *scriptedAgent) Run(_ context.Context, req flow.AgentRequest) (*flow.AgentResponse, error) {
+ 	a.prompts = append(a.prompts, req.Prompt)
++	a.reqs = append(a.reqs, req)
+ 	reply := "done"
+ 	if a.calls < len(a.replies) {
+ 		reply = a.replies[a.calls]
+@@ -668,3 +701,260 @@ func TestStepOpenPR_BodyCarriesTheCheckingStepsBriefings(t *testing.T) {
+ 		}
+ 	}
+ }
++
++// ---------------------------------------------------------------------------
++// Work in progress: what a step keeps when it stops without completing.
++// ---------------------------------------------------------------------------
++
++// The turn that finds the ambiguity is the turn that produced the reasoning
++// behind it. Losing it means paying for the same analysis again to arrive at
++// the question that has since been answered.
++func TestAgentQuestionKeepsTheWorkThatProducedIt(t *testing.T) {
++	wt := newFakeWorktree()
++	wt.exists["flow/issue-42"] = true
++	const reply = "I read the store and the cache paths.\n" +
++		"NEEDS-ANSWER: cache or new store?\n```\nboth are plausible\n```"
++	agent := &scriptedAgent{replies: []string{reply}}
++	ctx := ctxWithPlan(wt, agent)
++
++	if err := testBuilder(t).stepReview(ctx); err == nil {
++		t.Fatal("want the ask sentinel to stop the step")
++	}
++	if len(ctx.asked) != 1 {
++		t.Fatalf("asked %d questions, want 1 — the park must survive the stash", len(ctx.asked))
++	}
++	if len(ctx.wipSaves) != 1 || ctx.wipSaves[0] != reply {
++		t.Errorf("stashed %q, want the agent's whole final message", ctx.wipSaves)
++	}
++}
++
++// A stash that failed costs a re-derivation — today's behaviour. Turning it
++// into a step failure would lose the park as well as the work.
++func TestAgentQuestionParksEvenWhenTheStashFails(t *testing.T) {
++	wt := newFakeWorktree()
++	wt.exists["flow/issue-42"] = true
++	agent := &scriptedAgent{replies: []string{"NEEDS-ANSWER: cache or new store?"}}
++	ctx := ctxWithPlan(wt, agent)
++	ctx.wipSaveErr = errors.New("nowhere to write")
++
++	if err := testBuilder(t).stepReview(ctx); err == nil {
++		t.Fatal("want the ask sentinel to stop the step")
++	}
++	if len(ctx.asked) != 1 {
++		t.Errorf("asked %d questions, want 1 — a failed stash must not swallow the park", len(ctx.asked))
++	}
++	var reported bool
++	for _, n := range ctx.notices {
++		if strings.Contains(n, "could not record work in progress") {
++			reported = true
++		}
++	}
++	if !reported {
++		t.Errorf("the failed stash went unreported; notices = %v", ctx.notices)
++	}
++}
++
++// The record has to reach the prompt, or the resumed step renders the same
++// text against the same context and re-derives everything it already paid for.
++func TestPromptContextCarriesTheStashedWork(t *testing.T) {
++	ctx := ctxWithPlan(newFakeWorktree(), &scriptedAgent{})
++	ctx.wip = "what I worked out last time"
++
++	pc, err := testBuilder(t).promptContext(ctx)
++	if err != nil {
++		t.Fatalf("promptContext: %v", err)
++	}
++	if pc.WorkInProgress != "what I worked out last time" {
++		t.Errorf("PromptContext.WorkInProgress = %q, want the stashed record", pc.WorkInProgress)
++	}
++	if !strings.Contains(pc.WorkInProgressBlock(), "what I worked out last time") {
++		t.Errorf("WorkInProgressBlock() = %q, want it to carry the notes", pc.WorkInProgressBlock())
++	}
++}
++
++// Best-effort, like the answers: a read that failed costs the prompt some
++// context and must not fail a step the gate already cleared.
++func TestPromptContextSurvivesAnUnreadableRecord(t *testing.T) {
++	ctx := ctxWithPlan(newFakeWorktree(), &scriptedAgent{})
++	ctx.wipErr = errors.New("store is unreachable")
++
++	pc, err := testBuilder(t).promptContext(ctx)
++	if err != nil {
++		t.Fatalf("promptContext: %v", err)
++	}
++	if pc.WorkInProgress != "" {
++		t.Errorf("WorkInProgress = %q, want empty when the read failed", pc.WorkInProgress)
++	}
++	if pc.WorkInProgressBlock() != "" {
++		t.Error("WorkInProgressBlock() is non-empty with nothing stashed")
++	}
++}
++
++// ---------------------------------------------------------------------------
++// The refused-write door.
++// ---------------------------------------------------------------------------
++
++// refusal is a disclosure refusal shaped like the one the guard actually
++// returns: the act, and the guard's own answer naming what it found.
++func refusal(what string) flow.ErrDisclosureRefused {
++	return flow.ErrDisclosureRefused{
++		Act:    flow.ActArtifactComment,
++		Reason: errors.New(what),
++	}
++}
++
++// docs/disclosure.md: "A refusal is not a failure of the step. The text is
++// revised and re-offered." The revision costs one prompt, in the session the
++// agent is already holding — not an invocation, and not a re-derivation.
++func TestRefusedProseIsRevisedAndPublished(t *testing.T) {
++	agent := &scriptedAgent{replies: []string{"the plan mentioning /home/someone/", "the plan, relative"}}
++	ctx := ctxWithPlan(newFakeWorktree(), agent)
++	ctx.resolveErrs = []error{refusal(`an absolute home path names the machine's user`)}
++
++	if err := testBuilder(t).stepPlan(ctx); err != nil {
++		t.Fatalf("stepPlan: %v", err)
++	}
++	if !ctx.didResolve || ctx.resolved.Markdown != "the plan, relative" {
++		t.Errorf("resolved %q, want the REVISED text", ctx.resolved.Markdown)
++	}
++	if agent.calls != 2 {
++		t.Errorf("agent ran %d times, want 2 (the plan, then one revision)", agent.calls)
++	}
++	if ctx.park != nil {
++		t.Errorf("parked (%+v) — a refusal is not a failure of the step", ctx.park)
++	}
++	// The revision fixes a sentence. It must not be able to edit the tree: the
++	// wording is what is wrong, and a producing step has already committed by
++	// the time it runs.
++	rev := agent.reqs[1]
++	if rev.PermissionMode != "plan" {
++		t.Errorf("revision PermissionMode = %q, want plan", rev.PermissionMode)
++	}
++	if rev.ResumeSessionID != "session-1" {
++		t.Errorf("revision ResumeSessionID = %q, want the session that wrote the text", rev.ResumeSessionID)
++	}
++	// Carried in the prompt as well as the session, because ResumeSessionID is
++	// documented as best-effort.
++	if !strings.Contains(rev.Prompt, "the plan mentioning /home/someone/") {
++		t.Errorf("revision prompt does not carry the refused text: %q", rev.Prompt)
++	}
++	if !strings.Contains(rev.Prompt, "an absolute home path names the machine's user") {
++		t.Errorf("revision prompt does not carry the guard's reason: %q", rev.Prompt)
++	}
++}
++
++// The case from the issue, end to end: an agent that keeps producing the same
++// refused detail. It parks rather than failing, and the work survives — which
++// is what makes the next run differ from this one instead of being the same
++// attempt with a bigger budget.
++func TestProseRefusedEveryTimeParksAndKeepsTheWork(t *testing.T) {
++	agent := &scriptedAgent{}
++	ctx := ctxWithPlan(newFakeWorktree(), agent)
++	ctx.resolveErrs = []error{
++		refusal("an absolute home path was found"), refusal("an absolute home path was found"),
++		refusal("an absolute home path was found"), refusal("an absolute home path was found"),
++	}
++
++	err := testBuilder(t).stepPlan(ctx)
++	if err == nil {
++		t.Fatal("want the step to stop when the guard will not take the text")
++	}
++	if ctx.park == nil {
++		t.Fatal("no park recorded — a refusal must not be reported as a failed step")
++	}
++	if ctx.park.Kind != flow.ParkBlocked {
++		t.Errorf("park kind = %q, want %q", ctx.park.Kind, flow.ParkBlocked)
++	}
++	if !strings.Contains(ctx.park.Reason, "disclosure guard refused") {
++		t.Errorf("park reason = %q, want it to name the disclosure refusal", ctx.park.Reason)
++	}
++	if strings.Contains(ctx.park.Reason, "\n") {
++		t.Errorf("park reason spans lines: %q", ctx.park.Reason)
++	}
++	if ctx.didResolve {
++		t.Error("resolved the artifact after every offer was refused")
++	}
++	// The stash is the point: an issue comment is the one place refused text
++	// cannot go, so without this the work is gone.
++	last := ctx.wipSaves[len(ctx.wipSaves)-1]
++	if !strings.Contains(last, "an absolute home path was found") {
++		t.Errorf("stashed record does not carry the guard's reason: %q", last)
++	}
++	if !strings.Contains(last, "done") {
++		t.Errorf("stashed record does not carry the refused text: %q", last)
++	}
++	// Bounded, so a loop against the guard cannot eat the step's whole prompt
++	// budget: the opening turn plus maxDisclosureRevisions revisions.
++	if agent.calls != maxDisclosureRevisions+1 {
++		t.Errorf("agent ran %d times, want %d", agent.calls, maxDisclosureRevisions+1)
++	}
++}
++
++// Anything that is not a refusal is a real failure of the write. Re-prompting
++// over it would ask an agent to revise text that was never examined.
++func TestANonRefusalFromResolveIsReturnedUnchanged(t *testing.T) {
++	agent := &scriptedAgent{}
++	ctx := ctxWithPlan(newFakeWorktree(), agent)
++	boom := errors.New("github: 502 bad gateway")
++	ctx.resolveErrs = []error{boom}
++
++	err := testBuilder(t).stepPlan(ctx)
++	if !errors.Is(err, boom) {
++		t.Fatalf("err = %v, want the write's own error unchanged", err)
++	}
++	if agent.calls != 1 {
++		t.Errorf("agent ran %d times, want 1 — nothing should have been revised", agent.calls)
++	}
++	if ctx.park != nil {
++		t.Errorf("parked (%+v) on an error that is not a refusal", ctx.park)
++	}
++	if len(ctx.wipSaves) != 0 {
++		t.Errorf("stashed %v for a write that was never refused", ctx.wipSaves)
++	}
++}
++
++// An empty revision is not an empty artifact. Recording one would resolve the
++// step with nothing in it — the plan section of a pull request, blank.
++func TestAnEmptyRevisionIsAnError(t *testing.T) {
++	agent := &scriptedAgent{replies: []string{"the plan", "   "}}
++	ctx := ctxWithPlan(newFakeWorktree(), agent)
++	ctx.resolveErrs = []error{refusal("an absolute home path was found")}
++
++	err := testBuilder(t).stepPlan(ctx)
++	if err == nil || !strings.Contains(err.Error(), "revise") {
++		t.Fatalf("err = %v, want a refusal to record an empty revision", err)
++	}
++	if ctx.didResolve {
++		t.Error("resolved an artifact from an empty revision")
++	}
++}
++
++// Every step that publishes prose goes through the one revise path. A step
++// that resolved directly would fail on a refusal and lose its work — which is
++// the defect, reintroduced one step at a time.
++func TestEveryProseStepRevisesARefusal(t *testing.T) {
++	for name, step := range map[string]func(*builder, flow.StepCtx) error{
++		"plan":        (*builder).stepPlan,
++		"review":      (*builder).stepReview,
++		"coverage":    (*builder).stepCoverage,
++		"verify-impl": (*builder).stepVerifyImpl,
++	} {
++		t.Run(name, func(t *testing.T) {
++			wt := newFakeWorktree()
++			wt.exists["flow/issue-42"] = true
++			agent := &scriptedAgent{replies: []string{"first draft", "revised draft"}}
++			ctx := ctxWithPlan(wt, agent)
++			ctx.resolveErrs = []error{refusal("an absolute home path was found")}
++
++			if err := step(testBuilder(t), ctx); err != nil {
++				t.Fatalf("%s: %v", name, err)
++			}
++			if !ctx.didResolve || ctx.resolved.Markdown != "revised draft" {
++				t.Errorf("resolved %q, want the revised text", ctx.resolved.Markdown)
++			}
++			if len(ctx.wipSaves) != 1 {
++				t.Errorf("stashed %d times, want 1 — the refused text has nowhere else to go", len(ctx.wipSaves))
++			}
++		})
++	}
++}
+diff --git a/pkg/backend/fake/fake.go b/pkg/backend/fake/fake.go
+index 0667f42..a366375 100644
+--- a/pkg/backend/fake/fake.go
++++ b/pkg/backend/fake/fake.go
+@@ -62,6 +62,10 @@ type itemRecord struct {
+ 	nextQID     int
+ 	seeded      bool
+ 	parkRequest *flow.ParkRequest
++	// work is this item's work-in-progress records, keyed by step result id.
++	// Per-item rather than backend-wide, which is the keying the contract turns
++	// on: one item's reasoning must never be readable as another's.
++	work map[string]string
+ }
+ 
+ // New constructs an empty fake backend. Signals lists the SignalIds this
+@@ -233,6 +237,67 @@ func (b *Backend) Release(ctx context.Context, claim flow.Claim) error {
+ 	}
+ 	rec.claim = nil
+ 	rec.owner = ""
++	// Releasing ends that reasoning's life: work in progress kept past the
++	// claim it belonged to is scratch prose with nothing left to resume.
++	rec.work = nil
++	return nil
++}
++
++// ---------------------------------------------------------------------------
++// Work in progress (flow.WorkInProgress). In memory, keyed by item and step —
++// which is the property the contract turns on, so the fake models it rather
++// than a single flat map.
++// ---------------------------------------------------------------------------
++
++// SaveWorkInProgress stores what a step worked out against that step's result
++// id on this item.
++func (b *Backend) SaveWorkInProgress(ctx context.Context, claim flow.Claim, step, body string) error {
++	itemID, err := refID(claim.ItemRef)
++	if err != nil {
++		return err
++	}
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	rec := b.items[itemID]
++	if rec == nil {
++		return fmt.Errorf("fake: item %q not registered", itemID)
++	}
++	if rec.work == nil {
++		rec.work = map[string]string{}
++	}
++	rec.work[step] = body
++	return nil
++}
++
++// LoadWorkInProgress returns what this step stashed against this item, or ""
++// when there is none.
++func (b *Backend) LoadWorkInProgress(ctx context.Context, claim flow.Claim, step string) (string, error) {
++	itemID, err := refID(claim.ItemRef)
++	if err != nil {
++		return "", err
++	}
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	rec := b.items[itemID]
++	if rec == nil {
++		return "", fmt.Errorf("fake: item %q not registered", itemID)
++	}
++	return rec.work[step], nil
++}
++
++// ClearWorkInProgress drops this step's record. Idempotent.
++func (b *Backend) ClearWorkInProgress(ctx context.Context, claim flow.Claim, step string) error {
++	itemID, err := refID(claim.ItemRef)
++	if err != nil {
++		return err
++	}
++	b.mu.Lock()
++	defer b.mu.Unlock()
++	rec := b.items[itemID]
++	if rec == nil {
++		return fmt.Errorf("fake: item %q not registered", itemID)
++	}
++	delete(rec.work, step)
+ 	return nil
+ }
+ 
+diff --git a/pkg/backend/fake/fake_test.go b/pkg/backend/fake/fake_test.go
+index 1fe3507..48f9561 100644
+--- a/pkg/backend/fake/fake_test.go
++++ b/pkg/backend/fake/fake_test.go
+@@ -487,3 +487,56 @@ func TestBackend_RunGateRefusesAnUndeclaredNameWithNoOutcome(t *testing.T) {
+ 		t.Errorf("Outcome = %q, want none — no gate ran", run.Outcome)
+ 	}
+ }
++
++// The fake is what SDK tests drive the work-in-progress path against, so it has
++// to model the property that path turns on: a record belongs to one item and
++// one step, and is invisible under any other key.
++func TestBackend_WorkInProgressIsKeyedByItemAndStep(t *testing.T) {
++	ctx := context.Background()
++	b := fake.New()
++	b.AddItem(newItem("1"))
++	b.AddItem(newItem("2"))
++	claim1, _ := b.Claim(ctx, itemRef("1"), "alice", false)
++	claim2, _ := b.Claim(ctx, itemRef("2"), "alice", false)
++
++	if got, err := b.LoadWorkInProgress(ctx, claim1, "plan"); got != "" || err != nil {
++		t.Errorf("Load with nothing stored = (%q, %v), want (\"\", nil)", got, err)
++	}
++	if err := b.SaveWorkInProgress(ctx, claim1, "plan", "item 1's reasoning"); err != nil {
++		t.Fatalf("SaveWorkInProgress: %v", err)
++	}
++	if got, _ := b.LoadWorkInProgress(ctx, claim1, "plan"); got != "item 1's reasoning" {
++		t.Errorf("Load under its own key = %q, want the stored body", got)
++	}
++	if got, _ := b.LoadWorkInProgress(ctx, claim2, "plan"); got != "" {
++		t.Errorf("Load under another item = %q, want nothing", got)
++	}
++	if got, _ := b.LoadWorkInProgress(ctx, claim1, "review"); got != "" {
++		t.Errorf("Load under another step = %q, want nothing", got)
++	}
++	if err := b.ClearWorkInProgress(ctx, claim1, "plan"); err != nil {
++		t.Fatalf("ClearWorkInProgress: %v", err)
++	}
++	if err := b.ClearWorkInProgress(ctx, claim1, "plan"); err != nil {
++		t.Errorf("second Clear = %v, want nil", err)
++	}
++}
++
++// Releasing ends that reasoning's life — there is nothing left to resume, and
++// what stays behind is prose nobody asked for.
++func TestBackend_ReleaseDropsWorkInProgress(t *testing.T) {
++	ctx := context.Background()
++	b := fake.New()
++	b.AddItem(newItem("1"))
++	claim, _ := b.Claim(ctx, itemRef("1"), "alice", false)
++
++	if err := b.SaveWorkInProgress(ctx, claim, "plan", "reasoning"); err != nil {
++		t.Fatalf("SaveWorkInProgress: %v", err)
++	}
++	if err := b.Release(ctx, claim); err != nil {
++		t.Fatalf("Release: %v", err)
++	}
++	if got, err := b.LoadWorkInProgress(ctx, claim, "plan"); got != "" || err != nil {
++		t.Errorf("Load after Release = (%q, %v), want nothing left", got, err)
++	}
++}
+diff --git a/pkg/backend/github/outward.go b/pkg/backend/github/outward.go
+index 14ff432..8c5d0b3 100644
+--- a/pkg/backend/github/outward.go
++++ b/pkg/backend/github/outward.go
+@@ -93,10 +93,12 @@ var (
+ // It refuses before `do` runs, never after — the whole value of a guard is that
+ // the act has not happened yet.
+ //
+-// A refusal fails the backend call, which fails the step, which parks the item,
+-// so a person sees what was found. docs/disclosure.md also wants the text
+-// returned to the agent that wrote it for revision, which is a step-handler
+-// change rather than a seam one: #52.
++// A refusal fails the backend call, and what becomes of it is the caller's.
++// docs/disclosure.md wants the text returned to the agent that wrote it for
++// revision, which is a step-handler decision rather than a seam one: the issue
++// package's prose steps re-prompt on a flow.ErrDisclosureRefused and re-offer.
++// The patch and pull-request write paths do not yet — a refused diff is not
++// fixed by revising a sentence — and #52 is open for them.
+ func (o *outward) publish(ctx context.Context, d flow.Disclosure, do func(context.Context) error) error {
+ 	d.Owner, d.Repo = o.owner, o.repo
+ 	if !d.Act.Valid() {
+diff --git a/pkg/backend/github/work.go b/pkg/backend/github/work.go
+new file mode 100644
+index 0000000..f9b519b
+--- /dev/null
++++ b/pkg/backend/github/work.go
+@@ -0,0 +1,64 @@
++package github
++
++import (
++	"context"
++	"strconv"
++
++	"github.com/promise-language/flow"
++	"github.com/promise-language/flow/pkg/clistate"
++)
++
++// This backend's work-in-progress store is the worktree-local `.flow/work`
++// tree, the same per-clone place its claim state lives. See
++// flow.WorkInProgress for the contract and clistate for the files.
++//
++// Nothing here touches `outward`, which is the only route this package has to
++// GitHub. That structural fact IS the "never published" guarantee the contract
++// asks for — and it is what makes the store able to hold the one text that has
++// nowhere else to go: prose a disclosure guard refused.
++//
++// Records are keyed by the issue number and the step's result id. Release
++// already clears the claim state through clistate.Clear, which removes the work
++// tree with it, so a released claim leaves no reasoning behind. This backend
++// implements no flow.Finalizer (#28); when one lands it releases through the
++// same path.
++
++// workItemKey is the item half of a record's key: the issue number, which is
++// this backend's item identity everywhere else too.
++func (b *Backend) workItemKey(ref flow.ItemRef) (string, error) {
++	issueNum, err := b.issueNumber(ref)
++	if err != nil {
++		return "", err
++	}
++	return strconv.Itoa(issueNum), nil
++}
++
++// SaveWorkInProgress stores what a step worked out, against that step's result
++// id on this issue.
++func (b *Backend) SaveWorkInProgress(ctx context.Context, claim flow.Claim, step, body string) error {
++	item, err := b.workItemKey(claim.ItemRef)
++	if err != nil {
++		return err
++	}
++	return clistate.SaveWork(item, step, body)
++}
++
++// LoadWorkInProgress returns what this step stashed against this issue, or ""
++// when there is none — including when a record on disk names another issue or
++// another step.
++func (b *Backend) LoadWorkInProgress(ctx context.Context, claim flow.Claim, step string) (string, error) {
++	item, err := b.workItemKey(claim.ItemRef)
++	if err != nil {
++		return "", err
++	}
++	return clistate.LoadWork(item, step)
++}
++
++// ClearWorkInProgress drops the record for this step. Idempotent.
++func (b *Backend) ClearWorkInProgress(ctx context.Context, claim flow.Claim, step string) error {
++	item, err := b.workItemKey(claim.ItemRef)
++	if err != nil {
++		return err
++	}
++	return clistate.ClearWork(item, step)
++}
+diff --git a/pkg/backend/github/work_test.go b/pkg/backend/github/work_test.go
+new file mode 100644
+index 0000000..4eecca2
+--- /dev/null
++++ b/pkg/backend/github/work_test.go
+@@ -0,0 +1,85 @@
++package github
++
++import (
++	"testing"
++
++	"github.com/promise-language/flow"
++)
++
++// The store is keyed by the issue number, which is this backend's item
++// identity everywhere else. Reading under another issue's key must report
++// absence: a record that crossed items would put one issue's reasoning into
++// another issue's agent, and from there into a public comment.
++func TestWorkInProgress_KeyedByIssueAndStep(t *testing.T) {
++	mock := newGHMock(t)
++	srv := mock.server()
++	defer srv.Close()
++	b := newMockedBackend(t, mock, srv)
++	ctx := t.Context()
++
++	claim42 := flow.Claim{BackendName: b.Name(), ItemRef: b.refFromIssue(42), Owner: "alice"}
++	claim43 := flow.Claim{BackendName: b.Name(), ItemRef: b.refFromIssue(43), Owner: "alice"}
++
++	if got, err := b.LoadWorkInProgress(ctx, claim42, "plan"); got != "" || err != nil {
++		t.Errorf("Load with nothing stored = (%q, %v), want (\"\", nil)", got, err)
++	}
++	if err := b.SaveWorkInProgress(ctx, claim42, "plan", "issue 42's reasoning"); err != nil {
++		t.Fatalf("SaveWorkInProgress: %v", err)
++	}
++	got, err := b.LoadWorkInProgress(ctx, claim42, "plan")
++	if err != nil || got != "issue 42's reasoning" {
++		t.Fatalf("Load under its own key = (%q, %v), want the stored body", got, err)
++	}
++	if got, err := b.LoadWorkInProgress(ctx, claim43, "plan"); got != "" || err != nil {
++		t.Errorf("Load under another issue = (%q, %v), want (\"\", nil)", got, err)
++	}
++	if got, err := b.LoadWorkInProgress(ctx, claim42, "review"); got != "" || err != nil {
++		t.Errorf("Load under another step = (%q, %v), want (\"\", nil)", got, err)
++	}
++
++	if err := b.ClearWorkInProgress(ctx, claim42, "plan"); err != nil {
++		t.Fatalf("ClearWorkInProgress: %v", err)
++	}
++	if got, _ := b.LoadWorkInProgress(ctx, claim42, "plan"); got != "" {
++		t.Errorf("Load after Clear = %q, want nothing", got)
++	}
++	if err := b.ClearWorkInProgress(ctx, claim42, "plan"); err != nil {
++		t.Errorf("second Clear = %v, want nil — clearing what is not there is not an error", err)
++	}
++}
++
++// Releasing a claim ends that reasoning's life. Left behind, it is prose on
++// disk with nothing left to resume — a disclosure sitting around for no
++// benefit.
++func TestWorkInProgress_ReleaseLeavesNoRecords(t *testing.T) {
++	mock := newGHMock(t)
++	srv := mock.server()
++	defer srv.Close()
++	b := newMockedBackend(t, mock, srv)
++	ctx := t.Context()
++
++	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
++	if err != nil {
++		t.Fatalf("Claim: %v", err)
++	}
++	for _, step := range []string{"plan", "review"} {
++		if err := b.SaveWorkInProgress(ctx, claim, step, "reasoning"); err != nil {
++			t.Fatalf("SaveWorkInProgress(%s): %v", step, err)
++		}
++	}
++	if err := b.Release(ctx, claim); err != nil {
++		t.Fatalf("Release: %v", err)
++	}
++	for _, step := range []string{"plan", "review"} {
++		if got, err := b.LoadWorkInProgress(ctx, claim, step); got != "" || err != nil {
++			t.Errorf("Load %s after Release = (%q, %v), want nothing left", step, got, err)
++		}
++	}
++}
++
++// The backend must actually satisfy the optional capability: the SDK reaches it
++// by type assertion, so a signature that drifted would degrade silently to "no
++// store" and every step would go back to losing its work.
++func TestBackendImplementsWorkInProgress(t *testing.T) {
++	var _ flow.WorkInProgress = (*Backend)(nil)
++}
+diff --git a/pkg/clistate/clistate.go b/pkg/clistate/clistate.go
+index 11f2f27..61a28bb 100644
+--- a/pkg/clistate/clistate.go
++++ b/pkg/clistate/clistate.go
+@@ -8,6 +8,10 @@
+ // a tracker server) ignore these helpers entirely; backends whose lease
+ // IS the local file (github) call them from Claim / LookupActiveClaim /
+ // Release.
++//
++// The same directory holds the other per-clone thing a claim owns: the
++// work-in-progress records a step leaves for its own next invocation
++// (`.flow/work/<item>/<step>.json`). See SaveWork and flow.WorkInProgress.
+ package clistate
+ 
+ import (
+@@ -16,6 +20,8 @@ import (
+ 	"fmt"
+ 	"os"
+ 	"path/filepath"
++	"strings"
++	"time"
+ 
+ 	"github.com/promise-language/flow"
+ )
+@@ -23,6 +29,7 @@ import (
+ const (
+ 	flowDirName   = ".flow"
+ 	activeJSONRel = "active.json"
++	workDirRel    = "work"
+ )
+ 
+ // Dir returns the worktree-local state directory. Tests can override via
+@@ -72,12 +79,139 @@ func Save(c flow.Claim) error {
+ 	return nil
+ }
+ 
+-// Clear removes `.flow/active.json` (and the directory if empty).
+-// Idempotent — no error if already absent.
++// Clear removes the worktree-local claim state: `active.json` and every
++// work-in-progress record (and the directory if empty). Idempotent — no error
++// if already absent.
++//
++// The work tree goes first, and not only so `os.Remove(Dir())` can succeed
++// again: releasing a claim ends that reasoning's life. Prose left on disk after
++// the work is over is a disclosure sitting around for no benefit.
+ func Clear() error {
++	if err := os.RemoveAll(WorkDir()); err != nil {
++		return fmt.Errorf("remove %s: %w", WorkDir(), err)
++	}
+ 	if err := os.Remove(ActiveJSONPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+ 		return fmt.Errorf("remove %s: %w", ActiveJSONPath(), err)
+ 	}
+ 	_ = os.Remove(Dir())
+ 	return nil
+ }
++
++// ---------------------------------------------------------------------------
++// Work in progress.
++//
++// A step that stops without completing — parked on a question, or refused on
++// the way out — leaves what it worked out here, and the next dispatch of that
++// same step continues from it rather than re-deriving it. See
++// flow.WorkInProgress for the contract these implement.
++//
++// Records live under `.flow/work/<item>/<step>.json`, beside `active.json`:
++// per-clone and gitignored, which is where a local backend's claim state
++// already is. They are never published.
++// ---------------------------------------------------------------------------
++
++// workRecord is one step's stashed work. Item and Step are stored IN the file
++// as well as being in its path: the in-file pair is the authority, so
++// sanitising two different ids onto one path can only lose a record, never
++// hand one step another's reasoning.
++type workRecord struct {
++	Item       string    `json:"item"`
++	Step       string    `json:"step"`
++	RecordedAt time.Time `json:"recorded_at"`
++	Body       string    `json:"body"`
++}
++
++// WorkDir returns the directory work-in-progress records live under.
++func WorkDir() string { return filepath.Join(Dir(), workDirRel) }
++
++// workPath is the file one (item, step) record lives at. Both segments are
++// sanitised because they are backend-supplied ids being used as path
++// components; the in-file check in LoadWork is what makes a collision safe.
++func workPath(item, step string) string {
++	return filepath.Join(WorkDir(), sanitizeSegment(item), sanitizeSegment(step)+".json")
++}
++
++// sanitizeSegment reduces an id to characters that are safe in a path
++// component. Anything else becomes "_", so "../escape" cannot walk out of the
++// work directory.
++func sanitizeSegment(s string) string {
++	if s == "" {
++		return "_"
++	}
++	out := []rune(s)
++	for i, r := range out {
++		switch {
++		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
++			r == '.', r == '_', r == '-':
++		default:
++			out[i] = '_'
++		}
++	}
++	// A segment of dots alone would name a directory rather than a record.
++	if strings.Trim(string(out), ".") == "" {
++		return "_"
++	}
++	return string(out)
++}
++
++// SaveWork stores body as the work in progress for (item, step), replacing
++// whatever was there. The file is 0o600 because it may carry text a disclosure
++// guard refused to publish.
++func SaveWork(item, step, body string) error {
++	path := workPath(item, step)
++	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
++		return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
++	}
++	b, err := json.MarshalIndent(workRecord{
++		Item:       item,
++		Step:       step,
++		RecordedAt: time.Now().UTC(),
++		Body:       body,
++	}, "", "  ")
++	if err != nil {
++		return fmt.Errorf("marshal work record: %w", err)
++	}
++	if err := os.WriteFile(path, b, 0o600); err != nil {
++		return fmt.Errorf("write %s: %w", path, err)
++	}
++	return nil
++}
++
++// LoadWork returns the work in progress stored for (item, step), or "" when
++// there is none.
++//
++// A record naming a different item or step is not this step's, and reads as
++// absence. That check — not the clearing — is what keeps one item's reasoning
++// out of another item's agent when a crash, a kill, or an abandoned run leaves
++// `.flow/` behind.
++func LoadWork(item, step string) (string, error) {
++	path := workPath(item, step)
++	b, err := os.ReadFile(path)
++	if err != nil {
++		if errors.Is(err, os.ErrNotExist) {
++			return "", nil
++		}
++		return "", fmt.Errorf("read %s: %w", path, err)
++	}
++	var rec workRecord
++	if err := json.Unmarshal(b, &rec); err != nil {
++		return "", fmt.Errorf("parse %s: %w", path, err)
++	}
++	if rec.Item != item || rec.Step != step {
++		return "", nil
++	}
++	return rec.Body, nil
++}
++
++// ClearWork removes the record for (item, step). Idempotent — no error if
++// already absent.
++func ClearWork(item, step string) error {
++	path := workPath(item, step)
++	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
++		return fmt.Errorf("remove %s: %w", path, err)
++	}
++	// The per-item directory is worth nothing empty; failing to drop it is not
++	// worth failing a clear over.
++	_ = os.Remove(filepath.Dir(path))
++	return nil
++}
+diff --git a/pkg/clistate/clistate_test.go b/pkg/clistate/clistate_test.go
+index d46fa5b..13ed412 100644
+--- a/pkg/clistate/clistate_test.go
++++ b/pkg/clistate/clistate_test.go
+@@ -3,6 +3,7 @@ package clistate_test
+ import (
+ 	"encoding/json"
+ 	"errors"
++	"io/fs"
+ 	"os"
+ 	"path/filepath"
+ 	"testing"
+@@ -45,3 +46,143 @@ func TestActiveClaimRoundTrip(t *testing.T) {
+ 		t.Errorf("active.json should be gone, stat err = %v", err)
+ 	}
+ }
++
++func TestWorkRoundTrip(t *testing.T) {
++	dir := t.TempDir()
++	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
++
++	if got, err := clistate.LoadWork("42", "plan"); got != "" || err != nil {
++		t.Errorf("LoadWork with nothing stored = (%q, %v), want (\"\", nil)", got, err)
++	}
++	if err := clistate.SaveWork("42", "plan", "half a plan"); err != nil {
++		t.Fatalf("SaveWork: %v", err)
++	}
++	got, err := clistate.LoadWork("42", "plan")
++	if err != nil || got != "half a plan" {
++		t.Fatalf("LoadWork = (%q, %v), want the stored body", got, err)
++	}
++	// A second save replaces rather than accumulates: the record is the step's
++	// current working-out, not a log of every one it has had.
++	if err := clistate.SaveWork("42", "plan", "a better half"); err != nil {
++		t.Fatalf("SaveWork (again): %v", err)
++	}
++	if got, _ := clistate.LoadWork("42", "plan"); got != "a better half" {
++		t.Errorf("LoadWork after re-save = %q, want the newer body", got)
++	}
++	if err := clistate.ClearWork("42", "plan"); err != nil {
++		t.Fatalf("ClearWork: %v", err)
++	}
++	if got, err := clistate.LoadWork("42", "plan"); got != "" || err != nil {
++		t.Errorf("LoadWork after ClearWork = (%q, %v), want (\"\", nil)", got, err)
++	}
++}
++
++// The keying is the correctness property, not the clearing: every path that
++// skips a cleanup — a crash, a kill, an abandoned run — leaves a record on
++// disk, and reading one that belongs to another item feeds that item's
++// reasoning to this item's agent.
++func TestWorkIsNotReadableUnderAnotherKey(t *testing.T) {
++	dir := t.TempDir()
++	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
++
++	if err := clistate.SaveWork("42", "plan", "item 42's reasoning"); err != nil {
++		t.Fatalf("SaveWork: %v", err)
++	}
++	if got, err := clistate.LoadWork("43", "plan"); got != "" || err != nil {
++		t.Errorf("LoadWork for another item = (%q, %v), want (\"\", nil)", got, err)
++	}
++	if got, err := clistate.LoadWork("42", "review"); got != "" || err != nil {
++		t.Errorf("LoadWork for another step = (%q, %v), want (\"\", nil)", got, err)
++	}
++	if got, _ := clistate.LoadWork("42", "plan"); got != "item 42's reasoning" {
++		t.Errorf("LoadWork under its own key = %q, want the stored body", got)
++	}
++}
++
++// The in-file (item, step) pair is the authority, so two ids that sanitise onto
++// one path can only LOSE a record, never hand one step another's reasoning.
++func TestWorkRefusesARecordWhosePathItShares(t *testing.T) {
++	dir := t.TempDir()
++	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
++
++	if err := clistate.SaveWork("a/b", "plan", "one item's reasoning"); err != nil {
++		t.Fatalf("SaveWork: %v", err)
++	}
++	// "a/b" and "a:b" both sanitise to "a_b".
++	if got, err := clistate.LoadWork("a:b", "plan"); got != "" || err != nil {
++		t.Errorf("LoadWork for a colliding id = (%q, %v), want (\"\", nil)", got, err)
++	}
++}
++
++// A traversing id must not write outside the work tree — the ids are
++// backend-supplied and used as path components.
++func TestWorkStaysUnderTheWorkDirectory(t *testing.T) {
++	dir := t.TempDir()
++	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
++
++	if err := clistate.SaveWork("../../escape", "../plan", "nowhere"); err != nil {
++		t.Fatalf("SaveWork: %v", err)
++	}
++	if err := filepath.WalkDir(filepath.Join(dir, ".flow"), func(path string, d fs.DirEntry, err error) error {
++		if err != nil {
++			return err
++		}
++		if d.IsDir() {
++			return nil
++		}
++		if rel, rerr := filepath.Rel(clistate.WorkDir(), path); rerr != nil || !filepath.IsLocal(rel) {
++			t.Errorf("record landed at %s, outside %s", path, clistate.WorkDir())
++		}
++		return nil
++	}); err != nil {
++		t.Fatalf("walk: %v", err)
++	}
++	if _, err := os.Stat(filepath.Join(dir, "escape")); !errors.Is(err, os.ErrNotExist) {
++		t.Errorf("a record escaped the flow directory, stat err = %v", err)
++	}
++}
++
++func TestClearWorkIsIdempotent(t *testing.T) {
++	dir := t.TempDir()
++	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
++
++	if err := clistate.ClearWork("42", "plan"); err != nil {
++		t.Errorf("ClearWork with nothing stored = %v, want nil", err)
++	}
++	if err := clistate.SaveWork("42", "plan", "body"); err != nil {
++		t.Fatalf("SaveWork: %v", err)
++	}
++	if err := clistate.ClearWork("42", "plan"); err != nil {
++		t.Fatalf("ClearWork: %v", err)
++	}
++	if err := clistate.ClearWork("42", "plan"); err != nil {
++		t.Errorf("second ClearWork = %v, want nil", err)
++	}
++}
++
++// Releasing a claim ends that reasoning's life: prose left on disk after the
++// work is over is a disclosure sitting around for no benefit. It is also what
++// lets the .flow directory itself go.
++func TestClearRemovesEveryWorkRecord(t *testing.T) {
++	dir := t.TempDir()
++	flowDir := filepath.Join(dir, ".flow")
++	t.Setenv("FLOW_DIR", flowDir)
++
++	if err := clistate.Save(flow.Claim{BackendName: "fake", Owner: "alice"}); err != nil {
++		t.Fatalf("Save: %v", err)
++	}
++	for _, w := range []struct{ item, step string }{{"42", "plan"}, {"42", "review"}, {"43", "plan"}} {
++		if err := clistate.SaveWork(w.item, w.step, "reasoning"); err != nil {
++			t.Fatalf("SaveWork(%s, %s): %v", w.item, w.step, err)
++		}
++	}
++	if err := clistate.Clear(); err != nil {
++		t.Fatalf("Clear: %v", err)
++	}
++	if got, _ := clistate.LoadWork("42", "plan"); got != "" {
++		t.Errorf("LoadWork after Clear = %q, want nothing left", got)
++	}
++	if _, err := os.Stat(flowDir); !errors.Is(err, os.ErrNotExist) {
++		t.Errorf("%s should be gone once it holds nothing, stat err = %v", flowDir, err)
++	}
++}
+diff --git a/stepctx.go b/stepctx.go
+index 4baf26b..67af9c1 100644
+--- a/stepctx.go
++++ b/stepctx.go
+@@ -37,6 +37,25 @@ type StepCtx interface {
+ 	// see a field that was already in memory.
+ 	ParkedOn() *ParkRequest
+ 
++	// WorkInProgress returns what THIS step stashed against THIS item on an
++	// earlier invocation, or "" when there is none — including when the backend
++	// has no store at all.
++	//
++	// Loaded lazily and memoised: a step that never asks pays nothing, which is
++	// what makes the record optional. A step that does ask resumes from its own
++	// reasoning instead of re-deriving it, which is the whole point — the work
++	// that produced a question is exactly the work a park would otherwise throw
++	// away.
++	WorkInProgress() (string, error)
++
++	// RecordWorkInProgress stashes work this step wants its next invocation to
++	// start from. It does NOT resolve the step — it is scaffolding, not a
++	// result — is read by no other step, is never published, and is cleared
++	// automatically when the step resolves.
++	//
++	// Returns ErrWorkInProgressUnsupported when the backend has no store.
++	RecordWorkInProgress(body string) error
++
+ 	// Artifact write surface — one Resolve* per ArtifactType.
+ 	ResolveFlag() error
+ 	ResolveCommitHash(sha string) error
