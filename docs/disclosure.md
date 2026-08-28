@@ -75,15 +75,22 @@ Three things about the signature carry the rest of the design.
 
 **The set of origins is closed.**
 
-| Origin | Text that came from |
-|---|---|
-| `worktree` | The tree under resolution — an agent's turn within it, or a file read from it |
-| `item` | The item being resolved: its title, body, its comments. Already published where this is going |
-| `flow` | The SDK itself — templates, headings, its own error strings |
-| `operator` | A person, typed |
-| `elsewhere` | Anywhere else: another repository, another session, another machine |
+| Origin | Text that came from | Vouched for by |
+|---|---|---|
+| `worktree` | A file read from the tree under resolution | The tree, which is what is being published about |
+| `item` | The item being resolved: title, body, comments | The destination itself — it is already published there |
+| `flow` | The SDK — templates, headings, its own error strings | The flow, which is delivered from outside |
+| `operator` | A person, typed | A person |
+| `agent` | **An agent composed it.** What went into it is not known to the caller | **Nothing** |
+| `elsewhere` | Anywhere else: another repository, another session, another machine | Nothing, and known not to belong |
 
 Closed, because an open set is one a caller extends by inventing a name that means "fine, probably". Text that fits none of these is not a new origin — it is `elsewhere`, which is the member that exists to have somewhere honest to put it.
+
+**`agent` exists because the alternative was a lie.** A pre-tool hook watching `gh issue create` knows where the *command* is running; it does not know where the *text* came from, and the agent that composed it may have had several repositories in context. Calling that `worktree` would be a claim about location dressed as a claim about provenance, which is the one thing an origin must not be.
+
+So `agent` says the true thing — **nobody vouches for this** — and it is the origin that earns the strictest examination, precisely because there is nothing behind it. It is also the most common one in practice: almost everything a resolution publishes was composed by an agent.
+
+The right-hand column is what the set is really for. An origin is not a category of text; it is **the name of the party standing behind it**, and two of the six name nobody.
 
 **There is no `unknown`.** A caller that cannot state an origin cannot make the call, and a guard that is not called does not permit anything — the write does not happen. Providing an `unknown` member would turn the one case this guard exists for into a value that can be passed, and a value that can be passed is a value someone defaults to.
 
