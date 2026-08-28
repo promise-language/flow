@@ -454,6 +454,47 @@ type Worktree interface {
 	// defect that is not there.
 	RunGate(ctx context.Context, name GateName) (GateRun, error)
 
+	// Judge asks the PROJECT whether a measurement is acceptable.
+	//
+	// THE SDK NEVER COMPUTES THIS ITSELF. The thresholds are the project's —
+	// what its coverage floor is, which numbers block a change, what a
+	// baseline ratchets to — and an SDK that computed a verdict would have to
+	// hold them, which is the same mistake as a gate holding its own
+	// thresholds one layer up. It would have to hold them for every project it
+	// is ever pointed at.
+	//
+	// The SDK KEEPS THE SPAWN. The judge is handed an envelope it did not
+	// produce and could not have: a project entry point that ran the gate
+	// itself and returned a verdict would be the runner, and the runner is the
+	// one party that may not come from the tree — it is the sole witness to a
+	// process that no longer exists, so a runner that lied is undetectable in
+	// principle. The judge is checkable, which is what lets it be a tree
+	// artifact: re-run it against the same envelope and the same thresholds
+	// and it answers the same, which is why GateVerdict carries both.
+	//
+	// ONLY OutcomeMeasured MAY BE JUDGED, and a run carrying any other outcome
+	// is refused with an error before anything is spawned. The other four are
+	// not verdicts and must never be passed off as one: a gate that could not
+	// start, timed out, died or broke its contract has not reported that the
+	// tree is bad, and turning that into a refusal blames a change for a
+	// failure that was never about it.
+	//
+	// A NON-NIL ERROR MEANS NO VERDICT EXISTS, AND IS NEVER A REFUSAL. An
+	// unanswerable judge — absent, wedged, printing something that is not a
+	// verdict — says nothing about the measurement, and a caller that read it
+	// as "not acceptable" would refuse a sound change because the project's
+	// own tooling is broken. That is a fact for a person, not a result.
+	//
+	// A refusal, by contrast, is a perfectly good verdict and arrives with a
+	// nil error: Acceptable is false and Detail says which metric, its value,
+	// and the term it was judged against.
+	//
+	// The judge needs no outcome vocabulary of its own. What became of the
+	// judge's own process is nobody's evidence about anything — unlike the
+	// runner, it is not the sole witness to a vanished process, and anyone
+	// holding the envelope can ask again.
+	Judge(ctx context.Context, run GateRun) (GateVerdict, error)
+
 	// CapturePatch produces a unified diff of the current working tree.
 	// Handlers call it to attach work they have already verified; the
 	// orchestrator does NOT call it when a step's deadline fires — a timeout

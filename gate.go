@@ -81,3 +81,42 @@ type GateRun struct {
 	// keys on it.
 	Detail string
 }
+
+// GateVerdict is a JUDGING layer's answer about one measurement: whether the
+// numbers a gate reported are acceptable to the project that holds the
+// thresholds.
+//
+// A judging layer IS entitled to a binary answer, unlike a gate and unlike a
+// runner. The disjoint-channel rule exists because a gate has no verdict to
+// give; the judge's whole job is to have one.
+//
+// It carries the run it was reached from because a verdict handed over with
+// its inputs discarded is exactly as unfalsifiable as a lying runner. What
+// lets a judge live in the tree it judges is that anyone can re-run it against
+// the same envelope and the same thresholds and get the same answer — and that
+// is only true if both travel with the verdict. See
+// docs/gates-and-commands.md § "The runner comes from outside the tree".
+type GateVerdict struct {
+	// Run is the measurement this verdict is about, as the runner reported it.
+	// Its Stdout is the envelope the judge was handed; the judge did not
+	// produce it, and could not have.
+	//
+	// Only a run whose Outcome is OutcomeMeasured may be judged. The other
+	// four are not verdicts and must never be passed off as one: a run that
+	// measured nothing has not reported that the tree is bad.
+	Run GateRun
+
+	// Acceptable is the answer. It is the project's, computed from thresholds
+	// the SDK never sees.
+	Acceptable bool
+
+	// Thresholds are the terms the measurement was judged against, as the
+	// judge stated them — opaque to the SDK, which does not read a project's
+	// numbers. They are carried so the verdict can be recomputed by whoever
+	// was not there, which is the whole reason a judge may be a tree artifact.
+	Thresholds []byte
+
+	// Detail is the reason a person needs: which metric, its value, the term
+	// it was judged against. It is prose and nothing keys on it.
+	Detail string
+}

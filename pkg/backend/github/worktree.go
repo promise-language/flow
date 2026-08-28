@@ -136,9 +136,41 @@ func (w *worktree) RunGate(ctx context.Context, name flow.GateName) (flow.GateRu
 	return runGate(ctx, w.b.cfg.WorktreeDir, name, argv, w.b.cfg.GateTimeout)
 }
 
+// Judge asks the project whether a measurement is acceptable, by exec'ing its
+// judging entry point with the envelope on stdin. See flow.Worktree.Judge: the
+// SDK never computes the verdict, and it keeps the spawn.
+//
+// Only a measured run may be judged, and that is checked here rather than by
+// the judge — the four other outcomes mean no measurement exists, so there is
+// nothing to hand over, and a judge asked to answer about one would have to
+// invent something.
+func (w *worktree) Judge(ctx context.Context, run flow.GateRun) (flow.GateVerdict, error) {
+	if !run.Gate.Valid() {
+		return flow.GateVerdict{}, fmt.Errorf("worktree.Judge: %q is not a declared gate name", run.Gate)
+	}
+	if run.Outcome != flow.OutcomeMeasured {
+		observed := string(run.Outcome)
+		if observed == "" {
+			observed = "no outcome at all"
+		}
+		return flow.GateVerdict{}, fmt.Errorf(
+			"worktree.Judge: the run of gate %s reports %s, and only a %s run may be judged — "+
+				"a run that measured nothing has not reported that the tree is bad",
+			run.Gate, observed, flow.OutcomeMeasured)
+	}
+	argv := append(append([]string{}, judgeEntryPoint...), string(run.Gate), verdictFlag)
+	return askJudge(ctx, w.b.cfg.WorktreeDir, run, argv, w.b.cfg.GateTimeout)
+}
+
 // gateEntryPoint is how a project exposes its gates. Not configurable: the
 // names are fixed, so the way to reach them is too.
 var gateEntryPoint = []string{"bin/gate"}
+
+// judgeEntryPoint is how a project exposes the layer that holds its
+// thresholds. Not configurable, for the same reason the gate entry point is
+// not: the SDK asks one way, so two callers asking about the same measurement
+// cannot get different answers and both be right.
+var judgeEntryPoint = []string{"bin/run"}
 
 // run executes one configured command in the worktree.
 //

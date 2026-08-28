@@ -44,6 +44,29 @@ func TestGateRun_ZeroValueIsNotAnOutcome(t *testing.T) {
 	}
 }
 
+// The zero GateVerdict says nothing was judged, and above all it does not say
+// a measured run was refused. Callers get one back beside an error — the
+// request no judge could answer — and a caller that read `Acceptable == false`
+// out of it would refuse a sound change because the project's judging layer
+// could not be reached.
+func TestGateVerdict_ZeroValueIsNotAVerdictAboutAMeasuredRun(t *testing.T) {
+	var v GateVerdict
+	if v.Acceptable {
+		t.Error("a zero GateVerdict reads as acceptable")
+	}
+	// The refusal it appears to be is unbacked: there is no run behind it, no
+	// terms it was reached against, and nothing a person could re-check.
+	if v.Run.Outcome == OutcomeMeasured {
+		t.Error("a zero GateVerdict carries a measured run")
+	}
+	if v.Thresholds != nil {
+		t.Errorf("Thresholds = %q, want none — nothing was compared", v.Thresholds)
+	}
+	if v.Detail != "" {
+		t.Errorf("Detail = %q, want none", v.Detail)
+	}
+}
+
 // The set is CLOSED and it is not flow's to extend — base reads the same five
 // names. The test above pins the five VALUES; it does not notice a sixth
 // constant, which would compile, satisfy every switch in this repository, and

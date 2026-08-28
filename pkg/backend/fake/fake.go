@@ -23,6 +23,7 @@ type Backend struct {
 	clock           func() time.Time
 	verifyOK        bool             // controls Worktree.Verify result
 	gateOutcome     flow.GateOutcome // controls what Worktree.RunGate observes
+	verdict         *bool            // controls what Worktree.Judge answers; nil = acceptable
 	supportsRequest bool             // controls whether Worktree.Request() returns non-nil
 	// supportedArtifacts is the backend's canonical artifact schema returned by
 	// SupportedArtifacts. nil (the default) means "use the standard vocabulary"
@@ -91,6 +92,24 @@ func (b *Backend) SetVerifyOK(ok bool) { b.verifyOK = ok }
 // model — a caller that must tell "could not start" from "died" cannot be
 // exercised against a fake that only knows pass and fail.
 func (b *Backend) SetGateOutcome(o flow.GateOutcome) { b.gateOutcome = o }
+
+// SetGateVerdict controls what Worktree.Judge answers about a measured run.
+// Default: acceptable.
+//
+// A boolean rather than an outcome, because a judging layer IS entitled to a
+// binary answer — that is its whole job, and the reason a gate has no verdict
+// to give does not apply to it. A refusal is an ANSWER: it arrives with a nil
+// error, and a fake that returned one as an error would let a caller be
+// written that cannot tell a project saying no from a project whose judge is
+// broken.
+func (b *Backend) SetGateVerdict(acceptable bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.verdict = &acceptable
+	for _, wt := range b.worktrees {
+		wt.verdict = b.verdict
+	}
+}
 
 // SetSupportsRequest controls whether Worktree.Request() returns a non-nil
 // RequestManager. Default true; set to false to exercise the "backend
@@ -521,6 +540,7 @@ func (b *Backend) Worktree(ctx context.Context, claim flow.Claim) (flow.Worktree
 	}
 	wt.verifyOK = b.verifyOK
 	wt.gateOutcome = b.gateOutcome
+	wt.verdict = b.verdict
 	wt.supportsRequest = b.supportsRequest
 	wt.nothingToCommit = b.nothingToCommit
 	return wt, nil
@@ -555,6 +575,7 @@ type fakeWorktree struct {
 	// truthfully across invocations.
 	branches        map[string]bool
 	gateOutcome     flow.GateOutcome
+	verdict         *bool
 	verifyOK        bool
 	supportsRequest bool
 	branch          string
@@ -640,6 +661,32 @@ func (w *fakeWorktree) RunGate(ctx context.Context, name flow.GateName) (flow.Ga
 	run.Detail = fmt.Sprintf("fake: gate %q %s", name, outcome)
 	return run, nil
 }
+
+// Judge answers about a measured run and refuses everything else. The fake
+// models the protocol, not a project's thresholds — so the terms it reports
+// are ones that parse and say nothing, the same posture as its envelope.
+//
+// The error is for a request no judge could answer: a name no gate has, and a
+// run that measured nothing. A refusal is NOT one of them — it is a verdict,
+// and it comes back with a nil error.
+func (w *fakeWorktree) Judge(ctx context.Context, run flow.GateRun) (flow.GateVerdict, error) {
+	if !run.Gate.Valid() {
+		return flow.GateVerdict{}, fmt.Errorf("fake: %q is not a declared gate name", run.Gate)
+	}
+	if run.Outcome != flow.OutcomeMeasured {
+		return flow.GateVerdict{}, fmt.Errorf(
+			"fake: the run of gate %q reports %q, and only a %q run may be judged",
+			run.Gate, run.Outcome, flow.OutcomeMeasured)
+	}
+	acceptable := w.verdict == nil || *w.verdict
+	return flow.GateVerdict{
+		Run:        run,
+		Acceptable: acceptable,
+		Thresholds: []byte("{}"),
+		Detail:     fmt.Sprintf("fake: gate %q judged acceptable=%t against no terms at all", run.Gate, acceptable),
+	}, nil
+}
+
 func (w *fakeWorktree) CapturePatch(ctx context.Context) ([]byte, error) { return nil, nil }
 
 // Request returns the worktree itself — fake exposes a request manager so

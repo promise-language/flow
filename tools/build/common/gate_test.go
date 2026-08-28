@@ -123,38 +123,8 @@ func TestGatesHoldNoThresholds(t *testing.T) {
 	}
 }
 
-// An incomplete run is never a pass and never moves a baseline. Honest numbers
-// that understate what was checked are indistinguishable from an improvement
-// unless the run says it measured less.
-func TestIncompleteRunNeverPasses(t *testing.T) {
-	within := Envelope{Metrics: []Metric{Count("failed_tests", 0)}}
-	if !passes(within) {
-		t.Fatal("a complete run inside every cap did not pass")
-	}
-	within.Incomplete = "some packages failed their tests"
-	if passes(within) {
-		t.Error("an incomplete run passed; its numbers understate what was checked")
-	}
-}
-
-// A metric nothing caps is reported and not judged. Adding a measurement must
-// not silently start failing changes.
-func TestUncappedMetricIsReportedNotJudged(t *testing.T) {
-	env := Envelope{Metrics: []Metric{Quantity("statement_coverage", 12.5, "percent")}}
-	if !passes(env) {
-		t.Error("an uncapped metric failed a verdict nobody declared")
-	}
-	if out := renderVerdict(env); !strings.Contains(out, "not judged") {
-		t.Errorf("an uncapped metric is not shown as unjudged:\n%s", out)
-	}
-}
-
-func TestCappedMetricOverItsCapFails(t *testing.T) {
-	env := Envelope{Metrics: []Metric{Count("failed_tests", 1)}}
-	if passes(env) {
-		t.Error("a measurement over its cap passed")
-	}
-}
+// The judging half — what the caps do to a measurement, and the wire form of
+// the answer — lives beside the layer that holds them, in run_test.go.
 
 // go test indents a failing subtest under its parent, and a subtest that failed
 // is a failing test.
