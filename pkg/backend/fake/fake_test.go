@@ -314,3 +314,81 @@ func TestBackend_ResolveClearsParkForThatStep(t *testing.T) {
 		t.Errorf("park = %+v, want cleared by the resolve", p)
 	}
 }
+
+// gateWorktree claims an item and returns its worktree.
+func gateWorktree(t *testing.T, b *fake.Backend) flow.Worktree {
+	t.Helper()
+	ctx := context.Background()
+	b.AddItem(newItem("1"))
+	claim, err := b.Claim(ctx, itemRef("1"), "alice", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err := b.Worktree(ctx, claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wt
+}
+
+// The fake is what a caller's tests are written against, so the outcomes have
+// to reach them AS outcomes. A fake that turned "died" into an error would let
+// a caller be written that cannot tell a dead host from a missing binary — the
+// exact collapse the outcome set exists to prevent — and every one of that
+// caller's tests would still pass.
+func TestBackend_SetGateOutcomeReachesTheWorktreeAsAnOutcome(t *testing.T) {
+	ctx := context.Background()
+	for _, outcome := range []flow.GateOutcome{
+		flow.OutcomeMeasured,
+		flow.OutcomeTimedOut,
+		flow.OutcomeCouldNotStart,
+		flow.OutcomeDied,
+		flow.OutcomeBrokeContract,
+	} {
+		t.Run(string(outcome), func(t *testing.T) {
+			b := fake.New()
+			b.SetGateOutcome(outcome)
+			run, err := gateWorktree(t, b).RunGate(ctx, flow.GateIntegration)
+			if err != nil {
+				t.Fatalf("RunGate: %v — every way a gate fails is an outcome, not an error", err)
+			}
+			if run.Outcome != outcome {
+				t.Errorf("Outcome = %q, want %q", run.Outcome, outcome)
+			}
+			if run.Gate != flow.GateIntegration {
+				t.Errorf("Gate = %q, want the name that was asked for", run.Gate)
+			}
+		})
+	}
+}
+
+// The default has to be the one outcome that lets an unrelated test get on with
+// its subject, and the envelope it reports has to be one that parses: the fake
+// models the protocol, and a caller that reads Stdout would otherwise be
+// written against a shape no real gate produces.
+func TestBackend_GateMeasuresByDefaultAndPrintsSomethingThatParses(t *testing.T) {
+	run, err := gateWorktree(t, fake.New()).RunGate(context.Background(), flow.GateTested)
+	if err != nil {
+		t.Fatalf("RunGate: %v", err)
+	}
+	if run.Outcome != flow.OutcomeMeasured {
+		t.Fatalf("Outcome = %q, want %q", run.Outcome, flow.OutcomeMeasured)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(run.Stdout, &envelope); err != nil || envelope == nil {
+		t.Errorf("Stdout = %q, want one JSON object: %v", run.Stdout, err)
+	}
+}
+
+// An undeclared name is a request no runner could attempt, so it is the one
+// thing that is an error — and the GateRun beside it must carry no outcome. A
+// caller that read a measurement out of it would act on a gate that never ran.
+func TestBackend_RunGateRefusesAnUndeclaredNameWithNoOutcome(t *testing.T) {
+	run, err := gateWorktree(t, fake.New()).RunGate(context.Background(), "lint")
+	if err == nil {
+		t.Fatal("RunGate accepted an undeclared gate name")
+	}
+	if run.Outcome != "" {
+		t.Errorf("Outcome = %q, want none — no gate ran", run.Outcome)
+	}
+}

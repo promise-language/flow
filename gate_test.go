@@ -1,6 +1,11 @@
 package flow
 
-import "testing"
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"testing"
+)
 
 // The five outcome strings are a WIRE CONTRACT shared with base, not flow's own
 // spelling. A silent change to one of them is a break that only shows up in
@@ -36,5 +41,62 @@ func TestGateRun_ZeroValueIsNotAnOutcome(t *testing.T) {
 	}
 	if run.Outcome == OutcomeMeasured {
 		t.Error("a zero GateRun reads as a measurement")
+	}
+}
+
+// The set is CLOSED and it is not flow's to extend — base reads the same five
+// names. The test above pins the five VALUES; it does not notice a sixth
+// constant, which would compile, satisfy every switch in this repository, and
+// reach base as a name it has never heard of. So the declared constants are
+// parsed out of the source and matched against the register above.
+//
+// A count would not do: it passes the moment someone adds one and removes
+// another. Adding a name here is meant to be the deliberate act of changing a
+// vocabulary another repository reads, not a side effect of adding a constant.
+func TestGateOutcomes_TheSetIsClosed(t *testing.T) {
+	register := map[string]bool{
+		"OutcomeMeasured":      true,
+		"OutcomeTimedOut":      true,
+		"OutcomeCouldNotStart": true,
+		"OutcomeDied":          true,
+		"OutcomeBrokeContract": true,
+	}
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "gate.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse gate.go: %v", err)
+	}
+
+	declared := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		spec, ok := n.(*ast.ValueSpec)
+		if !ok {
+			return true
+		}
+		id, ok := spec.Type.(*ast.Ident)
+		if !ok || id.Name != "GateOutcome" {
+			return true
+		}
+		for _, name := range spec.Names {
+			declared[name.Name] = true
+		}
+		return true
+	})
+	if len(declared) == 0 {
+		t.Fatal("parsed no GateOutcome constants — the probe is broken, not the code")
+	}
+
+	for name := range declared {
+		if !register[name] {
+			t.Errorf("%s is a GateOutcome the wire contract does not name — "+
+				"base reads this vocabulary and has never heard of it", name)
+		}
+	}
+	for name := range register {
+		if !declared[name] {
+			t.Errorf("%s is named by the wire contract and is no longer declared — "+
+				"whatever base sends carrying it now has no meaning here", name)
+		}
 	}
 }
