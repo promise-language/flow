@@ -111,11 +111,31 @@ The non-modification rule is what makes any of it repeatable. A measurement that
 | Measures | Runs |
 |---|---|
 | A tree, or a merge result | At the decision to integrate |
-| An action an agent proposes to take | Before that action |
 | What a step actually did, against what it said it would | After the step |
 | Whether a machine is fit to be given work | Before work is given |
 
-Recognising these as one thing is worth more than it first appears. A gate that measures a proposed command is the cheapest place to catch a violation — the agent learns the constraint mid-turn and adapts. A gate that measures the result catches it however it happened, including by routes nobody anticipated. **They are complementary because they differ in position, not in kind**, and neither substitutes for the other: the first fails open when it is absent or bypassed, the second costs a whole turn before it speaks.
+Every one of them measures something that already exists, and reports on it.
+
+## Guards
+
+A **guard** is not a gate. It stands on the execution path of an act that has not happened yet, and **prevents it**.
+
+| | Gate | Guard |
+|---|---|---|
+| Subject | Something that exists | An act that has been proposed and not yet taken |
+| Position | Beside the work. It observes | On the path. The act cannot occur without passing it |
+| Answers | A measurement, judged elsewhere | Allow or refuse, decided there and then |
+| Removing it | Loses an answer | **Loses the prevention** |
+
+The last row is the whole distinction. A gate that is absent means nobody measured — the work is unchanged, and the answer can still be obtained afterwards. A guard that is absent means the thing happened.
+
+Two of them exist in a resolution: one over the actions an agent proposes to take, and one over what the flow publishes (`docs/disclosure.md`).
+
+**A guard decides for itself, where a gate must not.** A gate's measurement is stored, ratcheted and re-judged later, so the judgement has to be recomputable by someone who was not there — which is why the thresholds are a separate artifact. A guard's answer is consumed the instant it is given and never becomes a fact about anything, so there is no later judgement to keep honest.
+
+**A guard and a gate over the same concern are complementary, and neither substitutes for the other.** A guard on a proposed command is the cheapest place to stop a violation — the agent learns the constraint mid-turn and adapts, rather than losing the whole turn. A gate on the result catches it however it happened, including by routes nobody anticipated. The guard fails open when it is absent or bypassed; the gate costs a whole turn before it speaks.
+
+**Where a guard's refusal cannot be undone, it must not come from the tree it protects.** A change wrongly admitted can be reverted, so a gate may be a project artifact. A message wrongly published cannot be, so the thing that could have stopped it must be something the party being stopped cannot author.
 
 **This is a property, not a machinery.** What defines the gates, schedules them, records their measurements, holds the thresholds those measurements are judged against and decides what a failure means for the work queue belongs to whatever schedules work — not to this SDK. What is stated here is what any of them must be.
 

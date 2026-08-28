@@ -161,9 +161,21 @@ This is what makes deriving completeness from the *absence* of a stated reason s
 
 **A run that measured less than usual must never move a baseline.** Honest numbers that understate what was checked are indistinguishable from a regression unless the run says it measured less.
 
-### The runner comes from outside the tree, and that is the whole requirement
+### The runner comes from outside the tree, and it is the only party that must
 
 A gate an agent can edit must not be what decides whether that agent's change passed. A runner taken from the worktree could be edited to skip. **The property is whose artifact it is** — the same boundary the write-contract sits behind.
+
+But the gate is a tree artifact, and so is the judge. So the runner is the exception, and the reason is worth stating or the split reads as two conventions rather than one rule:
+
+| Party | May come from the tree | Because |
+|---|---|---|
+| The gate | yes | What it reported is checkable against its subject, by anyone, later |
+| **The runner** | **no** | It is the sole witness to a process that no longer exists |
+| The judge | yes | Its inputs persist and its output can be recomputed |
+
+**The runner is the only party whose account nothing can check.** Its job is to report what became of a process — killed at a deadline, ended by a signal, exited having printed nothing — and once that process is gone there is no artifact left from which anyone can confirm it. A runner that lied is undetectable in principle, so it must be something the subject cannot author.
+
+Everything else is checkable, which is what lets it live in the tree. A judge that lied is caught by re-running it against the same envelope and the same baseline — **provided those travel with its verdict.** A verdict handed over with its inputs discarded is exactly as unfalsifiable as a lying runner, and forfeits the property that allowed it to live in the tree at all.
 
 **Being remote is not what makes a runner trusted.** A purely local runner that never speaks to a server and only keeps tabs on what it started satisfies this exactly as well.
 
@@ -171,7 +183,17 @@ That matters here, because the standalone model has no server and this is the on
 
 ### Running one gate by hand
 
-A person or an agent wanting one gate's result runs **`bin/run <gate>`**, which takes the same path the runner takes rather than a parallel one. Running a single gate is not a lesser case: it is faster than everything that blocks a transition, and it is what someone iterating on one failure actually wants.
+A person or an agent wanting one gate's result runs **`bin/run <gate>`**. Running a single gate is not a lesser case: it is faster than everything that blocks a transition, and it is what someone iterating on one failure actually wants.
+
+**It spawns the gate itself, and that is allowed because no decision rests on it.** It is a convenience for a person at a terminal. The moment a decision rests on a gate, the party that spawned it is the SDK — which is delivered from outside the tree it resolves, and is the only thing whose account of a vanished process anyone has to take on trust.
+
+That holds because of a rule about the caller rather than about `bin/run`:
+
+> **A verdict backs a decision only when the party deciding obtained it from a runner it can vouch for. A result handed over by the measured party is a claim, not a measurement.**
+
+Provenance is what separates them. The same envelope, byte for byte, means one thing when a runner produced it and another when it arrived from the tree being judged — and nothing in the bytes says which. So an agent that runs `bin/run`, sees a pass and reports that the gates pass has produced **nothing a decision may rest on**, however true the report is. A relayed claim was never accepted, so relaying it changes nothing.
+
+This is why `bin/run`'s implementation does not have to be argued about. It may be a tree artifact, built by the project's own tooling, because its results cannot back a decision no matter who reads them.
 
 **It reaches a verdict and prints it for a human**, because it is the judging layer and the judging layer is the only thing that can — it holds the thresholds, so it can put a number beside the terms it was judged on. A gate could only ever print the left-hand column.
 
