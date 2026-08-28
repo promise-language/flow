@@ -3,13 +3,13 @@ package github
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -238,24 +238,87 @@ func TestEveryOutwardWriteIsRefusable(t *testing.T) {
 	}
 }
 
-// The seam is only one seam if every write is on it. Reflection closes the set:
-// a method added to *outward that is in neither table fails here until it is
-// classified, and classifying it as a write puts it under the refusal test
-// above.
+// The seam is only one seam if every method on it is accounted for. A method
+// added to *outward that is in neither table fails here until it is classified,
+// and classifying it as a write puts it under the refusal test above.
+//
+// The declarations are read out of the package source rather than reflected
+// over the type. Reflection sees exported methods only, and an unexported one
+// that reached the client directly would be exactly the seventh call site
+// docs/disclosure.md is about — invisible to this check and to
+// TestNoSecondRouteToGitHub, which exempts outward.go.
 func TestOutwardMethodsAreAllClassified(t *testing.T) {
+	// Neither a read nor a write of its own: publish IS the funnel the writes
+	// go through, and repoFullName only formats "owner/repo". Adding a name
+	// here is a claim that the method reaches GitHub by neither route.
+	notARoute := map[string]bool{"publish": true, "repoFullName": true}
+
 	writes := outwardWrites()
-	typ := reflect.TypeOf(&outward{})
-	for i := range typ.NumMethod() {
-		name := typ.Method(i).Name
-		_, isWrite := writes[name]
-		switch {
-		case isWrite && outwardReads[name]:
-			t.Errorf("outward.%s is listed as both a read and a write", name)
-		case !isWrite && !outwardReads[name]:
-			t.Errorf("outward.%s is neither driven by outwardWrites nor listed in outwardReads; "+
-				"if it writes, add it to outwardWrites so TestEveryOutwardWriteIsRefusable covers it", name)
+	found := 0
+	for _, path := range packageSourceFiles(t) {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil || len(fn.Recv.List) != 1 ||
+				receiverTypeName(fn.Recv.List[0].Type) != "outward" {
+				continue
+			}
+			found++
+			name := fn.Name.Name
+			_, isWrite := writes[name]
+			switch {
+			case isWrite && outwardReads[name]:
+				t.Errorf("outward.%s is listed as both a read and a write", name)
+			case isWrite || outwardReads[name] || notARoute[name]:
+				// classified
+			default:
+				t.Errorf("%s: outward.%s is neither driven by outwardWrites nor listed in "+
+					"outwardReads; if it writes, add it to outwardWrites so "+
+					"TestEveryOutwardWriteIsRefusable covers it", fset.Position(fn.Pos()), name)
+			}
 		}
 	}
+	if found == 0 {
+		t.Fatal("found no methods on *outward — the check is not running")
+	}
+}
+
+// receiverTypeName is the bare type name of a method receiver, pointer or not.
+func receiverTypeName(e ast.Expr) string {
+	if star, ok := e.(*ast.StarExpr); ok {
+		e = star.X
+	}
+	if id, ok := e.(*ast.Ident); ok {
+		return id.Name
+	}
+	return ""
+}
+
+// packageSourceFiles lists the package's non-test .go files. The checks that
+// read them are the ones that cannot be expressed as an assertion about a
+// value, so they have to agree on what "the package" is.
+func packageSourceFiles(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		t.Fatal("scanned no files — the check is not running")
+	}
+	return out
 }
 
 // recordingGuard captures what the seam was shown, and allows.
@@ -398,6 +461,198 @@ func TestRefusedWriteFailsTheBackendCall(t *testing.T) {
 	if len(mock.mutations) > 0 {
 		t.Errorf("Claim wrote to GitHub despite a refusing guard: %v", mock.mutations)
 	}
+}
+
+// docs/disclosure.md: "It never modifies what it examines." The label and
+// assignee writes are the ones that hand the guard a slice rather than a
+// string. If it were the SAME slice the API call carries, a guard could rewrite
+// the bytes after inspecting them — and then what was examined and what was
+// published are two different texts, with nothing to say so.
+func TestTheGuardCannotAlterWhatIsSent(t *testing.T) {
+	b, mock, _ := newSeamBackend(t)
+	ctx := t.Context()
+	b.out.guard = func(_ context.Context, d disclosure) error {
+		for i := range d.text {
+			d.text[i] = "rewritten-after-inspection"
+		}
+		return nil
+	}
+
+	if err := b.out.AddLabels(ctx, 42, []string{"flow:owner:alice"}); err != nil {
+		t.Fatalf("AddLabels: %v", err)
+	}
+	if err := b.out.AddAssignees(ctx, 42, []string{"alice"}); err != nil {
+		t.Fatalf("AddAssignees: %v", err)
+	}
+
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	if !slices.Contains(mock.issueLabels, "flow:owner:alice") {
+		t.Errorf("the label the guard was shown is not the one that was sent: %v", mock.issueLabels)
+	}
+	if !slices.Contains(mock.assignees, "alice") {
+		t.Errorf("the assignee the guard was shown is not the one that was sent: %v", mock.assignees)
+	}
+	for _, sent := range append(append([]string(nil), mock.issueLabels...), mock.assignees...) {
+		if sent == "rewritten-after-inspection" {
+			t.Error("the guard rewrote what was published by mutating what it was shown")
+		}
+	}
+}
+
+// A disclosure carries where it was going, not just what it said. The seam is
+// where docs/disclosure.md puts the guard partly because "this also puts it
+// where provenance is still legible" — every caller below names an issue at
+// most, so the repository has to be filled in here or it is nowhere.
+func TestDisclosureNamesTheRepositoryItWouldReach(t *testing.T) {
+	b, _, _ := newSeamBackend(t)
+	guard := &recordingGuard{}
+	b.out.guard = guard.fn
+
+	if _, err := b.out.CreateComment(t.Context(), actArtifactComment, 42, "a body"); err != nil {
+		t.Fatalf("CreateComment: %v", err)
+	}
+	seen := guard.of(actArtifactComment)
+	if len(seen) != 1 {
+		t.Fatalf("guard saw %d disclosures, want 1", len(seen))
+	}
+	if seen[0].owner != "o" || seen[0].repo != "r" {
+		t.Errorf("disclosure names %q/%q, want the repository the backend writes to",
+			seen[0].owner, seen[0].repo)
+	}
+}
+
+// The act vocabulary is closed, and a name in it is worth nothing unless some
+// call site produces it carrying that write's final bytes. The kinds asserted
+// above — the artifact comment, the spilled bytes, the constructed label, the
+// park record — are not repeated here; this drives the rest of a resolution and
+// fails when a declared act has no call site behind it, which is what a write
+// naming the wrong act looks like from outside.
+func TestEveryActReachesTheGuardWithItsFinalBytes(t *testing.T) {
+	b, _, _ := newSeamBackend(t)
+	ctx := t.Context()
+	guard := &recordingGuard{}
+	b.out.guard = guard.fn
+
+	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if err := b.SeedState(ctx, claim, []flow.ArtifactSpec{
+		{Id: "plan", Type: flow.ArtifactFile, Required: true, Budget: flow.DefaultStepBudget()},
+	}); err != nil {
+		t.Fatalf("SeedState: %v", err)
+	}
+	// A file artifact always spills, so this reaches the artifacts branch too.
+	if err := b.ResolveArtifact(ctx, claim, "plan", flow.ArtifactBody{
+		Type: flow.ArtifactFile,
+		File: flow.FileBody{Name: "notes.txt", Content: []byte("the spilled bytes")},
+	}); err != nil {
+		t.Fatalf("ResolveArtifact: %v", err)
+	}
+	if _, err := b.AskQuestions(ctx, claim, []flow.AgentQuestion{
+		{Header: "Which base branch?", Text: "main, or the release branch?"},
+	}); err != nil {
+		t.Fatalf("AskQuestions: %v", err)
+	}
+	if err := b.Park(ctx, claim, flow.ParkRequest{
+		Kind: flow.ParkQuestion, Step: "plan", Reason: "waiting on the base branch",
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+	w := &worktree{b: b, claim: claim, issueNum: 42}
+	prURL, err := w.Open(ctx, "main", "a pull request title", "a pull request body")
+	if err != nil {
+		t.Fatalf("worktree.Open: %v", err)
+	}
+	if err := w.Merge(ctx, prURL); err != nil {
+		t.Fatalf("worktree.Merge: %v", err)
+	}
+
+	for _, a := range declaredActs(t) {
+		if len(guard.of(a)) == 0 {
+			t.Errorf("nothing produced the act %q: either no call site names it, "+
+				"or the one that should names another", a)
+		}
+	}
+
+	for _, want := range []struct {
+		act       act
+		fragments []string
+	}{
+		{actAssignee, []string{"alice"}},
+		{actStateComment, []string{"flow:state-v1 begin"}},
+		{actQuestion, []string{"<!-- flow:question", "Which base branch?", "main, or the release branch?"}},
+		{actPullRequest, []string{"a pull request title", "a pull request body", "main", "flow/issue-42"}},
+		{actMerge, []string{prURL}},
+	} {
+		seen := guard.of(want.act)
+		for _, fragment := range want.fragments {
+			if !slices.ContainsFunc(seen, func(d disclosure) bool {
+				return slices.ContainsFunc(d.text, func(s string) bool {
+					return strings.Contains(s, fragment)
+				})
+			}) {
+				t.Errorf("no %q disclosure carries %q; saw %v", want.act, fragment, seen)
+			}
+		}
+	}
+
+	// The pull request publishes a branch, and the disclosure has to say which.
+	if pr := guard.of(actPullRequest); len(pr) != 1 || pr[0].ref != "flow/issue-42" {
+		t.Errorf("pull-request disclosure ref = %v, want the head branch it opens from", pr)
+	}
+}
+
+// declaredActs reads the act vocabulary out of outward.go. Hand-listing it in
+// the test would let an act be added that nothing ever produces; reading the
+// source keeps the set closed in the direction that matters — every name
+// declared has a call site behind it.
+func declaredActs(t *testing.T) []act {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "outward.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse outward.go: %v", err)
+	}
+	var out []act
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok || len(vs.Values) != 1 {
+				continue
+			}
+			if id, ok := vs.Type.(*ast.Ident); !ok || id.Name != "act" {
+				continue
+			}
+			lit, ok := vs.Values[0].(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				continue
+			}
+			v, err := strconv.Unquote(lit.Value)
+			if err != nil {
+				t.Fatalf("%s: %v", fset.Position(lit.Pos()), err)
+			}
+			out = append(out, act(v))
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("found no act constants — the check is not running")
+	}
+	// Two names for one string are one act: the guard cannot tell the writes
+	// apart, and a refusal cannot say which of them it refused.
+	seen := map[act]bool{}
+	for _, a := range out {
+		if seen[a] {
+			t.Errorf("the act %q is declared twice", a)
+		}
+		seen[a] = true
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -588,13 +843,87 @@ func TestRefusedPushDoesNotPush(t *testing.T) {
 	}
 }
 
+// PushMaterial's answer is only worth computing if it reaches the guard. A Push
+// that showed the branch name alone would satisfy every refusal test above
+// while publishing commit messages and a diff nothing examined — and
+// docs/disclosure.md puts both on the surface, calling them the ones most
+// easily forgotten because they reach the public through git.
+//
+// Against a real repository, for the reason TestPushMaterial is: a mocked
+// answer would agree with whatever the implementation happened to ask for.
+func TestGuardSeesTheCommitsAndDiffAPushWouldPublish(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir, origin := t.TempDir(), t.TempDir()
+	gitInTest(t, origin, "init", "--bare", "-b", "main", ".")
+	gitInTest(t, dir, "init", "-b", "main", ".")
+	commitFile(t, dir, "a.txt", "old content\n", "on origin already")
+	gitInTest(t, dir, "remote", "add", "origin", origin)
+	gitInTest(t, dir, "push", "origin", "main")
+	gitInTest(t, dir, "checkout", "-b", "flow/issue-42")
+	commitFile(t, dir, "b.txt", "a line only this branch has\n", "new work here")
+
+	// Everything but the push itself runs for real; the push is the one command
+	// that would leave the machine.
+	g := newGitOps(dir)
+	spawn := g.runner
+	pushes := 0
+	g.runner = func(ctx context.Context, wd, name string, args ...string) ([]byte, []byte, error) {
+		if slices.Contains(args, "push") {
+			pushes++
+			return nil, nil, nil
+		}
+		return spawn(ctx, wd, name, args...)
+	}
+
+	guard := &recordingGuard{}
+	pushesWhenAsked := -1
+	o := &outward{git: g, owner: "o", repo: "r"}
+	o.guard = func(ctx context.Context, d disclosure) error {
+		pushesWhenAsked = pushes
+		return guard.fn(ctx, d)
+	}
+	if err := o.Push(t.Context()); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	seen := guard.of(actPush)
+	if len(seen) != 1 {
+		t.Fatalf("guard saw %d push disclosures, want 1", len(seen))
+	}
+	d := seen[0]
+	if d.ref != "flow/issue-42" {
+		t.Errorf("push disclosure ref = %q, want the branch being published", d.ref)
+	}
+	carries := func(fragment string) bool {
+		return slices.ContainsFunc(d.text, func(s string) bool { return strings.Contains(s, fragment) })
+	}
+	if !carries("flow/issue-42") {
+		t.Errorf("the push disclosure does not name the branch it would create: %q", d.text)
+	}
+	if !carries("new work here") {
+		t.Errorf("the push disclosure does not carry the commit message it would publish: %q", d.text)
+	}
+	if !carries("a line only this branch has") {
+		t.Errorf("the push disclosure does not carry the diff it would publish: %q", d.text)
+	}
+	if carries("on origin already") {
+		t.Errorf("the push disclosure carries a commit origin already has: %q", d.text)
+	}
+	if pushesWhenAsked != 0 {
+		t.Errorf("the guard was asked after %d pushes had already run", pushesWhenAsked)
+	}
+	if pushes != 1 {
+		t.Errorf("an allowed push ran %d times, want 1", pushes)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // No second route.
 // ---------------------------------------------------------------------------
-
-// The seam is a guarantee only while it is the ONLY way out. This fails any
-// file in the package that builds a GitHub client of its own, or that names
-// `gh` or `push` in a string literal.
+// secondRouteViolations parses one file and reports every place it could reach
+// GitHub without passing the seam, as "<position>: <what>".
 //
 // The client check follows the IMPORT rather than the identifier `github`:
 // aliasing the library is a one-word edit, and a check that only knows the
@@ -604,89 +933,184 @@ func TestRefusedPushDoesNotPush(t *testing.T) {
 // `runner(ctx, "", "gh", args...)` does. Both are positions a string can reach
 // a process from; `p["push"]`, a permission map key, is not one.
 //
+// Separate from the test that walks the package because the package is clean:
+// against real files every report below is dead code, and a check whose
+// reporting path never runs is one that can stop working in silence.
+// TestSecondRouteCheckFindsTheRoutesItNames is what runs it.
+func secondRouteViolations(t *testing.T, name string, src any) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, name, src, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", name, err)
+	}
+	var found []string
+	report := func(pos token.Pos, format string, args ...any) {
+		found = append(found, fset.Position(pos).String()+": "+fmt.Sprintf(format, args...))
+	}
+
+	// Whatever local name this file gave the client library, if any. The files
+	// that legitimately import it do so for option structs and github.Ptr,
+	// which is why the import itself is not the violation.
+	clientPkg := map[string]bool{}
+	for _, imp := range file.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || !strings.HasPrefix(path, "github.com/google/go-github/") {
+			continue
+		}
+		local := "github" // the library's own package name
+		if imp.Name != nil {
+			local = imp.Name.Name
+		}
+		if local == "." {
+			report(imp.Pos(), "%s dot-imports the client library, which puts NewClient in scope "+
+				"unqualified and out of this check's reach", name)
+			continue
+		}
+		clientPkg[local] = true
+	}
+
+	// commands flags any of exprs that is the string "gh" or "push".
+	commands := func(exprs []ast.Expr) {
+		for _, e := range exprs {
+			if kv, ok := e.(*ast.KeyValueExpr); ok {
+				e = kv.Value // a key is never an argument
+			}
+			lit, ok := e.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				continue
+			}
+			v, err := strconv.Unquote(lit.Value)
+			if err != nil || (v != "gh" && v != "push") {
+				continue
+			}
+			report(lit.Pos(), "%s reaches GitHub with %q outside the seam; "+
+				"add a method to outward.go instead", name, v)
+		}
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.SelectorExpr:
+			pkg, ok := node.X.(*ast.Ident)
+			if !ok || !clientPkg[pkg.Name] {
+				return true
+			}
+			// The type itself, and every constructor of one: go-github names
+			// them all New* (NewClient, NewTokenClient, NewEnterpriseClient,
+			// NewClientWithEnvProxy).
+			if node.Sel.Name == "Client" || strings.HasPrefix(node.Sel.Name, "New") {
+				report(node.Pos(), "%s holds a second GitHub client (%s.%s); the only one lives in outward.go",
+					name, pkg.Name, node.Sel.Name)
+			}
+		case *ast.CallExpr:
+			commands(node.Args)
+		case *ast.CompositeLit:
+			commands(node.Elts)
+		}
+		return true
+	})
+	return found
+}
+
+// The seam is a guarantee only while it is the ONLY way out. This fails any
+// file in the package that builds a GitHub client of its own, or that names
+// `gh` or `push` in a string literal.
+//
 // _test.go is the one exemption: newMockedBackend builds a client on purpose,
 // and the tables above name the very commands this forbids elsewhere.
 func TestNoSecondRouteToGitHub(t *testing.T) {
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	fset := token.NewFileSet()
-	checked := 0
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") ||
-			strings.HasSuffix(name, "_test.go") || name == "outward.go" {
+	for _, name := range packageSourceFiles(t) {
+		if name == "outward.go" {
 			continue
 		}
-		checked++
-		file, err := parser.ParseFile(fset, name, nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", name, err)
+		for _, v := range secondRouteViolations(t, name, nil) {
+			t.Error(v)
 		}
-
-		// Whatever local name this file gave the client library, if any. The
-		// files that legitimately import it do so for option structs and
-		// github.Ptr, which is why the import itself is not the violation.
-		clientPkg := map[string]bool{}
-		for _, imp := range file.Imports {
-			path, err := strconv.Unquote(imp.Path.Value)
-			if err != nil || !strings.HasPrefix(path, "github.com/google/go-github/") {
-				continue
-			}
-			local := "github" // the library's own package name
-			if imp.Name != nil {
-				local = imp.Name.Name
-			}
-			if local == "." {
-				t.Errorf("%s: %s dot-imports the client library, which puts NewClient in scope "+
-					"unqualified and out of this check's reach", fset.Position(imp.Pos()), name)
-				continue
-			}
-			clientPkg[local] = true
-		}
-
-		// commands flags any of exprs that is the string "gh" or "push".
-		commands := func(exprs []ast.Expr) {
-			for _, e := range exprs {
-				if kv, ok := e.(*ast.KeyValueExpr); ok {
-					e = kv.Value // a key is never an argument
-				}
-				lit, ok := e.(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
-					continue
-				}
-				v, err := strconv.Unquote(lit.Value)
-				if err != nil || (v != "gh" && v != "push") {
-					continue
-				}
-				t.Errorf("%s: %s reaches GitHub with %q outside the seam; "+
-					"add a method to outward.go instead", fset.Position(lit.Pos()), name, v)
-			}
-		}
-		ast.Inspect(file, func(n ast.Node) bool {
-			switch node := n.(type) {
-			case *ast.SelectorExpr:
-				pkg, ok := node.X.(*ast.Ident)
-				if !ok || !clientPkg[pkg.Name] {
-					return true
-				}
-				// The type itself, and every constructor of one: go-github
-				// names them all New* (NewClient, NewTokenClient,
-				// NewEnterpriseClient, NewClientWithEnvProxy).
-				if node.Sel.Name == "Client" || strings.HasPrefix(node.Sel.Name, "New") {
-					t.Errorf("%s: %s holds a second GitHub client (%s.%s); the only one lives in outward.go",
-						fset.Position(node.Pos()), name, pkg.Name, node.Sel.Name)
-				}
-			case *ast.CallExpr:
-				commands(node.Args)
-			case *ast.CompositeLit:
-				commands(node.Elts)
-			}
-			return true
-		})
 	}
-	if checked == 0 {
-		t.Fatal("scanned no files — the check is not running")
+}
+
+// What the check above is worth depends entirely on it still detecting, and
+// against a clean package it reports nothing whether it works or not. These are
+// files that DO reach GitHub, so a check that stopped seeing one fails here
+// rather than passing quietly forever.
+//
+// The last case is the other half: the package really does import the client
+// library for option structs and github.Ptr, and really does keep a permission
+// map keyed "push". A check that flagged those would be turned off within a
+// week, which is the same outcome as not having one.
+func TestSecondRouteCheckFindsTheRoutesItNames(t *testing.T) {
+	const lib = "github.com/google/go-github/v68/github"
+	for _, tc := range []struct {
+		name string
+		src  string
+		want string // substring the report must contain; "" means no report
+	}{{
+		name: "a client under the library's own name",
+		src: `package github
+import "` + lib + `"
+func f(token string) { _ = github.NewClient(nil).WithAuthToken(token) }`,
+		want: "second GitHub client",
+	}, {
+		name: "a client under an alias",
+		src: `package github
+import gh "` + lib + `"
+func f(token string) { _ = gh.NewClient(nil).WithAuthToken(token) }`,
+		want: "second GitHub client",
+	}, {
+		name: "the client type held in a field",
+		src: `package github
+import "` + lib + `"
+type backend struct{ client *github.Client }`,
+		want: "second GitHub client",
+	}, {
+		name: "the library dot-imported",
+		src: `package github
+import . "` + lib + `"
+func f() { _ = NewClient(nil) }`,
+		want: "dot-imports",
+	}, {
+		name: "gh spawned as a call argument",
+		src: `package github
+import "context"
+func f(ctx context.Context, run func(context.Context, string, string, ...string) error) {
+	_ = run(ctx, "", "gh", "pr", "create")
+}`,
+		want: `with "gh"`,
+	}, {
+		name: "gh spawned from an argument slice",
+		src: `package github
+func f(base string) []string { return []string{"gh", "pr", "create", "--base", base} }`,
+		want: `with "gh"`,
+	}, {
+		name: "a push run outside the seam",
+		src: `package github
+import "context"
+func f(ctx context.Context, run func(context.Context, ...string) error, branch string) {
+	_ = run(ctx, "push", "-u", "origin", branch)
+}`,
+		want: `with "push"`,
+	}, {
+		name: "the library used for what files may legitimately use it for",
+		src: `package github
+import "` + lib + `"
+func f(perms map[string]bool) *github.IssueComment {
+	_ = map[string]bool{"push": true, "pull": true}
+	_ = perms["push"]
+	return &github.IssueComment{Body: github.Ptr("hi")}
+}`,
+		want: "",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := secondRouteViolations(t, "subject.go", tc.src)
+			if tc.want == "" {
+				if len(got) > 0 {
+					t.Errorf("clean file reported %v", got)
+				}
+				return
+			}
+			if !slices.ContainsFunc(got, func(v string) bool { return strings.Contains(v, tc.want) }) {
+				t.Errorf("reported %v, want one mentioning %q", got, tc.want)
+			}
+		})
 	}
 }
