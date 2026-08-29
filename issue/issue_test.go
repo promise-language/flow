@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/promise-language/flow"
+	ghbackend "github.com/promise-language/flow/pkg/backend/github"
 )
 
 // ---------------------------------------------------------------------------
@@ -419,13 +420,136 @@ func TestBuildApp_ContributorSliceWiresUp(t *testing.T) {
 	if app.Preflight == nil {
 		t.Error("Preflight is nil — the answer gate was not wired")
 	}
-	wantArtifacts := []flow.ArtifactId{"plan", "implementation", "review", "coverage", "verify-impl"}
+	// Ids AND types. The type is what catches `implementation` reverting to a
+	// patch: the deliverable is the commit on the branch, and a copy of it can
+	// be empty, is read back by nothing, and can disagree with what it copies.
+	wantArtifacts := []flow.ArtifactDef{
+		{Id: "plan", Type: flow.ArtifactMarkdown},
+		{Id: "branch", Type: flow.ArtifactCommitHash},
+		{Id: "implementation", Type: flow.ArtifactCommitHash},
+		{Id: "review", Type: flow.ArtifactMarkdown},
+		{Id: "coverage", Type: flow.ArtifactMarkdown},
+		{Id: "branch-closed", Type: flow.ArtifactFlag},
+	}
 	if len(app.Artifacts) != len(wantArtifacts) {
 		t.Fatalf("got %d artifacts, want %d", len(app.Artifacts), len(wantArtifacts))
 	}
 	for i, want := range wantArtifacts {
-		if app.Artifacts[i].Id != want {
-			t.Errorf("artifact[%d] = %q, want %q", i, app.Artifacts[i].Id, want)
+		if app.Artifacts[i].Id != want.Id || app.Artifacts[i].Type != want.Type {
+			t.Errorf("artifact[%d] = (%q, %v), want (%q, %v)",
+				i, app.Artifacts[i].Id, app.Artifacts[i].Type, want.Id, want.Type)
+		}
+	}
+}
+
+// The registered step set IS the document's step set: seven steps, in order,
+// each producing the result that is its identity.
+//
+// docs/issue-flow.md § "Contributor steps". The two branch steps and the
+// request are mechanical; there is no verification step, because verify is a
+// command a producing step uses while working rather than a place in a
+// sequence.
+func TestContributorStepSetMatchesTheDocument(t *testing.T) {
+	app, err := BuildApp(context.Background(), Config{
+		BinaryName: "issue", VerifyCmd: []string{"true"},
+		Role: RoleContributor, BaseBranch: "main",
+	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
+	if err != nil {
+		t.Fatalf("BuildApp: %v", err)
+	}
+	want := []struct {
+		name   string
+		result string
+		kind   flow.LifecycleKind
+	}{
+		{"write plan", "plan", flow.LifecycleArtifact},
+		{"open branch", "branch", flow.LifecycleArtifact},
+		{"implement the change", "implementation", flow.LifecycleArtifact},
+		{"review the work", "review", flow.LifecycleArtifact},
+		{"analyze coverage", "coverage", flow.LifecycleArtifact},
+		{"create pull request", "pr-open", flow.LifecycleSignal},
+		{"close branch", "branch-closed", flow.LifecycleArtifact},
+	}
+	items := app.Flows[0].Items()
+	if len(items) != len(want) {
+		t.Fatalf("got %d steps %v, want %d", len(items), app.Flows[0].Steps(), len(want))
+	}
+	for i, w := range want {
+		got := items[i]
+		result := string(got.ArtifactId)
+		if got.Kind == flow.LifecycleSignal {
+			result = string(got.SignalId)
+		}
+		if got.Name != w.name || result != w.result || got.Kind != w.kind {
+			t.Errorf("step[%d] = (%q, %q, %v), want (%q, %q, %v)",
+				i, got.Name, result, got.Kind, w.name, w.result, w.kind)
+		}
+	}
+	// Closing the branch has no "did the resolution complete" test of its own:
+	// DeriveNext returns the first PENDING step in registration order, so a run
+	// that stopped never reaches a step registered after the request.
+	if items[len(items)-1].Name != "close branch" {
+		t.Error("close branch is not last, so a parked or failed run would still restore the worktree")
+	}
+}
+
+// A prompt slot that outlives its step is a Config.Prompts key a project can
+// set, that BuildApp accepts, and that nothing will ever render. Removing a
+// step means removing its slot from three files, and missing one is silent in
+// every direction: the override is simply never used.
+//
+// Derived from defaultPrompts rather than listed, so a slot cannot be kept by
+// keeping it out of a hand-written list.
+func TestEveryPromptSlotBelongsToARegisteredStep(t *testing.T) {
+	app, err := BuildApp(context.Background(), Config{
+		BinaryName: "issue", VerifyCmd: []string{"true"},
+		Role: RoleContributor, BaseBranch: "main",
+	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
+	if err != nil {
+		t.Fatalf("BuildApp: %v", err)
+	}
+	steps := map[string]bool{}
+	for _, it := range app.Flows[0].Items() {
+		steps[string(it.ArtifactId)] = true
+		steps[string(it.SignalId)] = true
+	}
+	// The re-prompts are the exclusions, and for the reason they are excluded
+	// everywhere else: each runs inside another step's invocation rather than
+	// being a step of its own.
+	inSessionReprompts := map[PromptID]bool{
+		PromptImplementFix: true,
+		PromptRevise:       true,
+	}
+	for id := range defaultPrompts {
+		if inSessionReprompts[id] {
+			continue
+		}
+		if !steps[string(id)] {
+			t.Errorf("prompt slot %q names no registered step — a project overriding "+
+				"it would see nothing happen", id)
+		}
+	}
+}
+
+// Three ids move across two closed sets in this change — the flow's and the
+// backend's — and today nothing but a live cli.Run notices when they drift.
+// cli.App refuses at startup on a mismatch, which is a failure every operator
+// sees and no test does.
+func TestContributorArtifactsAreInTheGitHubBackendsSchema(t *testing.T) {
+	recordable := map[flow.ArtifactId]flow.ArtifactDef{}
+	for _, def := range (*ghbackend.Backend)(nil).SupportedArtifacts() {
+		recordable[def.Id] = def
+	}
+	for _, declared := range contributorArtifacts() {
+		def, ok := recordable[declared.Id]
+		if !ok {
+			t.Errorf("artifact %q is declared by the contributor flow but the github "+
+				"backend cannot record it — cli.Run refuses at startup", declared.Id)
+			continue
+		}
+		if def.Type != declared.Type {
+			t.Errorf("artifact %q is declared as %v but the backend records it as %v",
+				declared.Id, declared.Type, def.Type)
 		}
 	}
 }
@@ -671,7 +795,7 @@ func TestDefaultPromptsRender(t *testing.T) {
 func TestEveryPromptSlotHasADefault(t *testing.T) {
 	for _, id := range []PromptID{
 		PromptPlan, PromptImplement, PromptImplementFix,
-		PromptReview, PromptCoverage, PromptVerifyImpl,
+		PromptReview, PromptCoverage,
 	} {
 		if _, ok := defaultPrompts[id]; !ok {
 			t.Errorf("no library default for %q", id)
@@ -695,8 +819,9 @@ func TestAnswersReachEveryResumableDefaultPrompt(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 	// Every slot a canonical step can park from, derived rather than listed:
-	// this test named the exact failure it guards against and then omitted the
-	// verify-impl slot, which parks like any other.
+	// this test once named the exact failure it guards against and then
+	// omitted one of the slots from its own hand-written list, which parked
+	// like any other.
 	//
 	// The two re-prompts are the exclusions: each runs inside a single
 	// invocation of the step it belongs to, resuming that session, where the
@@ -908,7 +1033,7 @@ func TestPublishedProsePromptsAskForRepositoryRelativePaths(t *testing.T) {
 	if err := pc.Context.Render(); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	for _, id := range []PromptID{PromptPlan, PromptReview, PromptCoverage, PromptVerifyImpl} {
+	for _, id := range []PromptID{PromptPlan, PromptReview, PromptCoverage} {
 		t.Run(string(id), func(t *testing.T) {
 			got, err := renderPrompt(Config{}, id, pc)
 			if err != nil {

@@ -288,15 +288,6 @@ change can see what you did rather than reconstruct it from the diff.
 
 {{.AnswersBlock}}`,
 
-	PromptVerifyImpl: `Summarize the verification run for the pull request body: what was run, what
-passed, and anything a reviewer should still check by hand.
-
-` + repoRelativePaths + `
-
-{{.WorkInProgressBlock}}
-
-{{.AnswersBlock}}`,
-
 	PromptRevise: `The text you just produced was NOT published. A guard examines everything this
 flow writes outward before it is sent, and it refused this:
 

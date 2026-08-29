@@ -56,6 +56,39 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 	return b.resolveMarkdown(ctx, pc, resp.SessionID, resp.LastText)
 }
 
+// stepOpenBranch puts the worktree on this item's branch and records the commit
+// it was cut from.
+//
+// Mechanical, and its own step for three reasons. A branch that fails to open —
+// a dirty tree, a name already taken, a base that cannot be resolved — fails
+// HERE, naming its own cause, rather than surfacing as an implement failure that
+// sends a reader to look at the agent. Implement's concern stays "make it work"
+// rather than "prepare a workspace and then make it work". And every step after
+// this one commits, so the branch has to exist before any of them runs.
+//
+// It records HEAD after the checkout, not the base branch's tip. On a resume the
+// two differ: a branch cut by an earlier attempt that died before resolving is
+// still empty, and its HEAD is the base as it stood when the branch was cut.
+// Reading the base branch today would record a commit the branch was never cut
+// from — and that record is exactly what makes "what is this change relative to"
+// answerable later against a base that has since moved.
+func (b *builder) stepOpenBranch(ctx flow.StepCtx) error {
+	wt, err := ctx.Worktree()
+	if err != nil {
+		return err
+	}
+	if _, _, err := b.ensureBranch(ctx, wt); err != nil {
+		// Named, so the message stands on its own wherever it is read: what
+		// could not be opened, and why. That is the whole of "fails as itself".
+		return fmt.Errorf("could not open branch %q: %w", b.branchName(ctx), err)
+	}
+	head, err := wt.RevParse(ctx.Context(), "HEAD")
+	if err != nil {
+		return err
+	}
+	return ctx.ResolveCommitHash(head)
+}
+
 // stepImplement makes the change and drives it to a passing gate.
 //
 // This is a loop, not a single agent turn, and that is the point: an agent's
@@ -65,8 +98,8 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 // surfaces to the operator as a budget park naming every exhausted axis, not as
 // a silent give-up.
 //
-// The artifact resolves ONLY on a green gate. A patch attached after a failing
-// verify is unverified work that a resume would apply on top of a broken tree.
+// The artifact resolves ONLY on a green gate. A commit recorded after a failing
+// verify would name work that does not build.
 func (b *builder) stepImplement(ctx flow.StepCtx) error {
 	pc, err := b.promptContext(ctx)
 	if err != nil {
@@ -78,13 +111,22 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 	if plan, ok := pc.PriorMarkdown(StepPlan); !ok || strings.TrimSpace(plan) == "" {
 		return fmt.Errorf("plan artifact missing, unresolved, or empty — refusing to implement without a plan")
 	}
+	// The commit the branch was cut from, as the branch step recorded it. Same
+	// shape as the plan refusal above, and for the same reason: without it the
+	// empty-branch check below has nothing to compare against.
+	baseSHA, ok := ctx.CommitHash(flow.ArtifactId(StepBranch))
+	if !ok || strings.TrimSpace(baseSHA) == "" {
+		return fmt.Errorf("branch artifact missing, unresolved, or empty — " +
+			"refusing to implement without the commit the branch was cut from")
+	}
 
 	wt, err := ctx.Worktree()
 	if err != nil {
 		return err
 	}
-	base, _, err := b.ensureBranch(ctx, wt)
-	if err != nil {
+	// The branch must already exist. Cutting one here is the failure the open
+	// branch step exists to report as itself.
+	if err := b.onClaimBranch(ctx); err != nil {
 		return err
 	}
 
@@ -139,75 +181,51 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 		}
 	}
 
-	// The commit the diff is taken against. Captured before the commit,
-	// because that is what the diff is relative to: pointing BaseSHA at the
-	// commit that CONTAINS the hunks would make `checkout BaseSHA && apply`
-	// fail, since they are already there.
-	baseSHA, err := wt.RevParse(ctx.Context(), "HEAD")
-	if err != nil {
-		return err
-	}
-
-	// Stage, capture, then commit — in that order, and the order is the whole
-	// point. CapturePatch is a diff against HEAD: before staging it cannot see
-	// untracked files, so it would attach a diff missing every file the change
-	// ADDED while looking complete; after committing it sees a clean tree and
-	// returns nothing at all. Between the two it sees everything.
-	if err := wt.Stage(ctx.Context()); err != nil {
-		return err
-	}
-	patch, err := wt.CapturePatch(ctx.Context())
-	if err != nil {
-		return err
-	}
 	// The prompts tell the agent NOT to commit — committing mid-loop would bury
 	// a half-finished round in history — which makes it this handler's job.
-	// Nothing else in the flow commits, so without this the branch pushed at PR
-	// time carries no commits and `gh pr create` fails with "No commits
-	// between ...".
-	if err := wt.Commit(ctx.Context(), b.commitMessage(ctx)); err != nil {
+	// Nothing else in the flow commits before the request, so without this the
+	// branch pushed at PR time carries no commits and `gh pr create` fails with
+	// "No commits between ...".
+	//
+	// The same helper every other producing step records through, so implement
+	// also gets the dirty-tree guard: the invariant is the same one step later,
+	// and one copy of it is what keeps the two from drifting.
+	if err := b.recordStepWork(ctx, wt, "implement", b.commitMessage(ctx)); err != nil {
 		return err
 	}
 	// Commit is a deliberate no-op when nothing is staged, so a nil return is
 	// not evidence that anything was recorded. Ask the question that actually
-	// matters instead: does this branch carry anything the base does not?
+	// matters instead: does this branch carry anything the commit it was cut
+	// from does not?
 	//
 	// Comparing HEAD before and after the commit would only cover the
 	// invocation that made it — a resumed branch whose work was committed by an
 	// earlier run that then died would read as "the agent did nothing" and
 	// deadlock the step with the change sitting right there. Comparing against
-	// the base covers both, and catches an empty branch here rather than three
-	// agent turns later at "No commits between ...".
+	// the RECORDED base covers both, and catches an empty branch here rather
+	// than three agent turns later at "No commits between ...".
 	//
-	// One case slips through: a branch cut by an EARLIER run, still empty, on a
-	// base that has advanced since. Its HEAD is the old base, which no longer
-	// equals the current one, so this reads as work. Closing that needs an
-	// ahead-count (`rev-list --count base..HEAD`) rather than an equality, and
-	// the Worktree surface has no such call. The failure is the pre-existing
-	// one — `gh pr create` refusing an empty branch — not a wrong result.
+	// Recorded rather than re-read, which is what closes the case a base-branch
+	// lookup misses: a branch cut by an earlier run, still empty, on a base that
+	// has advanced since. Its HEAD is the base as it stood at the cut, which no
+	// longer equals the base branch's tip — so comparing against today's base
+	// would read an empty branch as work.
 	head, err := wt.RevParse(ctx.Context(), "HEAD")
 	if err != nil {
 		return err
 	}
-	baseBranchSHA, err := wt.RevParse(ctx.Context(), base)
-	if err != nil {
-		return err
-	}
-	if head == baseBranchSHA {
-		return fmt.Errorf("branch %q carries no commits beyond %q — the agent changed nothing, "+
-			"so there is nothing to open a pull request from", b.branchName(ctx), base)
+	if head == baseSHA {
+		return fmt.Errorf("branch %q carries no commits beyond %s, the commit it was cut from — "+
+			"the agent changed nothing, so there is nothing to open a pull request from",
+			b.branchName(ctx), baseSHA)
 	}
 
-	// An empty diff here is legal and expected on one path: a resumed branch
-	// whose work an earlier run already committed has a clean tree, so there is
-	// nothing left to capture. The branch-vs-base check above has already
-	// established the work exists; the artifact records that it lives in the
-	// branch rather than in these bytes.
-	return ctx.ResolvePatch(flow.PatchBody{
-		Diff:       patch,
-		BaseSHA:    baseSHA,
-		BaseBranch: base,
-	})
+	// The commit, not a copy of it. A resumed branch whose work an earlier run
+	// already committed has a clean tree, so a patch captured here would be
+	// legitimately empty — a record that may be empty, that nothing reads back,
+	// and that can disagree with what it copies. A commit names exactly one
+	// state and is never ambiguous.
+	return ctx.ResolveCommitHash(head)
 }
 
 // recordStepWork commits whatever the calling step changed and refuses to
@@ -221,11 +239,15 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 //
 // Commit is a deliberate no-op when nothing is staged, so a step that changed
 // nothing records nothing and costs one call.
-func (b *builder) recordStepWork(ctx flow.StepCtx, wt flow.Worktree, label string) error {
+//
+// The message is the caller's rather than built here: only the implement commit
+// carries the closes-reference, and a second commit repeating it would read as a
+// second resolution of the same item.
+func (b *builder) recordStepWork(ctx flow.StepCtx, wt flow.Worktree, label, msg string) error {
 	if err := wt.Stage(ctx.Context()); err != nil {
 		return err
 	}
-	if err := wt.Commit(ctx.Context(), fmt.Sprintf("%s: %s", label, b.itemLabel(ctx))); err != nil {
+	if err := wt.Commit(ctx.Context(), msg); err != nil {
 		return err
 	}
 	// Not redundant with the commit: staging cannot pick up what a backend
@@ -279,7 +301,8 @@ func (b *builder) producingMarkdownStep(ctx flow.StepCtx, id PromptID, label str
 	if strings.TrimSpace(resp.LastText) == "" {
 		return fmt.Errorf("agent returned nothing for %q", id)
 	}
-	if err := b.recordStepWork(ctx, wt, label); err != nil {
+	if err := b.recordStepWork(ctx, wt, label,
+		fmt.Sprintf("%s: %s", label, b.itemLabel(ctx))); err != nil {
 		return err
 	}
 	return b.resolveMarkdown(ctx, pc, resp.SessionID, resp.LastText)
@@ -301,47 +324,9 @@ func (b *builder) stepCoverage(ctx flow.StepCtx) error {
 	return b.producingMarkdownStep(ctx, PromptCoverage, "coverage")
 }
 
-// stepVerifyImpl records the passing verification for the pull request.
-//
-// The gate is re-run here rather than trusted from the implement step: review
-// and coverage may have changed the tree in between, and this artifact is the
-// evidence a reviewer reads.
-func (b *builder) stepVerifyImpl(ctx flow.StepCtx) error {
-	wt, err := ctx.Worktree()
-	if err != nil {
-		return err
-	}
-	if err := b.onClaimBranch(ctx); err != nil {
-		return err
-	}
-	if verr := wt.Verify(ctx.Context()); verr != nil {
-		// Same reasoning as the implement loop: a ParkBlocked nothing refuses
-		// would just be re-dispatched next cycle.
-		return fmt.Errorf("verify failed on the branch as it now stands: %s", verifyTail(verr))
-	}
-	pc, err := b.promptContext(ctx)
-	if err != nil {
-		return err
-	}
-	body, err := renderPrompt(b.cfg, PromptVerifyImpl, pc)
-	if err != nil {
-		return err
-	}
-	resp, err := b.runAgent(ctx, flow.AgentRequest{Prompt: body})
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(resp.LastText) == "" {
-		// The gate passing is the fact worth recording; the summary is a
-		// convenience. Don't fail the step over prose.
-		return b.resolveMarkdown(ctx, pc, resp.SessionID,
-			fmt.Sprintf("verify passed (%s)", strings.Join(b.cfg.VerifyCmd, " ")))
-	}
-	return b.resolveMarkdown(ctx, pc, resp.SessionID, resp.LastText)
-}
-
-// stepOpenPR opens the pull request. The pr-open signal is set by the backend
-// as a side effect of Open succeeding, not by this handler.
+// stepOpenPR measures the branch and, if the measurement is acceptable, opens
+// the pull request. The pr-open signal is set by the backend as a side effect of
+// Open succeeding, not by this handler.
 func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 	wt, err := ctx.Worktree()
 	if err != nil {
@@ -386,12 +371,80 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 		return err
 	}
 
-	body, err := b.pullRequestBody(ctx)
+	// The gate, after recording and before the push. After, because it must
+	// measure the branch exactly as it will be proposed — recording moves the
+	// tree, so measuring first would establish something about a state nobody
+	// will review. Before, because a branch that cannot pass must not leave the
+	// machine: the maintainer runs the same gate, and a request that fails it
+	// spends a reviewer's attention on a change that was never going to land.
+	verdict, err := b.runIntegrationGate(ctx, wt)
+	if err != nil {
+		return err
+	}
+
+	body, err := b.pullRequestBody(ctx, verdict)
 	if err != nil {
 		return err
 	}
 	_, err = flow.Open(ctx.Context(), wt, base, title, body)
 	return err
+}
+
+// runIntegrationGate measures the branch and asks the project whether the
+// measurement is acceptable.
+//
+// Each way this can stop returns an ERROR rather than a park, for the reason
+// already recorded on the implement loop: no preflight refuses a ParkBlocked
+// item, so a park here is re-dispatched next cycle and spends the gate again.
+//
+// The three failures are deliberately worded apart, because they belong to
+// different people and only one of them is about the change:
+//
+//   - RunGate errored: no gate ran and no outcome exists. Never read as the
+//     change failing.
+//   - The run measured nothing: the gate timed out, could not start, died, or
+//     broke its contract. Still nothing about the change.
+//   - Judge errored: no verdict exists. Explicitly not a refusal — an
+//     unanswerable judge says nothing about the measurement, and reading it as
+//     "not acceptable" would refuse a sound change over the project's own
+//     broken tooling.
+//
+// Only the fourth — a verdict that is a refusal — is about the change, and it
+// is a perfectly good answer arriving with a nil error.
+func (b *builder) runIntegrationGate(ctx flow.StepCtx, wt flow.Worktree) (flow.GateVerdict, error) {
+	ctx.Notify("", fmt.Sprintf("running the %s gate on the branch as it will be proposed", flow.GateIntegration))
+	run, err := wt.RunGate(ctx.Context(), flow.GateIntegration)
+	if err != nil {
+		return flow.GateVerdict{}, fmt.Errorf(
+			"no %s gate ran, so nothing was measured about this branch — this is not the "+
+				"change failing: %w", flow.GateIntegration, err)
+	}
+	if run.Outcome != flow.OutcomeMeasured {
+		return flow.GateVerdict{}, fmt.Errorf(
+			"the %s gate reports %q, so nothing was measured about this change — this is not "+
+				"the change failing%s", flow.GateIntegration, run.Outcome, detailSuffix(run.Detail))
+	}
+	verdict, err := wt.Judge(ctx.Context(), run)
+	if err != nil {
+		return flow.GateVerdict{}, fmt.Errorf(
+			"the %s gate measured this branch but no verdict exists, which is not a refusal — "+
+				"the project's judging layer could not answer: %w", flow.GateIntegration, err)
+	}
+	if !verdict.Acceptable {
+		return flow.GateVerdict{}, fmt.Errorf(
+			"the %s gate's verdict on this branch is not acceptable, so it is not proposed%s",
+			flow.GateIntegration, detailSuffix(verdict.Detail))
+	}
+	return verdict, nil
+}
+
+// detailSuffix appends prose a runner or a judge wrote for a person, when there
+// is any. Nothing keys on it, so an empty one costs the message nothing.
+func detailSuffix(detail string) string {
+	if d := strings.TrimSpace(detail); d != "" {
+		return ": " + d
+	}
+	return ""
 }
 
 // recordOutstanding commits whatever the post-implement steps left in the tree,
@@ -445,6 +498,41 @@ func (b *builder) recordOutstanding(ctx flow.StepCtx, wt flow.Worktree) error {
 // resolution of the same item.
 func (b *builder) followUpCommitMessage(ctx flow.StepCtx) string {
 	return fmt.Sprintf("Review and coverage on #%s", ctx.Item().ID)
+}
+
+// stepCloseBranch returns the worktree to the base branch.
+//
+// It runs only when the resolution completed: DeriveNext dispatches the first
+// PENDING step in registration order, and this one is registered after the
+// request, so a run that parked, was blocked or failed never reaches it. That is
+// the point — the state a stopped run left is what someone resumes from or
+// diagnoses.
+//
+// It does NOT delete the item's branch. The branch carries the request, and the
+// request outlives the resolution that opened it.
+func (b *builder) stepCloseBranch(ctx flow.StepCtx) error {
+	wt, err := ctx.Worktree()
+	if err != nil {
+		return err
+	}
+	base, err := b.baseBranch(ctx.Context())
+	if err != nil {
+		return err
+	}
+	// Branch CREATES when the name is absent, so the created flag is the check
+	// rather than decoration: without it, a worktree missing the base branch
+	// silently gets a new branch of that name pointing at this item's tip, and
+	// every later item would be cut from the wrong place.
+	created, err := wt.Branch(ctx.Context(), base, "")
+	if err != nil {
+		return err
+	}
+	if created {
+		return fmt.Errorf("base branch %q is not in this worktree, so the worktree cannot be "+
+			"returned to it — a branch of that name now points at this item's work and has "+
+			"to be resolved by hand", base)
+	}
+	return ctx.ResolveFlag()
 }
 
 // ---------------------------------------------------------------------------
@@ -611,8 +699,10 @@ func refusedRecord(refused flow.ErrDisclosureRefused, body string) string {
 // promptContext builds the render context, exposing every upstream contributor
 // artifact so a project's template can reference whichever it needs.
 func (b *builder) promptContext(ctx flow.StepCtx) (PromptContext, error) {
+	// The branch step is not here: implement reads the commit it recorded
+	// through ctx.CommitHash, and no prompt has anything to say about it.
 	pc, err := newPromptContext(ctx, b.cfg, b.role, []StepID{
-		StepPlan, StepImplement, StepReview, StepCoverage, StepVerifyImpl,
+		StepPlan, StepImplement, StepReview, StepCoverage,
 	})
 	if err != nil {
 		return PromptContext{}, err
@@ -691,9 +781,10 @@ func (b *builder) answersFor(ctx flow.StepCtx) []Answer {
 //
 // Every step that reads or runs against the tree needs this, not just the one
 // that writes to it. The worktree directory is shared across items, so a tree
-// left on another item's branch would have review, coverage and — worst — the
-// VERIFICATION artifact all describing code from a different issue, with
-// nothing noticing until the pull request step refused the branch.
+// left on another item's branch would have review and coverage analyse code
+// from a different issue, and — worst — the gate the request rests on measure
+// it. Nothing would notice: the request would be proposed carrying a
+// measurement of somebody else's change.
 func (b *builder) ensureBranch(ctx flow.StepCtx, wt flow.Worktree) (base string, created bool, err error) {
 	base, err = b.baseBranch(ctx.Context())
 	if err != nil {
@@ -709,11 +800,11 @@ func (b *builder) ensureBranch(ctx flow.StepCtx, wt flow.Worktree) (base string,
 // onClaimBranch is ensureBranch for the steps that read the implementation
 // rather than produce it.
 //
-// It REFUSES when the branch had to be created. These steps run after the
-// implement step, so a missing claim branch means the work is not here — a
+// It REFUSES when the branch had to be created. These steps run after the open
+// branch step, so a missing claim branch means the work is not here — a
 // re-cloned or reset worktree, most likely. Cutting a fresh branch off the base
 // and carrying on would have review and coverage analyse an empty change, and
-// verify-impl resolve a "verify passed" artifact that is evidence for nothing.
+// the request propose one.
 func (b *builder) onClaimBranch(ctx flow.StepCtx) error {
 	wt, err := ctx.Worktree()
 	if err != nil {
@@ -761,8 +852,9 @@ func (b *builder) branchName(ctx flow.StepCtx) string {
 	return "flow/issue-" + ctx.Item().ID
 }
 
-// pullRequestBody assembles the PR description from what the flow produced.
-func (b *builder) pullRequestBody(ctx flow.StepCtx) (string, error) {
+// pullRequestBody assembles the PR description from what the flow produced and
+// what the gate established.
+func (b *builder) pullRequestBody(ctx flow.StepCtx, verdict flow.GateVerdict) (string, error) {
 	var sb strings.Builder
 	// Emit a heading only when there is something under it. A resolved
 	// artifact can still carry an empty body — the backend stores bodies out
@@ -791,9 +883,48 @@ func (b *builder) pullRequestBody(ctx flow.StepCtx) (string, error) {
 	// unaided why it is there.
 	section("Review", StepReview)
 	section("Coverage", StepCoverage)
-	section("Verification", StepVerifyImpl)
+	// The gate's result travels with the request. This is the whole of
+	// "recorded, so a reader knows what was established rather than taking it on
+	// trust": the body is where a reader meets it, and it carries both inputs
+	// the verdict was computed from as well as the answer, so the verdict can be
+	// recomputed by whoever was not there.
+	sb.WriteString(gateSection(verdict))
 	fmt.Fprintln(&sb, closesRef(ctx.Item().ID))
 	return sb.String(), nil
+}
+
+// gateSection renders what the gate established: which gate, what the runner
+// observed, what the project's judge answered, and BOTH inputs it answered
+// from.
+//
+// Both, because either one alone leaves a reader exactly where a reader with
+// neither stands. The envelope says what was measured and the thresholds say
+// what it was judged against, and recomputing the verdict needs the pair — so
+// a body carrying only the measurement publishes an answer nobody can check.
+// That is not a presentation detail: recomputability is the whole reason a
+// judge is allowed to live in the tree it judges, and a verdict whose terms
+// were discarded is as unfalsifiable as a lying runner. See
+// docs/gates-and-commands.md § "Where the verdict is made".
+func gateSection(v flow.GateVerdict) string {
+	var sb strings.Builder
+	sb.WriteString("## Gate\n\n")
+	fmt.Fprintf(&sb, "- gate: `%s`\n", v.Run.Gate)
+	fmt.Fprintf(&sb, "- outcome: `%s`\n", v.Run.Outcome)
+	fmt.Fprintf(&sb, "- acceptable: `%t`\n", v.Acceptable)
+	if d := strings.TrimSpace(v.Detail); d != "" {
+		fmt.Fprintf(&sb, "- verdict: %s\n", d)
+	}
+	// Labelled, because two unlabelled fenced blocks are two blobs of JSON a
+	// reader has to tell apart by guessing which is which.
+	block := func(label string, body []byte) {
+		if b := strings.TrimSpace(string(body)); b != "" {
+			fmt.Fprintf(&sb, "\n%s:\n\n```\n%s\n```\n", label, b)
+		}
+	}
+	block("measurement", v.Run.Stdout)
+	block("thresholds", v.Thresholds)
+	sb.WriteString("\n")
+	return sb.String()
 }
 
 // verifyTail reduces a failing verify error to the part worth re-prompting on.
