@@ -56,6 +56,11 @@ type fakeWorktree struct {
 	judgeErr     error
 	judgeRefuses bool
 	judgeDetail  string
+	// thresholds are the terms the judge stated it answered against. Never
+	// empty on a verdict that parses — the SDK refuses one without them,
+	// because a verdict nobody can re-check is what a judge living in the tree
+	// it judges buys its way out of.
+	thresholds []byte
 	// calls is every worktree operation in order. Some properties here are
 	// about ORDER rather than occurrence — the gate must measure the branch as
 	// it will be proposed, which is a statement about when it ran.
@@ -150,10 +155,14 @@ func (w *fakeWorktree) Judge(_ context.Context, run flow.GateRun) (flow.GateVerd
 	if w.judgeErr != nil {
 		return flow.GateVerdict{}, w.judgeErr
 	}
+	thresholds := w.thresholds
+	if len(thresholds) == 0 {
+		thresholds = []byte("{}")
+	}
 	return flow.GateVerdict{
 		Run:        run,
 		Acceptable: !w.judgeRefuses,
-		Thresholds: []byte("{}"),
+		Thresholds: thresholds,
 		Detail:     w.judgeDetail,
 	}, nil
 }
@@ -1019,11 +1028,16 @@ func TestStepOpenPR_DoesNotProposeWhatTheJudgeRefuses(t *testing.T) {
 }
 
 // What was established travels with the request, so a reader knows it rather
-// than taking it on trust — including the envelope, so the verdict can be
-// recomputed by whoever was not there.
+// than taking it on trust.
+//
+// BOTH inputs the verdict was computed from, not just the measurement. A
+// reader holding the envelope alone can no more recompute the answer than one
+// holding neither, and recomputability is the whole reason a judge is allowed
+// to live in the tree it judges.
 func TestStepOpenPR_BodyCarriesTheGatesResult(t *testing.T) {
 	wt := resumedWorktree()
 	wt.envelope = []byte(`{"gate":"integration","tests":{"passed":812}}`)
+	wt.thresholds = []byte(`{"tests_failed":0,"coverage_floor":70}`)
 	wt.judgeDetail = "every measurement is within this project's thresholds"
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
@@ -1037,11 +1051,17 @@ func TestStepOpenPR_BodyCarriesTheGatesResult(t *testing.T) {
 		"acceptable",
 		wt.judgeDetail,
 		`"passed":812`,
+		`"coverage_floor":70`,
 	} {
 		if !strings.Contains(wt.openBody, want) {
 			t.Errorf("body missing %q — a reader has to take the change on trust:\n%s",
 				want, wt.openBody)
 		}
+	}
+	// The two blobs are told apart by their labels, not by a reader guessing
+	// which JSON object is which.
+	if !strings.Contains(wt.openBody, "measurement:") || !strings.Contains(wt.openBody, "thresholds:") {
+		t.Errorf("the gate's two inputs are unlabelled:\n%s", wt.openBody)
 	}
 	// Verify is a tool a producing step uses, not a place in the sequence, and
 	// there is no artifact recording that it ran.

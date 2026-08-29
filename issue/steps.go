@@ -781,9 +781,10 @@ func (b *builder) answersFor(ctx flow.StepCtx) []Answer {
 //
 // Every step that reads or runs against the tree needs this, not just the one
 // that writes to it. The worktree directory is shared across items, so a tree
-// left on another item's branch would have review, coverage and — worst — the
-// VERIFICATION artifact all describing code from a different issue, with
-// nothing noticing until the pull request step refused the branch.
+// left on another item's branch would have review and coverage analyse code
+// from a different issue, and — worst — the gate the request rests on measure
+// it. Nothing would notice: the request would be proposed carrying a
+// measurement of somebody else's change.
 func (b *builder) ensureBranch(ctx flow.StepCtx, wt flow.Worktree) (base string, created bool, err error) {
 	base, err = b.baseBranch(ctx.Context())
 	if err != nil {
@@ -884,8 +885,8 @@ func (b *builder) pullRequestBody(ctx flow.StepCtx, verdict flow.GateVerdict) (s
 	section("Coverage", StepCoverage)
 	// The gate's result travels with the request. This is the whole of
 	// "recorded, so a reader knows what was established rather than taking it on
-	// trust": the body is where a reader meets it, and it carries the envelope
-	// the judge was handed as well as the answer, so the verdict can be
+	// trust": the body is where a reader meets it, and it carries both inputs
+	// the verdict was computed from as well as the answer, so the verdict can be
 	// recomputed by whoever was not there.
 	sb.WriteString(gateSection(verdict))
 	fmt.Fprintln(&sb, closesRef(ctx.Item().ID))
@@ -893,8 +894,17 @@ func (b *builder) pullRequestBody(ctx flow.StepCtx, verdict flow.GateVerdict) (s
 }
 
 // gateSection renders what the gate established: which gate, what the runner
-// observed, what the project's judge answered, and the envelope it answered
-// about.
+// observed, what the project's judge answered, and BOTH inputs it answered
+// from.
+//
+// Both, because either one alone leaves a reader exactly where a reader with
+// neither stands. The envelope says what was measured and the thresholds say
+// what it was judged against, and recomputing the verdict needs the pair — so
+// a body carrying only the measurement publishes an answer nobody can check.
+// That is not a presentation detail: recomputability is the whole reason a
+// judge is allowed to live in the tree it judges, and a verdict whose terms
+// were discarded is as unfalsifiable as a lying runner. See
+// docs/gates-and-commands.md § "Where the verdict is made".
 func gateSection(v flow.GateVerdict) string {
 	var sb strings.Builder
 	sb.WriteString("## Gate\n\n")
@@ -904,9 +914,15 @@ func gateSection(v flow.GateVerdict) string {
 	if d := strings.TrimSpace(v.Detail); d != "" {
 		fmt.Fprintf(&sb, "- verdict: %s\n", d)
 	}
-	if envelope := strings.TrimSpace(string(v.Run.Stdout)); envelope != "" {
-		fmt.Fprintf(&sb, "\n```\n%s\n```\n", envelope)
+	// Labelled, because two unlabelled fenced blocks are two blobs of JSON a
+	// reader has to tell apart by guessing which is which.
+	block := func(label string, body []byte) {
+		if b := strings.TrimSpace(string(body)); b != "" {
+			fmt.Fprintf(&sb, "\n%s:\n\n```\n%s\n```\n", label, b)
+		}
 	}
+	block("measurement", v.Run.Stdout)
+	block("thresholds", v.Thresholds)
 	sb.WriteString("\n")
 	return sb.String()
 }

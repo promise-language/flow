@@ -781,8 +781,9 @@ func TestAnswersReachEveryResumableDefaultPrompt(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 	// Every slot a canonical step can park from, derived rather than listed:
-	// this test named the exact failure it guards against and then omitted the
-	// verify-impl slot, which parks like any other.
+	// this test once named the exact failure it guards against and then
+	// omitted one of the slots from its own hand-written list, which parked
+	// like any other.
 	//
 	// The two re-prompts are the exclusions: each runs inside a single
 	// invocation of the step it belongs to, resuming that session, where the
