@@ -1,6 +1,7 @@
 package issue
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -52,7 +53,7 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 	if strings.TrimSpace(resp.LastText) == "" {
 		return fmt.Errorf("agent returned an empty plan")
 	}
-	return ctx.ResolveMarkdown(resp.LastText)
+	return b.resolveMarkdown(ctx, pc, resp.SessionID, resp.LastText)
 }
 
 // stepImplement makes the change and drives it to a passing gate.
@@ -281,7 +282,7 @@ func (b *builder) producingMarkdownStep(ctx flow.StepCtx, id PromptID, label str
 	if err := b.recordStepWork(ctx, wt, label); err != nil {
 		return err
 	}
-	return ctx.ResolveMarkdown(resp.LastText)
+	return b.resolveMarkdown(ctx, pc, resp.SessionID, resp.LastText)
 }
 
 // stepReview asks for a critique of the change.
@@ -333,9 +334,10 @@ func (b *builder) stepVerifyImpl(ctx flow.StepCtx) error {
 	if strings.TrimSpace(resp.LastText) == "" {
 		// The gate passing is the fact worth recording; the summary is a
 		// convenience. Don't fail the step over prose.
-		return ctx.ResolveMarkdown(fmt.Sprintf("verify passed (%s)", strings.Join(b.cfg.VerifyCmd, " ")))
+		return b.resolveMarkdown(ctx, pc, resp.SessionID,
+			fmt.Sprintf("verify passed (%s)", strings.Join(b.cfg.VerifyCmd, " ")))
 	}
-	return ctx.ResolveMarkdown(resp.LastText)
+	return b.resolveMarkdown(ctx, pc, resp.SessionID, resp.LastText)
 }
 
 // stepOpenPR opens the pull request. The pr-open signal is set by the backend
@@ -468,6 +470,18 @@ func (b *builder) runAgent(ctx flow.StepCtx, req flow.AgentRequest) (*flow.Agent
 		return nil, fmt.Errorf("agent returned no response")
 	}
 	if header, body, ok := detectQuestion(resp.LastText); ok {
+		// The turn that found the ambiguity is the turn that produced the
+		// reasoning behind it: a step does not ask at the start, it asks once it
+		// has read enough to find the question. Stashing the whole final message
+		// is what makes the resumed step continue instead of paying for the same
+		// analysis again to arrive at the question it now has an answer to.
+		//
+		// Best-effort: a stash that failed costs a re-derivation, which is the
+		// old behaviour, and turning it into a step failure would lose the park
+		// as well as the work.
+		if err := ctx.RecordWorkInProgress(resp.LastText); err != nil {
+			ctx.Notify("", "could not record work in progress: "+err.Error())
+		}
 		// Header is the question; Text is the evidence behind it. The step's
 		// own identity is not repeated here — the park record already names the
 		// step, and a header that led with it would push the actual question
@@ -495,7 +509,95 @@ func (b *builder) agentMarkdownStep(ctx flow.StepCtx, id PromptID) error {
 	if strings.TrimSpace(resp.LastText) == "" {
 		return fmt.Errorf("agent returned nothing for %q", id)
 	}
-	return ctx.ResolveMarkdown(resp.LastText)
+	return b.resolveMarkdown(ctx, pc, resp.SessionID, resp.LastText)
+}
+
+// resolveMarkdown records prose as this step's artifact, re-prompting the agent
+// to revise when the disclosure guard refuses to publish it.
+//
+// docs/disclosure.md: "A refusal is not a failure of the step. The text is
+// revised and re-offered." What was refused is an expression of work already
+// done and paid for, so the agent is asked to fix the SENTENCE in the session
+// it is already holding — not re-run to re-derive the plan. A revision costs a
+// prompt, not an invocation, which is what stops three refused sentences from
+// exhausting a three-invocation grant and then reporting a budget cap — naming
+// the wrong problem entirely.
+//
+// Every step that publishes prose goes through this one copy. A step that
+// called ctx.ResolveMarkdown directly would fail on a refusal instead, and lose
+// the work that produced the text.
+func (b *builder) resolveMarkdown(ctx flow.StepCtx, pc PromptContext, session, body string) error {
+	for round := 0; ; round++ {
+		err := ctx.ResolveMarkdown(body)
+		if err == nil {
+			return nil
+		}
+		var refused flow.ErrDisclosureRefused
+		if !errors.As(err, &refused) {
+			// Anything else is a real failure of the write. Returning it
+			// unchanged keeps a broken backend from being reported as a
+			// disclosure problem.
+			return err
+		}
+		// Stash BEFORE anything else can go wrong. This is the case the store
+		// earns itself on: the text was refused, so an issue comment is the one
+		// place it cannot go, and losing it here would spend the whole step's
+		// cost again to reach the same sentence.
+		if werr := ctx.RecordWorkInProgress(refusedRecord(refused, body)); werr != nil {
+			ctx.Notify("", "could not record refused text: "+werr.Error())
+		}
+		if round >= maxDisclosureRevisions {
+			// A guard's answer may run to several lines; a park reason is read
+			// as one. The whole answer is in the stashed record, which is where
+			// the next invocation reads it from anyway.
+			last, _, _ := strings.Cut(refused.Error(), "\n")
+			// A park, not a failure: the work is sound and a person has to
+			// decide. And a re-run after this park is not the identical retry —
+			// it starts from the stashed draft and the refusal, which is exactly
+			// what the previous attempt did not have.
+			return ctx.Park(flow.ParkRequest{
+				Kind: flow.ParkBlocked,
+				Reason: fmt.Sprintf(
+					"the disclosure guard refused this step's text %d times; last refusal: %s",
+					round+1, last),
+			})
+		}
+		ctx.Notify("", fmt.Sprintf("disclosure refused — revising (round %d)", round+1))
+		rpc := pc
+		rpc.Refusal = refused.Error()
+		rpc.RefusedText = body
+		prompt, rerr := renderPrompt(b.cfg, PromptRevise, rpc)
+		if rerr != nil {
+			return rerr
+		}
+		resp, rerr := b.runAgent(ctx, flow.AgentRequest{
+			Prompt: prompt,
+			// The wording is what is wrong, not the tree — and by this point a
+			// producing step has already committed. A revision that edited
+			// files would put work into the branch after the commit that was
+			// supposed to carry it.
+			PermissionMode:  "plan",
+			ResumeSessionID: session,
+		})
+		if rerr != nil {
+			return rerr
+		}
+		if strings.TrimSpace(resp.LastText) == "" {
+			return fmt.Errorf("agent returned nothing when asked to revise refused text")
+		}
+		session = resp.SessionID
+		body = resp.LastText
+	}
+}
+
+// refusedRecord is what a refused offer leaves behind for the next invocation:
+// the text, and the guard's answer about it. Both, because the text alone would
+// be re-offered unchanged and refused identically.
+func refusedRecord(refused flow.ErrDisclosureRefused, body string) string {
+	return fmt.Sprintf(
+		"An earlier run produced this text and the disclosure guard refused to publish it.\n\n"+
+			"The refusal:\n\n%s\n\nThe text that was refused:\n\n%s",
+		refused.Error(), body)
 }
 
 // promptContext builds the render context, exposing every upstream contributor
@@ -512,7 +614,26 @@ func (b *builder) promptContext(ctx flow.StepCtx) (PromptContext, error) {
 	// again with a fresh timestamp that excludes the answer just given — a
 	// stall no amount of answering can clear.
 	pc.Answers = b.answersFor(ctx)
+	// What this step left itself last time it stopped short. Without it the
+	// resumed step renders the same prompt against the same context and
+	// re-derives the reasoning it already paid for — worst for the plan step,
+	// which changes no files and so keeps nothing else at all.
+	pc.WorkInProgress = b.workInProgressFor(ctx)
 	return pc, nil
+}
+
+// workInProgressFor returns what this step stashed on an earlier invocation.
+//
+// Best-effort for the same reason as answersFor: a failure here costs the
+// prompt some context — the step re-derives, which is what it did before this
+// existed — and must not fail a step that is otherwise ready to run.
+func (b *builder) workInProgressFor(ctx flow.StepCtx) string {
+	wip, err := ctx.WorkInProgress()
+	if err != nil {
+		ctx.Notify("", "could not read work in progress: "+err.Error())
+		return ""
+	}
+	return wip
 }
 
 // answersFor returns the human replies to a question this item is parked on.

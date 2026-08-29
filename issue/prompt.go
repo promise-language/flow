@@ -30,6 +30,22 @@ type PromptContext struct {
 	// when rendering PromptImplementFix.
 	VerifyOutput string
 
+	// WorkInProgress is what THIS step stashed on an earlier invocation that
+	// stopped without completing. Non-empty ONLY on a resume that found a
+	// record; a first run sees "". Notes, not a result — see WorkInProgressBlock.
+	WorkInProgress string
+
+	// Refusal is the disclosure guard's own answer, carried unchanged: it
+	// already names what was found, where, and what would satisfy the rule.
+	// Non-empty ONLY when rendering PromptRevise.
+	Refusal string
+
+	// RefusedText is the body the guard refused, so the re-prompt does not
+	// depend on the agent substrate honouring ResumeSessionID — which
+	// flow.AgentRequest documents as best-effort. Non-empty ONLY when rendering
+	// PromptRevise.
+	RefusedText string
+
 	// Prior carries upstream artifacts as records rather than strings, so a
 	// body cannot silently interpolate a patch into a markdown slot. Read them
 	// through PriorMarkdown / PriorPatch / PriorJSON.
@@ -182,6 +198,8 @@ var defaultPrompts = map[PromptID]string{
 
 Produce an implementation plan as concise markdown.
 
+{{.WorkInProgressBlock}}
+
 {{.AnswersBlock}}
 
 {{.PlanStepResolution}}
@@ -195,6 +213,8 @@ Implement this plan:
 {{.PlanBody}}
 
 Make {{.VerifyCmd}} pass. {{.DeferCommit}}
+
+{{.WorkInProgressBlock}}
 
 {{.AnswersBlock}}
 
@@ -221,6 +241,8 @@ left alone and what needs a human decision. Someone will read this to review
 the change, so write for them: what you looked for, what you changed, what
 they should still judge.
 
+{{.WorkInProgressBlock}}
+
 {{.AnswersBlock}}`,
 
 	PromptCoverage: `Bring the changes on the current branch up to this project's testing standard.
@@ -244,12 +266,38 @@ Keep {{.VerifyCmd}} passing. {{.DeferCommit}}
 Report what you added and what you restructured, so the person reviewing the
 change can see what you did rather than reconstruct it from the diff.
 
+{{.WorkInProgressBlock}}
+
 {{.AnswersBlock}}`,
 
 	PromptVerifyImpl: `Summarize the verification run for the pull request body: what was run, what
 passed, and anything a reviewer should still check by hand.
 
+{{.WorkInProgressBlock}}
+
 {{.AnswersBlock}}`,
+
+	PromptRevise: `The text you just produced was NOT published. A guard examines everything this
+flow writes outward before it is sent, and it refused this:
+
+` + "```" + `
+{{.Refusal}}
+` + "```" + `
+
+This is not a judgement on the work — the work is done and paid for, and only
+its expression is wrong. Express the refused detail another way (a
+repository-relative path instead of an absolute one, for instance) rather than
+re-deriving anything or dropping the substance.
+
+This is what was refused:
+
+` + "```" + `
+{{.RefusedText}}
+` + "```" + `
+
+Reply with the FULL revised text and nothing else — no preamble, no
+explanation of what you changed. Your reply is recorded verbatim as the step's
+result.`,
 }
 
 // AnswersBlock renders the human replies this step is resuming on, or "" when
@@ -286,6 +334,30 @@ func (c PromptContext) AnswersBlock() string {
 		b.WriteString("\n")
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// WorkInProgressBlock renders the notes this step left itself on an earlier
+// invocation that stopped without completing, or "" when there are none.
+//
+// A method rather than leaving `{{.WorkInProgress}}` to every project, for the
+// same reason as AnswersBlock: this text is what makes a resumed step continue
+// rather than restart, and a body that forgets to render it re-derives
+// everything the earlier invocation already paid for — which for the plan step
+// is the entire step.
+//
+// The framing is load-bearing. These are notes, not a result: the step still
+// has to produce its artifact, and anything the reply supersedes should be
+// dropped rather than defended.
+func (c PromptContext) WorkInProgressBlock() string {
+	notes := strings.TrimSpace(c.WorkInProgress)
+	if notes == "" {
+		return ""
+	}
+	return "You stopped part-way through this step on an earlier run, and these " +
+		"are the notes you left yourself. They are your own working-out, not a " +
+		"result: nothing was recorded and the step still has to produce its " +
+		"answer. Continue from them rather than starting over, and discard " +
+		"whatever they got wrong.\n\n" + notes
 }
 
 // PlanBody is referenced by the default implement prompt. It is a method rather

@@ -81,6 +81,15 @@ const (
 	// inside the implement step. PromptContext.VerifyOutput carries the
 	// failing tail, and is non-empty only when this prompt is rendered.
 	PromptImplementFix PromptID = "implementation:fix"
+
+	// PromptRevise is the re-prompt issued when the disclosure guard refuses a
+	// step's prose. PromptContext.Refusal and RefusedText carry what was
+	// refused and why, and are non-empty only when this prompt is rendered.
+	//
+	// Like PromptImplementFix it is a slot, not a step — but unlike it, it
+	// belongs to no single step, because every step that publishes prose can be
+	// refused.
+	PromptRevise PromptID = "revise"
 )
 
 // Role is the capability the authenticated principal holds on the repository,
@@ -219,6 +228,19 @@ type Deps struct {
 // hit, and only fall through to a budget park when something is genuinely
 // looping.
 const DefaultMaxFixRounds = 5
+
+// maxDisclosureRevisions bounds how many times a step re-prompts its agent to
+// revise prose the disclosure guard refused.
+//
+// The step's prompt budget is the real bound — a revision costs a prompt, not
+// an invocation, which is what keeps a refused sentence from consuming an
+// attempt at the step. This is the project-independent floor under it, so a
+// loop against the guard stops before it has eaten the whole prompt cap and
+// left nothing for the work.
+//
+// Not a Config knob: one fewer thing to get wrong, and the budget axes are
+// already the operator's lever over it.
+const maxDisclosureRevisions = 3
 
 // verifyTailLines is how much of a failing verify's output is fed back to the
 // agent in the fix re-prompt. The tail, not the head: a build log's useful part

@@ -62,6 +62,10 @@ type itemRecord struct {
 	nextQID     int
 	seeded      bool
 	parkRequest *flow.ParkRequest
+	// work is this item's work-in-progress records, keyed by step result id.
+	// Per-item rather than backend-wide, which is the keying the contract turns
+	// on: one item's reasoning must never be readable as another's.
+	work map[string]string
 }
 
 // New constructs an empty fake backend. Signals lists the SignalIds this
@@ -233,6 +237,67 @@ func (b *Backend) Release(ctx context.Context, claim flow.Claim) error {
 	}
 	rec.claim = nil
 	rec.owner = ""
+	// Releasing ends that reasoning's life: work in progress kept past the
+	// claim it belonged to is scratch prose with nothing left to resume.
+	rec.work = nil
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Work in progress (flow.WorkInProgress). In memory, keyed by item and step —
+// which is the property the contract turns on, so the fake models it rather
+// than a single flat map.
+// ---------------------------------------------------------------------------
+
+// SaveWorkInProgress stores what a step worked out against that step's result
+// id on this item.
+func (b *Backend) SaveWorkInProgress(ctx context.Context, claim flow.Claim, step, body string) error {
+	itemID, err := refID(claim.ItemRef)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	if rec.work == nil {
+		rec.work = map[string]string{}
+	}
+	rec.work[step] = body
+	return nil
+}
+
+// LoadWorkInProgress returns what this step stashed against this item, or ""
+// when there is none.
+func (b *Backend) LoadWorkInProgress(ctx context.Context, claim flow.Claim, step string) (string, error) {
+	itemID, err := refID(claim.ItemRef)
+	if err != nil {
+		return "", err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return "", fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	return rec.work[step], nil
+}
+
+// ClearWorkInProgress drops this step's record. Idempotent.
+func (b *Backend) ClearWorkInProgress(ctx context.Context, claim flow.Claim, step string) error {
+	itemID, err := refID(claim.ItemRef)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	delete(rec.work, step)
 	return nil
 }
 

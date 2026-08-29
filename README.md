@@ -300,6 +300,15 @@ ctx.Park(req)                    // blocked / waiting; structured reason
 ctx.AskQuestions(q1, q2, ...)    // park until the user answers (see below)
 ctx.MarkStale(id)                // force a prior artifact to re-run
 
+// Work in progress — what THIS step keeps when it stops without completing,
+// so the next dispatch continues rather than restarts. Scaffolding, not a
+// result: it resolves nothing, no other step reads it, it is never published,
+// and it is cleared when the step resolves. Needs a backend implementing
+// WorkInProgress; without one, reads are empty and the write returns
+// ErrWorkInProgressUnsupported.
+ctx.WorkInProgress()             // (body, error) — "" when nothing was stashed
+ctx.RecordWorkInProgress(body)   // stash it for the next invocation
+
 ctx.Agent()          // the metered LLM handle — the ONLY spend chokepoint
 ctx.Worktree()       // lazily-acquired git surface for this claim
 ctx.Notify(step, detail) // progress telemetry (NOT a liveness signal)
@@ -628,6 +637,7 @@ The CLI feature-detects these — implement the ones that fit your store:
 | `RefResolver` | `ResolveRef(ctx, id) (ItemRef, error)` | `claim <id>` builds the ref directly (no `ListEligible` scan), and can claim any item regardless of current status. Implement when your ref *is* the id. |
 | `StateInspector` | `LoadStateByRef(ctx, ref) (*ItemState, error)` | `status <id>` inspects any item read-only, with no claim. |
 | `Finalizer` | `Finalize(ctx, claim) error` | On flow completion (or a completed manual run), the SDK marks the item finalized and releases the claim — instead of leaving it un-finalized with the lease held. |
+| `WorkInProgress` | `Save/Load/ClearWorkInProgress(ctx, claim, step[, body])` | A step that parks — on a question, or on a refused write — keeps what it worked out, and its next dispatch continues from it. Key by **item and step**, read only when both match, and never publish it: a record that crossed items would feed one item's reasoning to another item's agent. |
 
 ### Preflight
 
@@ -758,7 +768,7 @@ usage and exits 0 without running it.
 ├── stepctx.go              StepCtx interface — typed read/Resolve* surface, Agent(), Worktree(), AskQuestions
 ├── artifact.go             ArtifactDef/ArtifactType (the six types), ArtifactRecord, PatchBody/FileBody
 ├── signal.go               SignalDef + SignalState
-├── backend.go              Backend, Worktree, RequestManager, Item, Claim, ItemRef, ItemState; RefResolver/StateInspector/Finalizer
+├── backend.go              Backend, Worktree, RequestManager, Item, Claim, ItemRef, ItemState; RefResolver/StateInspector/Finalizer/WorkInProgress
 ├── budget.go               StepBudget + defaults {3, 1, $10, 30m}
 ├── agent.go                Agent interface + AgentRequest/Response/Failure
 ├── preflight.go            PreflightFunc + ChainPreflight
