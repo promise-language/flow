@@ -96,7 +96,7 @@ One check covers all three because they are one question: **did this step do onl
 
 ### Branches are moved only by mechanical steps
 
-**Steps 2, 7 and 8 are the only ones that create, switch or publish a branch, and none of them runs an agent.** Every other step finds the worktree already on the right branch and leaves it there.
+**Steps 2, 6 and 7 are the only ones that create, switch or publish a branch, and none of them runs an agent.** Every other step finds the worktree already on the right branch and leaves it there.
 
 This is a restriction on the agent-driven steps, and it is deliberate. An agent given a shell and a goal will reach for git when it seems expedient — cutting a branch of its own, committing directly to the base, resetting to escape a state it does not understand. Each of those is locally reasonable and globally wrong: a ghost branch strands the work where nothing will find it, and a commit on the base defeats the entire proposal model, which exists so that nothing reaches the mainline unreviewed.
 
@@ -108,7 +108,7 @@ The check costs two reads and turns an unenforceable instruction into an invaria
 
 ### Closing the branch is part of finishing, not of stopping
 
-Step 8 runs when the resolution **completed**. A run that parked, was blocked, or failed leaves the worktree exactly where it stopped, because that state is what someone will resume from or diagnose.
+Step 7 runs when the resolution **completed**. A run that parked, was blocked, or failed leaves the worktree exactly where it stopped, because that state is what someone will resume from or diagnose.
 
 Returning the worktree is not the same act as releasing a claim. An operator who releases mid-work is stepping away and keeps their branch; a resolution that finished is done with it and owes the arena a clean starting point for the next item.
 
@@ -130,15 +130,13 @@ Where a result is stored is the backend's business, not this flow's. What this f
 
 ### Where judgement lives, and why it is worth knowing
 
-Steps 1 through 4 spend an agent turn on a decision. Step 5 spends one on prose about a decision something else made. Step 6 spends none.
+Steps 1, 3, 4 and 5 spend an agent turn on a decision. Steps 2, 6 and 7 spend none.
 
 That distinction is not bookkeeping. A step whose outcome an agent decides is **neither cheap nor reproducible**: it costs a turn, and running it twice on the same input can produce different work. A mechanical step is both — it costs nothing beyond the operations it performs, and it does the same thing every time.
 
-So the flow's cost and its variability both sit almost entirely in steps 1 to 4, and every one of them is there because a decision has to be made. Step 5's turn is the one that buys prose rather than a decision, which is why the fallback exists: when it produces nothing, nothing of consequence is lost.
+So the flow's cost and its variability sit entirely in the four agent-driven steps, and every one of them is there because a decision has to be made.
 
-**Deliverable and record are not the same thing**, and the difference matters most where they diverge. Implement's deliverable is a working change; what is recorded is the patch. Review's deliverable is the corrections themselves — already in the tree — and what is recorded is prose *about* them. A step is not finished when its artifact resolves; it is finished when its deliverable exists.
-
-Steps 2 through 4 are the producing phase. Each carries the change further under a different concern, and each may modify the worktree — including the solution itself. The properties that govern them are in `resolution-standalone.md` and are not repeated here.
+**Deliverable and record are not the same thing**, and the difference matters most where they diverge. Implement's deliverable is a working change; what is recorded is the commit carrying it. Review's deliverable is the corrections themselves — already in the tree — and what is recorded is prose *about* them. A step is not finished when its artifact resolves; it is finished when its deliverable exists.
 
 ### 1. Plan
 
@@ -162,9 +160,9 @@ Makes the change work.
 
 It drives the change against the gate in a bounded loop: each failing run re-prompts with the gate's output, until the gate passes or the step's prompt budget is exhausted. Exhaustion parks; it does not fail.
 
-**This step commits**, and it is the only producing step that does. It stages, captures the patch, then commits — in that order, because a patch captured before staging cannot see added files and one captured after committing sees a clean tree.
+**This step commits.** The prompts tell the agent not to — committing mid-loop would bury a half-finished round in history — so the step stages and commits once the gate is green, and its result names that commit.
 
-The result resolves only on a passing gate. A change attached after a failing gate would record work that does not build.
+The result resolves only on a passing gate. A commit recorded after a failing gate would name work that does not build.
 
 ### 4. Review
 

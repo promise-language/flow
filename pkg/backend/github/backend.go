@@ -97,13 +97,14 @@ func (b *Backend) SupportedSignals() []flow.SignalDef {
 var githubSupportedArtifacts = []flow.ArtifactDef{
 	// Standard code-lifecycle artifacts (shared vocabulary with the tracker).
 	flow.Artifact("plan", flow.ArtifactMarkdown).WithDoc("Implementation plan for the issue."),
-	flow.Artifact("implementation", flow.ArtifactPatch).WithDoc("The code change for the issue, captured as a diff."),
+	flow.Artifact("branch", flow.ArtifactCommitHash).WithDoc("Hash of the commit the issue's working branch was cut from."),
+	flow.Artifact("implementation", flow.ArtifactCommitHash).WithDoc("Hash of the commit carrying the code change for the issue."),
 	flow.Artifact("review", flow.ArtifactMarkdown).WithDoc("Contributor-side code-review findings."),
 	flow.Artifact("coverage", flow.ArtifactMarkdown).WithDoc("Test-coverage analysis."),
 	flow.Artifact("summary", flow.ArtifactMarkdown).WithDoc("Resolution summary for the issue."),
+	flow.Artifact("branch-closed", flow.ArtifactFlag).WithDoc("The worktree was returned to the base branch after the resolution completed."),
 	// github/PR-specific artifacts — the contributor→maintainer pull-request
 	// lifecycle this backend is built around.
-	flow.Artifact("verify-impl", flow.ArtifactMarkdown).WithDoc("Contributor-side verification (test/build) output before opening the PR."),
 	flow.Artifact("review-maint", flow.ArtifactMarkdown).WithDoc("Maintainer-side review of the PR before merge."),
 	flow.Artifact("verify-merge", flow.ArtifactMarkdown).WithDoc("Maintainer-side pre-merge verification output."),
 	flow.Artifact("merge-commit", flow.ArtifactCommitHash).WithDoc("Hash of the merge commit on the default branch after the PR merges."),

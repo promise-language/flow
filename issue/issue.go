@@ -46,13 +46,17 @@ import (
 type StepID string
 
 const (
-	// Contributor step set.
-	StepPlan       StepID = "plan"
-	StepImplement  StepID = "implementation"
-	StepReview     StepID = "review"
-	StepCoverage   StepID = "coverage"
-	StepVerifyImpl StepID = "verify-impl"
-	StepOpenPR     StepID = "pr-open" // signal step
+	// Contributor step set, in the order docs/issue-flow.md defines. The two
+	// branch steps are mechanical and run no agent: one prepares the worktree
+	// and records what the branch was cut from, the other returns the worktree
+	// to the base once the resolution has completed.
+	StepPlan        StepID = "plan"
+	StepBranch      StepID = "branch"
+	StepImplement   StepID = "implementation"
+	StepReview      StepID = "review"
+	StepCoverage    StepID = "coverage"
+	StepOpenPR      StepID = "pr-open" // signal step
+	StepCloseBranch StepID = "branch-closed"
 
 	// Maintainer step set. Declared here so both roles share one vocabulary;
 	// the handlers land with the maintainer slice.
@@ -67,15 +71,16 @@ const (
 // more than one prompt. The implement step re-prompts the agent with failing
 // verify output, and that re-prompt is a slot, not a step of its own.
 //
-// Every StepID's value is a valid PromptID; PromptImplementFix is the extra.
+// Every AGENT-DRIVEN step's id is a valid PromptID; PromptImplementFix is the
+// extra. The mechanical steps — the two branch steps and the pull request —
+// have none, because they run no agent and so have nothing to prompt.
 type PromptID string
 
 const (
-	PromptPlan       PromptID = "plan"
-	PromptImplement  PromptID = "implementation"
-	PromptReview     PromptID = "review"
-	PromptCoverage   PromptID = "coverage"
-	PromptVerifyImpl PromptID = "verify-impl"
+	PromptPlan      PromptID = "plan"
+	PromptImplement PromptID = "implementation"
+	PromptReview    PromptID = "review"
+	PromptCoverage  PromptID = "coverage"
 
 	// PromptImplementFix is the re-prompt issued when the verify gate fails
 	// inside the implement step. PromptContext.VerifyOutput carries the

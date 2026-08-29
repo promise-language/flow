@@ -40,29 +40,66 @@ type fakeWorktree struct {
 	captured    []byte
 	// dirty models work appearing in the tree AFTER a commit — what the review
 	// and coverage steps do. A Commit that lands clears it, as git does; a
-	// Commit that lands nothing (noCommit) leaves it, as git also does.
+	// Commit that lands nothing (noCommit) leaves it, as git also does. It also
+	// blocks a checkout, as git does.
 	dirty []byte
 	// gatesRun records which gates were asked for; gateOutcome names what the
 	// runner observed of the ones that did not simply measure.
 	gatesRun    []flow.GateName
 	gateOutcome map[flow.GateName]flow.GateOutcome
+	// envelope is what the gate printed on stdout — what the judge is handed
+	// and what travels with the verdict.
+	envelope []byte
+	// judgeErr models a judging layer that cannot answer: no verdict exists,
+	// which is never a refusal. judgeRefuses models one that answers "no",
+	// which is a perfectly good verdict.
+	judgeErr     error
+	judgeRefuses bool
+	judgeDetail  string
+	// calls is every worktree operation in order. Some properties here are
+	// about ORDER rather than occurrence — the gate must measure the branch as
+	// it will be proposed, which is a statement about when it ran.
+	calls []string
 }
 
 func newFakeWorktree() *fakeWorktree {
 	return &fakeWorktree{exists: map[string]bool{}, head: "base", base: "base"}
 }
 
+// testBranch is the claim branch for the item every test here uses.
+const testBranch = "flow/issue-42"
+
+// resumedWorktree is what every step after "open branch" finds: the item's
+// branch exists and is checked out.
+func resumedWorktree() *fakeWorktree {
+	wt := newFakeWorktree()
+	wt.exists[testBranch] = true
+	wt.branch = testBranch
+	return wt
+}
+
 func (w *fakeWorktree) Branch(_ context.Context, name, base string) (bool, error) {
+	w.calls = append(w.calls, "branch:"+name)
+	if w.branch == name {
+		return false, nil // already there; git does not look at the tree
+	}
+	// git refuses to switch branches over a dirty tree. Modelling it is what
+	// makes a failed checkout the branch step's own failure rather than
+	// something the next step is blamed for.
+	if len(w.dirty) > 0 {
+		return false, errors.New("worktree is dirty; cannot switch branches")
+	}
 	w.branch = name
 	if w.exists[name] {
 		return false, nil
 	}
 	w.exists[name] = true
-	w.head = w.base // a fresh branch starts at the base
+	w.head = w.base // a fresh branch starts at the base branch's tip
 	return true, nil
 }
 func (w *fakeWorktree) CurrentBranch(context.Context) (string, error) { return w.branch, nil }
 func (w *fakeWorktree) Commit(context.Context, string) error {
+	w.calls = append(w.calls, "commit")
 	if w.noCommit {
 		return nil // git's own behavior with nothing staged
 	}
@@ -88,21 +125,37 @@ func (w *fakeWorktree) RunGate(_ context.Context, name flow.GateName) (flow.Gate
 	if !name.Valid() {
 		return flow.GateRun{}, fmt.Errorf("fake: %q is not a declared gate name", name)
 	}
+	w.calls = append(w.calls, "gate:"+string(name))
 	w.gatesRun = append(w.gatesRun, name)
 	outcome, ok := w.gateOutcome[name]
 	if !ok {
 		outcome = flow.OutcomeMeasured
 	}
-	return flow.GateRun{Gate: name, Outcome: outcome, ExitCode: -1}, nil
+	run := flow.GateRun{Gate: name, Outcome: outcome, ExitCode: -1}
+	if outcome == flow.OutcomeMeasured {
+		run.Stdout = w.envelope
+	} else {
+		run.Detail = fmt.Sprintf("the runner observed %s", outcome)
+	}
+	return run, nil
 }
 
 // Judge answers about a measured run and refuses anything else — the project
 // holds the thresholds, so nothing here computes one.
 func (w *fakeWorktree) Judge(_ context.Context, run flow.GateRun) (flow.GateVerdict, error) {
+	w.calls = append(w.calls, "judge:"+string(run.Gate))
 	if run.Outcome != flow.OutcomeMeasured {
 		return flow.GateVerdict{}, fmt.Errorf("fake: %q measured nothing, so there is nothing to judge", run.Gate)
 	}
-	return flow.GateVerdict{Run: run, Acceptable: true, Thresholds: []byte("{}")}, nil
+	if w.judgeErr != nil {
+		return flow.GateVerdict{}, w.judgeErr
+	}
+	return flow.GateVerdict{
+		Run:        run,
+		Acceptable: !w.judgeRefuses,
+		Thresholds: []byte("{}"),
+		Detail:     w.judgeDetail,
+	}, nil
 }
 func (w *fakeWorktree) CapturePatch(context.Context) ([]byte, error) {
 	// Models `git diff HEAD`: untracked work is invisible until staged, and
@@ -130,8 +183,19 @@ func (w *fakeWorktree) RevParse(_ context.Context, rev string) (string, error) {
 }
 func (w *fakeWorktree) Request() flow.RequestManager { return w }
 func (w *fakeWorktree) Open(_ context.Context, base, title, body string) (string, error) {
+	w.calls = append(w.calls, "open")
 	w.opened, w.openBody = true, body
 	return "https://example.invalid/pr/1", nil
+}
+
+// callIndex reports where an operation appears in the ordered log, or -1.
+func (w *fakeWorktree) callIndex(op string) int {
+	for i, c := range w.calls {
+		if c == op {
+			return i
+		}
+	}
+	return -1
 }
 func (w *fakeWorktree) Merge(context.Context, string) error             { return nil }
 func (w *fakeWorktree) Mergeable(context.Context, string) (bool, error) { return true, nil }
@@ -165,12 +229,24 @@ func (c *fakeCtx) Flow() string             { return "resolve" }
 func (c *fakeCtx) StepName() string         { return "step" }
 func (c *fakeCtx) Result() flow.ArtifactId  { return "implementation" }
 func (c *fakeCtx) Item() flow.Item          { return c.item }
+
+// Artifact filters unresolved records, as the real StepCtx does: a seeded but
+// unresolved entry is not a value a step may read.
 func (c *fakeCtx) Artifact(id flow.ArtifactId) (flow.ArtifactRecord, bool) {
 	rec, ok := c.arts[id]
+	if !ok || !rec.Resolved {
+		return flow.ArtifactRecord{}, false
+	}
 	return rec, ok
 }
-func (c *fakeCtx) Flag(flow.ArtifactId) (bool, bool)         { return false, false }
-func (c *fakeCtx) CommitHash(flow.ArtifactId) (string, bool) { return "", false }
+func (c *fakeCtx) Flag(flow.ArtifactId) (bool, bool) { return false, false }
+func (c *fakeCtx) CommitHash(id flow.ArtifactId) (string, bool) {
+	rec, ok := c.Artifact(id)
+	if !ok || rec.Type != flow.ArtifactCommitHash {
+		return "", false
+	}
+	return rec.CommitHash, true
+}
 func (c *fakeCtx) Markdown(id flow.ArtifactId) (string, bool) {
 	rec, ok := c.arts[id]
 	if !ok || rec.Type != flow.ArtifactMarkdown {
@@ -183,8 +259,14 @@ func (c *fakeCtx) File(flow.ArtifactId) (string, []byte, bool)  { return "", nil
 func (c *fakeCtx) Patch(flow.ArtifactId) (flow.PatchBody, bool) { return flow.PatchBody{}, false }
 func (c *fakeCtx) Signal(flow.SignalId) bool                    { return false }
 func (c *fakeCtx) ParkedOn() *flow.ParkRequest                  { return c.park }
-func (c *fakeCtx) ResolveFlag() error                           { c.didResolve = true; return nil }
-func (c *fakeCtx) ResolveCommitHash(string) error               { c.didResolve = true; return nil }
+func (c *fakeCtx) ResolveFlag() error {
+	c.didResolve, c.resolved = true, flow.ArtifactBody{Type: flow.ArtifactFlag}
+	return nil
+}
+func (c *fakeCtx) ResolveCommitHash(sha string) error {
+	c.didResolve, c.resolved = true, flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: sha}
+	return nil
+}
 func (c *fakeCtx) ResolveMarkdown(b string) error {
 	c.resolves = append(c.resolves, b)
 	if n := len(c.resolves) - 1; n < len(c.resolveErrs) && c.resolveErrs[n] != nil {
@@ -270,14 +352,90 @@ func testBuilder(t *testing.T) *builder {
 	return b
 }
 
+// ctxWithPlan is an item whose upstream mechanical and prose results are in
+// place: the plan, and the commit the branch was cut from.
 func ctxWithPlan(wt *fakeWorktree, agent flow.Agent) *fakeCtx {
 	return &fakeCtx{
 		item:  flow.Item{ID: "42", Type: "task", Title: "widget is broken"},
 		wt:    wt,
 		agent: agent,
 		arts: map[flow.ArtifactId]flow.ArtifactRecord{
-			"plan": {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "the plan"},
+			"plan":   {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "the plan"},
+			"branch": {Resolved: true, Type: flow.ArtifactCommitHash, CommitHash: "base"},
 		},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// stepOpenBranch.
+// ---------------------------------------------------------------------------
+
+// The record is what makes "what is this change relative to" answerable later.
+// It is the branch's own HEAD, taken after the checkout.
+func TestStepOpenBranch_RecordsTheCommitTheBranchWasCutFrom(t *testing.T) {
+	wt := newFakeWorktree()
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	if err := testBuilder(t).stepOpenBranch(ctx); err != nil {
+		t.Fatalf("stepOpenBranch: %v", err)
+	}
+	if wt.branch != testBranch {
+		t.Errorf("worktree is on %q, want the claim branch %q", wt.branch, testBranch)
+	}
+	if ctx.resolved.Type != flow.ArtifactCommitHash {
+		t.Fatalf("resolved a %v, want a commit hash", ctx.resolved.Type)
+	}
+	if ctx.resolved.CommitHash != "base" {
+		t.Errorf("recorded %q, want the commit the branch sits on", ctx.resolved.CommitHash)
+	}
+	// Mechanical: no prose, and no agent turn.
+	if len(ctx.resolves) != 0 {
+		t.Errorf("resolved markdown %v — this step produces a commit, not prose", ctx.resolves)
+	}
+	if agent, ok := ctx.agent.(*scriptedAgent); ok && agent.calls != 0 {
+		t.Errorf("agent ran %d times in a mechanical step", agent.calls)
+	}
+}
+
+// The failure this step exists to relocate. A dirty tree is a branch that could
+// not be opened; before this step existed it surfaced as an implement failure
+// and sent a reader to look at the agent.
+func TestStepOpenBranch_ADirtyTreeFailsHere(t *testing.T) {
+	wt := newFakeWorktree()
+	wt.dirty = []byte("diff --git a/left-behind.go b/left-behind.go\n")
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	err := testBuilder(t).stepOpenBranch(ctx)
+	if err == nil {
+		t.Fatal("want the checkout's failure surfaced by this step")
+	}
+	// It names the branch it could not open and carries the cause, so nothing
+	// about the message sends a reader to an agent that never ran.
+	if !strings.Contains(err.Error(), testBranch) || !strings.Contains(err.Error(), "dirty") {
+		t.Errorf("err = %v, want it to name the branch and the dirty tree", err)
+	}
+	if ctx.didResolve {
+		t.Error("recorded a branch that was never opened")
+	}
+	if agent, ok := ctx.agent.(*scriptedAgent); ok && agent.calls != 0 {
+		t.Errorf("agent ran %d times before the workspace was prepared", agent.calls)
+	}
+}
+
+// Resumed on a branch an earlier attempt cut and then died on. Its HEAD is the
+// base as it stood at the cut, and that is what must be recorded — reading the
+// base branch today would record a commit the branch was never cut from.
+func TestStepOpenBranch_ResumedBranchRecordsItsOwnHead(t *testing.T) {
+	wt := resumedWorktree()
+	wt.head = "cut-from"      // where the earlier attempt cut it
+	wt.base = "base-moved-on" // the base branch has advanced since
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	if err := testBuilder(t).stepOpenBranch(ctx); err != nil {
+		t.Fatalf("stepOpenBranch on a resumed branch: %v", err)
+	}
+	if ctx.resolved.CommitHash != "cut-from" {
+		t.Errorf("recorded %q, want the commit the branch actually sits on", ctx.resolved.CommitHash)
 	}
 }
 
@@ -289,7 +447,7 @@ func TestStepImplement_RefusesWhenTheBranchGainedNothing(t *testing.T) {
 	// Commit is a no-op with nothing staged, so its nil return proves nothing.
 	// Catching it here beats failing three agent turns later at `gh pr create`
 	// with "No commits between ...".
-	wt := newFakeWorktree()
+	wt := resumedWorktree()
 	wt.noCommit = true
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
@@ -302,15 +460,37 @@ func TestStepImplement_RefusesWhenTheBranchGainedNothing(t *testing.T) {
 	}
 }
 
+// The case an equality against today's BASE BRANCH cannot catch: a branch cut by
+// an earlier run, still empty, on a base that has moved since. Its HEAD no
+// longer equals the base branch's tip, so the old check read it as work and let
+// an empty branch travel to "No commits between ...". Against the RECORDED base
+// it is what it is: nothing.
+func TestStepImplement_RefusesAnEmptyBranchWhoseBaseHasMovedOn(t *testing.T) {
+	wt := resumedWorktree()
+	wt.head = "cut-from"      // the branch is still where it was cut
+	wt.base = "base-moved-on" // ...but the base branch is not
+	wt.noCommit = true        // and the agent changed nothing
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+	ctx.arts["branch"] = flow.ArtifactRecord{
+		Resolved: true, Type: flow.ArtifactCommitHash, CommitHash: "cut-from"}
+
+	err := testBuilder(t).stepImplement(ctx)
+	if err == nil || !strings.Contains(err.Error(), "no commits beyond") {
+		t.Fatalf("err = %v, want a refusal — the branch carries nothing", err)
+	}
+	if ctx.didResolve {
+		t.Error("resolved an implementation for an empty branch whose base had moved")
+	}
+}
+
 func TestStepImplement_AcceptsWorkCommittedByAnEarlierRun(t *testing.T) {
 	// A previous invocation that committed and then died before resolving
 	// leaves a finished tree. Comparing HEAD before/after this commit would
 	// read that as "the agent did nothing" and deadlock the step forever, with
 	// the change sitting right there in the branch.
-	wt := newFakeWorktree()
-	wt.exists["flow/issue-42"] = true // resumed, not created
-	wt.head = "sha-1"                 // an earlier run already committed
-	wt.noCommit = true                // nothing left to stage
+	wt := resumedWorktree()
+	wt.head = "sha-1"  // an earlier run already committed
+	wt.noCommit = true // nothing left to stage
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
 	if err := testBuilder(t).stepImplement(ctx); err != nil {
@@ -319,26 +499,25 @@ func TestStepImplement_AcceptsWorkCommittedByAnEarlierRun(t *testing.T) {
 	if !ctx.didResolve {
 		t.Error("did not resolve despite the branch carrying work")
 	}
-	// An empty diff is correct here and not an oversight: the tree is clean
-	// because an earlier run committed the work, so there is nothing left to
-	// capture. The branch-vs-base check is what established the work exists.
-	if len(ctx.resolved.Patch.Diff) != 0 {
-		t.Errorf("Diff = %q, want empty on a tree whose work is already committed",
-			ctx.resolved.Patch.Diff)
+	// The record names the commit that is there, which is exactly why it is a
+	// commit and not a patch: a patch captured on this path is empty, and an
+	// empty record cannot be told from "the step did nothing".
+	if ctx.resolved.CommitHash != "sha-1" {
+		t.Errorf("recorded %q, want the commit the earlier run left", ctx.resolved.CommitHash)
 	}
 }
 
 func TestStepImplement_RefusesWithoutAPlan(t *testing.T) {
 	// A resolved artifact whose body did not load reads as present. Implementing
 	// against a blank plan produces something plausible and reports nothing.
-	for name, arts := range map[string]map[flow.ArtifactId]flow.ArtifactRecord{
+	for name, plan := range map[string]flow.ArtifactRecord{
 		"missing":    {},
-		"unresolved": {"plan": {Type: flow.ArtifactMarkdown}},
-		"empty body": {"plan": {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "  "}},
+		"unresolved": {Type: flow.ArtifactMarkdown},
+		"empty body": {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "  "},
 	} {
 		t.Run(name, func(t *testing.T) {
-			ctx := ctxWithPlan(newFakeWorktree(), &scriptedAgent{})
-			ctx.arts = arts
+			ctx := ctxWithPlan(resumedWorktree(), &scriptedAgent{})
+			ctx.arts["plan"] = plan
 			err := testBuilder(t).stepImplement(ctx)
 			if err == nil || !strings.Contains(err.Error(), "plan") {
 				t.Errorf("err = %v, want a refusal naming the plan", err)
@@ -347,8 +526,45 @@ func TestStepImplement_RefusesWithoutAPlan(t *testing.T) {
 	}
 }
 
+// The same shape one artifact over. Without the branch step's record there is
+// nothing to compare HEAD against, so an empty branch would read as work.
+func TestStepImplement_RefusesWithoutTheBranchRecord(t *testing.T) {
+	for name, branch := range map[string]flow.ArtifactRecord{
+		"missing":    {},
+		"unresolved": {Type: flow.ArtifactCommitHash, CommitHash: "base"},
+		"wrong type": {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "base"},
+		"empty body": {Resolved: true, Type: flow.ArtifactCommitHash},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := ctxWithPlan(resumedWorktree(), &scriptedAgent{})
+			ctx.arts["branch"] = branch
+			err := testBuilder(t).stepImplement(ctx)
+			if err == nil || !strings.Contains(err.Error(), "branch artifact") {
+				t.Errorf("err = %v, want a refusal naming the branch record", err)
+			}
+			if ctx.didResolve {
+				t.Error("implemented without knowing what the branch was cut from")
+			}
+		})
+	}
+}
+
+// Implement leaves the tree clean, like every other producing step. A step
+// returning over work it could not stage hands the next one changes it did not
+// make and will be blamed for.
+func TestStepImplement_RefusesWhenWorkSurvivesTheCommit(t *testing.T) {
+	wt := resumedWorktree()
+	wt.noCommit = true                              // nothing lands...
+	wt.dirty = []byte("diff --git a/x.go b/x.go\n") // ...but the tree still carries work
+
+	err := testBuilder(t).stepImplement(ctxWithPlan(wt, &scriptedAgent{}))
+	if err == nil || !strings.Contains(err.Error(), "uncommitted") {
+		t.Fatalf("err = %v, want a refusal naming the uncommitted work", err)
+	}
+}
+
 func TestStepImplement_LoopsOnFailingVerifyAndKeepsOneSession(t *testing.T) {
-	wt := newFakeWorktree()
+	wt := resumedWorktree()
 	wt.verifyErr = errors.New("verify failed:\nFAIL pkg/x")
 	wt.verifyAfter = 2 // fails twice, then passes
 	agent := &scriptedAgent{}
@@ -371,7 +587,7 @@ func TestStepImplement_StopsAfterMaxFixRounds(t *testing.T) {
 	// An error, not a park: no preflight refuses a blocked park, so an
 	// unattended run would re-enter the loop and re-spend the whole round
 	// budget every cycle.
-	wt := newFakeWorktree()
+	wt := resumedWorktree()
 	wt.verifyErr = errors.New("verify failed:\nstill broken")
 	wt.verifyAfter = 99
 	b := testBuilder(t)
@@ -393,20 +609,29 @@ func TestStepImplement_StopsAfterMaxFixRounds(t *testing.T) {
 	}
 }
 
-func TestStepImplement_RecordsTheCommitOnThePatch(t *testing.T) {
-	wt := newFakeWorktree()
+// The deliverable is the commit on the branch, and the record names it. A patch
+// would be a copy: it can be legitimately empty, nothing reads it back, and it
+// can disagree with the thing it copies.
+func TestStepImplement_RecordsTheCommitItProduced(t *testing.T) {
+	wt := resumedWorktree()
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 	if err := testBuilder(t).stepImplement(ctx); err != nil {
 		t.Fatalf("stepImplement: %v", err)
 	}
-	// BaseSHA must name the commit the diff applies AGAINST, not the one that
-	// contains it: `checkout BaseSHA && apply` has to work.
-	if ctx.resolved.Patch.BaseSHA != "base" {
-		t.Errorf("BaseSHA = %q, want the pre-commit HEAD the diff was taken against",
-			ctx.resolved.Patch.BaseSHA)
+	if ctx.resolved.Type != flow.ArtifactCommitHash {
+		t.Fatalf("resolved a %v, want a commit hash", ctx.resolved.Type)
 	}
-	if ctx.resolved.Patch.BaseBranch != "main" {
-		t.Errorf("BaseBranch = %q, want main", ctx.resolved.Patch.BaseBranch)
+	if ctx.resolved.CommitHash != wt.head {
+		t.Errorf("recorded %q, want HEAD after the commit (%q)", ctx.resolved.CommitHash, wt.head)
+	}
+	if len(ctx.resolved.Patch.Diff) != 0 {
+		t.Errorf("resolved a patch as well: %q", ctx.resolved.Patch.Diff)
+	}
+	// The commit is this handler's job: the prompts tell the agent not to, and
+	// nothing else records the work before the request is opened.
+	if wt.commits != 1 || !wt.staged {
+		t.Errorf("commits = %d, staged = %v, want the work staged and committed once",
+			wt.commits, wt.staged)
 	}
 }
 
@@ -417,16 +642,19 @@ func TestStepImplement_RecordsTheCommitOnThePatch(t *testing.T) {
 func TestConsumingStepsRefuseAMissingBranch(t *testing.T) {
 	// The worktree directory is shared across items. A missing claim branch
 	// means the work is not here; cutting a fresh one off the base and carrying
-	// on would have review and coverage analyse an empty change, and
-	// verify-impl resolve a "verify passed" artifact that proves nothing.
+	// on would have implement work on nothing, review and coverage analyse an
+	// empty change, and the request propose one. Cutting a branch is the open
+	// branch step's job, and only its.
 	b := testBuilder(t)
 	for name, step := range map[string]func(flow.StepCtx) error{
-		"review":      b.stepReview,
-		"coverage":    b.stepCoverage,
-		"verify-impl": b.stepVerifyImpl,
+		"implement":    b.stepImplement,
+		"review":       b.stepReview,
+		"coverage":     b.stepCoverage,
+		"open request": b.stepOpenPR,
 	} {
 		t.Run(name, func(t *testing.T) {
-			ctx := ctxWithPlan(newFakeWorktree(), &scriptedAgent{})
+			wt := newFakeWorktree()
+			ctx := ctxWithPlan(wt, &scriptedAgent{})
 			err := step(ctx)
 			if err == nil || !strings.Contains(err.Error(), "did not exist") {
 				t.Errorf("err = %v, want a refusal that the branch is absent", err)
@@ -434,23 +662,10 @@ func TestConsumingStepsRefuseAMissingBranch(t *testing.T) {
 			if ctx.didResolve {
 				t.Error("resolved an artifact describing a tree that has no implementation")
 			}
+			if wt.commits != 0 {
+				t.Errorf("committed %d times onto a branch it had just cut", wt.commits)
+			}
 		})
-	}
-}
-
-func TestStepVerifyImpl_FailsRatherThanRecordingAPassingArtifact(t *testing.T) {
-	wt := newFakeWorktree()
-	wt.exists["flow/issue-42"] = true
-	wt.verifyErr = errors.New("verify failed:\nboom")
-	wt.verifyAfter = 99
-	ctx := ctxWithPlan(wt, &scriptedAgent{})
-
-	err := testBuilder(t).stepVerifyImpl(ctx)
-	if err == nil || !strings.Contains(err.Error(), "verify failed") {
-		t.Fatalf("err = %v, want the failing verify surfaced", err)
-	}
-	if ctx.didResolve {
-		t.Error("recorded a verification artifact for a tree that does not verify")
 	}
 }
 
@@ -459,8 +674,7 @@ func TestStepVerifyImpl_FailsRatherThanRecordingAPassingArtifact(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAgentQuestionParksThroughAnyStep(t *testing.T) {
-	wt := newFakeWorktree()
-	wt.exists["flow/issue-42"] = true
+	wt := resumedWorktree()
 	agent := &scriptedAgent{replies: []string{
 		"I cannot decide this.\nNEEDS-ANSWER: cache or new store?\n```\nboth are plausible\n```",
 	}}
@@ -493,8 +707,7 @@ func TestStepOpenPR_RefusesAPullRequestWithNoPlanInIt(t *testing.T) {
 	// A resolved plan reading as empty means its body did not load. Opening a
 	// PR that says only "Closes #N" would present a silent read failure as a
 	// finished change.
-	wt := newFakeWorktree()
-	wt.exists["flow/issue-42"] = true
+	wt := resumedWorktree()
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 	ctx.arts["plan"] = flow.ArtifactRecord{Resolved: true, Type: flow.ArtifactMarkdown}
 
@@ -508,8 +721,7 @@ func TestStepOpenPR_RefusesAPullRequestWithNoPlanInIt(t *testing.T) {
 }
 
 func TestStepOpenPR_BodyClosesTheIssue(t *testing.T) {
-	wt := newFakeWorktree()
-	wt.exists["flow/issue-42"] = true
+	wt := resumedWorktree()
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
 	if err := testBuilder(t).stepOpenPR(ctx); err != nil {
@@ -534,8 +746,7 @@ func TestStepOpenPR_BodyClosesTheIssue(t *testing.T) {
 // "+1" reaches the prompt too. The orchestrator's "question: " prefix is
 // presentation and must not reach the agent as part of the question.
 func TestAnswersCarryTheQuestionWithoutItsPrefix(t *testing.T) {
-	wt := newFakeWorktree()
-	wt.exists["flow/issue-42"] = true
+	wt := resumedWorktree()
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 	ctx.park = &flow.ParkRequest{
 		Kind:    flow.ParkQuestion,
@@ -585,29 +796,6 @@ func (b *answeringBackend) ReadAnswers(context.Context, flow.Item, time.Time, st
 	return b.answers, nil
 }
 
-// The patch artifact must carry the actual diff. CapturePatch is a diff against
-// HEAD, so it has to run after staging (untracked files are invisible before
-// it) and before committing (nothing is left to see after). Getting the order
-// wrong attaches either an incomplete diff or an empty one, and both look fine.
-func TestStepImplement_AttachesACompletePatch(t *testing.T) {
-	wt := newFakeWorktree()
-	wt.captured = []byte("diff --git a/new.go b/new.go\n+package new\n")
-	ctx := ctxWithPlan(wt, &scriptedAgent{})
-
-	if err := testBuilder(t).stepImplement(ctx); err != nil {
-		t.Fatalf("stepImplement: %v", err)
-	}
-	if !wt.staged {
-		t.Error("did not stage before capturing — a diff against HEAD cannot see untracked files")
-	}
-	if len(ctx.resolved.Patch.Diff) == 0 {
-		t.Error("patch artifact carries no diff")
-	}
-	if !strings.Contains(string(ctx.resolved.Patch.Diff), "new.go") {
-		t.Errorf("diff = %q, want the added file", ctx.resolved.Patch.Diff)
-	}
-}
-
 // The canonical steps must stay inside the guaranteed RevParse set — "HEAD"
 // and the item's base branch. A backend that cannot resolve arbitrary
 // revisions is required to error rather than guess, so a step reaching outside
@@ -615,10 +803,19 @@ func TestStepImplement_AttachesACompletePatch(t *testing.T) {
 func TestStepsOnlyRevParseTheGuaranteedRevisions(t *testing.T) {
 	wt := newFakeWorktree()
 	wt.strictRevs = map[string]bool{"HEAD": true, "main": true}
+	b := testBuilder(t)
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	if err := testBuilder(t).stepImplement(ctx); err != nil {
+	// The whole mechanical-and-producing sequence over one worktree, because a
+	// step reaching outside the pair does so wherever it runs.
+	if err := b.stepOpenBranch(ctx); err != nil {
+		t.Fatalf("stepOpenBranch: %v", err)
+	}
+	if err := b.stepImplement(ctx); err != nil {
 		t.Fatalf("stepImplement: %v", err)
+	}
+	if err := b.stepOpenPR(ctx); err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
 	}
 	for _, rev := range wt.revsAsked {
 		if !wt.strictRevs[rev] {
@@ -639,8 +836,7 @@ func TestStepsOnlyRevParseTheGuaranteedRevisions(t *testing.T) {
 // request describes a branch that does not contain it and nothing says so.
 // Observed on three consecutive real runs before this existed.
 func TestStepOpenPR_RecordsWhatTheCheckingStepsChanged(t *testing.T) {
-	wt := newFakeWorktree()
-	wt.exists["flow/issue-42"] = true
+	wt := resumedWorktree()
 	wt.commits = 1 // implement already committed
 	wt.dirty = []byte("diff --git a/cli/app.go b/cli/app.go\n")
 
@@ -660,8 +856,7 @@ func TestStepOpenPR_RecordsWhatTheCheckingStepsChanged(t *testing.T) {
 // The corollary: a clean tree costs nothing. Committing per step regardless
 // would record steps that changed nothing.
 func TestStepOpenPR_CleanTreeRecordsNothing(t *testing.T) {
-	wt := newFakeWorktree()
-	wt.exists["flow/issue-42"] = true
+	wt := resumedWorktree()
 	wt.commits = 1
 	wt.noCommit = true // git lands nothing with nothing staged
 
@@ -677,8 +872,7 @@ func TestStepOpenPR_CleanTreeRecordsNothing(t *testing.T) {
 // the request would propose a branch that does not carry it. Refuse instead —
 // silently proposing an incomplete change is the failure being prevented.
 func TestStepOpenPR_RefusesWhenWorkSurvivesRecording(t *testing.T) {
-	wt := newFakeWorktree()
-	wt.exists["flow/issue-42"] = true
+	wt := resumedWorktree()
 	wt.commits = 1
 	wt.noCommit = true                        // nothing lands...
 	wt.dirty = []byte("diff --git a/x b/x\n") // ...but the tree still carries work
@@ -696,8 +890,7 @@ func TestStepOpenPR_RefusesWhenWorkSurvivesRecording(t *testing.T) {
 // reader is budget spent on nothing, and worse when it describes changes that
 // ARE in the diff — the reader sees unexplained work and must reconstruct why.
 func TestStepOpenPR_BodyCarriesTheCheckingStepsBriefings(t *testing.T) {
-	wt := newFakeWorktree()
-	wt.exists["flow/issue-42"] = true
+	wt := resumedWorktree()
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 	ctx.arts["review"] = flow.ArtifactRecord{
 		Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "routed grant through usageError"}
@@ -716,6 +909,211 @@ func TestStepOpenPR_BodyCarriesTheCheckingStepsBriefings(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// The gate the request rests on.
+// ---------------------------------------------------------------------------
+
+// An ORDERING property, not an occurrence one. The gate must measure the branch
+// exactly as it will be proposed — so after the outstanding work is recorded,
+// since recording moves the tree — and before the push, since a branch that
+// cannot pass must not leave the machine.
+func TestStepOpenPR_MeasuresTheBranchAsItWillBeProposed(t *testing.T) {
+	wt := resumedWorktree()
+	wt.commits = 1 // implement already committed
+	wt.dirty = []byte("diff --git a/cli/app.go b/cli/app.go\n")
+
+	if err := testBuilder(t).stepOpenPR(ctxWithPlan(wt, &scriptedAgent{})); err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	// One gate, and it is the one a decision may rest on.
+	if len(wt.gatesRun) != 1 || wt.gatesRun[0] != flow.GateIntegration {
+		t.Fatalf("gates run = %v, want exactly [%s]", wt.gatesRun, flow.GateIntegration)
+	}
+	commit, gate, open := wt.callIndex("commit"), wt.callIndex("gate:integration"), wt.callIndex("open")
+	if commit < 0 || gate < 0 || open < 0 {
+		t.Fatalf("calls = %v, want the recording, the gate and the open all to have happened", wt.calls)
+	}
+	if !(commit < gate) {
+		t.Errorf("calls = %v — the gate measured a tree the recording then changed", wt.calls)
+	}
+	if !(gate < open) {
+		t.Errorf("calls = %v — the request was opened before anything was measured", wt.calls)
+	}
+}
+
+// Four of the five outcomes mean no measurement exists. None of them is the
+// change failing, and a message that read that way would send someone looking
+// for a defect that is not there.
+//
+// Derived from AllGateOutcomes rather than listed, so a sixth outcome cannot be
+// added without this test failing.
+func TestStepOpenPR_DoesNotProposeWhatWasNeverMeasured(t *testing.T) {
+	for _, outcome := range flow.AllGateOutcomes() {
+		if outcome == flow.OutcomeMeasured {
+			continue
+		}
+		t.Run(string(outcome), func(t *testing.T) {
+			wt := resumedWorktree()
+			wt.gateOutcome = map[flow.GateName]flow.GateOutcome{flow.GateIntegration: outcome}
+			ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+			err := testBuilder(t).stepOpenPR(ctx)
+			if err == nil {
+				t.Fatal("opened a request over a gate that measured nothing")
+			}
+			if !strings.Contains(err.Error(), string(outcome)) {
+				t.Errorf("err = %v, want it to name the outcome %q", err, outcome)
+			}
+			if !strings.Contains(err.Error(), "not the change failing") {
+				t.Errorf("err = %v, want it to say plainly that nothing was measured "+
+					"about the change", err)
+			}
+			if wt.opened {
+				t.Error("opened a pull request that was never measured")
+			}
+		})
+	}
+}
+
+// A judge that cannot answer says nothing about the measurement. Reading that
+// as "not acceptable" would refuse a sound change because the project's own
+// tooling is broken.
+func TestStepOpenPR_ABrokenJudgeIsNotARefusal(t *testing.T) {
+	wt := resumedWorktree()
+	wt.judgeErr = errors.New("bin/run: no such file or directory")
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	err := testBuilder(t).stepOpenPR(ctx)
+	if err == nil {
+		t.Fatal("opened a request with no verdict about it")
+	}
+	if !strings.Contains(err.Error(), "not a refusal") {
+		t.Errorf("err = %v, want it to say the missing verdict is not a refusal", err)
+	}
+	if !strings.Contains(err.Error(), "no such file") {
+		t.Errorf("err = %v, want the judge's own failure surfaced", err)
+	}
+	if wt.opened {
+		t.Error("opened a pull request with no verdict about it")
+	}
+}
+
+// A refusal, by contrast, is a perfectly good verdict — and it is the whole
+// reason the gate runs here. The maintainer runs the same gate; proposing
+// anyway spends a reviewer's attention on a change that cannot land.
+func TestStepOpenPR_DoesNotProposeWhatTheJudgeRefuses(t *testing.T) {
+	wt := resumedWorktree()
+	wt.judgeRefuses = true
+	wt.judgeDetail = "coverage 61.2% is below the floor of 70%"
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	err := testBuilder(t).stepOpenPR(ctx)
+	if err == nil {
+		t.Fatal("proposed a change the maintainer's own gate will reject")
+	}
+	if !strings.Contains(err.Error(), wt.judgeDetail) {
+		t.Errorf("err = %v, want the judge's reason carried", err)
+	}
+	if wt.opened {
+		t.Error("opened a pull request the gate refused")
+	}
+}
+
+// What was established travels with the request, so a reader knows it rather
+// than taking it on trust — including the envelope, so the verdict can be
+// recomputed by whoever was not there.
+func TestStepOpenPR_BodyCarriesTheGatesResult(t *testing.T) {
+	wt := resumedWorktree()
+	wt.envelope = []byte(`{"gate":"integration","tests":{"passed":812}}`)
+	wt.judgeDetail = "every measurement is within this project's thresholds"
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	if err := testBuilder(t).stepOpenPR(ctx); err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	for _, want := range []string{
+		"## Gate",
+		string(flow.GateIntegration),
+		string(flow.OutcomeMeasured),
+		"acceptable",
+		wt.judgeDetail,
+		`"passed":812`,
+	} {
+		if !strings.Contains(wt.openBody, want) {
+			t.Errorf("body missing %q — a reader has to take the change on trust:\n%s",
+				want, wt.openBody)
+		}
+	}
+	// Verify is a tool a producing step uses, not a place in the sequence, and
+	// there is no artifact recording that it ran.
+	if strings.Contains(wt.openBody, "## Verification") {
+		t.Errorf("body still carries a verification section:\n%s", wt.openBody)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// stepCloseBranch.
+// ---------------------------------------------------------------------------
+
+func TestStepCloseBranch_ReturnsTheWorktreeToTheBase(t *testing.T) {
+	wt := resumedWorktree()
+	wt.exists["main"] = true
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	if err := testBuilder(t).stepCloseBranch(ctx); err != nil {
+		t.Fatalf("stepCloseBranch: %v", err)
+	}
+	if wt.branch != "main" {
+		t.Errorf("worktree is on %q, want the base branch — the arena owes the next "+
+			"item a clean starting point", wt.branch)
+	}
+	if ctx.resolved.Type != flow.ArtifactFlag {
+		t.Errorf("resolved a %v, want the flag — this step restores rather than produces",
+			ctx.resolved.Type)
+	}
+	// The branch is the product: it carries the request, which outlives the
+	// resolution that opened it.
+	if !wt.exists[testBranch] {
+		t.Error("deleted the item's branch — the request lives on it")
+	}
+}
+
+// Branch CREATES when the name is absent, so without the created check a
+// worktree missing the base would silently get a branch of that name pointing
+// at this item's tip, and every later item would be cut from the wrong place.
+func TestStepCloseBranch_RefusesWhenTheBaseIsNotInTheWorktree(t *testing.T) {
+	wt := resumedWorktree() // "main" is not among the branches
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	err := testBuilder(t).stepCloseBranch(ctx)
+	if err == nil || !strings.Contains(err.Error(), "main") {
+		t.Fatalf("err = %v, want a refusal naming the base branch that is missing", err)
+	}
+	if ctx.didResolve {
+		t.Error("recorded the worktree as restored when it was not")
+	}
+}
+
+func TestStepCloseBranch_RefusesADirtyWorktree(t *testing.T) {
+	// Work nobody has seen. Switching away would hide it; the step stops and
+	// leaves it where a person can find it.
+	wt := resumedWorktree()
+	wt.exists["main"] = true
+	wt.dirty = []byte("diff --git a/x b/x\n")
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	err := testBuilder(t).stepCloseBranch(ctx)
+	if err == nil || !strings.Contains(err.Error(), "dirty") {
+		t.Fatalf("err = %v, want a refusal naming the dirty tree", err)
+	}
+	if ctx.didResolve {
+		t.Error("recorded the worktree as restored over uncommitted work")
+	}
+	if wt.branch != testBranch {
+		t.Errorf("worktree moved to %q over a dirty tree", wt.branch)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Work in progress: what a step keeps when it stops without completing.
 // ---------------------------------------------------------------------------
 
@@ -723,8 +1121,7 @@ func TestStepOpenPR_BodyCarriesTheCheckingStepsBriefings(t *testing.T) {
 // behind it. Losing it means paying for the same analysis again to arrive at
 // the question that has since been answered.
 func TestAgentQuestionKeepsTheWorkThatProducedIt(t *testing.T) {
-	wt := newFakeWorktree()
-	wt.exists["flow/issue-42"] = true
+	wt := resumedWorktree()
 	const reply = "I read the store and the cache paths.\n" +
 		"NEEDS-ANSWER: cache or new store?\n```\nboth are plausible\n```"
 	agent := &scriptedAgent{replies: []string{reply}}
@@ -744,8 +1141,7 @@ func TestAgentQuestionKeepsTheWorkThatProducedIt(t *testing.T) {
 // A stash that failed costs a re-derivation — today's behaviour. Turning it
 // into a step failure would lose the park as well as the work.
 func TestAgentQuestionParksEvenWhenTheStashFails(t *testing.T) {
-	wt := newFakeWorktree()
-	wt.exists["flow/issue-42"] = true
+	wt := resumedWorktree()
 	agent := &scriptedAgent{replies: []string{"NEEDS-ANSWER: cache or new store?"}}
 	ctx := ctxWithPlan(wt, agent)
 	ctx.wipSaveErr = errors.New("nowhere to write")
@@ -963,14 +1359,12 @@ func TestAnEmptyRevisionIsAnError(t *testing.T) {
 // the defect, reintroduced one step at a time.
 func TestEveryProseStepRevisesARefusal(t *testing.T) {
 	for name, step := range map[string]func(*builder, flow.StepCtx) error{
-		"plan":        (*builder).stepPlan,
-		"review":      (*builder).stepReview,
-		"coverage":    (*builder).stepCoverage,
-		"verify-impl": (*builder).stepVerifyImpl,
+		"plan":     (*builder).stepPlan,
+		"review":   (*builder).stepReview,
+		"coverage": (*builder).stepCoverage,
 	} {
 		t.Run(name, func(t *testing.T) {
-			wt := newFakeWorktree()
-			wt.exists["flow/issue-42"] = true
+			wt := resumedWorktree()
 			agent := &scriptedAgent{replies: []string{"first draft", "revised draft"}}
 			ctx := ctxWithPlan(wt, agent)
 			ctx.resolveErrs = []error{refusal("an absolute home path was found")}

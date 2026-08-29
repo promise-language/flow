@@ -90,12 +90,4 @@ TESTS NEEDED on its own line.
 {{.AnswersBlock}}
 
 {{.AskGuidance}}`,
-
-	issue.PromptVerifyImpl: `Summarize the verification run for the pull request body: what was run, what
-passed, and anything a reviewer should still check by hand. Keep it to a short
-markdown section — it is read by a human deciding whether to merge.
-
-{{.WorkInProgressBlock}}
-
-{{.AnswersBlock}}`,
 }

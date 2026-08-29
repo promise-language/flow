@@ -105,16 +105,22 @@ func (b *builder) contributorFlow(cfg Config) *flow.Flow {
 	f := flow.NewFlow("resolve", itemTypes(cfg))
 	f.AddStep("write plan", flow.ArtifactId(StepPlan), b.stepPlan,
 		flow.StepConfig{Budget: cfg.budgetFor(StepPlan)})
+	f.AddStep("open branch", flow.ArtifactId(StepBranch), b.stepOpenBranch,
+		flow.StepConfig{Budget: cfg.budgetFor(StepBranch)})
 	f.AddStep("implement the change", flow.ArtifactId(StepImplement), b.stepImplement,
 		flow.StepConfig{Budget: cfg.budgetFor(StepImplement)})
 	f.AddStep("review the work", flow.ArtifactId(StepReview), b.stepReview,
 		flow.StepConfig{Budget: cfg.budgetFor(StepReview)})
 	f.AddStep("analyze coverage", flow.ArtifactId(StepCoverage), b.stepCoverage,
 		flow.StepConfig{Budget: cfg.budgetFor(StepCoverage)})
-	f.AddStep("verify", flow.ArtifactId(StepVerifyImpl), b.stepVerifyImpl,
-		flow.StepConfig{Budget: cfg.budgetFor(StepVerifyImpl)})
 	f.AddSignalStep("create pull request", flow.SignalId(StepOpenPR), b.stepOpenPR,
 		flow.StepConfig{Budget: cfg.budgetFor(StepOpenPR)})
+	// Closing the branch needs no "did the resolution complete" test of its
+	// own: DeriveNext returns the first PENDING step in registration order, so
+	// a run that parked, was blocked or failed never reaches a step registered
+	// after the request. The ordering is the condition.
+	f.AddStep("close branch", flow.ArtifactId(StepCloseBranch), b.stepCloseBranch,
+		flow.StepConfig{Budget: cfg.budgetFor(StepCloseBranch)})
 	return f
 }
 
@@ -182,10 +188,17 @@ func itemTypes(cfg Config) []flow.ItemType {
 func contributorArtifacts() []flow.ArtifactDef {
 	return []flow.ArtifactDef{
 		flow.Artifact(flow.ArtifactId(StepPlan), flow.ArtifactMarkdown),
-		flow.Artifact(flow.ArtifactId(StepImplement), flow.ArtifactPatch),
+		// Both branch-cut and implementation name a COMMIT. The deliverable is
+		// what sits on the branch, and a copy of it — a patch — can be empty on
+		// a resumed branch, is read back by nothing, and can disagree with the
+		// thing it copies.
+		flow.Artifact(flow.ArtifactId(StepBranch), flow.ArtifactCommitHash),
+		flow.Artifact(flow.ArtifactId(StepImplement), flow.ArtifactCommitHash),
 		flow.Artifact(flow.ArtifactId(StepReview), flow.ArtifactMarkdown),
 		flow.Artifact(flow.ArtifactId(StepCoverage), flow.ArtifactMarkdown),
-		flow.Artifact(flow.ArtifactId(StepVerifyImpl), flow.ArtifactMarkdown),
+		// A flag: closing the branch restores rather than produces, and every
+		// step still owes exactly one result.
+		flow.Artifact(flow.ArtifactId(StepCloseBranch), flow.ArtifactFlag),
 	}
 }
 
