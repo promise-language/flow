@@ -1,5 +1,7 @@
 package flow
 
+import "slices"
+
 // GateOutcome is what a RUNNER observed of one gate process. It is not a
 // verdict and not a number the gate chose: the gate measures, the runner
 // spawns it and watches what became of it, and something else judges the
@@ -49,6 +51,24 @@ const (
 	// change under measurement.
 	OutcomeBrokeContract GateOutcome = "broke_contract"
 )
+
+// AllGateOutcomes returns every declared outcome, in declaration order.
+//
+// A consumer enumerates it rather than mirroring the set, which is how two
+// copies of one vocabulary drift — the same reason AllOrigins and
+// AllDisclosureActs exist. A backend proving it refuses every unjudgeable
+// outcome, or a runner proving it has an answer for each, should be able to
+// ask rather than restate: a hand-written list is the thing that goes stale
+// when a member is added, and it goes stale silently.
+func AllGateOutcomes() []GateOutcome {
+	return []GateOutcome{
+		OutcomeMeasured, OutcomeTimedOut, OutcomeCouldNotStart, OutcomeDied, OutcomeBrokeContract,
+	}
+}
+
+// Valid reports whether o is a declared outcome. The empty string is not one:
+// a run with no outcome is a run the runner never classified.
+func (o GateOutcome) Valid() bool { return slices.Contains(AllGateOutcomes(), o) }
 
 // GateRun is a runner's account of one gate process: what it observed, plus
 // the raw diagnostics a person debugging the gate wants.

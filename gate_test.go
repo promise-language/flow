@@ -123,3 +123,44 @@ func TestGateOutcomes_TheSetIsClosed(t *testing.T) {
 		}
 	}
 }
+
+// The enumerator and the constants are one vocabulary, and a hand-written list
+// is what goes stale when a member is added — silently, because a stale list
+// still compiles and still passes every test that uses it. This parses the
+// declarations and compares, so adding a sixth outcome without adding it to
+// AllGateOutcomes fails here rather than somewhere downstream months later.
+func TestAllGateOutcomesMatchesTheDeclaredConstants(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "gate.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse gate.go: %v", err)
+	}
+	var declared []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		vs, ok := n.(*ast.ValueSpec)
+		if !ok || len(vs.Names) != 1 {
+			return true
+		}
+		id, ok := vs.Type.(*ast.Ident)
+		if !ok || id.Name != "GateOutcome" {
+			return true
+		}
+		declared = append(declared, vs.Names[0].Name)
+		return true
+	})
+	if len(declared) == 0 {
+		t.Fatal("found no GateOutcome constants; the parse is wrong, not the code")
+	}
+	if len(declared) != len(AllGateOutcomes()) {
+		t.Errorf("gate.go declares %d outcomes (%v) but AllGateOutcomes returns %d",
+			len(declared), declared, len(AllGateOutcomes()))
+	}
+	for _, o := range AllGateOutcomes() {
+		if !o.Valid() {
+			t.Errorf("AllGateOutcomes returned %q, which Valid rejects", o)
+		}
+	}
+	if GateOutcome("").Valid() {
+		t.Error("the empty outcome is valid; a run the runner never classified would pass")
+	}
+}
