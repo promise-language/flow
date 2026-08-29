@@ -235,6 +235,10 @@ type scriptedAgent struct {
 	// re-prompt was allowed to do — a revision that could edit the tree would
 	// put work into the branch after the commit meant to carry it.
 	reqs []flow.AgentRequest
+	// errs is what Run returns on successive calls, so a test can script a
+	// substrate that dies part-way through a step. A shorter slice than the
+	// number of calls means every later call succeeds.
+	errs []error
 }
 
 func (a *scriptedAgent) Name() string { return "scripted" }
@@ -245,8 +249,17 @@ func (a *scriptedAgent) Run(_ context.Context, req flow.AgentRequest) (*flow.Age
 	if a.calls < len(a.replies) {
 		reply = a.replies[a.calls]
 	}
+	var err error
+	if a.calls < len(a.errs) {
+		err = a.errs[a.calls]
+	}
 	a.calls++
-	return &flow.AgentResponse{LastText: reply, SessionID: "session-1"}, nil
+	if err != nil {
+		return nil, err
+	}
+	// One session per turn, numbered: a re-prompt that resumes the wrong one is
+	// asking a session that never saw the text it is being asked to fix.
+	return &flow.AgentResponse{LastText: reply, SessionID: fmt.Sprintf("session-%d", a.calls)}, nil
 }
 
 func testBuilder(t *testing.T) *builder {
@@ -972,5 +985,98 @@ func TestEveryProseStepRevisesARefusal(t *testing.T) {
 				t.Errorf("stashed %d times, want 1 — the refused text has nowhere else to go", len(ctx.wipSaves))
 			}
 		})
+	}
+}
+
+// A refusal that comes back a second time has to produce a different round:
+// the agent is asked to fix the text it just wrote, in the session that wrote
+// it. A round that re-sent the ORIGINAL text would ask for a change already
+// made, and the loop could only run out its rounds and park.
+func TestASecondRefusalRevisesTheRevision(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{"draft one", "draft two", "draft three"}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+	ctx.resolveErrs = []error{refusal("first refusal"), refusal("second refusal")}
+
+	if err := testBuilder(t).stepPlan(ctx); err != nil {
+		t.Fatalf("stepPlan: %v", err)
+	}
+	if ctx.resolved.Markdown != "draft three" {
+		t.Errorf("resolved %q, want the second revision", ctx.resolved.Markdown)
+	}
+	if agent.calls != 3 {
+		t.Fatalf("agent ran %d times, want 3 (the plan, then two revisions)", agent.calls)
+	}
+	second := agent.reqs[2]
+	if !strings.Contains(second.Prompt, "draft two") {
+		t.Errorf("the second revision does not carry the text just refused: %q", second.Prompt)
+	}
+	if strings.Contains(second.Prompt, "draft one") {
+		t.Errorf("the second revision re-sends the text the first one already replaced: %q", second.Prompt)
+	}
+	if !strings.Contains(second.Prompt, "second refusal") {
+		t.Errorf("the second revision carries the first refusal's reason, not this one's: %q", second.Prompt)
+	}
+	if second.ResumeSessionID != "session-2" {
+		t.Errorf("second revision resumes %q, want the session that wrote draft two", second.ResumeSessionID)
+	}
+	// Each round replaces the stash, so what survives a park is the newest
+	// refused text — the one the next run should start from.
+	if len(ctx.wipSaves) != 2 {
+		t.Fatalf("stashed %d times, want one per refusal", len(ctx.wipSaves))
+	}
+	if !strings.Contains(ctx.wipSaves[1], "draft two") || !strings.Contains(ctx.wipSaves[1], "second refusal") {
+		t.Errorf("the last stash is not the last refusal: %q", ctx.wipSaves[1])
+	}
+}
+
+// The stash is what makes the work survive, but it is not what makes the
+// revision possible — that is the session and the prompt. A store that cannot
+// take the text must cost the record and nothing else.
+func TestRefusedProseIsRevisedEvenWhenTheStashFails(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{"the plan, absolute", "the plan, relative"}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+	ctx.resolveErrs = []error{refusal("an absolute home path was found")}
+	ctx.wipSaveErr = errors.New("nowhere to write")
+
+	if err := testBuilder(t).stepPlan(ctx); err != nil {
+		t.Fatalf("stepPlan: %v", err)
+	}
+	if ctx.resolved.Markdown != "the plan, relative" {
+		t.Errorf("resolved %q, want the revised text", ctx.resolved.Markdown)
+	}
+	var reported bool
+	for _, n := range ctx.notices {
+		if strings.Contains(n, "could not record refused text") {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Errorf("the failed stash went unreported; notices = %v", ctx.notices)
+	}
+}
+
+// The stash happens before the revision is attempted, so a substrate that dies
+// between the refusal and the fix still leaves the next run something to start
+// from. Stashing after the revision would lose exactly the text that a run
+// stopped here can no longer reach — it was never published.
+func TestARevisionThatCannotRunKeepsTheRefusedWork(t *testing.T) {
+	boom := errors.New("agent substrate is down")
+	agent := &scriptedAgent{replies: []string{"the plan"}, errs: []error{nil, boom}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+	ctx.resolveErrs = []error{refusal("an absolute home path was found")}
+
+	err := testBuilder(t).stepPlan(ctx)
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the agent's own error", err)
+	}
+	if ctx.didResolve {
+		t.Error("resolved an artifact after the revision could not run")
+	}
+	if len(ctx.wipSaves) != 1 {
+		t.Fatalf("stashed %d times, want the refused text kept before the revision ran", len(ctx.wipSaves))
+	}
+	if !strings.Contains(ctx.wipSaves[0], "the plan") ||
+		!strings.Contains(ctx.wipSaves[0], "an absolute home path was found") {
+		t.Errorf("the stash carries neither the text nor the reason: %q", ctx.wipSaves[0])
 	}
 }

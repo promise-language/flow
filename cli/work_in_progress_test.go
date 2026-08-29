@@ -207,3 +207,96 @@ func TestWorkInProgress_IsNotVisibleToAnotherStep(t *testing.T) {
 		t.Fatal("the plan's record is gone, so this proved nothing about keying")
 	}
 }
+
+// loadFailsBackend answers every read with an error and counts the attempts.
+// A store that is there but broken is not a store that is absent: the step is
+// told, once.
+type loadFailsBackend struct {
+	*fake.Backend
+	err   error
+	loads int
+}
+
+func (b *loadFailsBackend) LoadWorkInProgress(context.Context, flow.Claim, string) (string, error) {
+	b.loads++
+	return "", b.err
+}
+
+// saveFailsBackend takes nothing and says so.
+type saveFailsBackend struct {
+	*fake.Backend
+	err error
+}
+
+func (b saveFailsBackend) SaveWorkInProgress(context.Context, flow.Claim, string, string) error {
+	return b.err
+}
+
+// A read that failed is reported to the step rather than answered as "nothing
+// stashed": absence means re-derive, and a step told that when the record is
+// actually sitting in an unreachable store has been told something false. It
+// costs one read per invocation — the memo holds the failure too, so a step
+// that asks twice does not hammer a store that is down.
+func TestWorkInProgress_ReadFailureReachesTheStep(t *testing.T) {
+	var (
+		body    string
+		first   error
+		second  error
+		wantErr = errors.New("store is unreachable")
+	)
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			body, first = ctx.WorkInProgress()
+			_, second = ctx.WorkInProgress()
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	store := &loadFailsBackend{Backend: be, err: wantErr}
+	app.Backend = store
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "done" {
+		t.Errorf("res = %+v, want done — the step decides what a failed read costs", res)
+	}
+	if !errors.Is(first, wantErr) || body != "" {
+		t.Errorf("WorkInProgress() = (%q, %v), want (\"\", the store's error)", body, first)
+	}
+	if !errors.Is(second, wantErr) {
+		t.Errorf("second WorkInProgress() = %v, want the same error", second)
+	}
+	if store.loads != 1 {
+		t.Errorf("read the store %d times in one invocation, want 1 — the load is memoised", store.loads)
+	}
+}
+
+// A write that failed is named, and leaves nothing behind: a step that read
+// back work the store never took would build its next invocation on a draft
+// that does not exist anywhere.
+func TestWorkInProgress_SaveFailureReachesTheStepAndStashesNothing(t *testing.T) {
+	var (
+		saveErr  error
+		readBack string
+		wantErr  = errors.New("disk went away")
+	)
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			saveErr = ctx.RecordWorkInProgress("half a plan")
+			readBack, _ = ctx.WorkInProgress()
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	app.Backend = saveFailsBackend{Backend: be, err: wantErr}
+
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
+		t.Fatalf("RunOne = (%+v, %v), want done", res, err)
+	}
+	if !errors.Is(saveErr, wantErr) {
+		t.Errorf("RecordWorkInProgress = %v, want the store's own error", saveErr)
+	}
+	if readBack != "" {
+		t.Errorf("read back %q after a write that failed, want nothing", readBack)
+	}
+}

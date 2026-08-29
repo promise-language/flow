@@ -1,9 +1,13 @@
 package github
 
 import (
+	"encoding/json"
+	"errors"
+	"os"
 	"testing"
 
 	"github.com/promise-language/flow"
+	"github.com/promise-language/flow/pkg/clistate"
 )
 
 // The store is keyed by the issue number, which is this backend's item
@@ -82,4 +86,66 @@ func TestWorkInProgress_ReleaseLeavesNoRecords(t *testing.T) {
 // store" and every step would go back to losing its work.
 func TestBackendImplementsWorkInProgress(t *testing.T) {
 	var _ flow.WorkInProgress = (*Backend)(nil)
+}
+
+// The store must work with NO disclosure guard installed. Everything this
+// package sends outward goes through `outward`, which refuses every act when
+// no guard is present (TestNoGuardPublishesNothing), so a store that survives
+// here is a store with no route outward — which is what lets it hold the one
+// text that has nowhere else to go: prose a guard refused.
+func TestWorkInProgress_IsNotAPublishingPath(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+	b.out.guard = nil
+	ctx := t.Context()
+	claim := flow.Claim{BackendName: b.Name(), ItemRef: b.refFromIssue(42), Owner: "alice"}
+
+	const refused = "the plan the guard would not take"
+	if err := b.SaveWorkInProgress(ctx, claim, "plan", refused); err != nil {
+		t.Fatalf("SaveWorkInProgress with no guard installed: %v", err)
+	}
+	if got, err := b.LoadWorkInProgress(ctx, claim, "plan"); got != refused || err != nil {
+		t.Fatalf("Load with no guard installed = (%q, %v), want the stored body", got, err)
+	}
+	if err := b.ClearWorkInProgress(ctx, claim, "plan"); err != nil {
+		t.Fatalf("ClearWorkInProgress with no guard installed: %v", err)
+	}
+	mock.mu.Lock()
+	leaked := append([]string(nil), mock.mutations...)
+	mock.mu.Unlock()
+	if len(leaked) > 0 {
+		t.Errorf("the work store reached GitHub: %v", leaked)
+	}
+}
+
+// A claim whose ref names no issue has no key, and every method says so. The
+// alternative is a fallback key — issue 0 — shared by every item with a
+// malformed ref, which is exactly the cross-item read the keying exists to
+// prevent, arriving as the agent's own reasoning.
+func TestWorkInProgress_RefusesAClaimThatNamesNoIssue(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+	ctx := t.Context()
+	claim := flow.Claim{
+		BackendName: b.Name(),
+		ItemRef:     flow.ItemRef{BackendName: b.Name(), Display: "o/r#?", Ref: json.RawMessage(`{"issue":0}`)},
+		Owner:       "alice",
+	}
+
+	if err := b.SaveWorkInProgress(ctx, claim, "plan", "reasoning"); err == nil {
+		t.Error("SaveWorkInProgress stored a record for a claim that names no issue")
+	}
+	if got, err := b.LoadWorkInProgress(ctx, claim, "plan"); err == nil {
+		t.Errorf("LoadWorkInProgress = (%q, nil), want an error rather than a fallback key", got)
+	}
+	if err := b.ClearWorkInProgress(ctx, claim, "plan"); err == nil {
+		t.Error("ClearWorkInProgress reported success for a claim that names no issue")
+	}
+	if _, err := os.Stat(clistate.WorkDir()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("something was written under %s; stat err = %v", clistate.WorkDir(), err)
+	}
 }
