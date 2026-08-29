@@ -68,9 +68,7 @@ The set is closed. A refusal fitting none of these means the vocabulary is wrong
 
 A step that stops this way **keeps as much of its work as it can**, and continues from it when it resumes. How much survives depends on what the work was: implement's changes are in the worktree, so a run cut off mid-step — by a park, a crash, or a power failure — leaves them there to resume from. The plan step has no such durable half-product, so it needs somewhere to put one. The question exists because of that work: the step read enough to find the ambiguity, and discarding it means re-deriving the same reasoning to arrive at the same question, now answered. The plan step is where this matters most, because it changes no files — a park with nothing kept erases the step entirely.
 
-What it keeps is scaffolding, not a result: it does not resolve the step, only the step that wrote it reads it, and it is discarded once the step completes.
-
-> Not implemented — [#31](https://github.com/promise-language/flow/issues/31).
+What it keeps is scaffolding, not a result: it does not resolve the step, only the step that wrote it reads it, and it is discarded once the step completes. `resolution.md` § "Work in progress" states the general rule.
 
 ### A step's write contract is checked, not merely stated
 

@@ -17,6 +17,12 @@ var ErrRequestNotSupported = errors.New("flow: backend does not support pull req
 // "intentionally not supported" from a transient failure.
 var ErrResetSeedUnsupported = errors.New("flow: backend does not support ResetSeed")
 
+// ErrWorkInProgressUnsupported — the backend has no work-in-progress store, so
+// there is nowhere for a step to leave what it worked out. Reads report absence
+// instead; only a WRITE says so, because a caller that believed it stashed
+// something and did not is the case worth naming.
+var ErrWorkInProgressUnsupported = errors.New("flow: backend does not support work in progress")
+
 // ErrTransient — handler-returned sentinel for infrastructure failures
 // observed by the handler (e.g. a Worktree HTTP call against a remote
 // runner that's offline). The orchestrator translates this to:

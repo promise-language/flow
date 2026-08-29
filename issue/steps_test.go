@@ -145,6 +145,19 @@ type fakeCtx struct {
 	resolved   flow.ArtifactBody
 	didResolve bool
 	asked      []flow.AgentQuestion
+	// wip is this step's work-in-progress record. wipErr / wipSaveErr model a
+	// backend that cannot read or cannot write one — the paths that must cost
+	// context and nothing more.
+	wip        string
+	wipErr     error
+	wipSaveErr error
+	wipSaves   []string
+	// resolveErrs is what ResolveMarkdown returns on successive calls, so a
+	// test can script a disclosure refusal followed by an acceptance. A shorter
+	// slice than the number of calls means every later call succeeds.
+	resolveErrs []error
+	resolves    []string
+	notices     []string
 }
 
 func (c *fakeCtx) Context() context.Context { return context.Background() }
@@ -173,6 +186,12 @@ func (c *fakeCtx) ParkedOn() *flow.ParkRequest                  { return c.park 
 func (c *fakeCtx) ResolveFlag() error                           { c.didResolve = true; return nil }
 func (c *fakeCtx) ResolveCommitHash(string) error               { c.didResolve = true; return nil }
 func (c *fakeCtx) ResolveMarkdown(b string) error {
+	c.resolves = append(c.resolves, b)
+	if n := len(c.resolves) - 1; n < len(c.resolveErrs) && c.resolveErrs[n] != nil {
+		// A refused offer leaves the step re-offerable, as the real StepCtx
+		// does: writeResolve marks it resolved only when the write lands.
+		return c.resolveErrs[n]
+	}
 	c.didResolve, c.resolved = true, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: b}
 	return nil
 }
@@ -192,7 +211,16 @@ func (c *fakeCtx) AskQuestions(qs ...flow.AgentQuestion) error {
 	c.asked = append(c.asked, qs...)
 	return errors.New("asked")
 }
-func (c *fakeCtx) Notify(string, string)            {}
+func (c *fakeCtx) WorkInProgress() (string, error) { return c.wip, c.wipErr }
+func (c *fakeCtx) RecordWorkInProgress(body string) error {
+	if c.wipSaveErr != nil {
+		return c.wipSaveErr
+	}
+	c.wipSaves = append(c.wipSaves, body)
+	c.wip = body
+	return nil
+}
+func (c *fakeCtx) Notify(_, detail string)          { c.notices = append(c.notices, detail) }
 func (c *fakeCtx) Agent() flow.Agent                { return c.agent }
 func (c *fakeCtx) Worktree() (flow.Worktree, error) { return c.wt, nil }
 func (c *fakeCtx) Claim() flow.Claim                { return flow.Claim{} }
@@ -203,17 +231,35 @@ type scriptedAgent struct {
 	replies []string
 	calls   int
 	prompts []string
+	// reqs is every request as it arrived, so a test can assert what a
+	// re-prompt was allowed to do — a revision that could edit the tree would
+	// put work into the branch after the commit meant to carry it.
+	reqs []flow.AgentRequest
+	// errs is what Run returns on successive calls, so a test can script a
+	// substrate that dies part-way through a step. A shorter slice than the
+	// number of calls means every later call succeeds.
+	errs []error
 }
 
 func (a *scriptedAgent) Name() string { return "scripted" }
 func (a *scriptedAgent) Run(_ context.Context, req flow.AgentRequest) (*flow.AgentResponse, error) {
 	a.prompts = append(a.prompts, req.Prompt)
+	a.reqs = append(a.reqs, req)
 	reply := "done"
 	if a.calls < len(a.replies) {
 		reply = a.replies[a.calls]
 	}
+	var err error
+	if a.calls < len(a.errs) {
+		err = a.errs[a.calls]
+	}
 	a.calls++
-	return &flow.AgentResponse{LastText: reply, SessionID: "session-1"}, nil
+	if err != nil {
+		return nil, err
+	}
+	// One session per turn, numbered: a re-prompt that resumes the wrong one is
+	// asking a session that never saw the text it is being asked to fix.
+	return &flow.AgentResponse{LastText: reply, SessionID: fmt.Sprintf("session-%d", a.calls)}, nil
 }
 
 func testBuilder(t *testing.T) *builder {
@@ -666,5 +712,371 @@ func TestStepOpenPR_BodyCarriesTheCheckingStepsBriefings(t *testing.T) {
 			t.Errorf("body missing %q — it reaches only the state comment, where no reviewer looks:\n%s",
 				want, wt.openBody)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Work in progress: what a step keeps when it stops without completing.
+// ---------------------------------------------------------------------------
+
+// The turn that finds the ambiguity is the turn that produced the reasoning
+// behind it. Losing it means paying for the same analysis again to arrive at
+// the question that has since been answered.
+func TestAgentQuestionKeepsTheWorkThatProducedIt(t *testing.T) {
+	wt := newFakeWorktree()
+	wt.exists["flow/issue-42"] = true
+	const reply = "I read the store and the cache paths.\n" +
+		"NEEDS-ANSWER: cache or new store?\n```\nboth are plausible\n```"
+	agent := &scriptedAgent{replies: []string{reply}}
+	ctx := ctxWithPlan(wt, agent)
+
+	if err := testBuilder(t).stepReview(ctx); err == nil {
+		t.Fatal("want the ask sentinel to stop the step")
+	}
+	if len(ctx.asked) != 1 {
+		t.Fatalf("asked %d questions, want 1 — the park must survive the stash", len(ctx.asked))
+	}
+	if len(ctx.wipSaves) != 1 || ctx.wipSaves[0] != reply {
+		t.Errorf("stashed %q, want the agent's whole final message", ctx.wipSaves)
+	}
+}
+
+// A stash that failed costs a re-derivation — today's behaviour. Turning it
+// into a step failure would lose the park as well as the work.
+func TestAgentQuestionParksEvenWhenTheStashFails(t *testing.T) {
+	wt := newFakeWorktree()
+	wt.exists["flow/issue-42"] = true
+	agent := &scriptedAgent{replies: []string{"NEEDS-ANSWER: cache or new store?"}}
+	ctx := ctxWithPlan(wt, agent)
+	ctx.wipSaveErr = errors.New("nowhere to write")
+
+	if err := testBuilder(t).stepReview(ctx); err == nil {
+		t.Fatal("want the ask sentinel to stop the step")
+	}
+	if len(ctx.asked) != 1 {
+		t.Errorf("asked %d questions, want 1 — a failed stash must not swallow the park", len(ctx.asked))
+	}
+	var reported bool
+	for _, n := range ctx.notices {
+		if strings.Contains(n, "could not record work in progress") {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Errorf("the failed stash went unreported; notices = %v", ctx.notices)
+	}
+}
+
+// The record has to reach the prompt, or the resumed step renders the same
+// text against the same context and re-derives everything it already paid for.
+func TestPromptContextCarriesTheStashedWork(t *testing.T) {
+	ctx := ctxWithPlan(newFakeWorktree(), &scriptedAgent{})
+	ctx.wip = "what I worked out last time"
+
+	pc, err := testBuilder(t).promptContext(ctx)
+	if err != nil {
+		t.Fatalf("promptContext: %v", err)
+	}
+	if pc.WorkInProgress != "what I worked out last time" {
+		t.Errorf("PromptContext.WorkInProgress = %q, want the stashed record", pc.WorkInProgress)
+	}
+	if !strings.Contains(pc.WorkInProgressBlock(), "what I worked out last time") {
+		t.Errorf("WorkInProgressBlock() = %q, want it to carry the notes", pc.WorkInProgressBlock())
+	}
+}
+
+// Best-effort, like the answers: a read that failed costs the prompt some
+// context and must not fail a step the gate already cleared.
+func TestPromptContextSurvivesAnUnreadableRecord(t *testing.T) {
+	ctx := ctxWithPlan(newFakeWorktree(), &scriptedAgent{})
+	ctx.wipErr = errors.New("store is unreachable")
+
+	pc, err := testBuilder(t).promptContext(ctx)
+	if err != nil {
+		t.Fatalf("promptContext: %v", err)
+	}
+	if pc.WorkInProgress != "" {
+		t.Errorf("WorkInProgress = %q, want empty when the read failed", pc.WorkInProgress)
+	}
+	if pc.WorkInProgressBlock() != "" {
+		t.Error("WorkInProgressBlock() is non-empty with nothing stashed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The refused-write door.
+// ---------------------------------------------------------------------------
+
+// refusal is a disclosure refusal shaped like the one the guard actually
+// returns: the act, and the guard's own answer naming what it found.
+func refusal(what string) flow.ErrDisclosureRefused {
+	return flow.ErrDisclosureRefused{
+		Act:    flow.ActArtifactComment,
+		Reason: errors.New(what),
+	}
+}
+
+// docs/disclosure.md: "A refusal is not a failure of the step. The text is
+// revised and re-offered." The revision costs one prompt, in the session the
+// agent is already holding — not an invocation, and not a re-derivation.
+func TestRefusedProseIsRevisedAndPublished(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{"the plan mentioning /home/someone/", "the plan, relative"}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+	ctx.resolveErrs = []error{refusal(`an absolute home path names the machine's user`)}
+
+	if err := testBuilder(t).stepPlan(ctx); err != nil {
+		t.Fatalf("stepPlan: %v", err)
+	}
+	if !ctx.didResolve || ctx.resolved.Markdown != "the plan, relative" {
+		t.Errorf("resolved %q, want the REVISED text", ctx.resolved.Markdown)
+	}
+	if agent.calls != 2 {
+		t.Errorf("agent ran %d times, want 2 (the plan, then one revision)", agent.calls)
+	}
+	if ctx.park != nil {
+		t.Errorf("parked (%+v) — a refusal is not a failure of the step", ctx.park)
+	}
+	// The revision fixes a sentence. It must not be able to edit the tree: the
+	// wording is what is wrong, and a producing step has already committed by
+	// the time it runs.
+	rev := agent.reqs[1]
+	if rev.PermissionMode != "plan" {
+		t.Errorf("revision PermissionMode = %q, want plan", rev.PermissionMode)
+	}
+	if rev.ResumeSessionID != "session-1" {
+		t.Errorf("revision ResumeSessionID = %q, want the session that wrote the text", rev.ResumeSessionID)
+	}
+	// Carried in the prompt as well as the session, because ResumeSessionID is
+	// documented as best-effort.
+	if !strings.Contains(rev.Prompt, "the plan mentioning /home/someone/") {
+		t.Errorf("revision prompt does not carry the refused text: %q", rev.Prompt)
+	}
+	if !strings.Contains(rev.Prompt, "an absolute home path names the machine's user") {
+		t.Errorf("revision prompt does not carry the guard's reason: %q", rev.Prompt)
+	}
+}
+
+// The case from the issue, end to end: an agent that keeps producing the same
+// refused detail. It parks rather than failing, and the work survives — which
+// is what makes the next run differ from this one instead of being the same
+// attempt with a bigger budget.
+func TestProseRefusedEveryTimeParksAndKeepsTheWork(t *testing.T) {
+	// Stands for the fragment a real refusal quotes back — "what it found and
+	// where", which is the disclosure itself.
+	const guardAnswer = "an absolute home path was found"
+	agent := &scriptedAgent{}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+	ctx.resolveErrs = []error{
+		refusal(guardAnswer), refusal(guardAnswer),
+		refusal(guardAnswer), refusal(guardAnswer),
+	}
+
+	err := testBuilder(t).stepPlan(ctx)
+	if err == nil {
+		t.Fatal("want the step to stop when the guard will not take the text")
+	}
+	if ctx.park == nil {
+		t.Fatal("no park recorded — a refusal must not be reported as a failed step")
+	}
+	if ctx.park.Kind != flow.ParkBlocked {
+		t.Errorf("park kind = %q, want %q", ctx.park.Kind, flow.ParkBlocked)
+	}
+	if !strings.Contains(ctx.park.Reason, "disclosure guard refused") {
+		t.Errorf("park reason = %q, want it to name the disclosure refusal", ctx.park.Reason)
+	}
+	if strings.Contains(ctx.park.Reason, "\n") {
+		t.Errorf("park reason spans lines: %q", ctx.park.Reason)
+	}
+	// A park is PUBLISHED — Backend.Park posts the whole request as an issue
+	// comment, through the same guard. A reason repeating what the guard said
+	// carries the fragment the guard just refused, so the park record is
+	// refused too, Backend.Park errors, and the item never parks at all.
+	if strings.Contains(ctx.park.Reason, guardAnswer) {
+		t.Errorf("park reason repeats the guard's answer, which is the one text that cannot be published: %q",
+			ctx.park.Reason)
+	}
+	// What it can say instead: the act, which is the SDK's own vocabulary.
+	if !strings.Contains(ctx.park.Reason, string(flow.ActArtifactComment)) {
+		t.Errorf("park reason = %q, want it to name the refused act", ctx.park.Reason)
+	}
+	if ctx.didResolve {
+		t.Error("resolved the artifact after every offer was refused")
+	}
+	// The stash is the point: an issue comment is the one place refused text
+	// cannot go, so without this the work is gone — and it is where the guard's
+	// answer lives, since the park cannot carry it.
+	last := ctx.wipSaves[len(ctx.wipSaves)-1]
+	if !strings.Contains(last, guardAnswer) {
+		t.Errorf("stashed record does not carry the guard's reason: %q", last)
+	}
+	if !strings.Contains(last, "done") {
+		t.Errorf("stashed record does not carry the refused text: %q", last)
+	}
+	// Bounded, so a loop against the guard cannot eat the step's whole prompt
+	// budget: the opening turn plus maxDisclosureRevisions revisions.
+	if agent.calls != maxDisclosureRevisions+1 {
+		t.Errorf("agent ran %d times, want %d", agent.calls, maxDisclosureRevisions+1)
+	}
+}
+
+// Anything that is not a refusal is a real failure of the write. Re-prompting
+// over it would ask an agent to revise text that was never examined.
+func TestANonRefusalFromResolveIsReturnedUnchanged(t *testing.T) {
+	agent := &scriptedAgent{}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+	boom := errors.New("github: 502 bad gateway")
+	ctx.resolveErrs = []error{boom}
+
+	err := testBuilder(t).stepPlan(ctx)
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the write's own error unchanged", err)
+	}
+	if agent.calls != 1 {
+		t.Errorf("agent ran %d times, want 1 — nothing should have been revised", agent.calls)
+	}
+	if ctx.park != nil {
+		t.Errorf("parked (%+v) on an error that is not a refusal", ctx.park)
+	}
+	if len(ctx.wipSaves) != 0 {
+		t.Errorf("stashed %v for a write that was never refused", ctx.wipSaves)
+	}
+}
+
+// An empty revision is not an empty artifact. Recording one would resolve the
+// step with nothing in it — the plan section of a pull request, blank.
+func TestAnEmptyRevisionIsAnError(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{"the plan", "   "}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+	ctx.resolveErrs = []error{refusal("an absolute home path was found")}
+
+	err := testBuilder(t).stepPlan(ctx)
+	if err == nil || !strings.Contains(err.Error(), "revise") {
+		t.Fatalf("err = %v, want a refusal to record an empty revision", err)
+	}
+	if ctx.didResolve {
+		t.Error("resolved an artifact from an empty revision")
+	}
+}
+
+// Every step that publishes prose goes through the one revise path. A step
+// that resolved directly would fail on a refusal and lose its work — which is
+// the defect, reintroduced one step at a time.
+func TestEveryProseStepRevisesARefusal(t *testing.T) {
+	for name, step := range map[string]func(*builder, flow.StepCtx) error{
+		"plan":        (*builder).stepPlan,
+		"review":      (*builder).stepReview,
+		"coverage":    (*builder).stepCoverage,
+		"verify-impl": (*builder).stepVerifyImpl,
+	} {
+		t.Run(name, func(t *testing.T) {
+			wt := newFakeWorktree()
+			wt.exists["flow/issue-42"] = true
+			agent := &scriptedAgent{replies: []string{"first draft", "revised draft"}}
+			ctx := ctxWithPlan(wt, agent)
+			ctx.resolveErrs = []error{refusal("an absolute home path was found")}
+
+			if err := step(testBuilder(t), ctx); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if !ctx.didResolve || ctx.resolved.Markdown != "revised draft" {
+				t.Errorf("resolved %q, want the revised text", ctx.resolved.Markdown)
+			}
+			if len(ctx.wipSaves) != 1 {
+				t.Errorf("stashed %d times, want 1 — the refused text has nowhere else to go", len(ctx.wipSaves))
+			}
+		})
+	}
+}
+
+// A refusal that comes back a second time has to produce a different round:
+// the agent is asked to fix the text it just wrote, in the session that wrote
+// it. A round that re-sent the ORIGINAL text would ask for a change already
+// made, and the loop could only run out its rounds and park.
+func TestASecondRefusalRevisesTheRevision(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{"draft one", "draft two", "draft three"}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+	ctx.resolveErrs = []error{refusal("first refusal"), refusal("second refusal")}
+
+	if err := testBuilder(t).stepPlan(ctx); err != nil {
+		t.Fatalf("stepPlan: %v", err)
+	}
+	if ctx.resolved.Markdown != "draft three" {
+		t.Errorf("resolved %q, want the second revision", ctx.resolved.Markdown)
+	}
+	if agent.calls != 3 {
+		t.Fatalf("agent ran %d times, want 3 (the plan, then two revisions)", agent.calls)
+	}
+	second := agent.reqs[2]
+	if !strings.Contains(second.Prompt, "draft two") {
+		t.Errorf("the second revision does not carry the text just refused: %q", second.Prompt)
+	}
+	if strings.Contains(second.Prompt, "draft one") {
+		t.Errorf("the second revision re-sends the text the first one already replaced: %q", second.Prompt)
+	}
+	if !strings.Contains(second.Prompt, "second refusal") {
+		t.Errorf("the second revision carries the first refusal's reason, not this one's: %q", second.Prompt)
+	}
+	if second.ResumeSessionID != "session-2" {
+		t.Errorf("second revision resumes %q, want the session that wrote draft two", second.ResumeSessionID)
+	}
+	// Each round replaces the stash, so what survives a park is the newest
+	// refused text — the one the next run should start from.
+	if len(ctx.wipSaves) != 2 {
+		t.Fatalf("stashed %d times, want one per refusal", len(ctx.wipSaves))
+	}
+	if !strings.Contains(ctx.wipSaves[1], "draft two") || !strings.Contains(ctx.wipSaves[1], "second refusal") {
+		t.Errorf("the last stash is not the last refusal: %q", ctx.wipSaves[1])
+	}
+}
+
+// The stash is what makes the work survive, but it is not what makes the
+// revision possible — that is the session and the prompt. A store that cannot
+// take the text must cost the record and nothing else.
+func TestRefusedProseIsRevisedEvenWhenTheStashFails(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{"the plan, absolute", "the plan, relative"}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+	ctx.resolveErrs = []error{refusal("an absolute home path was found")}
+	ctx.wipSaveErr = errors.New("nowhere to write")
+
+	if err := testBuilder(t).stepPlan(ctx); err != nil {
+		t.Fatalf("stepPlan: %v", err)
+	}
+	if ctx.resolved.Markdown != "the plan, relative" {
+		t.Errorf("resolved %q, want the revised text", ctx.resolved.Markdown)
+	}
+	var reported bool
+	for _, n := range ctx.notices {
+		if strings.Contains(n, "could not record refused text") {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Errorf("the failed stash went unreported; notices = %v", ctx.notices)
+	}
+}
+
+// The stash happens before the revision is attempted, so a substrate that dies
+// between the refusal and the fix still leaves the next run something to start
+// from. Stashing after the revision would lose exactly the text that a run
+// stopped here can no longer reach — it was never published.
+func TestARevisionThatCannotRunKeepsTheRefusedWork(t *testing.T) {
+	boom := errors.New("agent substrate is down")
+	agent := &scriptedAgent{replies: []string{"the plan"}, errs: []error{nil, boom}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+	ctx.resolveErrs = []error{refusal("an absolute home path was found")}
+
+	err := testBuilder(t).stepPlan(ctx)
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the agent's own error", err)
+	}
+	if ctx.didResolve {
+		t.Error("resolved an artifact after the revision could not run")
+	}
+	if len(ctx.wipSaves) != 1 {
+		t.Fatalf("stashed %d times, want the refused text kept before the revision ran", len(ctx.wipSaves))
+	}
+	if !strings.Contains(ctx.wipSaves[0], "the plan") ||
+		!strings.Contains(ctx.wipSaves[0], "an absolute home path was found") {
+		t.Errorf("the stash carries neither the text nor the reason: %q", ctx.wipSaves[0])
 	}
 }

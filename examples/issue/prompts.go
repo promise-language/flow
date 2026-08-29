@@ -30,6 +30,8 @@ If this item conflicts with a project constraint you cannot resolve on your own,
 do not guess and do not quietly plan around it — ask, following the guidance
 below, and quote the conflicting statement in the block.
 
+{{.WorkInProgressBlock}}
+
 {{.AnswersBlock}}
 
 {{.AskGuidance}}`,
@@ -44,6 +46,8 @@ Rules for this project:
   - {{.VerifyCmd}} must pass before the change is done.
   - Match the surrounding code's idioms rather than importing your own.
   - {{.DeferCommit}}
+
+{{.WorkInProgressBlock}}
 
 {{.AnswersBlock}}
 
@@ -69,6 +73,8 @@ enough that someone could act on the finding without rediscovering it.
 
 End with PASS or FAIL on its own line.
 
+{{.WorkInProgressBlock}}
+
 {{.AnswersBlock}}
 
 {{.AskGuidance}}`,
@@ -79,6 +85,8 @@ List the paths a reviewer would expect to be covered and are not, and say
 whether each gap is worth closing now or is acceptable. Recommend PASS or MORE
 TESTS NEEDED on its own line.
 
+{{.WorkInProgressBlock}}
+
 {{.AnswersBlock}}
 
 {{.AskGuidance}}`,
@@ -86,6 +94,8 @@ TESTS NEEDED on its own line.
 	issue.PromptVerifyImpl: `Summarize the verification run for the pull request body: what was run, what
 passed, and anything a reviewer should still check by hand. Keep it to a short
 markdown section — it is read by a human deciding whether to merge.
+
+{{.WorkInProgressBlock}}
 
 {{.AnswersBlock}}`,
 }

@@ -92,6 +92,40 @@ type StateInspector interface {
 	LoadStateByRef(ctx context.Context, ref ItemRef) (*ItemState, error)
 }
 
+// WorkInProgress is an optional Backend capability: somewhere for a step to
+// leave what it worked out when it stops without completing, so the next
+// dispatch continues rather than restarts.
+//
+// `step` is the step's RESULT ID (LifecycleItem.Result()) — the same identity
+// that keys the budget record and that `grant` accepts, so nothing has to
+// translate between two names for one step.
+//
+// The contract is on the implementation:
+//
+//   - A record is keyed by the claim's ITEM and by `step`, and a stored record
+//     naming a different item or step is not this step's: LoadWorkInProgress
+//     returns "" for it. Keying is the correctness property, not clearing —
+//     every path that skips the cleanup (a crash, a kill, a `.flow` left by an
+//     abandoned run) would otherwise feed one item's reasoning to another
+//     item's agent, arriving with origin OriginAgent and indistinguishable
+//     from that agent's own thinking.
+//   - Absence is ("", nil), not an error. A step that never stashed anything
+//     is the ordinary case, and it is exactly today's behaviour.
+//   - NOTHING HERE IS EVER PUBLISHED. The record is the step's own scratch
+//     state. For a refused write the text to store IS the text a disclosure
+//     guard refused, so a store that could go outward is a store that cannot
+//     hold it.
+//   - ClearWorkInProgress is idempotent: clearing what is not there is nil.
+//
+// Where the record physically lives is the backend's business. A local
+// backend keeps it beside its claim state; a server-backed one keeps it with
+// the claim, where an arena can lose its disk without losing the record.
+type WorkInProgress interface {
+	SaveWorkInProgress(ctx context.Context, claim Claim, step, body string) error
+	LoadWorkInProgress(ctx context.Context, claim Claim, step string) (string, error)
+	ClearWorkInProgress(ctx context.Context, claim Claim, step string) error
+}
+
 // Claim is the credentialed handle returned by Backend.Claim. Holds the
 // backend-internal token used by subsequent write ops; the SDK serializes
 // this to .flow/active.json.

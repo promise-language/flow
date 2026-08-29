@@ -62,6 +62,8 @@ That is the shape to check any retry against: **a retry that cannot differ from 
 
 So an attempt stopped by something correctable hands the correction back. A refused write returns to the step that produced the text, carrying what was refused and why, so the next attempt is answering something the last one did not know.
 
+**A correction round costs a prompt, not an invocation.** An invocation is an attempt at the step; a refused *expression* of finished work is not a failed attempt. Charging one exhausts a three-invocation grant in three sentences and then reports a budget cap — naming the wrong problem, which is exactly what this section is about. It must cost something: a correction that were free is a loop against whatever refused it, with nothing bounding it at all.
+
 ## Parking
 
 A park records that a step stopped without completing, and why. Every park names the step it belongs to.
@@ -72,6 +74,21 @@ Parks divide into two kinds, and the division is what an operator acts on:
 - **Human-clearing** — nothing changes until a person acts. A budget cap, an unanswered question, or a condition only a human can lift.
 
 A park that advertises a condition **stops advertising it the moment the condition ends**. A marker outliving its condition is worse than no marker, because it is read as current.
+
+## Work in progress
+
+A step that stops without completing may leave **what it worked out** where its own next invocation finds it. That is what makes an invocation that could not finish still produce progress: the work that led to the question, or to the refused sentence, is the expensive part, and it is exactly the part a stop would otherwise discard.
+
+The record is **scaffolding, not a result**:
+
+- **It does not resolve the step.** An unfinished plan stored as the plan artifact would mark the step done and let the resolution proceed against a plan that was never finished — a worse outcome than losing it.
+- **It decides nothing.** The next step is still derived from artifacts and signals; a record is read by the step that wrote it and by nothing else. It is not part of what a reviewer reads, and it does not appear in what is proposed.
+- **It is keyed by item and step, and read only when both match.** Keying is the correctness property; clearing is hygiene. Every path that skips a cleanup — a crash, a kill, a lost machine, a working directory left by an abandoned run — would otherwise feed one item's reasoning to another item's agent, where it arrives indistinguishable from that agent's own thinking. A missing record costs a re-derivation, which is the cost of not having the mechanism at all; a wrong record costs a plan built on another item's reasoning, published under this item's number. Every ambiguity resolves toward discarding.
+- **It is never published.** For a refused write the text to keep *is* the text a guard refused, so a store that could go outward is a store that cannot hold it.
+- **It is cleared when the step resolves**, and when the claim is released or finalized. Scaffolding that outlives its work becomes stale prose a later reader mistakes for a record; reasoning left behind after the work is over is a disclosure sitting around for no benefit.
+- **It is optional.** A step that does not use it behaves exactly as one would without the mechanism.
+
+Where the record physically lives is the backend's: beside its claim state on a machine that holds one, or with the claim on a server, so that an arena can lose its disk without losing the record.
 
 ## Questions
 

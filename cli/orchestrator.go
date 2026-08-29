@@ -506,6 +506,12 @@ type stepCtx struct {
 	wtErr    error
 	agent    *meteredAgent
 	resolved bool
+	// wip memoises the step's work-in-progress record for this invocation. A
+	// step that never asks never loads, which is what makes the record cost
+	// nothing to not use.
+	wip       string
+	wipLoaded bool
+	wipErr    error
 	// startedAt and timeout back the timeout axis of a park-time snapshot:
 	// elapsed-vs-cap is the one axis with no counter on the record.
 	startedAt time.Time
@@ -673,6 +679,21 @@ func (s *stepCtx) writeResolve(body flow.ArtifactBody) error {
 		return err
 	}
 	s.resolved = true
+	// The step has a result now, so its scaffolding is done. Clearing lives
+	// HERE and nowhere else: one place that runs whichever Resolve* the step
+	// called, so no handler can complete while leaving stale prose behind for a
+	// later reader to mistake for a record.
+	//
+	// Best-effort, and deliberately so. The artifact has already landed, so
+	// failing the step now would report a failure for work that is recorded —
+	// and a record that outlives its step is harmless anyway, because keying by
+	// (item, step) means the next dispatch of a resolved step never reads it.
+	// Keying is the correctness property; clearing is hygiene.
+	if store, ok := s.app.Backend.(flow.WorkInProgress); ok {
+		if err := store.ClearWorkInProgress(s.ctx, s.claim, s.li.Result()); err != nil {
+			s.Notify("", "could not clear work in progress: "+err.Error())
+		}
+	}
 	return nil
 }
 
@@ -697,6 +718,45 @@ func (s *stepCtx) ParkedOn() *flow.ParkRequest {
 		return nil
 	}
 	return s.state.Park
+}
+
+// WorkInProgress returns what this step stashed on an earlier invocation.
+//
+// A backend with no store reads as absence rather than as an error: the record
+// is optional, and a step that has to distinguish "nothing stashed" from "no
+// store" to build its prompt would be a step no backend without one could run.
+func (s *stepCtx) WorkInProgress() (string, error) {
+	if s.wipLoaded {
+		return s.wip, s.wipErr
+	}
+	s.wipLoaded = true
+	store, ok := s.app.Backend.(flow.WorkInProgress)
+	if !ok {
+		return "", nil
+	}
+	s.wip, s.wipErr = store.LoadWorkInProgress(s.ctx, s.claim, s.li.Result())
+	return s.wip, s.wipErr
+}
+
+// RecordWorkInProgress stashes work for this step's next invocation, keyed by
+// the same result id its budget is metered against.
+//
+// A missing store is named here and only here. A caller that believed it
+// stashed something and did not would park expecting to resume from a draft
+// that was never written — which is the failure this whole surface exists to
+// stop, silently reintroduced.
+func (s *stepCtx) RecordWorkInProgress(body string) error {
+	store, ok := s.app.Backend.(flow.WorkInProgress)
+	if !ok {
+		return flow.ErrWorkInProgressUnsupported
+	}
+	if err := store.SaveWorkInProgress(s.ctx, s.claim, s.li.Result(), body); err != nil {
+		return err
+	}
+	// Keep the memo honest: a later read in this same invocation must see what
+	// was just written, not a load from before it.
+	s.wip, s.wipLoaded, s.wipErr = body, true, nil
+	return nil
 }
 
 func (s *stepCtx) Notify(step, detail string) {

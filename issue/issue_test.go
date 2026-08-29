@@ -698,11 +698,18 @@ func TestAnswersReachEveryResumableDefaultPrompt(t *testing.T) {
 	// this test named the exact failure it guards against and then omitted the
 	// verify-impl slot, which parks like any other.
 	//
-	// The fix re-prompt is the one exclusion: it runs inside a single implement
-	// invocation, where the answer already reached that session's opening
-	// prompt.
+	// The two re-prompts are the exclusions: each runs inside a single
+	// invocation of the step it belongs to, resuming that session, where the
+	// answer already reached the opening prompt. Repeating it would re-state
+	// the answer to an agent that has it in context, and the revise prompt in
+	// particular asks for one thing — the revised text — so anything else in it
+	// is competing with that.
+	inSessionReprompts := map[PromptID]bool{
+		PromptImplementFix: true,
+		PromptRevise:       true,
+	}
 	for id := range defaultPrompts {
-		if id == PromptImplementFix {
+		if inSessionReprompts[id] {
 			continue
 		}
 		t.Run(string(id), func(t *testing.T) {
@@ -805,5 +812,111 @@ func TestBuildApp_AcceptsEveryRealPromptKey(t *testing.T) {
 		Prompts: prompts,
 	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}}); err != nil {
 		t.Errorf("BuildApp = %v, want every real slot accepted", err)
+	}
+}
+
+// The stashed work has to reach the prompt of every step that can stop short,
+// for the same reason the answers do: a body that renders neither re-derives
+// what the earlier invocation already paid for — and for the plan step, which
+// changes no files, that is the entire step.
+func TestWorkInProgressReachesEveryResumableDefaultPrompt(t *testing.T) {
+	pc := PromptContext{
+		Prior:          map[StepID]flow.ArtifactRecord{},
+		WorkInProgress: "what I worked out before I stopped",
+	}
+	pc.VerifyCmd = "make check"
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	// The two re-prompts are excluded for the same reason as in the answers
+	// test: each resumes the session that produced the text, which already has
+	// the working-out in context.
+	inSessionReprompts := map[PromptID]bool{
+		PromptImplementFix: true,
+		PromptRevise:       true,
+	}
+	for id := range defaultPrompts {
+		if inSessionReprompts[id] {
+			continue
+		}
+		t.Run(string(id), func(t *testing.T) {
+			got, err := renderPrompt(Config{}, id, pc)
+			if err != nil {
+				t.Fatalf("renderPrompt: %v", err)
+			}
+			if !strings.Contains(got, "what I worked out before I stopped") {
+				t.Errorf("default prompt %q does not render the stashed work — a resumed step would re-derive it", id)
+			}
+		})
+	}
+}
+
+func TestWorkInProgressBlock(t *testing.T) {
+	t.Run("empty on a first run", func(t *testing.T) {
+		if got := (PromptContext{}).WorkInProgressBlock(); got != "" {
+			t.Errorf("got %q, want empty when nothing was stashed", got)
+		}
+	})
+	t.Run("says the notes are not a result", func(t *testing.T) {
+		got := PromptContext{WorkInProgress: "half a plan"}.WorkInProgressBlock()
+		if !strings.Contains(got, "half a plan") {
+			t.Errorf("block does not carry the notes: %q", got)
+		}
+		// The framing is load-bearing: an agent that read them as a finished
+		// result would defend them instead of finishing the step.
+		if !strings.Contains(got, "not a result") {
+			t.Errorf("block does not say the notes are scaffolding: %q", got)
+		}
+	})
+}
+
+// The revise prompt has one job, and its reply is recorded verbatim. Anything
+// that invites commentary produces an artifact that opens with an explanation
+// of what changed.
+func TestRevisePromptCarriesTheRefusalAndTheText(t *testing.T) {
+	pc := PromptContext{
+		Prior:       map[StepID]flow.ArtifactRecord{},
+		Refusal:     `disclosure refused (artifact-comment): found "/home/someone/"`,
+		RefusedText: "the plan, mentioning /home/someone/",
+	}
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	got, err := renderPrompt(Config{}, PromptRevise, pc)
+	if err != nil {
+		t.Fatalf("renderPrompt: %v", err)
+	}
+	for _, want := range []string{
+		`found "/home/someone/"`,              // what the guard caught
+		"the plan, mentioning /home/someone/", // what it caught it in
+		"FULL revised text",                   // what the reply must be
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("revise prompt is missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// The prompts whose product is published on the item have to ask for
+// repository-relative paths. An absolute home path is unusable to every reader
+// of the issue — nobody shares that filesystem — and it is what the disclosure
+// guard refuses on the way out, which then costs a revision round against work
+// that was already finished.
+func TestPublishedProsePromptsAskForRepositoryRelativePaths(t *testing.T) {
+	pc := PromptContext{Prior: map[StepID]flow.ArtifactRecord{}}
+	pc.VerifyCmd = "make check"
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, id := range []PromptID{PromptPlan, PromptReview, PromptCoverage, PromptVerifyImpl} {
+		t.Run(string(id), func(t *testing.T) {
+			got, err := renderPrompt(Config{}, id, pc)
+			if err != nil {
+				t.Fatalf("renderPrompt: %v", err)
+			}
+			if !strings.Contains(got, "never by absolute path") {
+				t.Errorf("default prompt %q does not ask for repository-relative paths:\n%s", id, got)
+			}
+		})
 	}
 }

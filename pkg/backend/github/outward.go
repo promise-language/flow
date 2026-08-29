@@ -93,10 +93,12 @@ var (
 // It refuses before `do` runs, never after — the whole value of a guard is that
 // the act has not happened yet.
 //
-// A refusal fails the backend call, which fails the step, which parks the item,
-// so a person sees what was found. docs/disclosure.md also wants the text
-// returned to the agent that wrote it for revision, which is a step-handler
-// change rather than a seam one: #52.
+// A refusal fails the backend call, and what becomes of it is the caller's.
+// docs/disclosure.md wants the text returned to the agent that wrote it for
+// revision, which is a step-handler decision rather than a seam one: the issue
+// package's prose steps re-prompt on a flow.ErrDisclosureRefused and re-offer.
+// The patch and pull-request write paths do not yet — a refused diff is not
+// fixed by revising a sentence — and #52 is open for them.
 func (o *outward) publish(ctx context.Context, d flow.Disclosure, do func(context.Context) error) error {
 	d.Owner, d.Repo = o.owner, o.repo
 	if !d.Act.Valid() {

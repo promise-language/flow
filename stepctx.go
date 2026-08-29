@@ -37,6 +37,25 @@ type StepCtx interface {
 	// see a field that was already in memory.
 	ParkedOn() *ParkRequest
 
+	// WorkInProgress returns what THIS step stashed against THIS item on an
+	// earlier invocation, or "" when there is none — including when the backend
+	// has no store at all.
+	//
+	// Loaded lazily and memoised: a step that never asks pays nothing, which is
+	// what makes the record optional. A step that does ask resumes from its own
+	// reasoning instead of re-deriving it, which is the whole point — the work
+	// that produced a question is exactly the work a park would otherwise throw
+	// away.
+	WorkInProgress() (string, error)
+
+	// RecordWorkInProgress stashes work this step wants its next invocation to
+	// start from. It does NOT resolve the step — it is scaffolding, not a
+	// result — is read by no other step, is never published, and is cleared
+	// automatically when the step resolves.
+	//
+	// Returns ErrWorkInProgressUnsupported when the backend has no store.
+	RecordWorkInProgress(body string) error
+
 	// Artifact write surface — one Resolve* per ArtifactType.
 	ResolveFlag() error
 	ResolveCommitHash(sha string) error

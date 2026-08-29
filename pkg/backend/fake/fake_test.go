@@ -487,3 +487,56 @@ func TestBackend_RunGateRefusesAnUndeclaredNameWithNoOutcome(t *testing.T) {
 		t.Errorf("Outcome = %q, want none — no gate ran", run.Outcome)
 	}
 }
+
+// The fake is what SDK tests drive the work-in-progress path against, so it has
+// to model the property that path turns on: a record belongs to one item and
+// one step, and is invisible under any other key.
+func TestBackend_WorkInProgressIsKeyedByItemAndStep(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	b.AddItem(newItem("1"))
+	b.AddItem(newItem("2"))
+	claim1, _ := b.Claim(ctx, itemRef("1"), "alice", false)
+	claim2, _ := b.Claim(ctx, itemRef("2"), "alice", false)
+
+	if got, err := b.LoadWorkInProgress(ctx, claim1, "plan"); got != "" || err != nil {
+		t.Errorf("Load with nothing stored = (%q, %v), want (\"\", nil)", got, err)
+	}
+	if err := b.SaveWorkInProgress(ctx, claim1, "plan", "item 1's reasoning"); err != nil {
+		t.Fatalf("SaveWorkInProgress: %v", err)
+	}
+	if got, _ := b.LoadWorkInProgress(ctx, claim1, "plan"); got != "item 1's reasoning" {
+		t.Errorf("Load under its own key = %q, want the stored body", got)
+	}
+	if got, _ := b.LoadWorkInProgress(ctx, claim2, "plan"); got != "" {
+		t.Errorf("Load under another item = %q, want nothing", got)
+	}
+	if got, _ := b.LoadWorkInProgress(ctx, claim1, "review"); got != "" {
+		t.Errorf("Load under another step = %q, want nothing", got)
+	}
+	if err := b.ClearWorkInProgress(ctx, claim1, "plan"); err != nil {
+		t.Fatalf("ClearWorkInProgress: %v", err)
+	}
+	if err := b.ClearWorkInProgress(ctx, claim1, "plan"); err != nil {
+		t.Errorf("second Clear = %v, want nil", err)
+	}
+}
+
+// Releasing ends that reasoning's life — there is nothing left to resume, and
+// what stays behind is prose nobody asked for.
+func TestBackend_ReleaseDropsWorkInProgress(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	b.AddItem(newItem("1"))
+	claim, _ := b.Claim(ctx, itemRef("1"), "alice", false)
+
+	if err := b.SaveWorkInProgress(ctx, claim, "plan", "reasoning"); err != nil {
+		t.Fatalf("SaveWorkInProgress: %v", err)
+	}
+	if err := b.Release(ctx, claim); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if got, err := b.LoadWorkInProgress(ctx, claim, "plan"); got != "" || err != nil {
+		t.Errorf("Load after Release = (%q, %v), want nothing left", got, err)
+	}
+}
