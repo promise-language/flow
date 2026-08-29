@@ -896,3 +896,27 @@ func TestRevisePromptCarriesTheRefusalAndTheText(t *testing.T) {
 		}
 	}
 }
+
+// The prompts whose product is published on the item have to ask for
+// repository-relative paths. An absolute home path is unusable to every reader
+// of the issue — nobody shares that filesystem — and it is what the disclosure
+// guard refuses on the way out, which then costs a revision round against work
+// that was already finished.
+func TestPublishedProsePromptsAskForRepositoryRelativePaths(t *testing.T) {
+	pc := PromptContext{Prior: map[StepID]flow.ArtifactRecord{}}
+	pc.VerifyCmd = "make check"
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, id := range []PromptID{PromptPlan, PromptReview, PromptCoverage, PromptVerifyImpl} {
+		t.Run(string(id), func(t *testing.T) {
+			got, err := renderPrompt(Config{}, id, pc)
+			if err != nil {
+				t.Fatalf("renderPrompt: %v", err)
+			}
+			if !strings.Contains(got, "never by absolute path") {
+				t.Errorf("default prompt %q does not ask for repository-relative paths:\n%s", id, got)
+			}
+		})
+	}
+}

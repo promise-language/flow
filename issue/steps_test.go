@@ -848,11 +848,14 @@ func TestRefusedProseIsRevisedAndPublished(t *testing.T) {
 // is what makes the next run differ from this one instead of being the same
 // attempt with a bigger budget.
 func TestProseRefusedEveryTimeParksAndKeepsTheWork(t *testing.T) {
+	// Stands for the fragment a real refusal quotes back — "what it found and
+	// where", which is the disclosure itself.
+	const guardAnswer = "an absolute home path was found"
 	agent := &scriptedAgent{}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 	ctx.resolveErrs = []error{
-		refusal("an absolute home path was found"), refusal("an absolute home path was found"),
-		refusal("an absolute home path was found"), refusal("an absolute home path was found"),
+		refusal(guardAnswer), refusal(guardAnswer),
+		refusal(guardAnswer), refusal(guardAnswer),
 	}
 
 	err := testBuilder(t).stepPlan(ctx)
@@ -871,13 +874,26 @@ func TestProseRefusedEveryTimeParksAndKeepsTheWork(t *testing.T) {
 	if strings.Contains(ctx.park.Reason, "\n") {
 		t.Errorf("park reason spans lines: %q", ctx.park.Reason)
 	}
+	// A park is PUBLISHED — Backend.Park posts the whole request as an issue
+	// comment, through the same guard. A reason repeating what the guard said
+	// carries the fragment the guard just refused, so the park record is
+	// refused too, Backend.Park errors, and the item never parks at all.
+	if strings.Contains(ctx.park.Reason, guardAnswer) {
+		t.Errorf("park reason repeats the guard's answer, which is the one text that cannot be published: %q",
+			ctx.park.Reason)
+	}
+	// What it can say instead: the act, which is the SDK's own vocabulary.
+	if !strings.Contains(ctx.park.Reason, string(flow.ActArtifactComment)) {
+		t.Errorf("park reason = %q, want it to name the refused act", ctx.park.Reason)
+	}
 	if ctx.didResolve {
 		t.Error("resolved the artifact after every offer was refused")
 	}
 	// The stash is the point: an issue comment is the one place refused text
-	// cannot go, so without this the work is gone.
+	// cannot go, so without this the work is gone — and it is where the guard's
+	// answer lives, since the park cannot carry it.
 	last := ctx.wipSaves[len(ctx.wipSaves)-1]
-	if !strings.Contains(last, "an absolute home path was found") {
+	if !strings.Contains(last, guardAnswer) {
 		t.Errorf("stashed record does not carry the guard's reason: %q", last)
 	}
 	if !strings.Contains(last, "done") {

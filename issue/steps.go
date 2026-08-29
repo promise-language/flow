@@ -547,19 +547,27 @@ func (b *builder) resolveMarkdown(ctx flow.StepCtx, pc PromptContext, session, b
 			ctx.Notify("", "could not record refused text: "+werr.Error())
 		}
 		if round >= maxDisclosureRevisions {
-			// A guard's answer may run to several lines; a park reason is read
-			// as one. The whole answer is in the stashed record, which is where
-			// the next invocation reads it from anyway.
-			last, _, _ := strings.Cut(refused.Error(), "\n")
 			// A park, not a failure: the work is sound and a person has to
 			// decide. And a re-run after this park is not the identical retry —
 			// it starts from the stashed draft and the refusal, which is exactly
 			// what the previous attempt did not have.
+			//
+			// The reason carries NOTHING the guard said. A park is published:
+			// Backend.Park posts the whole request as an issue comment, through
+			// the same guard. A refusal names what it found and quotes it
+			// (docs/disclosure.md), so a reason repeating the guard's answer
+			// carries the refused fragment itself — the guard refuses the park
+			// record too, Backend.Park errors, and the item never parks at all:
+			// the run dies with an error and no person is told anything. The
+			// act is the SDK's own closed vocabulary and is safe to publish;
+			// the guard's answer stays in the stashed record, which is local
+			// and never published.
 			return ctx.Park(flow.ParkRequest{
 				Kind: flow.ParkBlocked,
 				Reason: fmt.Sprintf(
-					"the disclosure guard refused this step's text %d times; last refusal: %s",
-					round+1, last),
+					"the disclosure guard refused this step's text %d times (%s); "+
+						"what it refused and why are kept with the step for the next run",
+					round+1, refused.Act),
 			})
 		}
 		ctx.Notify("", fmt.Sprintf("disclosure refused — revising (round %d)", round+1))

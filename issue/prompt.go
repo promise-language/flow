@@ -160,6 +160,18 @@ not close anything yourself. Say so as a question, with the proof in the block:
 the exact code, commit, or issue that makes the case. A human decides whether
 the item closes.`
 
+// repoRelativePaths is carried by every default prompt whose product is
+// published on the item.
+//
+// An absolute path naming a home directory is wrong in an issue comment
+// regardless of any guard — it names a person and a machine no reader shares,
+// and it is unusable to everyone who reads it. It is also what a disclosure
+// guard refuses, and a refusal caught here costs nothing, where one caught on
+// the way out costs a revision round against work already finished.
+const repoRelativePaths = `Cite files by path relative to the repository root, never by absolute path.
+What you write here is published on the item, and no reader shares the
+filesystem you are writing on.`
+
 // renderPrompt executes the project's body for one slot, falling back to the
 // library default when the project supplied none.
 //
@@ -197,6 +209,8 @@ var defaultPrompts = map[PromptID]string{
 	PromptPlan: `{{.ItemHeader}}
 
 Produce an implementation plan as concise markdown.
+
+` + repoRelativePaths + `
 
 {{.WorkInProgressBlock}}
 
@@ -241,6 +255,8 @@ left alone and what needs a human decision. Someone will read this to review
 the change, so write for them: what you looked for, what you changed, what
 they should still judge.
 
+` + repoRelativePaths + `
+
 {{.WorkInProgressBlock}}
 
 {{.AnswersBlock}}`,
@@ -266,12 +282,16 @@ Keep {{.VerifyCmd}} passing. {{.DeferCommit}}
 Report what you added and what you restructured, so the person reviewing the
 change can see what you did rather than reconstruct it from the diff.
 
+` + repoRelativePaths + `
+
 {{.WorkInProgressBlock}}
 
 {{.AnswersBlock}}`,
 
 	PromptVerifyImpl: `Summarize the verification run for the pull request body: what was run, what
 passed, and anything a reviewer should still check by hand.
+
+` + repoRelativePaths + `
 
 {{.WorkInProgressBlock}}
 
