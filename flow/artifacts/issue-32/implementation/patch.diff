@@ -1,0 +1,1701 @@
+diff --git a/docs/issue-flow.md b/docs/issue-flow.md
+index 9b1ce39..a8c2609 100644
+--- a/docs/issue-flow.md
++++ b/docs/issue-flow.md
+@@ -96,7 +96,7 @@ One check covers all three because they are one question: **did this step do onl
+ 
+ ### Branches are moved only by mechanical steps
+ 
+-**Steps 2, 7 and 8 are the only ones that create, switch or publish a branch, and none of them runs an agent.** Every other step finds the worktree already on the right branch and leaves it there.
++**Steps 2, 6 and 7 are the only ones that create, switch or publish a branch, and none of them runs an agent.** Every other step finds the worktree already on the right branch and leaves it there.
+ 
+ This is a restriction on the agent-driven steps, and it is deliberate. An agent given a shell and a goal will reach for git when it seems expedient — cutting a branch of its own, committing directly to the base, resetting to escape a state it does not understand. Each of those is locally reasonable and globally wrong: a ghost branch strands the work where nothing will find it, and a commit on the base defeats the entire proposal model, which exists so that nothing reaches the mainline unreviewed.
+ 
+@@ -108,7 +108,7 @@ The check costs two reads and turns an unenforceable instruction into an invaria
+ 
+ ### Closing the branch is part of finishing, not of stopping
+ 
+-Step 8 runs when the resolution **completed**. A run that parked, was blocked, or failed leaves the worktree exactly where it stopped, because that state is what someone will resume from or diagnose.
++Step 7 runs when the resolution **completed**. A run that parked, was blocked, or failed leaves the worktree exactly where it stopped, because that state is what someone will resume from or diagnose.
+ 
+ Returning the worktree is not the same act as releasing a claim. An operator who releases mid-work is stepping away and keeps their branch; a resolution that finished is done with it and owes the arena a clean starting point for the next item.
+ 
+@@ -130,15 +130,13 @@ Where a result is stored is the backend's business, not this flow's. What this f
+ 
+ ### Where judgement lives, and why it is worth knowing
+ 
+-Steps 1 through 4 spend an agent turn on a decision. Step 5 spends one on prose about a decision something else made. Step 6 spends none.
++Steps 1, 3, 4 and 5 spend an agent turn on a decision. Steps 2, 6 and 7 spend none.
+ 
+ That distinction is not bookkeeping. A step whose outcome an agent decides is **neither cheap nor reproducible**: it costs a turn, and running it twice on the same input can produce different work. A mechanical step is both — it costs nothing beyond the operations it performs, and it does the same thing every time.
+ 
+-So the flow's cost and its variability both sit almost entirely in steps 1 to 4, and every one of them is there because a decision has to be made. Step 5's turn is the one that buys prose rather than a decision, which is why the fallback exists: when it produces nothing, nothing of consequence is lost.
++So the flow's cost and its variability sit entirely in the four agent-driven steps, and every one of them is there because a decision has to be made.
+ 
+-**Deliverable and record are not the same thing**, and the difference matters most where they diverge. Implement's deliverable is a working change; what is recorded is the patch. Review's deliverable is the corrections themselves — already in the tree — and what is recorded is prose *about* them. A step is not finished when its artifact resolves; it is finished when its deliverable exists.
+-
+-Steps 2 through 4 are the producing phase. Each carries the change further under a different concern, and each may modify the worktree — including the solution itself. The properties that govern them are in `resolution-standalone.md` and are not repeated here.
++**Deliverable and record are not the same thing**, and the difference matters most where they diverge. Implement's deliverable is a working change; what is recorded is the commit carrying it. Review's deliverable is the corrections themselves — already in the tree — and what is recorded is prose *about* them. A step is not finished when its artifact resolves; it is finished when its deliverable exists.
+ 
+ ### 1. Plan
+ 
+@@ -162,9 +160,9 @@ Makes the change work.
+ 
+ It drives the change against the gate in a bounded loop: each failing run re-prompts with the gate's output, until the gate passes or the step's prompt budget is exhausted. Exhaustion parks; it does not fail.
+ 
+-**This step commits**, and it is the only producing step that does. It stages, captures the patch, then commits — in that order, because a patch captured before staging cannot see added files and one captured after committing sees a clean tree.
++**This step commits.** The prompts tell the agent not to — committing mid-loop would bury a half-finished round in history — so the step stages and commits once the gate is green, and its result names that commit.
+ 
+-The result resolves only on a passing gate. A change attached after a failing gate would record work that does not build.
++The result resolves only on a passing gate. A commit recorded after a failing gate would name work that does not build.
+ 
+ ### 4. Review
+ 
+diff --git a/examples/issue/prompts.go b/examples/issue/prompts.go
+index a9fd64d..12bc0fe 100644
+--- a/examples/issue/prompts.go
++++ b/examples/issue/prompts.go
+@@ -90,12 +90,4 @@ TESTS NEEDED on its own line.
+ {{.AnswersBlock}}
+ 
+ {{.AskGuidance}}`,
+-
+-	issue.PromptVerifyImpl: `Summarize the verification run for the pull request body: what was run, what
+-passed, and anything a reviewer should still check by hand. Keep it to a short
+-markdown section — it is read by a human deciding whether to merge.
+-
+-{{.WorkInProgressBlock}}
+-
+-{{.AnswersBlock}}`,
+ }
+diff --git a/issue/build.go b/issue/build.go
+index 1837307..933edb9 100644
+--- a/issue/build.go
++++ b/issue/build.go
+@@ -105,16 +105,22 @@ func (b *builder) contributorFlow(cfg Config) *flow.Flow {
+ 	f := flow.NewFlow("resolve", itemTypes(cfg))
+ 	f.AddStep("write plan", flow.ArtifactId(StepPlan), b.stepPlan,
+ 		flow.StepConfig{Budget: cfg.budgetFor(StepPlan)})
++	f.AddStep("open branch", flow.ArtifactId(StepBranch), b.stepOpenBranch,
++		flow.StepConfig{Budget: cfg.budgetFor(StepBranch)})
+ 	f.AddStep("implement the change", flow.ArtifactId(StepImplement), b.stepImplement,
+ 		flow.StepConfig{Budget: cfg.budgetFor(StepImplement)})
+ 	f.AddStep("review the work", flow.ArtifactId(StepReview), b.stepReview,
+ 		flow.StepConfig{Budget: cfg.budgetFor(StepReview)})
+ 	f.AddStep("analyze coverage", flow.ArtifactId(StepCoverage), b.stepCoverage,
+ 		flow.StepConfig{Budget: cfg.budgetFor(StepCoverage)})
+-	f.AddStep("verify", flow.ArtifactId(StepVerifyImpl), b.stepVerifyImpl,
+-		flow.StepConfig{Budget: cfg.budgetFor(StepVerifyImpl)})
+ 	f.AddSignalStep("create pull request", flow.SignalId(StepOpenPR), b.stepOpenPR,
+ 		flow.StepConfig{Budget: cfg.budgetFor(StepOpenPR)})
++	// Closing the branch needs no "did the resolution complete" test of its
++	// own: DeriveNext returns the first PENDING step in registration order, so
++	// a run that parked, was blocked or failed never reaches a step registered
++	// after the request. The ordering is the condition.
++	f.AddStep("close branch", flow.ArtifactId(StepCloseBranch), b.stepCloseBranch,
++		flow.StepConfig{Budget: cfg.budgetFor(StepCloseBranch)})
+ 	return f
+ }
+ 
+@@ -182,10 +188,17 @@ func itemTypes(cfg Config) []flow.ItemType {
+ func contributorArtifacts() []flow.ArtifactDef {
+ 	return []flow.ArtifactDef{
+ 		flow.Artifact(flow.ArtifactId(StepPlan), flow.ArtifactMarkdown),
+-		flow.Artifact(flow.ArtifactId(StepImplement), flow.ArtifactPatch),
++		// Both branch-cut and implementation name a COMMIT. The deliverable is
++		// what sits on the branch, and a copy of it — a patch — can be empty on
++		// a resumed branch, is read back by nothing, and can disagree with the
++		// thing it copies.
++		flow.Artifact(flow.ArtifactId(StepBranch), flow.ArtifactCommitHash),
++		flow.Artifact(flow.ArtifactId(StepImplement), flow.ArtifactCommitHash),
+ 		flow.Artifact(flow.ArtifactId(StepReview), flow.ArtifactMarkdown),
+ 		flow.Artifact(flow.ArtifactId(StepCoverage), flow.ArtifactMarkdown),
+-		flow.Artifact(flow.ArtifactId(StepVerifyImpl), flow.ArtifactMarkdown),
++		// A flag: closing the branch restores rather than produces, and every
++		// step still owes exactly one result.
++		flow.Artifact(flow.ArtifactId(StepCloseBranch), flow.ArtifactFlag),
+ 	}
+ }
+ 
+diff --git a/issue/issue.go b/issue/issue.go
+index 8184e5b..bd13631 100644
+--- a/issue/issue.go
++++ b/issue/issue.go
+@@ -46,13 +46,17 @@ import (
+ type StepID string
+ 
+ const (
+-	// Contributor step set.
+-	StepPlan       StepID = "plan"
+-	StepImplement  StepID = "implementation"
+-	StepReview     StepID = "review"
+-	StepCoverage   StepID = "coverage"
+-	StepVerifyImpl StepID = "verify-impl"
+-	StepOpenPR     StepID = "pr-open" // signal step
++	// Contributor step set, in the order docs/issue-flow.md defines. The two
++	// branch steps are mechanical and run no agent: one prepares the worktree
++	// and records what the branch was cut from, the other returns the worktree
++	// to the base once the resolution has completed.
++	StepPlan        StepID = "plan"
++	StepBranch      StepID = "branch"
++	StepImplement   StepID = "implementation"
++	StepReview      StepID = "review"
++	StepCoverage    StepID = "coverage"
++	StepOpenPR      StepID = "pr-open" // signal step
++	StepCloseBranch StepID = "branch-closed"
+ 
+ 	// Maintainer step set. Declared here so both roles share one vocabulary;
+ 	// the handlers land with the maintainer slice.
+@@ -67,15 +71,16 @@ const (
+ // more than one prompt. The implement step re-prompts the agent with failing
+ // verify output, and that re-prompt is a slot, not a step of its own.
+ //
+-// Every StepID's value is a valid PromptID; PromptImplementFix is the extra.
++// Every AGENT-DRIVEN step's id is a valid PromptID; PromptImplementFix is the
++// extra. The mechanical steps — the two branch steps and the pull request —
++// have none, because they run no agent and so have nothing to prompt.
+ type PromptID string
+ 
+ const (
+-	PromptPlan       PromptID = "plan"
+-	PromptImplement  PromptID = "implementation"
+-	PromptReview     PromptID = "review"
+-	PromptCoverage   PromptID = "coverage"
+-	PromptVerifyImpl PromptID = "verify-impl"
++	PromptPlan      PromptID = "plan"
++	PromptImplement PromptID = "implementation"
++	PromptReview    PromptID = "review"
++	PromptCoverage  PromptID = "coverage"
+ 
+ 	// PromptImplementFix is the re-prompt issued when the verify gate fails
+ 	// inside the implement step. PromptContext.VerifyOutput carries the
+diff --git a/issue/issue_test.go b/issue/issue_test.go
+index fca2858..42b4a43 100644
+--- a/issue/issue_test.go
++++ b/issue/issue_test.go
+@@ -9,6 +9,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/promise-language/flow"
++	ghbackend "github.com/promise-language/flow/pkg/backend/github"
+ )
+ 
+ // ---------------------------------------------------------------------------
+@@ -419,13 +420,98 @@ func TestBuildApp_ContributorSliceWiresUp(t *testing.T) {
+ 	if app.Preflight == nil {
+ 		t.Error("Preflight is nil — the answer gate was not wired")
+ 	}
+-	wantArtifacts := []flow.ArtifactId{"plan", "implementation", "review", "coverage", "verify-impl"}
++	// Ids AND types. The type is what catches `implementation` reverting to a
++	// patch: the deliverable is the commit on the branch, and a copy of it can
++	// be empty, is read back by nothing, and can disagree with what it copies.
++	wantArtifacts := []flow.ArtifactDef{
++		{Id: "plan", Type: flow.ArtifactMarkdown},
++		{Id: "branch", Type: flow.ArtifactCommitHash},
++		{Id: "implementation", Type: flow.ArtifactCommitHash},
++		{Id: "review", Type: flow.ArtifactMarkdown},
++		{Id: "coverage", Type: flow.ArtifactMarkdown},
++		{Id: "branch-closed", Type: flow.ArtifactFlag},
++	}
+ 	if len(app.Artifacts) != len(wantArtifacts) {
+ 		t.Fatalf("got %d artifacts, want %d", len(app.Artifacts), len(wantArtifacts))
+ 	}
+ 	for i, want := range wantArtifacts {
+-		if app.Artifacts[i].Id != want {
+-			t.Errorf("artifact[%d] = %q, want %q", i, app.Artifacts[i].Id, want)
++		if app.Artifacts[i].Id != want.Id || app.Artifacts[i].Type != want.Type {
++			t.Errorf("artifact[%d] = (%q, %v), want (%q, %v)",
++				i, app.Artifacts[i].Id, app.Artifacts[i].Type, want.Id, want.Type)
++		}
++	}
++}
++
++// The registered step set IS the document's step set: seven steps, in order,
++// each producing the result that is its identity.
++//
++// docs/issue-flow.md § "Contributor steps". The two branch steps and the
++// request are mechanical; there is no verification step, because verify is a
++// command a producing step uses while working rather than a place in a
++// sequence.
++func TestContributorStepSetMatchesTheDocument(t *testing.T) {
++	app, err := BuildApp(context.Background(), Config{
++		BinaryName: "issue", VerifyCmd: []string{"true"},
++		Role: RoleContributor, BaseBranch: "main",
++	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
++	if err != nil {
++		t.Fatalf("BuildApp: %v", err)
++	}
++	want := []struct {
++		name   string
++		result string
++		kind   flow.LifecycleKind
++	}{
++		{"write plan", "plan", flow.LifecycleArtifact},
++		{"open branch", "branch", flow.LifecycleArtifact},
++		{"implement the change", "implementation", flow.LifecycleArtifact},
++		{"review the work", "review", flow.LifecycleArtifact},
++		{"analyze coverage", "coverage", flow.LifecycleArtifact},
++		{"create pull request", "pr-open", flow.LifecycleSignal},
++		{"close branch", "branch-closed", flow.LifecycleArtifact},
++	}
++	items := app.Flows[0].Items()
++	if len(items) != len(want) {
++		t.Fatalf("got %d steps %v, want %d", len(items), app.Flows[0].Steps(), len(want))
++	}
++	for i, w := range want {
++		got := items[i]
++		result := string(got.ArtifactId)
++		if got.Kind == flow.LifecycleSignal {
++			result = string(got.SignalId)
++		}
++		if got.Name != w.name || result != w.result || got.Kind != w.kind {
++			t.Errorf("step[%d] = (%q, %q, %v), want (%q, %q, %v)",
++				i, got.Name, result, got.Kind, w.name, w.result, w.kind)
++		}
++	}
++	// Closing the branch has no "did the resolution complete" test of its own:
++	// DeriveNext returns the first PENDING step in registration order, so a run
++	// that stopped never reaches a step registered after the request.
++	if items[len(items)-1].Name != "close branch" {
++		t.Error("close branch is not last, so a parked or failed run would still restore the worktree")
++	}
++}
++
++// Three ids move across two closed sets in this change — the flow's and the
++// backend's — and today nothing but a live cli.Run notices when they drift.
++// cli.App refuses at startup on a mismatch, which is a failure every operator
++// sees and no test does.
++func TestContributorArtifactsAreInTheGitHubBackendsSchema(t *testing.T) {
++	recordable := map[flow.ArtifactId]flow.ArtifactDef{}
++	for _, def := range (*ghbackend.Backend)(nil).SupportedArtifacts() {
++		recordable[def.Id] = def
++	}
++	for _, declared := range contributorArtifacts() {
++		def, ok := recordable[declared.Id]
++		if !ok {
++			t.Errorf("artifact %q is declared by the contributor flow but the github "+
++				"backend cannot record it — cli.Run refuses at startup", declared.Id)
++			continue
++		}
++		if def.Type != declared.Type {
++			t.Errorf("artifact %q is declared as %v but the backend records it as %v",
++				declared.Id, declared.Type, def.Type)
+ 		}
+ 	}
+ }
+@@ -671,7 +757,7 @@ func TestDefaultPromptsRender(t *testing.T) {
+ func TestEveryPromptSlotHasADefault(t *testing.T) {
+ 	for _, id := range []PromptID{
+ 		PromptPlan, PromptImplement, PromptImplementFix,
+-		PromptReview, PromptCoverage, PromptVerifyImpl,
++		PromptReview, PromptCoverage,
+ 	} {
+ 		if _, ok := defaultPrompts[id]; !ok {
+ 			t.Errorf("no library default for %q", id)
+@@ -908,7 +994,7 @@ func TestPublishedProsePromptsAskForRepositoryRelativePaths(t *testing.T) {
+ 	if err := pc.Context.Render(); err != nil {
+ 		t.Fatalf("Render: %v", err)
+ 	}
+-	for _, id := range []PromptID{PromptPlan, PromptReview, PromptCoverage, PromptVerifyImpl} {
++	for _, id := range []PromptID{PromptPlan, PromptReview, PromptCoverage} {
+ 		t.Run(string(id), func(t *testing.T) {
+ 			got, err := renderPrompt(Config{}, id, pc)
+ 			if err != nil {
+diff --git a/issue/prompt.go b/issue/prompt.go
+index 104218e..5dd0d42 100644
+--- a/issue/prompt.go
++++ b/issue/prompt.go
+@@ -286,15 +286,6 @@ change can see what you did rather than reconstruct it from the diff.
+ 
+ {{.WorkInProgressBlock}}
+ 
+-{{.AnswersBlock}}`,
+-
+-	PromptVerifyImpl: `Summarize the verification run for the pull request body: what was run, what
+-passed, and anything a reviewer should still check by hand.
+-
+-` + repoRelativePaths + `
+-
+-{{.WorkInProgressBlock}}
+-
+ {{.AnswersBlock}}`,
+ 
+ 	PromptRevise: `The text you just produced was NOT published. A guard examines everything this
+diff --git a/issue/steps.go b/issue/steps.go
+index 3303809..23917e0 100644
+--- a/issue/steps.go
++++ b/issue/steps.go
+@@ -56,6 +56,39 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
+ 	return b.resolveMarkdown(ctx, pc, resp.SessionID, resp.LastText)
+ }
+ 
++// stepOpenBranch puts the worktree on this item's branch and records the commit
++// it was cut from.
++//
++// Mechanical, and its own step for three reasons. A branch that fails to open —
++// a dirty tree, a name already taken, a base that cannot be resolved — fails
++// HERE, naming its own cause, rather than surfacing as an implement failure that
++// sends a reader to look at the agent. Implement's concern stays "make it work"
++// rather than "prepare a workspace and then make it work". And every step after
++// this one commits, so the branch has to exist before any of them runs.
++//
++// It records HEAD after the checkout, not the base branch's tip. On a resume the
++// two differ: a branch cut by an earlier attempt that died before resolving is
++// still empty, and its HEAD is the base as it stood when the branch was cut.
++// Reading the base branch today would record a commit the branch was never cut
++// from — and that record is exactly what makes "what is this change relative to"
++// answerable later against a base that has since moved.
++func (b *builder) stepOpenBranch(ctx flow.StepCtx) error {
++	wt, err := ctx.Worktree()
++	if err != nil {
++		return err
++	}
++	if _, _, err := b.ensureBranch(ctx, wt); err != nil {
++		// Named, so the message stands on its own wherever it is read: what
++		// could not be opened, and why. That is the whole of "fails as itself".
++		return fmt.Errorf("could not open branch %q: %w", b.branchName(ctx), err)
++	}
++	head, err := wt.RevParse(ctx.Context(), "HEAD")
++	if err != nil {
++		return err
++	}
++	return ctx.ResolveCommitHash(head)
++}
++
+ // stepImplement makes the change and drives it to a passing gate.
+ //
+ // This is a loop, not a single agent turn, and that is the point: an agent's
+@@ -65,8 +98,8 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
+ // surfaces to the operator as a budget park naming every exhausted axis, not as
+ // a silent give-up.
+ //
+-// The artifact resolves ONLY on a green gate. A patch attached after a failing
+-// verify is unverified work that a resume would apply on top of a broken tree.
++// The artifact resolves ONLY on a green gate. A commit recorded after a failing
++// verify would name work that does not build.
+ func (b *builder) stepImplement(ctx flow.StepCtx) error {
+ 	pc, err := b.promptContext(ctx)
+ 	if err != nil {
+@@ -78,13 +111,22 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
+ 	if plan, ok := pc.PriorMarkdown(StepPlan); !ok || strings.TrimSpace(plan) == "" {
+ 		return fmt.Errorf("plan artifact missing, unresolved, or empty — refusing to implement without a plan")
+ 	}
++	// The commit the branch was cut from, as the branch step recorded it. Same
++	// shape as the plan refusal above, and for the same reason: without it the
++	// empty-branch check below has nothing to compare against.
++	baseSHA, ok := ctx.CommitHash(flow.ArtifactId(StepBranch))
++	if !ok || strings.TrimSpace(baseSHA) == "" {
++		return fmt.Errorf("branch artifact missing, unresolved, or empty — " +
++			"refusing to implement without the commit the branch was cut from")
++	}
+ 
+ 	wt, err := ctx.Worktree()
+ 	if err != nil {
+ 		return err
+ 	}
+-	base, _, err := b.ensureBranch(ctx, wt)
+-	if err != nil {
++	// The branch must already exist. Cutting one here is the failure the open
++	// branch step exists to report as itself.
++	if err := b.onClaimBranch(ctx); err != nil {
+ 		return err
+ 	}
+ 
+@@ -139,75 +181,51 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
+ 		}
+ 	}
+ 
+-	// The commit the diff is taken against. Captured before the commit,
+-	// because that is what the diff is relative to: pointing BaseSHA at the
+-	// commit that CONTAINS the hunks would make `checkout BaseSHA && apply`
+-	// fail, since they are already there.
+-	baseSHA, err := wt.RevParse(ctx.Context(), "HEAD")
+-	if err != nil {
+-		return err
+-	}
+-
+-	// Stage, capture, then commit — in that order, and the order is the whole
+-	// point. CapturePatch is a diff against HEAD: before staging it cannot see
+-	// untracked files, so it would attach a diff missing every file the change
+-	// ADDED while looking complete; after committing it sees a clean tree and
+-	// returns nothing at all. Between the two it sees everything.
+-	if err := wt.Stage(ctx.Context()); err != nil {
+-		return err
+-	}
+-	patch, err := wt.CapturePatch(ctx.Context())
+-	if err != nil {
+-		return err
+-	}
+ 	// The prompts tell the agent NOT to commit — committing mid-loop would bury
+ 	// a half-finished round in history — which makes it this handler's job.
+-	// Nothing else in the flow commits, so without this the branch pushed at PR
+-	// time carries no commits and `gh pr create` fails with "No commits
+-	// between ...".
+-	if err := wt.Commit(ctx.Context(), b.commitMessage(ctx)); err != nil {
++	// Nothing else in the flow commits before the request, so without this the
++	// branch pushed at PR time carries no commits and `gh pr create` fails with
++	// "No commits between ...".
++	//
++	// The same helper every other producing step records through, so implement
++	// also gets the dirty-tree guard: the invariant is the same one step later,
++	// and one copy of it is what keeps the two from drifting.
++	if err := b.recordStepWork(ctx, wt, "implement", b.commitMessage(ctx)); err != nil {
+ 		return err
+ 	}
+ 	// Commit is a deliberate no-op when nothing is staged, so a nil return is
+ 	// not evidence that anything was recorded. Ask the question that actually
+-	// matters instead: does this branch carry anything the base does not?
++	// matters instead: does this branch carry anything the commit it was cut
++	// from does not?
+ 	//
+ 	// Comparing HEAD before and after the commit would only cover the
+ 	// invocation that made it — a resumed branch whose work was committed by an
+ 	// earlier run that then died would read as "the agent did nothing" and
+ 	// deadlock the step with the change sitting right there. Comparing against
+-	// the base covers both, and catches an empty branch here rather than three
+-	// agent turns later at "No commits between ...".
++	// the RECORDED base covers both, and catches an empty branch here rather
++	// than three agent turns later at "No commits between ...".
+ 	//
+-	// One case slips through: a branch cut by an EARLIER run, still empty, on a
+-	// base that has advanced since. Its HEAD is the old base, which no longer
+-	// equals the current one, so this reads as work. Closing that needs an
+-	// ahead-count (`rev-list --count base..HEAD`) rather than an equality, and
+-	// the Worktree surface has no such call. The failure is the pre-existing
+-	// one — `gh pr create` refusing an empty branch — not a wrong result.
++	// Recorded rather than re-read, which is what closes the case a base-branch
++	// lookup misses: a branch cut by an earlier run, still empty, on a base that
++	// has advanced since. Its HEAD is the base as it stood at the cut, which no
++	// longer equals the base branch's tip — so comparing against today's base
++	// would read an empty branch as work.
+ 	head, err := wt.RevParse(ctx.Context(), "HEAD")
+ 	if err != nil {
+ 		return err
+ 	}
+-	baseBranchSHA, err := wt.RevParse(ctx.Context(), base)
+-	if err != nil {
+-		return err
+-	}
+-	if head == baseBranchSHA {
+-		return fmt.Errorf("branch %q carries no commits beyond %q — the agent changed nothing, "+
+-			"so there is nothing to open a pull request from", b.branchName(ctx), base)
++	if head == baseSHA {
++		return fmt.Errorf("branch %q carries no commits beyond %s, the commit it was cut from — "+
++			"the agent changed nothing, so there is nothing to open a pull request from",
++			b.branchName(ctx), baseSHA)
+ 	}
+ 
+-	// An empty diff here is legal and expected on one path: a resumed branch
+-	// whose work an earlier run already committed has a clean tree, so there is
+-	// nothing left to capture. The branch-vs-base check above has already
+-	// established the work exists; the artifact records that it lives in the
+-	// branch rather than in these bytes.
+-	return ctx.ResolvePatch(flow.PatchBody{
+-		Diff:       patch,
+-		BaseSHA:    baseSHA,
+-		BaseBranch: base,
+-	})
++	// The commit, not a copy of it. A resumed branch whose work an earlier run
++	// already committed has a clean tree, so a patch captured here would be
++	// legitimately empty — a record that may be empty, that nothing reads back,
++	// and that can disagree with what it copies. A commit names exactly one
++	// state and is never ambiguous.
++	return ctx.ResolveCommitHash(head)
+ }
+ 
+ // recordStepWork commits whatever the calling step changed and refuses to
+@@ -221,11 +239,15 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
+ //
+ // Commit is a deliberate no-op when nothing is staged, so a step that changed
+ // nothing records nothing and costs one call.
+-func (b *builder) recordStepWork(ctx flow.StepCtx, wt flow.Worktree, label string) error {
++//
++// The message is the caller's rather than built here: only the implement commit
++// carries the closes-reference, and a second commit repeating it would read as a
++// second resolution of the same item.
++func (b *builder) recordStepWork(ctx flow.StepCtx, wt flow.Worktree, label, msg string) error {
+ 	if err := wt.Stage(ctx.Context()); err != nil {
+ 		return err
+ 	}
+-	if err := wt.Commit(ctx.Context(), fmt.Sprintf("%s: %s", label, b.itemLabel(ctx))); err != nil {
++	if err := wt.Commit(ctx.Context(), msg); err != nil {
+ 		return err
+ 	}
+ 	// Not redundant with the commit: staging cannot pick up what a backend
+@@ -279,7 +301,8 @@ func (b *builder) producingMarkdownStep(ctx flow.StepCtx, id PromptID, label str
+ 	if strings.TrimSpace(resp.LastText) == "" {
+ 		return fmt.Errorf("agent returned nothing for %q", id)
+ 	}
+-	if err := b.recordStepWork(ctx, wt, label); err != nil {
++	if err := b.recordStepWork(ctx, wt, label,
++		fmt.Sprintf("%s: %s", label, b.itemLabel(ctx))); err != nil {
+ 		return err
+ 	}
+ 	return b.resolveMarkdown(ctx, pc, resp.SessionID, resp.LastText)
+@@ -301,47 +324,9 @@ func (b *builder) stepCoverage(ctx flow.StepCtx) error {
+ 	return b.producingMarkdownStep(ctx, PromptCoverage, "coverage")
+ }
+ 
+-// stepVerifyImpl records the passing verification for the pull request.
+-//
+-// The gate is re-run here rather than trusted from the implement step: review
+-// and coverage may have changed the tree in between, and this artifact is the
+-// evidence a reviewer reads.
+-func (b *builder) stepVerifyImpl(ctx flow.StepCtx) error {
+-	wt, err := ctx.Worktree()
+-	if err != nil {
+-		return err
+-	}
+-	if err := b.onClaimBranch(ctx); err != nil {
+-		return err
+-	}
+-	if verr := wt.Verify(ctx.Context()); verr != nil {
+-		// Same reasoning as the implement loop: a ParkBlocked nothing refuses
+-		// would just be re-dispatched next cycle.
+-		return fmt.Errorf("verify failed on the branch as it now stands: %s", verifyTail(verr))
+-	}
+-	pc, err := b.promptContext(ctx)
+-	if err != nil {
+-		return err
+-	}
+-	body, err := renderPrompt(b.cfg, PromptVerifyImpl, pc)
+-	if err != nil {
+-		return err
+-	}
+-	resp, err := b.runAgent(ctx, flow.AgentRequest{Prompt: body})
+-	if err != nil {
+-		return err
+-	}
+-	if strings.TrimSpace(resp.LastText) == "" {
+-		// The gate passing is the fact worth recording; the summary is a
+-		// convenience. Don't fail the step over prose.
+-		return b.resolveMarkdown(ctx, pc, resp.SessionID,
+-			fmt.Sprintf("verify passed (%s)", strings.Join(b.cfg.VerifyCmd, " ")))
+-	}
+-	return b.resolveMarkdown(ctx, pc, resp.SessionID, resp.LastText)
+-}
+-
+-// stepOpenPR opens the pull request. The pr-open signal is set by the backend
+-// as a side effect of Open succeeding, not by this handler.
++// stepOpenPR measures the branch and, if the measurement is acceptable, opens
++// the pull request. The pr-open signal is set by the backend as a side effect of
++// Open succeeding, not by this handler.
+ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
+ 	wt, err := ctx.Worktree()
+ 	if err != nil {
+@@ -386,7 +371,18 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
+ 		return err
+ 	}
+ 
+-	body, err := b.pullRequestBody(ctx)
++	// The gate, after recording and before the push. After, because it must
++	// measure the branch exactly as it will be proposed — recording moves the
++	// tree, so measuring first would establish something about a state nobody
++	// will review. Before, because a branch that cannot pass must not leave the
++	// machine: the maintainer runs the same gate, and a request that fails it
++	// spends a reviewer's attention on a change that was never going to land.
++	verdict, err := b.runIntegrationGate(ctx, wt)
++	if err != nil {
++		return err
++	}
++
++	body, err := b.pullRequestBody(ctx, verdict)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -394,6 +390,63 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
+ 	return err
+ }
+ 
++// runIntegrationGate measures the branch and asks the project whether the
++// measurement is acceptable.
++//
++// Each way this can stop returns an ERROR rather than a park, for the reason
++// already recorded on the implement loop: no preflight refuses a ParkBlocked
++// item, so a park here is re-dispatched next cycle and spends the gate again.
++//
++// The three failures are deliberately worded apart, because they belong to
++// different people and only one of them is about the change:
++//
++//   - RunGate errored: no gate ran and no outcome exists. Never read as the
++//     change failing.
++//   - The run measured nothing: the gate timed out, could not start, died, or
++//     broke its contract. Still nothing about the change.
++//   - Judge errored: no verdict exists. Explicitly not a refusal — an
++//     unanswerable judge says nothing about the measurement, and reading it as
++//     "not acceptable" would refuse a sound change over the project's own
++//     broken tooling.
++//
++// Only the fourth — a verdict that is a refusal — is about the change, and it
++// is a perfectly good answer arriving with a nil error.
++func (b *builder) runIntegrationGate(ctx flow.StepCtx, wt flow.Worktree) (flow.GateVerdict, error) {
++	ctx.Notify("", fmt.Sprintf("running the %s gate on the branch as it will be proposed", flow.GateIntegration))
++	run, err := wt.RunGate(ctx.Context(), flow.GateIntegration)
++	if err != nil {
++		return flow.GateVerdict{}, fmt.Errorf(
++			"no %s gate ran, so nothing was measured about this branch — this is not the "+
++				"change failing: %w", flow.GateIntegration, err)
++	}
++	if run.Outcome != flow.OutcomeMeasured {
++		return flow.GateVerdict{}, fmt.Errorf(
++			"the %s gate reports %q, so nothing was measured about this change — this is not "+
++				"the change failing%s", flow.GateIntegration, run.Outcome, detailSuffix(run.Detail))
++	}
++	verdict, err := wt.Judge(ctx.Context(), run)
++	if err != nil {
++		return flow.GateVerdict{}, fmt.Errorf(
++			"the %s gate measured this branch but no verdict exists, which is not a refusal — "+
++				"the project's judging layer could not answer: %w", flow.GateIntegration, err)
++	}
++	if !verdict.Acceptable {
++		return flow.GateVerdict{}, fmt.Errorf(
++			"the %s gate's verdict on this branch is not acceptable, so it is not proposed%s",
++			flow.GateIntegration, detailSuffix(verdict.Detail))
++	}
++	return verdict, nil
++}
++
++// detailSuffix appends prose a runner or a judge wrote for a person, when there
++// is any. Nothing keys on it, so an empty one costs the message nothing.
++func detailSuffix(detail string) string {
++	if d := strings.TrimSpace(detail); d != "" {
++		return ": " + d
++	}
++	return ""
++}
++
+ // recordOutstanding commits whatever the post-implement steps left in the tree,
+ // and refuses to continue if anything survives that.
+ //
+@@ -447,6 +500,41 @@ func (b *builder) followUpCommitMessage(ctx flow.StepCtx) string {
+ 	return fmt.Sprintf("Review and coverage on #%s", ctx.Item().ID)
+ }
+ 
++// stepCloseBranch returns the worktree to the base branch.
++//
++// It runs only when the resolution completed: DeriveNext dispatches the first
++// PENDING step in registration order, and this one is registered after the
++// request, so a run that parked, was blocked or failed never reaches it. That is
++// the point — the state a stopped run left is what someone resumes from or
++// diagnoses.
++//
++// It does NOT delete the item's branch. The branch carries the request, and the
++// request outlives the resolution that opened it.
++func (b *builder) stepCloseBranch(ctx flow.StepCtx) error {
++	wt, err := ctx.Worktree()
++	if err != nil {
++		return err
++	}
++	base, err := b.baseBranch(ctx.Context())
++	if err != nil {
++		return err
++	}
++	// Branch CREATES when the name is absent, so the created flag is the check
++	// rather than decoration: without it, a worktree missing the base branch
++	// silently gets a new branch of that name pointing at this item's tip, and
++	// every later item would be cut from the wrong place.
++	created, err := wt.Branch(ctx.Context(), base, "")
++	if err != nil {
++		return err
++	}
++	if created {
++		return fmt.Errorf("base branch %q is not in this worktree, so the worktree cannot be "+
++			"returned to it — a branch of that name now points at this item's work and has "+
++			"to be resolved by hand", base)
++	}
++	return ctx.ResolveFlag()
++}
++
+ // ---------------------------------------------------------------------------
+ // Shared helpers.
+ // ---------------------------------------------------------------------------
+@@ -611,8 +699,10 @@ func refusedRecord(refused flow.ErrDisclosureRefused, body string) string {
+ // promptContext builds the render context, exposing every upstream contributor
+ // artifact so a project's template can reference whichever it needs.
+ func (b *builder) promptContext(ctx flow.StepCtx) (PromptContext, error) {
++	// The branch step is not here: implement reads the commit it recorded
++	// through ctx.CommitHash, and no prompt has anything to say about it.
+ 	pc, err := newPromptContext(ctx, b.cfg, b.role, []StepID{
+-		StepPlan, StepImplement, StepReview, StepCoverage, StepVerifyImpl,
++		StepPlan, StepImplement, StepReview, StepCoverage,
+ 	})
+ 	if err != nil {
+ 		return PromptContext{}, err
+@@ -709,11 +799,11 @@ func (b *builder) ensureBranch(ctx flow.StepCtx, wt flow.Worktree) (base string,
+ // onClaimBranch is ensureBranch for the steps that read the implementation
+ // rather than produce it.
+ //
+-// It REFUSES when the branch had to be created. These steps run after the
+-// implement step, so a missing claim branch means the work is not here — a
++// It REFUSES when the branch had to be created. These steps run after the open
++// branch step, so a missing claim branch means the work is not here — a
+ // re-cloned or reset worktree, most likely. Cutting a fresh branch off the base
+ // and carrying on would have review and coverage analyse an empty change, and
+-// verify-impl resolve a "verify passed" artifact that is evidence for nothing.
++// the request propose one.
+ func (b *builder) onClaimBranch(ctx flow.StepCtx) error {
+ 	wt, err := ctx.Worktree()
+ 	if err != nil {
+@@ -761,8 +851,9 @@ func (b *builder) branchName(ctx flow.StepCtx) string {
+ 	return "flow/issue-" + ctx.Item().ID
+ }
+ 
+-// pullRequestBody assembles the PR description from what the flow produced.
+-func (b *builder) pullRequestBody(ctx flow.StepCtx) (string, error) {
++// pullRequestBody assembles the PR description from what the flow produced and
++// what the gate established.
++func (b *builder) pullRequestBody(ctx flow.StepCtx, verdict flow.GateVerdict) (string, error) {
+ 	var sb strings.Builder
+ 	// Emit a heading only when there is something under it. A resolved
+ 	// artifact can still carry an empty body — the backend stores bodies out
+@@ -791,11 +882,35 @@ func (b *builder) pullRequestBody(ctx flow.StepCtx) (string, error) {
+ 	// unaided why it is there.
+ 	section("Review", StepReview)
+ 	section("Coverage", StepCoverage)
+-	section("Verification", StepVerifyImpl)
++	// The gate's result travels with the request. This is the whole of
++	// "recorded, so a reader knows what was established rather than taking it on
++	// trust": the body is where a reader meets it, and it carries the envelope
++	// the judge was handed as well as the answer, so the verdict can be
++	// recomputed by whoever was not there.
++	sb.WriteString(gateSection(verdict))
+ 	fmt.Fprintln(&sb, closesRef(ctx.Item().ID))
+ 	return sb.String(), nil
+ }
+ 
++// gateSection renders what the gate established: which gate, what the runner
++// observed, what the project's judge answered, and the envelope it answered
++// about.
++func gateSection(v flow.GateVerdict) string {
++	var sb strings.Builder
++	sb.WriteString("## Gate\n\n")
++	fmt.Fprintf(&sb, "- gate: `%s`\n", v.Run.Gate)
++	fmt.Fprintf(&sb, "- outcome: `%s`\n", v.Run.Outcome)
++	fmt.Fprintf(&sb, "- acceptable: `%t`\n", v.Acceptable)
++	if d := strings.TrimSpace(v.Detail); d != "" {
++		fmt.Fprintf(&sb, "- verdict: %s\n", d)
++	}
++	if envelope := strings.TrimSpace(string(v.Run.Stdout)); envelope != "" {
++		fmt.Fprintf(&sb, "\n```\n%s\n```\n", envelope)
++	}
++	sb.WriteString("\n")
++	return sb.String()
++}
++
+ // verifyTail reduces a failing verify error to the part worth re-prompting on.
+ //
+ // flow.Worktree.Validate returns only an error, with the combined output
+diff --git a/issue/steps_test.go b/issue/steps_test.go
+index 711d0c6..d718cbb 100644
+--- a/issue/steps_test.go
++++ b/issue/steps_test.go
+@@ -40,29 +40,66 @@ type fakeWorktree struct {
+ 	captured    []byte
+ 	// dirty models work appearing in the tree AFTER a commit — what the review
+ 	// and coverage steps do. A Commit that lands clears it, as git does; a
+-	// Commit that lands nothing (noCommit) leaves it, as git also does.
++	// Commit that lands nothing (noCommit) leaves it, as git also does. It also
++	// blocks a checkout, as git does.
+ 	dirty []byte
+ 	// gatesRun records which gates were asked for; gateOutcome names what the
+ 	// runner observed of the ones that did not simply measure.
+ 	gatesRun    []flow.GateName
+ 	gateOutcome map[flow.GateName]flow.GateOutcome
++	// envelope is what the gate printed on stdout — what the judge is handed
++	// and what travels with the verdict.
++	envelope []byte
++	// judgeErr models a judging layer that cannot answer: no verdict exists,
++	// which is never a refusal. judgeRefuses models one that answers "no",
++	// which is a perfectly good verdict.
++	judgeErr     error
++	judgeRefuses bool
++	judgeDetail  string
++	// calls is every worktree operation in order. Some properties here are
++	// about ORDER rather than occurrence — the gate must measure the branch as
++	// it will be proposed, which is a statement about when it ran.
++	calls []string
+ }
+ 
+ func newFakeWorktree() *fakeWorktree {
+ 	return &fakeWorktree{exists: map[string]bool{}, head: "base", base: "base"}
+ }
+ 
++// testBranch is the claim branch for the item every test here uses.
++const testBranch = "flow/issue-42"
++
++// resumedWorktree is what every step after "open branch" finds: the item's
++// branch exists and is checked out.
++func resumedWorktree() *fakeWorktree {
++	wt := newFakeWorktree()
++	wt.exists[testBranch] = true
++	wt.branch = testBranch
++	return wt
++}
++
+ func (w *fakeWorktree) Branch(_ context.Context, name, base string) (bool, error) {
++	w.calls = append(w.calls, "branch:"+name)
++	if w.branch == name {
++		return false, nil // already there; git does not look at the tree
++	}
++	// git refuses to switch branches over a dirty tree. Modelling it is what
++	// makes a failed checkout the branch step's own failure rather than
++	// something the next step is blamed for.
++	if len(w.dirty) > 0 {
++		return false, errors.New("worktree is dirty; cannot switch branches")
++	}
+ 	w.branch = name
+ 	if w.exists[name] {
+ 		return false, nil
+ 	}
+ 	w.exists[name] = true
+-	w.head = w.base // a fresh branch starts at the base
++	w.head = w.base // a fresh branch starts at the base branch's tip
+ 	return true, nil
+ }
+ func (w *fakeWorktree) CurrentBranch(context.Context) (string, error) { return w.branch, nil }
+ func (w *fakeWorktree) Commit(context.Context, string) error {
++	w.calls = append(w.calls, "commit")
+ 	if w.noCommit {
+ 		return nil // git's own behavior with nothing staged
+ 	}
+@@ -88,21 +125,37 @@ func (w *fakeWorktree) RunGate(_ context.Context, name flow.GateName) (flow.Gate
+ 	if !name.Valid() {
+ 		return flow.GateRun{}, fmt.Errorf("fake: %q is not a declared gate name", name)
+ 	}
++	w.calls = append(w.calls, "gate:"+string(name))
+ 	w.gatesRun = append(w.gatesRun, name)
+ 	outcome, ok := w.gateOutcome[name]
+ 	if !ok {
+ 		outcome = flow.OutcomeMeasured
+ 	}
+-	return flow.GateRun{Gate: name, Outcome: outcome, ExitCode: -1}, nil
++	run := flow.GateRun{Gate: name, Outcome: outcome, ExitCode: -1}
++	if outcome == flow.OutcomeMeasured {
++		run.Stdout = w.envelope
++	} else {
++		run.Detail = fmt.Sprintf("the runner observed %s", outcome)
++	}
++	return run, nil
+ }
+ 
+ // Judge answers about a measured run and refuses anything else — the project
+ // holds the thresholds, so nothing here computes one.
+ func (w *fakeWorktree) Judge(_ context.Context, run flow.GateRun) (flow.GateVerdict, error) {
++	w.calls = append(w.calls, "judge:"+string(run.Gate))
+ 	if run.Outcome != flow.OutcomeMeasured {
+ 		return flow.GateVerdict{}, fmt.Errorf("fake: %q measured nothing, so there is nothing to judge", run.Gate)
+ 	}
+-	return flow.GateVerdict{Run: run, Acceptable: true, Thresholds: []byte("{}")}, nil
++	if w.judgeErr != nil {
++		return flow.GateVerdict{}, w.judgeErr
++	}
++	return flow.GateVerdict{
++		Run:        run,
++		Acceptable: !w.judgeRefuses,
++		Thresholds: []byte("{}"),
++		Detail:     w.judgeDetail,
++	}, nil
+ }
+ func (w *fakeWorktree) CapturePatch(context.Context) ([]byte, error) {
+ 	// Models `git diff HEAD`: untracked work is invisible until staged, and
+@@ -130,9 +183,20 @@ func (w *fakeWorktree) RevParse(_ context.Context, rev string) (string, error) {
+ }
+ func (w *fakeWorktree) Request() flow.RequestManager { return w }
+ func (w *fakeWorktree) Open(_ context.Context, base, title, body string) (string, error) {
++	w.calls = append(w.calls, "open")
+ 	w.opened, w.openBody = true, body
+ 	return "https://example.invalid/pr/1", nil
+ }
++
++// callIndex reports where an operation appears in the ordered log, or -1.
++func (w *fakeWorktree) callIndex(op string) int {
++	for i, c := range w.calls {
++		if c == op {
++			return i
++		}
++	}
++	return -1
++}
+ func (w *fakeWorktree) Merge(context.Context, string) error             { return nil }
+ func (w *fakeWorktree) Mergeable(context.Context, string) (bool, error) { return true, nil }
+ 
+@@ -165,12 +229,24 @@ func (c *fakeCtx) Flow() string             { return "resolve" }
+ func (c *fakeCtx) StepName() string         { return "step" }
+ func (c *fakeCtx) Result() flow.ArtifactId  { return "implementation" }
+ func (c *fakeCtx) Item() flow.Item          { return c.item }
++
++// Artifact filters unresolved records, as the real StepCtx does: a seeded but
++// unresolved entry is not a value a step may read.
+ func (c *fakeCtx) Artifact(id flow.ArtifactId) (flow.ArtifactRecord, bool) {
+ 	rec, ok := c.arts[id]
++	if !ok || !rec.Resolved {
++		return flow.ArtifactRecord{}, false
++	}
+ 	return rec, ok
+ }
+-func (c *fakeCtx) Flag(flow.ArtifactId) (bool, bool)         { return false, false }
+-func (c *fakeCtx) CommitHash(flow.ArtifactId) (string, bool) { return "", false }
++func (c *fakeCtx) Flag(flow.ArtifactId) (bool, bool) { return false, false }
++func (c *fakeCtx) CommitHash(id flow.ArtifactId) (string, bool) {
++	rec, ok := c.Artifact(id)
++	if !ok || rec.Type != flow.ArtifactCommitHash {
++		return "", false
++	}
++	return rec.CommitHash, true
++}
+ func (c *fakeCtx) Markdown(id flow.ArtifactId) (string, bool) {
+ 	rec, ok := c.arts[id]
+ 	if !ok || rec.Type != flow.ArtifactMarkdown {
+@@ -183,8 +259,14 @@ func (c *fakeCtx) File(flow.ArtifactId) (string, []byte, bool)  { return "", nil
+ func (c *fakeCtx) Patch(flow.ArtifactId) (flow.PatchBody, bool) { return flow.PatchBody{}, false }
+ func (c *fakeCtx) Signal(flow.SignalId) bool                    { return false }
+ func (c *fakeCtx) ParkedOn() *flow.ParkRequest                  { return c.park }
+-func (c *fakeCtx) ResolveFlag() error                           { c.didResolve = true; return nil }
+-func (c *fakeCtx) ResolveCommitHash(string) error               { c.didResolve = true; return nil }
++func (c *fakeCtx) ResolveFlag() error {
++	c.didResolve, c.resolved = true, flow.ArtifactBody{Type: flow.ArtifactFlag}
++	return nil
++}
++func (c *fakeCtx) ResolveCommitHash(sha string) error {
++	c.didResolve, c.resolved = true, flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: sha}
++	return nil
++}
+ func (c *fakeCtx) ResolveMarkdown(b string) error {
+ 	c.resolves = append(c.resolves, b)
+ 	if n := len(c.resolves) - 1; n < len(c.resolveErrs) && c.resolveErrs[n] != nil {
+@@ -270,17 +352,93 @@ func testBuilder(t *testing.T) *builder {
+ 	return b
+ }
+ 
++// ctxWithPlan is an item whose upstream mechanical and prose results are in
++// place: the plan, and the commit the branch was cut from.
+ func ctxWithPlan(wt *fakeWorktree, agent flow.Agent) *fakeCtx {
+ 	return &fakeCtx{
+ 		item:  flow.Item{ID: "42", Type: "task", Title: "widget is broken"},
+ 		wt:    wt,
+ 		agent: agent,
+ 		arts: map[flow.ArtifactId]flow.ArtifactRecord{
+-			"plan": {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "the plan"},
++			"plan":   {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "the plan"},
++			"branch": {Resolved: true, Type: flow.ArtifactCommitHash, CommitHash: "base"},
+ 		},
+ 	}
+ }
+ 
++// ---------------------------------------------------------------------------
++// stepOpenBranch.
++// ---------------------------------------------------------------------------
++
++// The record is what makes "what is this change relative to" answerable later.
++// It is the branch's own HEAD, taken after the checkout.
++func TestStepOpenBranch_RecordsTheCommitTheBranchWasCutFrom(t *testing.T) {
++	wt := newFakeWorktree()
++	ctx := ctxWithPlan(wt, &scriptedAgent{})
++
++	if err := testBuilder(t).stepOpenBranch(ctx); err != nil {
++		t.Fatalf("stepOpenBranch: %v", err)
++	}
++	if wt.branch != testBranch {
++		t.Errorf("worktree is on %q, want the claim branch %q", wt.branch, testBranch)
++	}
++	if ctx.resolved.Type != flow.ArtifactCommitHash {
++		t.Fatalf("resolved a %v, want a commit hash", ctx.resolved.Type)
++	}
++	if ctx.resolved.CommitHash != "base" {
++		t.Errorf("recorded %q, want the commit the branch sits on", ctx.resolved.CommitHash)
++	}
++	// Mechanical: no prose, and no agent turn.
++	if len(ctx.resolves) != 0 {
++		t.Errorf("resolved markdown %v — this step produces a commit, not prose", ctx.resolves)
++	}
++	if agent, ok := ctx.agent.(*scriptedAgent); ok && agent.calls != 0 {
++		t.Errorf("agent ran %d times in a mechanical step", agent.calls)
++	}
++}
++
++// The failure this step exists to relocate. A dirty tree is a branch that could
++// not be opened; before this step existed it surfaced as an implement failure
++// and sent a reader to look at the agent.
++func TestStepOpenBranch_ADirtyTreeFailsHere(t *testing.T) {
++	wt := newFakeWorktree()
++	wt.dirty = []byte("diff --git a/left-behind.go b/left-behind.go\n")
++	ctx := ctxWithPlan(wt, &scriptedAgent{})
++
++	err := testBuilder(t).stepOpenBranch(ctx)
++	if err == nil {
++		t.Fatal("want the checkout's failure surfaced by this step")
++	}
++	// It names the branch it could not open and carries the cause, so nothing
++	// about the message sends a reader to an agent that never ran.
++	if !strings.Contains(err.Error(), testBranch) || !strings.Contains(err.Error(), "dirty") {
++		t.Errorf("err = %v, want it to name the branch and the dirty tree", err)
++	}
++	if ctx.didResolve {
++		t.Error("recorded a branch that was never opened")
++	}
++	if agent, ok := ctx.agent.(*scriptedAgent); ok && agent.calls != 0 {
++		t.Errorf("agent ran %d times before the workspace was prepared", agent.calls)
++	}
++}
++
++// Resumed on a branch an earlier attempt cut and then died on. Its HEAD is the
++// base as it stood at the cut, and that is what must be recorded — reading the
++// base branch today would record a commit the branch was never cut from.
++func TestStepOpenBranch_ResumedBranchRecordsItsOwnHead(t *testing.T) {
++	wt := resumedWorktree()
++	wt.head = "cut-from"      // where the earlier attempt cut it
++	wt.base = "base-moved-on" // the base branch has advanced since
++	ctx := ctxWithPlan(wt, &scriptedAgent{})
++
++	if err := testBuilder(t).stepOpenBranch(ctx); err != nil {
++		t.Fatalf("stepOpenBranch on a resumed branch: %v", err)
++	}
++	if ctx.resolved.CommitHash != "cut-from" {
++		t.Errorf("recorded %q, want the commit the branch actually sits on", ctx.resolved.CommitHash)
++	}
++}
++
+ // ---------------------------------------------------------------------------
+ // stepImplement.
+ // ---------------------------------------------------------------------------
+@@ -289,7 +447,7 @@ func TestStepImplement_RefusesWhenTheBranchGainedNothing(t *testing.T) {
+ 	// Commit is a no-op with nothing staged, so its nil return proves nothing.
+ 	// Catching it here beats failing three agent turns later at `gh pr create`
+ 	// with "No commits between ...".
+-	wt := newFakeWorktree()
++	wt := resumedWorktree()
+ 	wt.noCommit = true
+ 	ctx := ctxWithPlan(wt, &scriptedAgent{})
+ 
+@@ -302,15 +460,37 @@ func TestStepImplement_RefusesWhenTheBranchGainedNothing(t *testing.T) {
+ 	}
+ }
+ 
++// The case an equality against today's BASE BRANCH cannot catch: a branch cut by
++// an earlier run, still empty, on a base that has moved since. Its HEAD no
++// longer equals the base branch's tip, so the old check read it as work and let
++// an empty branch travel to "No commits between ...". Against the RECORDED base
++// it is what it is: nothing.
++func TestStepImplement_RefusesAnEmptyBranchWhoseBaseHasMovedOn(t *testing.T) {
++	wt := resumedWorktree()
++	wt.head = "cut-from"      // the branch is still where it was cut
++	wt.base = "base-moved-on" // ...but the base branch is not
++	wt.noCommit = true        // and the agent changed nothing
++	ctx := ctxWithPlan(wt, &scriptedAgent{})
++	ctx.arts["branch"] = flow.ArtifactRecord{
++		Resolved: true, Type: flow.ArtifactCommitHash, CommitHash: "cut-from"}
++
++	err := testBuilder(t).stepImplement(ctx)
++	if err == nil || !strings.Contains(err.Error(), "no commits beyond") {
++		t.Fatalf("err = %v, want a refusal — the branch carries nothing", err)
++	}
++	if ctx.didResolve {
++		t.Error("resolved an implementation for an empty branch whose base had moved")
++	}
++}
++
+ func TestStepImplement_AcceptsWorkCommittedByAnEarlierRun(t *testing.T) {
+ 	// A previous invocation that committed and then died before resolving
+ 	// leaves a finished tree. Comparing HEAD before/after this commit would
+ 	// read that as "the agent did nothing" and deadlock the step forever, with
+ 	// the change sitting right there in the branch.
+-	wt := newFakeWorktree()
+-	wt.exists["flow/issue-42"] = true // resumed, not created
+-	wt.head = "sha-1"                 // an earlier run already committed
+-	wt.noCommit = true                // nothing left to stage
++	wt := resumedWorktree()
++	wt.head = "sha-1"  // an earlier run already committed
++	wt.noCommit = true // nothing left to stage
+ 	ctx := ctxWithPlan(wt, &scriptedAgent{})
+ 
+ 	if err := testBuilder(t).stepImplement(ctx); err != nil {
+@@ -319,26 +499,25 @@ func TestStepImplement_AcceptsWorkCommittedByAnEarlierRun(t *testing.T) {
+ 	if !ctx.didResolve {
+ 		t.Error("did not resolve despite the branch carrying work")
+ 	}
+-	// An empty diff is correct here and not an oversight: the tree is clean
+-	// because an earlier run committed the work, so there is nothing left to
+-	// capture. The branch-vs-base check is what established the work exists.
+-	if len(ctx.resolved.Patch.Diff) != 0 {
+-		t.Errorf("Diff = %q, want empty on a tree whose work is already committed",
+-			ctx.resolved.Patch.Diff)
++	// The record names the commit that is there, which is exactly why it is a
++	// commit and not a patch: a patch captured on this path is empty, and an
++	// empty record cannot be told from "the step did nothing".
++	if ctx.resolved.CommitHash != "sha-1" {
++		t.Errorf("recorded %q, want the commit the earlier run left", ctx.resolved.CommitHash)
+ 	}
+ }
+ 
+ func TestStepImplement_RefusesWithoutAPlan(t *testing.T) {
+ 	// A resolved artifact whose body did not load reads as present. Implementing
+ 	// against a blank plan produces something plausible and reports nothing.
+-	for name, arts := range map[string]map[flow.ArtifactId]flow.ArtifactRecord{
++	for name, plan := range map[string]flow.ArtifactRecord{
+ 		"missing":    {},
+-		"unresolved": {"plan": {Type: flow.ArtifactMarkdown}},
+-		"empty body": {"plan": {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "  "}},
++		"unresolved": {Type: flow.ArtifactMarkdown},
++		"empty body": {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "  "},
+ 	} {
+ 		t.Run(name, func(t *testing.T) {
+-			ctx := ctxWithPlan(newFakeWorktree(), &scriptedAgent{})
+-			ctx.arts = arts
++			ctx := ctxWithPlan(resumedWorktree(), &scriptedAgent{})
++			ctx.arts["plan"] = plan
+ 			err := testBuilder(t).stepImplement(ctx)
+ 			if err == nil || !strings.Contains(err.Error(), "plan") {
+ 				t.Errorf("err = %v, want a refusal naming the plan", err)
+@@ -347,8 +526,45 @@ func TestStepImplement_RefusesWithoutAPlan(t *testing.T) {
+ 	}
+ }
+ 
++// The same shape one artifact over. Without the branch step's record there is
++// nothing to compare HEAD against, so an empty branch would read as work.
++func TestStepImplement_RefusesWithoutTheBranchRecord(t *testing.T) {
++	for name, branch := range map[string]flow.ArtifactRecord{
++		"missing":    {},
++		"unresolved": {Type: flow.ArtifactCommitHash, CommitHash: "base"},
++		"wrong type": {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "base"},
++		"empty body": {Resolved: true, Type: flow.ArtifactCommitHash},
++	} {
++		t.Run(name, func(t *testing.T) {
++			ctx := ctxWithPlan(resumedWorktree(), &scriptedAgent{})
++			ctx.arts["branch"] = branch
++			err := testBuilder(t).stepImplement(ctx)
++			if err == nil || !strings.Contains(err.Error(), "branch artifact") {
++				t.Errorf("err = %v, want a refusal naming the branch record", err)
++			}
++			if ctx.didResolve {
++				t.Error("implemented without knowing what the branch was cut from")
++			}
++		})
++	}
++}
++
++// Implement leaves the tree clean, like every other producing step. A step
++// returning over work it could not stage hands the next one changes it did not
++// make and will be blamed for.
++func TestStepImplement_RefusesWhenWorkSurvivesTheCommit(t *testing.T) {
++	wt := resumedWorktree()
++	wt.noCommit = true                              // nothing lands...
++	wt.dirty = []byte("diff --git a/x.go b/x.go\n") // ...but the tree still carries work
++
++	err := testBuilder(t).stepImplement(ctxWithPlan(wt, &scriptedAgent{}))
++	if err == nil || !strings.Contains(err.Error(), "uncommitted") {
++		t.Fatalf("err = %v, want a refusal naming the uncommitted work", err)
++	}
++}
++
+ func TestStepImplement_LoopsOnFailingVerifyAndKeepsOneSession(t *testing.T) {
+-	wt := newFakeWorktree()
++	wt := resumedWorktree()
+ 	wt.verifyErr = errors.New("verify failed:\nFAIL pkg/x")
+ 	wt.verifyAfter = 2 // fails twice, then passes
+ 	agent := &scriptedAgent{}
+@@ -371,7 +587,7 @@ func TestStepImplement_StopsAfterMaxFixRounds(t *testing.T) {
+ 	// An error, not a park: no preflight refuses a blocked park, so an
+ 	// unattended run would re-enter the loop and re-spend the whole round
+ 	// budget every cycle.
+-	wt := newFakeWorktree()
++	wt := resumedWorktree()
+ 	wt.verifyErr = errors.New("verify failed:\nstill broken")
+ 	wt.verifyAfter = 99
+ 	b := testBuilder(t)
+@@ -393,20 +609,29 @@ func TestStepImplement_StopsAfterMaxFixRounds(t *testing.T) {
+ 	}
+ }
+ 
+-func TestStepImplement_RecordsTheCommitOnThePatch(t *testing.T) {
+-	wt := newFakeWorktree()
++// The deliverable is the commit on the branch, and the record names it. A patch
++// would be a copy: it can be legitimately empty, nothing reads it back, and it
++// can disagree with the thing it copies.
++func TestStepImplement_RecordsTheCommitItProduced(t *testing.T) {
++	wt := resumedWorktree()
+ 	ctx := ctxWithPlan(wt, &scriptedAgent{})
+ 	if err := testBuilder(t).stepImplement(ctx); err != nil {
+ 		t.Fatalf("stepImplement: %v", err)
+ 	}
+-	// BaseSHA must name the commit the diff applies AGAINST, not the one that
+-	// contains it: `checkout BaseSHA && apply` has to work.
+-	if ctx.resolved.Patch.BaseSHA != "base" {
+-		t.Errorf("BaseSHA = %q, want the pre-commit HEAD the diff was taken against",
+-			ctx.resolved.Patch.BaseSHA)
++	if ctx.resolved.Type != flow.ArtifactCommitHash {
++		t.Fatalf("resolved a %v, want a commit hash", ctx.resolved.Type)
+ 	}
+-	if ctx.resolved.Patch.BaseBranch != "main" {
+-		t.Errorf("BaseBranch = %q, want main", ctx.resolved.Patch.BaseBranch)
++	if ctx.resolved.CommitHash != wt.head {
++		t.Errorf("recorded %q, want HEAD after the commit (%q)", ctx.resolved.CommitHash, wt.head)
++	}
++	if len(ctx.resolved.Patch.Diff) != 0 {
++		t.Errorf("resolved a patch as well: %q", ctx.resolved.Patch.Diff)
++	}
++	// The commit is this handler's job: the prompts tell the agent not to, and
++	// nothing else records the work before the request is opened.
++	if wt.commits != 1 || !wt.staged {
++		t.Errorf("commits = %d, staged = %v, want the work staged and committed once",
++			wt.commits, wt.staged)
+ 	}
+ }
+ 
+@@ -417,16 +642,19 @@ func TestStepImplement_RecordsTheCommitOnThePatch(t *testing.T) {
+ func TestConsumingStepsRefuseAMissingBranch(t *testing.T) {
+ 	// The worktree directory is shared across items. A missing claim branch
+ 	// means the work is not here; cutting a fresh one off the base and carrying
+-	// on would have review and coverage analyse an empty change, and
+-	// verify-impl resolve a "verify passed" artifact that proves nothing.
++	// on would have implement work on nothing, review and coverage analyse an
++	// empty change, and the request propose one. Cutting a branch is the open
++	// branch step's job, and only its.
+ 	b := testBuilder(t)
+ 	for name, step := range map[string]func(flow.StepCtx) error{
+-		"review":      b.stepReview,
+-		"coverage":    b.stepCoverage,
+-		"verify-impl": b.stepVerifyImpl,
++		"implement":    b.stepImplement,
++		"review":       b.stepReview,
++		"coverage":     b.stepCoverage,
++		"open request": b.stepOpenPR,
+ 	} {
+ 		t.Run(name, func(t *testing.T) {
+-			ctx := ctxWithPlan(newFakeWorktree(), &scriptedAgent{})
++			wt := newFakeWorktree()
++			ctx := ctxWithPlan(wt, &scriptedAgent{})
+ 			err := step(ctx)
+ 			if err == nil || !strings.Contains(err.Error(), "did not exist") {
+ 				t.Errorf("err = %v, want a refusal that the branch is absent", err)
+@@ -434,33 +662,19 @@ func TestConsumingStepsRefuseAMissingBranch(t *testing.T) {
+ 			if ctx.didResolve {
+ 				t.Error("resolved an artifact describing a tree that has no implementation")
+ 			}
++			if wt.commits != 0 {
++				t.Errorf("committed %d times onto a branch it had just cut", wt.commits)
++			}
+ 		})
+ 	}
+ }
+ 
+-func TestStepVerifyImpl_FailsRatherThanRecordingAPassingArtifact(t *testing.T) {
+-	wt := newFakeWorktree()
+-	wt.exists["flow/issue-42"] = true
+-	wt.verifyErr = errors.New("verify failed:\nboom")
+-	wt.verifyAfter = 99
+-	ctx := ctxWithPlan(wt, &scriptedAgent{})
+-
+-	err := testBuilder(t).stepVerifyImpl(ctx)
+-	if err == nil || !strings.Contains(err.Error(), "verify failed") {
+-		t.Fatalf("err = %v, want the failing verify surfaced", err)
+-	}
+-	if ctx.didResolve {
+-		t.Error("recorded a verification artifact for a tree that does not verify")
+-	}
+-}
+-
+ // ---------------------------------------------------------------------------
+ // The ask contract, through a real step.
+ // ---------------------------------------------------------------------------
+ 
+ func TestAgentQuestionParksThroughAnyStep(t *testing.T) {
+-	wt := newFakeWorktree()
+-	wt.exists["flow/issue-42"] = true
++	wt := resumedWorktree()
+ 	agent := &scriptedAgent{replies: []string{
+ 		"I cannot decide this.\nNEEDS-ANSWER: cache or new store?\n```\nboth are plausible\n```",
+ 	}}
+@@ -493,8 +707,7 @@ func TestStepOpenPR_RefusesAPullRequestWithNoPlanInIt(t *testing.T) {
+ 	// A resolved plan reading as empty means its body did not load. Opening a
+ 	// PR that says only "Closes #N" would present a silent read failure as a
+ 	// finished change.
+-	wt := newFakeWorktree()
+-	wt.exists["flow/issue-42"] = true
++	wt := resumedWorktree()
+ 	ctx := ctxWithPlan(wt, &scriptedAgent{})
+ 	ctx.arts["plan"] = flow.ArtifactRecord{Resolved: true, Type: flow.ArtifactMarkdown}
+ 
+@@ -508,8 +721,7 @@ func TestStepOpenPR_RefusesAPullRequestWithNoPlanInIt(t *testing.T) {
+ }
+ 
+ func TestStepOpenPR_BodyClosesTheIssue(t *testing.T) {
+-	wt := newFakeWorktree()
+-	wt.exists["flow/issue-42"] = true
++	wt := resumedWorktree()
+ 	ctx := ctxWithPlan(wt, &scriptedAgent{})
+ 
+ 	if err := testBuilder(t).stepOpenPR(ctx); err != nil {
+@@ -534,8 +746,7 @@ func TestStepOpenPR_BodyClosesTheIssue(t *testing.T) {
+ // "+1" reaches the prompt too. The orchestrator's "question: " prefix is
+ // presentation and must not reach the agent as part of the question.
+ func TestAnswersCarryTheQuestionWithoutItsPrefix(t *testing.T) {
+-	wt := newFakeWorktree()
+-	wt.exists["flow/issue-42"] = true
++	wt := resumedWorktree()
+ 	ctx := ctxWithPlan(wt, &scriptedAgent{})
+ 	ctx.park = &flow.ParkRequest{
+ 		Kind:    flow.ParkQuestion,
+@@ -585,29 +796,6 @@ func (b *answeringBackend) ReadAnswers(context.Context, flow.Item, time.Time, st
+ 	return b.answers, nil
+ }
+ 
+-// The patch artifact must carry the actual diff. CapturePatch is a diff against
+-// HEAD, so it has to run after staging (untracked files are invisible before
+-// it) and before committing (nothing is left to see after). Getting the order
+-// wrong attaches either an incomplete diff or an empty one, and both look fine.
+-func TestStepImplement_AttachesACompletePatch(t *testing.T) {
+-	wt := newFakeWorktree()
+-	wt.captured = []byte("diff --git a/new.go b/new.go\n+package new\n")
+-	ctx := ctxWithPlan(wt, &scriptedAgent{})
+-
+-	if err := testBuilder(t).stepImplement(ctx); err != nil {
+-		t.Fatalf("stepImplement: %v", err)
+-	}
+-	if !wt.staged {
+-		t.Error("did not stage before capturing — a diff against HEAD cannot see untracked files")
+-	}
+-	if len(ctx.resolved.Patch.Diff) == 0 {
+-		t.Error("patch artifact carries no diff")
+-	}
+-	if !strings.Contains(string(ctx.resolved.Patch.Diff), "new.go") {
+-		t.Errorf("diff = %q, want the added file", ctx.resolved.Patch.Diff)
+-	}
+-}
+-
+ // The canonical steps must stay inside the guaranteed RevParse set — "HEAD"
+ // and the item's base branch. A backend that cannot resolve arbitrary
+ // revisions is required to error rather than guess, so a step reaching outside
+@@ -615,11 +803,20 @@ func TestStepImplement_AttachesACompletePatch(t *testing.T) {
+ func TestStepsOnlyRevParseTheGuaranteedRevisions(t *testing.T) {
+ 	wt := newFakeWorktree()
+ 	wt.strictRevs = map[string]bool{"HEAD": true, "main": true}
++	b := testBuilder(t)
+ 	ctx := ctxWithPlan(wt, &scriptedAgent{})
+ 
+-	if err := testBuilder(t).stepImplement(ctx); err != nil {
++	// The whole mechanical-and-producing sequence over one worktree, because a
++	// step reaching outside the pair does so wherever it runs.
++	if err := b.stepOpenBranch(ctx); err != nil {
++		t.Fatalf("stepOpenBranch: %v", err)
++	}
++	if err := b.stepImplement(ctx); err != nil {
+ 		t.Fatalf("stepImplement: %v", err)
+ 	}
++	if err := b.stepOpenPR(ctx); err != nil {
++		t.Fatalf("stepOpenPR: %v", err)
++	}
+ 	for _, rev := range wt.revsAsked {
+ 		if !wt.strictRevs[rev] {
+ 			t.Errorf("resolved %q, outside the guaranteed {HEAD, base} set", rev)
+@@ -639,8 +836,7 @@ func TestStepsOnlyRevParseTheGuaranteedRevisions(t *testing.T) {
+ // request describes a branch that does not contain it and nothing says so.
+ // Observed on three consecutive real runs before this existed.
+ func TestStepOpenPR_RecordsWhatTheCheckingStepsChanged(t *testing.T) {
+-	wt := newFakeWorktree()
+-	wt.exists["flow/issue-42"] = true
++	wt := resumedWorktree()
+ 	wt.commits = 1 // implement already committed
+ 	wt.dirty = []byte("diff --git a/cli/app.go b/cli/app.go\n")
+ 
+@@ -660,8 +856,7 @@ func TestStepOpenPR_RecordsWhatTheCheckingStepsChanged(t *testing.T) {
+ // The corollary: a clean tree costs nothing. Committing per step regardless
+ // would record steps that changed nothing.
+ func TestStepOpenPR_CleanTreeRecordsNothing(t *testing.T) {
+-	wt := newFakeWorktree()
+-	wt.exists["flow/issue-42"] = true
++	wt := resumedWorktree()
+ 	wt.commits = 1
+ 	wt.noCommit = true // git lands nothing with nothing staged
+ 
+@@ -677,8 +872,7 @@ func TestStepOpenPR_CleanTreeRecordsNothing(t *testing.T) {
+ // the request would propose a branch that does not carry it. Refuse instead —
+ // silently proposing an incomplete change is the failure being prevented.
+ func TestStepOpenPR_RefusesWhenWorkSurvivesRecording(t *testing.T) {
+-	wt := newFakeWorktree()
+-	wt.exists["flow/issue-42"] = true
++	wt := resumedWorktree()
+ 	wt.commits = 1
+ 	wt.noCommit = true                        // nothing lands...
+ 	wt.dirty = []byte("diff --git a/x b/x\n") // ...but the tree still carries work
+@@ -696,8 +890,7 @@ func TestStepOpenPR_RefusesWhenWorkSurvivesRecording(t *testing.T) {
+ // reader is budget spent on nothing, and worse when it describes changes that
+ // ARE in the diff — the reader sees unexplained work and must reconstruct why.
+ func TestStepOpenPR_BodyCarriesTheCheckingStepsBriefings(t *testing.T) {
+-	wt := newFakeWorktree()
+-	wt.exists["flow/issue-42"] = true
++	wt := resumedWorktree()
+ 	ctx := ctxWithPlan(wt, &scriptedAgent{})
+ 	ctx.arts["review"] = flow.ArtifactRecord{
+ 		Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "routed grant through usageError"}
+@@ -715,6 +908,211 @@ func TestStepOpenPR_BodyCarriesTheCheckingStepsBriefings(t *testing.T) {
+ 	}
+ }
+ 
++// ---------------------------------------------------------------------------
++// The gate the request rests on.
++// ---------------------------------------------------------------------------
++
++// An ORDERING property, not an occurrence one. The gate must measure the branch
++// exactly as it will be proposed — so after the outstanding work is recorded,
++// since recording moves the tree — and before the push, since a branch that
++// cannot pass must not leave the machine.
++func TestStepOpenPR_MeasuresTheBranchAsItWillBeProposed(t *testing.T) {
++	wt := resumedWorktree()
++	wt.commits = 1 // implement already committed
++	wt.dirty = []byte("diff --git a/cli/app.go b/cli/app.go\n")
++
++	if err := testBuilder(t).stepOpenPR(ctxWithPlan(wt, &scriptedAgent{})); err != nil {
++		t.Fatalf("stepOpenPR: %v", err)
++	}
++	// One gate, and it is the one a decision may rest on.
++	if len(wt.gatesRun) != 1 || wt.gatesRun[0] != flow.GateIntegration {
++		t.Fatalf("gates run = %v, want exactly [%s]", wt.gatesRun, flow.GateIntegration)
++	}
++	commit, gate, open := wt.callIndex("commit"), wt.callIndex("gate:integration"), wt.callIndex("open")
++	if commit < 0 || gate < 0 || open < 0 {
++		t.Fatalf("calls = %v, want the recording, the gate and the open all to have happened", wt.calls)
++	}
++	if !(commit < gate) {
++		t.Errorf("calls = %v — the gate measured a tree the recording then changed", wt.calls)
++	}
++	if !(gate < open) {
++		t.Errorf("calls = %v — the request was opened before anything was measured", wt.calls)
++	}
++}
++
++// Four of the five outcomes mean no measurement exists. None of them is the
++// change failing, and a message that read that way would send someone looking
++// for a defect that is not there.
++//
++// Derived from AllGateOutcomes rather than listed, so a sixth outcome cannot be
++// added without this test failing.
++func TestStepOpenPR_DoesNotProposeWhatWasNeverMeasured(t *testing.T) {
++	for _, outcome := range flow.AllGateOutcomes() {
++		if outcome == flow.OutcomeMeasured {
++			continue
++		}
++		t.Run(string(outcome), func(t *testing.T) {
++			wt := resumedWorktree()
++			wt.gateOutcome = map[flow.GateName]flow.GateOutcome{flow.GateIntegration: outcome}
++			ctx := ctxWithPlan(wt, &scriptedAgent{})
++
++			err := testBuilder(t).stepOpenPR(ctx)
++			if err == nil {
++				t.Fatal("opened a request over a gate that measured nothing")
++			}
++			if !strings.Contains(err.Error(), string(outcome)) {
++				t.Errorf("err = %v, want it to name the outcome %q", err, outcome)
++			}
++			if !strings.Contains(err.Error(), "not the change failing") {
++				t.Errorf("err = %v, want it to say plainly that nothing was measured "+
++					"about the change", err)
++			}
++			if wt.opened {
++				t.Error("opened a pull request that was never measured")
++			}
++		})
++	}
++}
++
++// A judge that cannot answer says nothing about the measurement. Reading that
++// as "not acceptable" would refuse a sound change because the project's own
++// tooling is broken.
++func TestStepOpenPR_ABrokenJudgeIsNotARefusal(t *testing.T) {
++	wt := resumedWorktree()
++	wt.judgeErr = errors.New("bin/run: no such file or directory")
++	ctx := ctxWithPlan(wt, &scriptedAgent{})
++
++	err := testBuilder(t).stepOpenPR(ctx)
++	if err == nil {
++		t.Fatal("opened a request with no verdict about it")
++	}
++	if !strings.Contains(err.Error(), "not a refusal") {
++		t.Errorf("err = %v, want it to say the missing verdict is not a refusal", err)
++	}
++	if !strings.Contains(err.Error(), "no such file") {
++		t.Errorf("err = %v, want the judge's own failure surfaced", err)
++	}
++	if wt.opened {
++		t.Error("opened a pull request with no verdict about it")
++	}
++}
++
++// A refusal, by contrast, is a perfectly good verdict — and it is the whole
++// reason the gate runs here. The maintainer runs the same gate; proposing
++// anyway spends a reviewer's attention on a change that cannot land.
++func TestStepOpenPR_DoesNotProposeWhatTheJudgeRefuses(t *testing.T) {
++	wt := resumedWorktree()
++	wt.judgeRefuses = true
++	wt.judgeDetail = "coverage 61.2% is below the floor of 70%"
++	ctx := ctxWithPlan(wt, &scriptedAgent{})
++
++	err := testBuilder(t).stepOpenPR(ctx)
++	if err == nil {
++		t.Fatal("proposed a change the maintainer's own gate will reject")
++	}
++	if !strings.Contains(err.Error(), wt.judgeDetail) {
++		t.Errorf("err = %v, want the judge's reason carried", err)
++	}
++	if wt.opened {
++		t.Error("opened a pull request the gate refused")
++	}
++}
++
++// What was established travels with the request, so a reader knows it rather
++// than taking it on trust — including the envelope, so the verdict can be
++// recomputed by whoever was not there.
++func TestStepOpenPR_BodyCarriesTheGatesResult(t *testing.T) {
++	wt := resumedWorktree()
++	wt.envelope = []byte(`{"gate":"integration","tests":{"passed":812}}`)
++	wt.judgeDetail = "every measurement is within this project's thresholds"
++	ctx := ctxWithPlan(wt, &scriptedAgent{})
++
++	if err := testBuilder(t).stepOpenPR(ctx); err != nil {
++		t.Fatalf("stepOpenPR: %v", err)
++	}
++	for _, want := range []string{
++		"## Gate",
++		string(flow.GateIntegration),
++		string(flow.OutcomeMeasured),
++		"acceptable",
++		wt.judgeDetail,
++		`"passed":812`,
++	} {
++		if !strings.Contains(wt.openBody, want) {
++			t.Errorf("body missing %q — a reader has to take the change on trust:\n%s",
++				want, wt.openBody)
++		}
++	}
++	// Verify is a tool a producing step uses, not a place in the sequence, and
++	// there is no artifact recording that it ran.
++	if strings.Contains(wt.openBody, "## Verification") {
++		t.Errorf("body still carries a verification section:\n%s", wt.openBody)
++	}
++}
++
++// ---------------------------------------------------------------------------
++// stepCloseBranch.
++// ---------------------------------------------------------------------------
++
++func TestStepCloseBranch_ReturnsTheWorktreeToTheBase(t *testing.T) {
++	wt := resumedWorktree()
++	wt.exists["main"] = true
++	ctx := ctxWithPlan(wt, &scriptedAgent{})
++
++	if err := testBuilder(t).stepCloseBranch(ctx); err != nil {
++		t.Fatalf("stepCloseBranch: %v", err)
++	}
++	if wt.branch != "main" {
++		t.Errorf("worktree is on %q, want the base branch — the arena owes the next "+
++			"item a clean starting point", wt.branch)
++	}
++	if ctx.resolved.Type != flow.ArtifactFlag {
++		t.Errorf("resolved a %v, want the flag — this step restores rather than produces",
++			ctx.resolved.Type)
++	}
++	// The branch is the product: it carries the request, which outlives the
++	// resolution that opened it.
++	if !wt.exists[testBranch] {
++		t.Error("deleted the item's branch — the request lives on it")
++	}
++}
++
++// Branch CREATES when the name is absent, so without the created check a
++// worktree missing the base would silently get a branch of that name pointing
++// at this item's tip, and every later item would be cut from the wrong place.
++func TestStepCloseBranch_RefusesWhenTheBaseIsNotInTheWorktree(t *testing.T) {
++	wt := resumedWorktree() // "main" is not among the branches
++	ctx := ctxWithPlan(wt, &scriptedAgent{})
++
++	err := testBuilder(t).stepCloseBranch(ctx)
++	if err == nil || !strings.Contains(err.Error(), "main") {
++		t.Fatalf("err = %v, want a refusal naming the base branch that is missing", err)
++	}
++	if ctx.didResolve {
++		t.Error("recorded the worktree as restored when it was not")
++	}
++}
++
++func TestStepCloseBranch_RefusesADirtyWorktree(t *testing.T) {
++	// Work nobody has seen. Switching away would hide it; the step stops and
++	// leaves it where a person can find it.
++	wt := resumedWorktree()
++	wt.exists["main"] = true
++	wt.dirty = []byte("diff --git a/x b/x\n")
++	ctx := ctxWithPlan(wt, &scriptedAgent{})
++
++	err := testBuilder(t).stepCloseBranch(ctx)
++	if err == nil || !strings.Contains(err.Error(), "dirty") {
++		t.Fatalf("err = %v, want a refusal naming the dirty tree", err)
++	}
++	if ctx.didResolve {
++		t.Error("recorded the worktree as restored over uncommitted work")
++	}
++	if wt.branch != testBranch {
++		t.Errorf("worktree moved to %q over a dirty tree", wt.branch)
++	}
++}
++
+ // ---------------------------------------------------------------------------
+ // Work in progress: what a step keeps when it stops without completing.
+ // ---------------------------------------------------------------------------
+@@ -723,8 +1121,7 @@ func TestStepOpenPR_BodyCarriesTheCheckingStepsBriefings(t *testing.T) {
+ // behind it. Losing it means paying for the same analysis again to arrive at
+ // the question that has since been answered.
+ func TestAgentQuestionKeepsTheWorkThatProducedIt(t *testing.T) {
+-	wt := newFakeWorktree()
+-	wt.exists["flow/issue-42"] = true
++	wt := resumedWorktree()
+ 	const reply = "I read the store and the cache paths.\n" +
+ 		"NEEDS-ANSWER: cache or new store?\n```\nboth are plausible\n```"
+ 	agent := &scriptedAgent{replies: []string{reply}}
+@@ -744,8 +1141,7 @@ func TestAgentQuestionKeepsTheWorkThatProducedIt(t *testing.T) {
+ // A stash that failed costs a re-derivation — today's behaviour. Turning it
+ // into a step failure would lose the park as well as the work.
+ func TestAgentQuestionParksEvenWhenTheStashFails(t *testing.T) {
+-	wt := newFakeWorktree()
+-	wt.exists["flow/issue-42"] = true
++	wt := resumedWorktree()
+ 	agent := &scriptedAgent{replies: []string{"NEEDS-ANSWER: cache or new store?"}}
+ 	ctx := ctxWithPlan(wt, agent)
+ 	ctx.wipSaveErr = errors.New("nowhere to write")
+@@ -963,14 +1359,12 @@ func TestAnEmptyRevisionIsAnError(t *testing.T) {
+ // the defect, reintroduced one step at a time.
+ func TestEveryProseStepRevisesARefusal(t *testing.T) {
+ 	for name, step := range map[string]func(*builder, flow.StepCtx) error{
+-		"plan":        (*builder).stepPlan,
+-		"review":      (*builder).stepReview,
+-		"coverage":    (*builder).stepCoverage,
+-		"verify-impl": (*builder).stepVerifyImpl,
++		"plan":     (*builder).stepPlan,
++		"review":   (*builder).stepReview,
++		"coverage": (*builder).stepCoverage,
+ 	} {
+ 		t.Run(name, func(t *testing.T) {
+-			wt := newFakeWorktree()
+-			wt.exists["flow/issue-42"] = true
++			wt := resumedWorktree()
+ 			agent := &scriptedAgent{replies: []string{"first draft", "revised draft"}}
+ 			ctx := ctxWithPlan(wt, agent)
+ 			ctx.resolveErrs = []error{refusal("an absolute home path was found")}
+diff --git a/pkg/backend/github/backend.go b/pkg/backend/github/backend.go
+index 5cf4c8d..2bda1e2 100644
+--- a/pkg/backend/github/backend.go
++++ b/pkg/backend/github/backend.go
+@@ -97,13 +97,14 @@ func (b *Backend) SupportedSignals() []flow.SignalDef {
+ var githubSupportedArtifacts = []flow.ArtifactDef{
+ 	// Standard code-lifecycle artifacts (shared vocabulary with the tracker).
+ 	flow.Artifact("plan", flow.ArtifactMarkdown).WithDoc("Implementation plan for the issue."),
+-	flow.Artifact("implementation", flow.ArtifactPatch).WithDoc("The code change for the issue, captured as a diff."),
++	flow.Artifact("branch", flow.ArtifactCommitHash).WithDoc("Hash of the commit the issue's working branch was cut from."),
++	flow.Artifact("implementation", flow.ArtifactCommitHash).WithDoc("Hash of the commit carrying the code change for the issue."),
+ 	flow.Artifact("review", flow.ArtifactMarkdown).WithDoc("Contributor-side code-review findings."),
+ 	flow.Artifact("coverage", flow.ArtifactMarkdown).WithDoc("Test-coverage analysis."),
+ 	flow.Artifact("summary", flow.ArtifactMarkdown).WithDoc("Resolution summary for the issue."),
++	flow.Artifact("branch-closed", flow.ArtifactFlag).WithDoc("The worktree was returned to the base branch after the resolution completed."),
+ 	// github/PR-specific artifacts — the contributor→maintainer pull-request
+ 	// lifecycle this backend is built around.
+-	flow.Artifact("verify-impl", flow.ArtifactMarkdown).WithDoc("Contributor-side verification (test/build) output before opening the PR."),
+ 	flow.Artifact("review-maint", flow.ArtifactMarkdown).WithDoc("Maintainer-side review of the PR before merge."),
+ 	flow.Artifact("verify-merge", flow.ArtifactMarkdown).WithDoc("Maintainer-side pre-merge verification output."),
+ 	flow.Artifact("merge-commit", flow.ArtifactCommitHash).WithDoc("Hash of the merge commit on the default branch after the PR merges."),
