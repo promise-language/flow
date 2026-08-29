@@ -44,9 +44,12 @@ type fakeWorktree struct {
 	// blocks a checkout, as git does.
 	dirty []byte
 	// gatesRun records which gates were asked for; gateOutcome names what the
-	// runner observed of the ones that did not simply measure.
+	// runner observed of the ones that did not simply measure. gateErr models
+	// a gate that could not be run at all — no outcome exists, which is a
+	// different fact from any outcome it could have reported.
 	gatesRun    []flow.GateName
 	gateOutcome map[flow.GateName]flow.GateOutcome
+	gateErr     error
 	// envelope is what the gate printed on stdout — what the judge is handed
 	// and what travels with the verdict.
 	envelope []byte
@@ -65,6 +68,10 @@ type fakeWorktree struct {
 	// about ORDER rather than occurrence — the gate must measure the branch as
 	// it will be proposed, which is a statement about when it ran.
 	calls []string
+	// commitMsgs is the message of every commit that LANDED. The message is
+	// the caller's rather than the recorder's, and the reason is a property of
+	// the whole sequence: only one commit may carry the closes-reference.
+	commitMsgs []string
 }
 
 func newFakeWorktree() *fakeWorktree {
@@ -103,12 +110,13 @@ func (w *fakeWorktree) Branch(_ context.Context, name, base string) (bool, error
 	return true, nil
 }
 func (w *fakeWorktree) CurrentBranch(context.Context) (string, error) { return w.branch, nil }
-func (w *fakeWorktree) Commit(context.Context, string) error {
+func (w *fakeWorktree) Commit(_ context.Context, msg string) error {
 	w.calls = append(w.calls, "commit")
 	if w.noCommit {
 		return nil // git's own behavior with nothing staged
 	}
 	w.commits++
+	w.commitMsgs = append(w.commitMsgs, msg)
 	w.head = fmt.Sprintf("sha-%d", w.commits)
 	w.dirty = nil
 	return nil
@@ -132,6 +140,9 @@ func (w *fakeWorktree) RunGate(_ context.Context, name flow.GateName) (flow.Gate
 	}
 	w.calls = append(w.calls, "gate:"+string(name))
 	w.gatesRun = append(w.gatesRun, name)
+	if w.gateErr != nil {
+		return flow.GateRun{}, w.gateErr
+	}
 	outcome, ok := w.gateOutcome[name]
 	if !ok {
 		outcome = flow.OutcomeMeasured
@@ -918,6 +929,61 @@ func TestStepOpenPR_BodyCarriesTheCheckingStepsBriefings(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// What the resolution's history says.
+// ---------------------------------------------------------------------------
+
+// The commit subject is the CALLER's, which is why recordStepWork takes one
+// rather than building it. Exactly one commit in a resolution may carry the
+// closes-reference: GitHub acts on every occurrence, so a second one reads as a
+// second resolution of the same item.
+//
+// Asserted over the whole sequence rather than one step, because the property
+// is about the set. A recorder that built the message itself would put the same
+// subject on all four, and a recorder that put implement's on all four would
+// close the issue four times over — neither shows up in any single step.
+func TestOnlyTheImplementCommitCarriesTheClosesReference(t *testing.T) {
+	wt := resumedWorktree()
+	b := testBuilder(t)
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	// A slice, not a map: the sequence is the property.
+	for _, step := range []struct {
+		name string
+		run  func(flow.StepCtx) error
+	}{
+		{"implement", b.stepImplement},
+		{"review", b.stepReview},
+		{"coverage", b.stepCoverage},
+		{"open request", b.stepOpenPR},
+	} {
+		if err := step.run(ctx); err != nil {
+			t.Fatalf("%s: %v", step.name, err)
+		}
+	}
+
+	var carrying []string
+	for _, msg := range wt.commitMsgs {
+		if strings.Contains(msg, closesRef(ctx.item.ID)) {
+			carrying = append(carrying, msg)
+		}
+	}
+	if len(carrying) != 1 {
+		t.Fatalf("%d of %d commits carry %q, want exactly one:\n%s",
+			len(carrying), len(wt.commitMsgs), closesRef(ctx.item.ID),
+			strings.Join(wt.commitMsgs, "\n---\n"))
+	}
+	// And it is the first one: the implement commit is the one the item is
+	// resolved by, and the steps after it record what they changed on top.
+	if carrying[0] != wt.commitMsgs[0] {
+		t.Errorf("the closes-reference is on %q, want it on the implement commit %q",
+			carrying[0], wt.commitMsgs[0])
+	}
+	if !strings.Contains(wt.commitMsgs[0], ctx.item.Title) {
+		t.Errorf("implement commit = %q, want it to name the item", wt.commitMsgs[0])
+	}
+}
+
+// ---------------------------------------------------------------------------
 // The gate the request rests on.
 // ---------------------------------------------------------------------------
 
@@ -980,6 +1046,34 @@ func TestStepOpenPR_DoesNotProposeWhatWasNeverMeasured(t *testing.T) {
 				t.Error("opened a pull request that was never measured")
 			}
 		})
+	}
+}
+
+// The first of the four ways this stops, and the only one where no outcome
+// exists at all: the gate could not be run. A missing runner, an unreadable
+// script, a substrate that refused — none of it is the change failing, and a
+// message that read that way would send someone hunting a defect that is not
+// there.
+//
+// Distinct from the outcome cases above: those have a gate that ran and
+// reported something. This one has nothing to report.
+func TestStepOpenPR_AGateThatCouldNotRunIsNotTheChangeFailing(t *testing.T) {
+	wt := resumedWorktree()
+	wt.gateErr = errors.New("bin/gate: permission denied")
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	err := testBuilder(t).stepOpenPR(ctx)
+	if err == nil {
+		t.Fatal("opened a request over a gate that never ran")
+	}
+	if !strings.Contains(err.Error(), "not the change failing") {
+		t.Errorf("err = %v, want it to say plainly that nothing was measured about the change", err)
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("err = %v, want the runner's own failure surfaced — it is the actionable part", err)
+	}
+	if wt.opened {
+		t.Error("opened a pull request no gate ever ran against")
 	}
 }
 

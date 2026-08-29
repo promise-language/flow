@@ -493,6 +493,44 @@ func TestContributorStepSetMatchesTheDocument(t *testing.T) {
 	}
 }
 
+// A prompt slot that outlives its step is a Config.Prompts key a project can
+// set, that BuildApp accepts, and that nothing will ever render. Removing a
+// step means removing its slot from three files, and missing one is silent in
+// every direction: the override is simply never used.
+//
+// Derived from defaultPrompts rather than listed, so a slot cannot be kept by
+// keeping it out of a hand-written list.
+func TestEveryPromptSlotBelongsToARegisteredStep(t *testing.T) {
+	app, err := BuildApp(context.Background(), Config{
+		BinaryName: "issue", VerifyCmd: []string{"true"},
+		Role: RoleContributor, BaseBranch: "main",
+	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
+	if err != nil {
+		t.Fatalf("BuildApp: %v", err)
+	}
+	steps := map[string]bool{}
+	for _, it := range app.Flows[0].Items() {
+		steps[string(it.ArtifactId)] = true
+		steps[string(it.SignalId)] = true
+	}
+	// The re-prompts are the exclusions, and for the reason they are excluded
+	// everywhere else: each runs inside another step's invocation rather than
+	// being a step of its own.
+	inSessionReprompts := map[PromptID]bool{
+		PromptImplementFix: true,
+		PromptRevise:       true,
+	}
+	for id := range defaultPrompts {
+		if inSessionReprompts[id] {
+			continue
+		}
+		if !steps[string(id)] {
+			t.Errorf("prompt slot %q names no registered step — a project overriding "+
+				"it would see nothing happen", id)
+		}
+	}
+}
+
 // Three ids move across two closed sets in this change — the flow's and the
 // backend's — and today nothing but a live cli.Run notices when they drift.
 // cli.App refuses at startup on a mismatch, which is a failure every operator
