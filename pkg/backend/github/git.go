@@ -211,7 +211,7 @@ func (g *gitOps) PushMaterial(ctx context.Context, branch string) (messages []st
 	// of its own diff, and the caller states one origin per string: the
 	// combined string would be the tree vouching for prose an agent wrote,
 	// which is the assembled-string case docs/disclosure.md refuses.
-	full, stderr, err := g.run(ctx, logArgs("", "--patch")...)
+	full, stderr, err := g.run(ctx, logArgs("", "--patch", "--diff-merges=first-parent")...)
 	if err != nil {
 		return nil, "", fmt.Errorf("git log --patch %s --not --remotes=origin: %w (%s)", branch, err, string(stderr))
 	}
