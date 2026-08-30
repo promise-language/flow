@@ -439,6 +439,10 @@ func parkLabel(l labels, req *flow.ParkRequest) string {
 		return l.BudgetExhausted(req.Step)
 	case flow.ParkInfraTransient:
 		return l.InfraTransient()
+	case flow.ParkRefused:
+		// A deterministic refusal is blocked until the environment changes;
+		// the generic "blocked" label is correct — no budget grant clears it.
+		return l.Blocked()
 	default:
 		return l.Blocked()
 	}

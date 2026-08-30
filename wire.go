@@ -28,6 +28,17 @@ const (
 	// it consumes no invocation budget; the tracker translates this kind
 	// into the typed FlowFailureRemoteUnreachable on the ledger row.
 	ParkRemoteUnreachable ParkKind = "remote-unreachable"
+	// ParkRefused — the handler determined that the failure is deterministic:
+	// re-invoking the identical handler against the identical worktree would
+	// return the identical answer. A repository guard refused a staged file,
+	// a required tool is out of date, or an environment precondition is unmet.
+	//
+	// Like ParkInfraTransient the orchestrator SKIPS BumpInvocations — the
+	// handler never got a real chance to do its work, so charging it would
+	// burn the invocation budget on identical no-op failures and eventually
+	// park with ParkBudgetExhausted, which describes the clock rather than
+	// the refusal.
+	ParkRefused ParkKind = "refused"
 )
 
 // BudgetAxis identifies which budget axis was exhausted (when
