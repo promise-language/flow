@@ -55,8 +55,16 @@ type cmdHelp struct {
 var perCommandUsage = map[string]cmdHelp{
 	"doctor": {name: "doctor", summary: "verify backend prerequisites",
 		detail: "Checks that the backend is reachable and configured (auth, connectivity).\nTakes no arguments."},
-	"list": {name: "list", summary: "list processable items",
-		detail: "Lists the items this flow can currently process. Takes no arguments."},
+	"list": {name: "list", syntax: "[--scope SCOPE] [--tag TAG]…", summary: "list processable items",
+		detail: `Lists items this flow can see. Default scope is "processable" (open items
+this binary could process).
+
+  --scope SCOPE    how far up the ladder: all|open|processable|workable|free|auto
+  --tag TAG        filter by tag (repeatable, conjunctive — item must carry all)
+
+The "availability" column marks which items resolve would auto-select (auto)
+versus merely claimable (available) — so the answer to "would resolve pick
+this?" belongs in the listing.`},
 	"claim": {name: "claim", aliases: []string{"lease"}, syntax: "<item-id>", summary: "acquire a claim on an item",
 		detail: "Acquires a claim (lease) on <item-id> so this owner can advance it.\nTakes exactly one item id."},
 	"release": {name: "release", summary: "drop the active claim",
@@ -65,8 +73,11 @@ var perCommandUsage = map[string]cmdHelp{
 		detail: "Prints the read-only lifecycle checklist. With <item-id>, inspects that\nitem from the backend without claiming it; without, uses the active claim."},
 	"run-step": {name: "run-step", summary: "advance one lifecycle item",
 		detail: "Advances exactly ONE lifecycle item against the active claim\n(one prompt → one artifact). Requires an active claim; takes no arguments."},
-	"resolve": {name: "resolve", aliases: []string{"run-all"}, syntax: "[<item-id>]", summary: "run all steps to completion",
+	"resolve": {name: "resolve", aliases: []string{"run-all"}, syntax: "[<item-id>] [--tag TAG]…", summary: "run all steps to completion",
 		detail: "Runs ALL steps until the item is finalized or parked. With <item-id>,\nclaims it first; otherwise uses the active claim.\n\n" +
+			"--tag TAG narrows the auto-selectable set to items carrying all given\n" +
+			"tags. Mutually exclusive with <item-id> (the id already answers the\n" +
+			"question the tag would ask). Selecting nothing is not an error.\n\n" +
 			"Progress is narrated on stderr in both output modes. In JSON mode\n" +
 			"(--json, FLOW_OUTPUT=json, or a piped/redirected stdout) each step's\n" +
 			"InvocationResult is also streamed to stdout, one compact object per\n" +

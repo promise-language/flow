@@ -126,6 +126,153 @@ type WorkInProgress interface {
 	ClearWorkInProgress(ctx context.Context, claim Claim, step string) error
 }
 
+// DiscoveryScope names how far up the listing ladder to go. The set is closed;
+// its names are the level names from the issue description.
+type DiscoveryScope string
+
+const (
+	// ScopeAll: every item the backend holds, open and closed.
+	ScopeAll DiscoveryScope = "all"
+	// ScopeOpen: every open item.
+	ScopeOpen DiscoveryScope = "open"
+	// ScopeProcessable: open items this binary could process (default).
+	ScopeProcessable DiscoveryScope = "processable"
+	// ScopeWorkable: processable items not blocked — someone could work them.
+	ScopeWorkable DiscoveryScope = "workable"
+	// ScopeFree: workable items this operator could claim now.
+	ScopeFree DiscoveryScope = "free"
+	// ScopeAuto: free items that are opted in — an unattended `resolve` would pick one.
+	ScopeAuto DiscoveryScope = "auto"
+)
+
+// ValidScope reports whether s is one of the six recognized scope values.
+func ValidScope(s DiscoveryScope) bool {
+	switch s {
+	case ScopeAll, ScopeOpen, ScopeProcessable, ScopeWorkable, ScopeFree, ScopeAuto:
+		return true
+	}
+	return false
+}
+
+// Availability is the per-item state, from a closed set. Each state is the
+// boundary between two adjacent scope levels.
+type Availability string
+
+const (
+	// AvailAuto: in scope level 6 — opted in for unattended selection.
+	AvailAuto Availability = "auto"
+	// AvailAvailable: in 5 (free) but not 6 (auto).
+	AvailAvailable Availability = "available"
+	// AvailHeld: in 4 (workable) but not 5 (free) — someone else holds it.
+	AvailHeld Availability = "held"
+	// AvailBlocked: in 3 (processable) but not 4 (workable).
+	AvailBlocked Availability = "blocked"
+	// AvailUnhandled: in 2 (open) but not 3 — no flow here accepts the type.
+	AvailUnhandled Availability = "unhandled"
+	// AvailClosed: in 1 (all) but not 2.
+	AvailClosed Availability = "closed"
+)
+
+// InScope reports whether an item at this availability level is included in
+// the given scope.
+func (a Availability) InScope(s DiscoveryScope) bool {
+	return availLevel(a) >= scopeLevel(s)
+}
+
+func scopeLevel(s DiscoveryScope) int {
+	switch s {
+	case ScopeAll:
+		return 1
+	case ScopeOpen:
+		return 2
+	case ScopeProcessable:
+		return 3
+	case ScopeWorkable:
+		return 4
+	case ScopeFree:
+		return 5
+	case ScopeAuto:
+		return 6
+	}
+	return 0
+}
+
+func availLevel(a Availability) int {
+	switch a {
+	case AvailClosed:
+		return 1
+	case AvailUnhandled:
+		return 2
+	case AvailBlocked:
+		return 3
+	case AvailHeld:
+		return 4
+	case AvailAvailable:
+		return 5
+	case AvailAuto:
+		return 6
+	}
+	return 0
+}
+
+// DiscoveryItem is the per-item snapshot returned by Discoverer.Discover.
+// It is NOT ItemRef: ItemRef is an addressing type embedded in Claim and
+// serialized to .flow/active.json, so attaching mutable fields (tags, holder)
+// to it would freeze them at claim time. DiscoveryItem carries the same
+// addressing fields plus the mutable listing metadata.
+type DiscoveryItem struct {
+	// Addressing — same fields as ItemRef, usable to construct one.
+	BackendName string          `json:"backend"`
+	Display     string          `json:"display"`
+	Ref         json.RawMessage `json:"ref"`
+
+	// Listing metadata — NOT frozen at claim time.
+	Title        string       `json:"title"`
+	Availability Availability `json:"availability"`
+	Holder       string       `json:"holder,omitempty"`     // current claim owner, if any
+	Tags         []string     `json:"tags"`                 // ALL labels, not just flow:*
+	BlockedBy    []string     `json:"blocked_by,omitempty"` // blocking item refs, by display id
+	BlockReason  string       `json:"block_reason,omitempty"`
+}
+
+// ItemRef converts the discovery item into an ItemRef for use by Claim et al.
+func (d DiscoveryItem) ItemRef() ItemRef {
+	return ItemRef{
+		BackendName: d.BackendName,
+		Display:     d.Display,
+		Ref:         d.Ref,
+	}
+}
+
+// Discoverer is an optional Backend capability: list items visible to the
+// operator beyond the narrow eligible set that ListEligible returns.
+//
+// ListEligible feeds resolve's auto-select: its narrowness is a safety
+// property (it must never pick an item that should not be auto-started).
+// Discover feeds `list`: it returns items at any scope the operator asks for,
+// with per-item availability, tags, and holder — enough for the operator to
+// see the landscape and choose what to claim.
+//
+// INVARIANT: resolve's auto-select path MUST NEVER call Discover. The two
+// draw from different base sets by design, and widening auto-select would
+// let a bare `resolve` pick an arbitrary open issue and begin work on it.
+// This invariant is stated here and covered by a test.
+type Discoverer interface {
+	Discover(ctx context.Context, scope DiscoveryScope, binaryName string) ([]DiscoveryItem, error)
+}
+
+// TagFilterer is an optional Backend capability: list eligible items
+// carrying all of the given tags. Used by `resolve --tag` to narrow the
+// auto-selectable set. The result is a subset of what ListEligible returns
+// (same base set, fewer items); the tags filter is conjunctive.
+//
+// Backends that can filter server-side (e.g. the github backend appends
+// `label:<tag>` terms to its search query) implement this for efficiency.
+// Backends without it make `--tag` unavailable on resolve.
+type TagFilterer interface {
+	ListEligibleWithTags(ctx context.Context, tags []string) ([]ItemRef, error)
+}
+
 // Claim is the credentialed handle returned by Backend.Claim. Holds the
 // backend-internal token used by subsequent write ops; the SDK serializes
 // this to .flow/active.json.

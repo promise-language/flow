@@ -218,13 +218,17 @@ type questionPayload struct {
 }
 
 type listPayload struct {
+	Scope string            `json:"scope"`
 	Items []listItemPayload `json:"items"`
 }
 
 type listItemPayload struct {
-	Display string `json:"display"`
-	Owner   string `json:"owner"`
-	Backend string `json:"backend"`
+	Display      string   `json:"display"`
+	Title        string   `json:"title,omitempty"`
+	Owner        string   `json:"owner"`
+	Backend      string   `json:"backend"`
+	Availability string   `json:"availability,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
 }
 
 type grantPayload struct {

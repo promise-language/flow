@@ -216,6 +216,7 @@ var outwardReads = map[string]bool{
 	"GetIssue":         true,
 	"GetComment":       true,
 	"ListCommentsPage": true,
+	"ListIssues":       true,
 	"GetRepo":          true,
 	"DownloadContents": true,
 	"GetContents":      true,

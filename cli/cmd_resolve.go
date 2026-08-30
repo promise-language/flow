@@ -51,11 +51,18 @@ const maxResolveSteps = 50
 func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("resolve")
 	of := addOutputFlags(fs)
+	var tags stringSliceFlag
+	fs.Var(&tags, "tag", "filter eligible set by tag (repeatable, conjunctive)")
 	if !app.parseArgs(fs, args) {
 		return 2
 	}
 	if fs.NArg() > 1 {
 		return app.usageError("resolve: unexpected argument %q (resolve takes an optional item id)", fs.Arg(1))
+	}
+	// Naming an item id AND a tag is a usage error: the id already answers
+	// the question the tag would ask.
+	if fs.NArg() == 1 && len(tags) > 0 {
+		return app.usageError("resolve: --tag and an explicit item id are mutually exclusive")
 	}
 	// Decided before any claim work: a contradictory --json --human must exit 2
 	// without leasing anything.
@@ -88,13 +95,32 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			// eligible item. The backend's ListEligible order is the
 			// selection policy (see doc comment above) — the CLI just
 			// claims whatever it returns first.
-			refs, err := app.Backend.ListEligible(ctx)
+			//
+			// When --tag is specified, use the TagFilterer interface to
+			// narrow the eligible set server-side. Without TagFilterer,
+			// --tag is refused.
+			var refs []flow.ItemRef
+			var err error
+			if len(tags) > 0 {
+				tf, ok := app.Backend.(flow.TagFilterer)
+				if !ok {
+					fmt.Fprintln(app.Err, "resolve: this backend does not support --tag (no TagFilterer capability)")
+					return 1
+				}
+				refs, err = tf.ListEligibleWithTags(ctx, tags)
+			} else {
+				refs, err = app.Backend.ListEligible(ctx)
+			}
 			if err != nil {
 				fmt.Fprintln(app.Err, "resolve:", err)
 				return 1
 			}
 			if len(refs) == 0 {
-				fmt.Fprintln(app.Err, "resolve: no active claim and no eligible items")
+				if len(tags) > 0 {
+					fmt.Fprintf(app.Err, "resolve: no active claim and no eligible items carrying tags %v\n", []string(tags))
+				} else {
+					fmt.Fprintln(app.Err, "resolve: no active claim and no items in the auto-selectable set (eligible items matching this binary's label and assignee)")
+				}
 				return 0
 			}
 			// Cheap desync: two arenas launched in lockstep would otherwise

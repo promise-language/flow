@@ -169,8 +169,8 @@ func TestCmdResolve_EmptyEligibleExitsClean(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 (empty eligible is a clean exit, not an error); err=%q", code, errBuf.String())
 	}
-	if !strings.Contains(errBuf.String(), "no eligible items") {
-		t.Errorf("expected Err to mention 'no eligible items'; got %q", errBuf.String())
+	if !strings.Contains(errBuf.String(), "no items in the auto-selectable set") {
+		t.Errorf("expected Err to mention 'no items in the auto-selectable set'; got %q", errBuf.String())
 	}
 	if out.Len() != 0 {
 		t.Errorf("Out should be empty on empty-eligible exit; got %q", out.String())
@@ -644,5 +644,122 @@ func TestCmdResolve_RunOneErrorKeepsStdoutClean(t *testing.T) {
 	}
 	if !strings.Contains(errBuf.String(), "state boom") {
 		t.Errorf("expected the error on stderr; got %q", errBuf.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// --tag on resolve
+// ---------------------------------------------------------------------------
+
+// tagFilterBackend wraps fake and implements TagFilterer.
+type tagFilterBackend struct {
+	*fake.Backend
+	taggedRefs []flow.ItemRef
+	calledTags []string
+}
+
+func (b *tagFilterBackend) ListEligibleWithTags(ctx context.Context, tags []string) ([]flow.ItemRef, error) {
+	b.calledTags = tags
+	return b.taggedRefs, nil
+}
+
+// TestCmdResolve_TagFilterSelectsFromTaggedSet verifies that --tag uses
+// TagFilterer and not ListEligible.
+func TestCmdResolve_TagFilterSelectsFromTaggedSet(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be := &tagFilterBackend{
+		Backend: inner,
+		taggedRefs: []flow.ItemRef{
+			{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
+		},
+	}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), []string{"--tag", "priority:high"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if len(be.calledTags) != 1 || be.calledTags[0] != "priority:high" {
+		t.Errorf("TagFilterer called with %v, want [priority:high]", be.calledTags)
+	}
+}
+
+// TestCmdResolve_TagAndIdMutuallyExclusive verifies the usage error.
+func TestCmdResolve_TagAndIdMutuallyExclusive(t *testing.T) {
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), []string{"--tag", "x", "42"})
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2 (usage error); err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "mutually exclusive") {
+		t.Errorf("expected mutual-exclusion message; got %q", errBuf.String())
+	}
+}
+
+// TestCmdResolve_TagEmptySetExitsClean verifies that no items with the given
+// tags exits 0 — selecting nothing is not an error.
+func TestCmdResolve_TagEmptySetExitsClean(t *testing.T) {
+	inner := fake.New()
+	be := &tagFilterBackend{
+		Backend:    inner,
+		taggedRefs: nil, // empty
+	}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), []string{"--tag", "nonexistent"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "no eligible items carrying tags") {
+		t.Errorf("expected tag-specific empty message; got %q", errBuf.String())
+	}
+}
+
+// TestCmdResolve_TagWithoutTagFiltererRefused verifies that --tag is refused
+// when the backend doesn't implement TagFilterer.
+func TestCmdResolve_TagWithoutTagFiltererRefused(t *testing.T) {
+	be := fake.New() // no TagFilterer
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), []string{"--tag", "x"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "does not support --tag") {
+		t.Errorf("expected TagFilterer-not-supported message; got %q", errBuf.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Invariant: resolve's auto-select NEVER calls Discover.
+// ---------------------------------------------------------------------------
+
+// discoverPanicBackend wraps fake and panics if Discover is called. This
+// proves the invariant stated in the Discoverer interface doc: resolve's
+// auto-select path must never call Discover.
+type discoverPanicBackend struct {
+	*fake.Backend
+}
+
+func (b *discoverPanicBackend) Discover(ctx context.Context, scope flow.DiscoveryScope, binaryName string) ([]flow.DiscoveryItem, error) {
+	panic("INVARIANT VIOLATION: resolve's auto-select called Discover")
+}
+
+// TestCmdResolve_AutoSelectNeverCallsDiscover is the invariant test from
+// item 2 of issue #6.
+func TestCmdResolve_AutoSelectNeverCallsDiscover(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be := &discoverPanicBackend{Backend: inner}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	// If cmdResolve ever calls Discover, the panic will fail this test.
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
 	}
 }
