@@ -259,6 +259,19 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		})
 	}
 
+	// Deterministic refusal (handler returned flow.ErrRefused): the failure
+	// provably cannot change on re-run, so retrying is pointless. Park with
+	// ParkRefused and SKIP the BumpInvocations call — symmetric with the
+	// ErrTransient branch above. The park reason is the refusal's own
+	// message so the operator sees what was refused.
+	if handlerErr != nil && errors.Is(handlerErr, flow.ErrRefused) {
+		return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
+			Kind:   flow.ParkRefused,
+			Step:   li.Result(),
+			Reason: handlerErr.Error(),
+		})
+	}
+
 	// Non-transient: the invocation produced a result (success, skip,
 	// park, or a real failure). Count it.
 	if li.Kind == flow.LifecycleArtifact {

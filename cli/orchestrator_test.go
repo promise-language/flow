@@ -1151,3 +1151,88 @@ func TestRunOne_NonQuestionParkIsNotStamped(t *testing.T) {
 		t.Errorf("Details = %q, want no ask marker on a non-question park", res.Park.Details)
 	}
 }
+
+// A handler returning ErrRefused parks with ParkRefused and does NOT consume
+// an invocation — symmetric with ErrTransient. The park reason carries the
+// refusal's own message so the operator sees what was refused.
+func TestRunOne_ErrRefusedParksWithoutBurningBudget(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("guarded", "plan", func(ctx flow.StepCtx) error {
+			return fmt.Errorf("guard refused staged file main.go: %w", flow.ErrRefused)
+		}, flow.StepConfig{Budget: flow.StepBudget{MaxInvocations: 1}})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "parked" {
+		t.Fatalf("status = %q, want parked", res.Status)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkRefused {
+		t.Fatalf("Park = %+v, want kind=refused", res.Park)
+	}
+	if !strings.Contains(res.Park.Reason, "guard refused staged file") {
+		t.Errorf("Park.Reason = %q, want the refusal's own message", res.Park.Reason)
+	}
+
+	// The invocation must NOT have been counted.
+	state, _ := be.LoadState(context.Background(), claim)
+	if rec := state.Artifact("plan"); rec.Invocations != 0 {
+		t.Errorf("Invocations = %d, want 0 (ErrRefused must not burn budget)", rec.Invocations)
+	}
+
+	// A second dispatch must NOT pre-gate on budget — the budget is untouched.
+	res2, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("second RunOne: %v", err)
+	}
+	if res2.Status != "parked" || res2.Park == nil || res2.Park.Kind != flow.ParkRefused {
+		t.Fatalf("second run = %+v, want parked/refused again (not budget-exhausted)", res2)
+	}
+}
+
+// Regression guard: a plain (non-sentinel) error still bumps invocations.
+// This test exists so a future refactor of the ErrRefused branch cannot
+// accidentally skip the bump for all errors.
+func TestRunOne_PlainErrorStillBumpsInvocations(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("broken", "plan", func(ctx flow.StepCtx) error {
+			return errors.New("something went wrong")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "failed" {
+		t.Fatalf("status = %q, want failed", res.Status)
+	}
+	state, _ := be.LoadState(context.Background(), claim)
+	if rec := state.Artifact("plan"); rec.Invocations != 1 {
+		t.Errorf("Invocations = %d, want 1 (plain error must consume budget)", rec.Invocations)
+	}
+}
+
+// ErrTransient still works as before — parks with ParkInfraTransient and
+// does not bump. Regression guard for the ErrRefused addition.
+func TestRunOne_ErrTransientStillParksInfraTransient(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) error {
+			return fmt.Errorf("runner offline: %w", flow.ErrTransient)
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkInfraTransient {
+		t.Fatalf("res = %+v, want parked/infra-transient", res)
+	}
+	state, _ := be.LoadState(context.Background(), claim)
+	if rec := state.Artifact("plan"); rec.Invocations != 0 {
+		t.Errorf("Invocations = %d, want 0 (ErrTransient must not burn budget)", rec.Invocations)
+	}
+}

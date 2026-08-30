@@ -39,6 +39,23 @@ var ErrWorkInProgressUnsupported = errors.New("flow: backend does not support wo
 // without needing a handler-level sentinel.
 var ErrTransient = errors.New("flow: transient infrastructure failure")
 
+// ErrRefused — handler-returned sentinel for deterministic failures that
+// provably cannot change on re-run: a repository guard refused a staged file,
+// a required tool reports itself out of date, or a precondition on the
+// environment is unmet. The orchestrator translates this to:
+//
+//	InvocationResult{Status: "parked", Park: {Kind: ParkRefused, ...}}
+//
+// and SKIPS the BumpInvocations call, so a deterministic refusal does not
+// burn the step's invocation budget. The park reason is the refusal's own
+// message, so the operator sees what was refused rather than a generic
+// "budget exhausted" after the budget drains on identical no-op retries.
+//
+// Symmetric with ErrTransient: one sentinel for "retry is free" (transient),
+// one for "retry is pointless" (refused), and the default in between stays
+// as it is (retry and pay).
+var ErrRefused = errors.New("flow: deterministic refusal")
+
 // ErrNoDisclosureGuard — no DisclosureGuard was injected, so nothing is
 // published. docs/disclosure.md: "an interface that defaults to allow is an
 // interface whose whole purpose is optional." Reads are unaffected; the first
