@@ -302,6 +302,31 @@ func TestGrantPark_RefusesNonBudgetPark(t *testing.T) {
 	}
 }
 
+// A ParkRefused park is not a budget exhaustion — granting budget would not
+// unpark it. The grant command must refuse and print the refusal-specific
+// remedy so the operator knows to fix the environment, not raise a cap.
+func TestGrantPark_RefusesRefusedPark(t *testing.T) {
+	env := newParkGrantEnv(t)
+	env.park(t, flow.ParkRequest{
+		Kind:   flow.ParkRefused,
+		Step:   "plan",
+		Reason: "guard refused staged file main.go",
+	})
+
+	code := env.grant()
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	for _, want := range []string{"not a budget cap", "deterministic", "Fix the environment"} {
+		if !strings.Contains(env.err.String(), want) {
+			t.Errorf("stderr = %q, want %q", env.err.String(), want)
+		}
+	}
+	if got := env.rec(t, "plan").GrantedInvocations; got != 3 {
+		t.Errorf("GrantedInvocations = %d, want 3 (unchanged — no budget written)", got)
+	}
+}
+
 func TestGrantPark_StaleParkOnResolvedStep(t *testing.T) {
 	env := newParkGrantEnv(t)
 	if err := env.be.ResolveArtifact(context.Background(), env.claim, "plan",
