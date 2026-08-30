@@ -988,3 +988,119 @@ func (m *ghMock) labelNames() []string {
 	defer m.mu.Unlock()
 	return append([]string(nil), m.issueLabels...)
 }
+
+// ---------------------------------------------------------------------------
+// LoadStateByRef (flow.StateInspector)
+// ---------------------------------------------------------------------------
+
+// The compile-time assertion lives in backend.go. This test exercises the
+// method end-to-end: claim, seed, resolve an artifact, then load via ref
+// alone — no claim token — and verify the result matches LoadState.
+func TestBackend_LoadStateByRef_MatchesLoadState(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	ctx := t.Context()
+	ref := b.refFromIssue(42)
+
+	claim, err := b.Claim(ctx, ref, "alice", false)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	specs := []flow.ArtifactSpec{
+		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
+	}
+	if err := b.SeedState(ctx, claim, specs); err != nil {
+		t.Fatalf("SeedState: %v", err)
+	}
+	if err := b.ResolveArtifact(ctx, claim, "plan", flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"}); err != nil {
+		t.Fatalf("ResolveArtifact: %v", err)
+	}
+
+	// LoadState (via claim) is the reference.
+	want, err := b.LoadState(ctx, claim)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+
+	// LoadStateByRef must return the same state without a claim.
+	got, err := b.LoadStateByRef(ctx, ref)
+	if err != nil {
+		t.Fatalf("LoadStateByRef: %v", err)
+	}
+
+	if got.Item.Title != want.Item.Title {
+		t.Errorf("Title = %q, want %q", got.Item.Title, want.Item.Title)
+	}
+	if len(got.Artifacts) != len(want.Artifacts) {
+		t.Fatalf("Artifacts count = %d, want %d", len(got.Artifacts), len(want.Artifacts))
+	}
+	rec := got.Artifacts["plan"]
+	if !rec.Resolved {
+		t.Errorf("plan artifact not resolved via LoadStateByRef")
+	}
+	if rec.Markdown != "the plan" {
+		t.Errorf("plan Markdown = %q, want %q", rec.Markdown, "the plan")
+	}
+}
+
+// LoadStateByRef with a cold cache (no prior LoadState call) must scan the
+// issue's comments to find the state comment — the same path fetchStateComment
+// takes when cachedID is 0.
+func TestBackend_LoadStateByRef_ColdCache(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	ctx := t.Context()
+	ref := b.refFromIssue(42)
+
+	// Claim and seed via a SEPARATE backend instance (simulating a different
+	// process) so b's stateCommentCache is cold.
+	b2 := newMockedBackend(t, mock, srv)
+	claim, err := b2.Claim(ctx, ref, "alice", false)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if err := b2.SeedState(ctx, claim, []flow.ArtifactSpec{
+		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
+	}); err != nil {
+		t.Fatalf("SeedState: %v", err)
+	}
+
+	// b has never seen this issue — cache is empty.
+	got, err := b.LoadStateByRef(ctx, ref)
+	if err != nil {
+		t.Fatalf("LoadStateByRef (cold): %v", err)
+	}
+	if _, ok := got.Artifacts["plan"]; !ok {
+		t.Errorf("plan artifact missing from cold-cache LoadStateByRef; got %+v", got.Artifacts)
+	}
+}
+
+// LoadStateByRef on an issue with NO state comment returns an empty (unseeded)
+// state — not an error. This is the expected shape for an issue that has never
+// been claimed.
+func TestBackend_LoadStateByRef_NoStateComment(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	ctx := t.Context()
+	ref := b.refFromIssue(42)
+
+	got, err := b.LoadStateByRef(ctx, ref)
+	if err != nil {
+		t.Fatalf("LoadStateByRef: %v", err)
+	}
+	if len(got.Artifacts) != 0 {
+		t.Errorf("expected no artifacts on unseeded issue; got %+v", got.Artifacts)
+	}
+	if got.Item.Title != "Test issue" {
+		t.Errorf("Title = %q, want %q", got.Item.Title, "Test issue")
+	}
+}
