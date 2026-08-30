@@ -1310,6 +1310,101 @@ func TestPushMaterialOnABranchThatIsAlsoAPath(t *testing.T) {
 	}
 }
 
+// A merge commit's conflict resolution is content git log --patch silently
+// omits. Without --diff-merges the guard never sees it, and the push publishes
+// bytes nothing examined — the failure docs/disclosure.md calls worse than no
+// guard at all.
+//
+// Against a real repository, for the reason TestPushMaterial is.
+func TestPushMaterialIncludesMergeCommitDiff(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	origin := t.TempDir()
+	gitInTest(t, origin, "init", "--bare", "-b", "main", ".")
+	gitInTest(t, dir, "init", "-b", "main", ".")
+	commitFile(t, dir, "a.txt", "original\n", "base")
+	gitInTest(t, dir, "remote", "add", "origin", origin)
+	gitInTest(t, dir, "push", "origin", "main")
+
+	// A branch with its own change to a.txt.
+	gitInTest(t, dir, "checkout", "-b", "topic")
+	commitFile(t, dir, "a.txt", "topic-side\n", "topic change")
+
+	// A conflicting change on main.
+	gitInTest(t, dir, "checkout", "main")
+	commitFile(t, dir, "a.txt", "main-side\n", "main change")
+	gitInTest(t, dir, "push", "origin", "main")
+
+	// Merge main into topic, resolve the conflict by hand.
+	gitInTest(t, dir, "checkout", "topic")
+	// git merge will fail due to conflict — that is expected.
+	g := newGitOps(dir)
+	g.run(t.Context(), "merge", "main")
+	// Resolve with content that appears only in the resolution.
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("RESOLVED-SECRET-LINE\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInTest(t, dir, "add", "a.txt")
+	gitInTest(t, dir, "commit", "-m", "merge main into topic")
+
+	msgs, patch, err := g.PushMaterial(t.Context(), "topic")
+	if err != nil {
+		t.Fatalf("PushMaterial after merge: %v", err)
+	}
+	if !slices.Contains(msgs, "merge main into topic") {
+		t.Errorf("messages = %v, want the merge commit's message", msgs)
+	}
+	if !strings.Contains(patch, "RESOLVED-SECRET-LINE") {
+		t.Errorf("patch does not carry the merge's conflict resolution:\n%s", patch)
+	}
+}
+
+// A merge commit that does not modify anything (a clean merge with no conflict
+// resolution) should not cause PushMaterial to fail. The diff for that merge is
+// empty, which is fine — there is nothing to disclose.
+//
+// Against a real repository, for the reason TestPushMaterial is.
+func TestPushMaterialCleanMergeDoesNotFail(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	origin := t.TempDir()
+	gitInTest(t, origin, "init", "--bare", "-b", "main", ".")
+	gitInTest(t, dir, "init", "-b", "main", ".")
+	commitFile(t, dir, "a.txt", "original\n", "base")
+	gitInTest(t, dir, "remote", "add", "origin", origin)
+	gitInTest(t, dir, "push", "origin", "main")
+
+	// A branch that touches a different file.
+	gitInTest(t, dir, "checkout", "-b", "topic")
+	commitFile(t, dir, "b.txt", "topic-only\n", "topic adds b")
+
+	// main adds a non-conflicting file.
+	gitInTest(t, dir, "checkout", "main")
+	commitFile(t, dir, "c.txt", "main-only\n", "main adds c")
+	gitInTest(t, dir, "push", "origin", "main")
+
+	// Clean merge — no conflict.
+	gitInTest(t, dir, "checkout", "topic")
+	gitInTest(t, dir, "merge", "main")
+
+	g := newGitOps(dir)
+	msgs, patch, err := g.PushMaterial(t.Context(), "topic")
+	if err != nil {
+		t.Fatalf("PushMaterial after clean merge: %v", err)
+	}
+	if !slices.Contains(msgs, "topic adds b") {
+		t.Errorf("messages = %v, want the topic's own commit", msgs)
+	}
+	// The topic's own commit should show up in the patch.
+	if !strings.Contains(patch, "topic-only") {
+		t.Errorf("patch missing topic's own content:\n%s", patch)
+	}
+}
+
 // A push whose material cannot be computed must not happen. docs/disclosure.md
 // fails closed — "a disclosure guard that cannot answer refuses to send" — and
 // the material query is what gives this guard something to answer about, so a
