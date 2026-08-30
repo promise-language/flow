@@ -1,0 +1,38 @@
+name: verify
+
+# The quality gate contributors already run locally (CONTRIBUTING.md: "Run the
+# quality gate (`bin/verify`) and keep it green"). CI runs the same binary from
+# the same source, so a green PR and a green desktop mean the same thing.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A PR that is pushed to twice does not need the first run's answer.
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # go.mod is the single source of the toolchain version, so bumping it
+      # moves CI too rather than leaving a second copy to drift.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # bin/ is gitignored, so a fresh checkout has no tools. ./make is
+      # committed shell text that builds them via `go run`, needing nothing but
+      # the toolchain above — which is what makes this reproducible off a clone.
+      - name: Build tools
+        run: ./make
+
+      - name: Verify
+        run: ./bin/verify

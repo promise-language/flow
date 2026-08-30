@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -63,7 +64,7 @@ func RunVerify(repoRoot string, args []string) error {
 func verifySteps(repoRoot string) []step {
 	if Exists(filepath.Join(repoRoot, "go.mod")) {
 		return []step{
-			{"format", func(r string) error { return RunIn(r, "gofmt", "-w", ".") }},
+			{"format", checkFormatted},
 			{"vet", func(r string) error { return RunIn(r, "go", "vet", "./...") }},
 			{"build", func(r string) error { return RunIn(r, "go", "build", "./...") }},
 			{"test", func(r string) error { return RunIn(r, "go", "test", "./...") }},
@@ -76,4 +77,31 @@ func verifySteps(repoRoot string) []step {
 		}}
 	}
 	return []step{stub("format"), stub("vet"), stub("build"), stub("test")}
+}
+
+// checkFormatted reports unformatted files instead of rewriting them.
+//
+// `gofmt -w` made this step incapable of failing: it repaired the tree and
+// exited 0, so the gate reported a clean run over a change it had silently
+// altered. A gate states what is true about the tree it was handed; one that
+// edits first is answering about a different tree — and under CI, about one
+// nobody will ever see, since the checkout is discarded. Unformatted code would
+// merge with the gate green.
+//
+// `gofmt -l` exits 0 whether or not it lists anything, so the OUTPUT is the
+// signal and the exit code carries nothing. The names are printed because
+// "run gofmt" without them leaves the reader to find the files themselves.
+func checkFormatted(repoRoot string) error {
+	out, err := RunOutputIn(repoRoot, "gofmt", "-l", ".")
+	if err != nil {
+		return fmt.Errorf("gofmt -l: %w", err)
+	}
+	if out == "" {
+		return nil
+	}
+	files := strings.Split(out, "\n")
+	for _, f := range files {
+		fmt.Printf("    unformatted: %s\n", f)
+	}
+	return fmt.Errorf("%d file(s) need gofmt -w", len(files))
 }
