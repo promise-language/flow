@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/promise-language/flow"
+	"github.com/promise-language/flow/pkg/backend/fake"
 )
 
 // statusFlowLine is the source of the "flow:" status line. The key invariant
@@ -169,5 +172,122 @@ func TestStatusHuman_OmitsEmptyTitle(t *testing.T) {
 	}
 	if out := env.out.String(); strings.Contains(out, "title:") {
 		t.Errorf("status printed a title line for an untitled item:\n%s", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// cmdStatus <id> — the StateInspector path introduced by this change
+// ---------------------------------------------------------------------------
+
+// When the backend does NOT implement StateInspector, `status <id>` must
+// refuse (exit 1) and tell the user to claim first — not panic, not silently
+// succeed.
+func TestCmdStatus_WithoutStateInspector_RefusesById(t *testing.T) {
+	app, _, _ := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{Budget: flow.DefaultStepBudget()})
+	}, &stubAgent{name: "stub"})
+
+	out := &bytes.Buffer{}
+	errBuf := &bytes.Buffer{}
+	app.Out, app.Err = out, errBuf
+
+	code := app.cmdStatus(context.Background(), []string{"1"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(errBuf.String(), "cannot inspect") {
+		t.Errorf("stderr should explain why; got %q", errBuf.String())
+	}
+}
+
+// statusInspectBackend wraps the fake backend and implements StateInspector
+// and RefResolver — mirroring the github backend where the ref IS the id and
+// state is resolvable from just the ref.
+type statusInspectBackend struct {
+	*fake.Backend
+	claim *flow.Claim // set after Claim so LoadStateByRef can delegate
+}
+
+func (b *statusInspectBackend) LoadStateByRef(ctx context.Context, ref flow.ItemRef) (*flow.ItemState, error) {
+	if b.claim == nil {
+		return &flow.ItemState{Item: flow.Item{Type: "task"}}, nil
+	}
+	return b.Backend.LoadState(ctx, *b.claim)
+}
+
+func (b *statusInspectBackend) ResolveRef(ctx context.Context, id string) (flow.ItemRef, error) {
+	return flow.ItemRef{BackendName: "fake", Display: id, Ref: json.RawMessage(`"` + id + `"`)}, nil
+}
+
+// When the backend DOES implement StateInspector, `status <id>` must succeed
+// (exit 0) and render the state — without claiming. This is the feature the
+// change enables.
+func TestCmdStatus_WithStateInspector_InspectsById(t *testing.T) {
+	be := fake.New(flow.Signal("pr-open", "test"))
+	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "inspect me"})
+
+	sib := &statusInspectBackend{Backend: be}
+	app := &App{
+		Backend: sib,
+		Agent:   &stubAgent{name: "stub"},
+		Artifacts: []flow.ArtifactDef{
+			flow.Artifact("plan", flow.ArtifactMarkdown),
+		},
+		Signals: []flow.SignalDef{
+			flow.Signal("pr-open", "test"),
+		},
+		Owner: "alice",
+	}
+	f := flow.NewFlow("implement", []flow.ItemType{"task"})
+	f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		return ctx.ResolveMarkdown("the plan")
+	}, flow.StepConfig{Budget: flow.StepBudget{
+		MaxInvocations: 3, MaxPromptsPerInvocation: 1, MaxCostUSD: 10,
+		Timeout: 30 * time.Minute,
+	}})
+	app.Flows = []*flow.Flow{f}
+	if err := app.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
+	// Claim and seed via the underlying fake so LoadStateByRef has state to
+	// return, but the claim is NOT the app's active claim — the point is that
+	// `status <id>` must NOT need an active claim.
+	ctx := context.Background()
+	ref := flow.ItemRef{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)}
+	claim, err := be.Claim(ctx, ref, "bob", false)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	sib.claim = &claim
+	if err := be.SeedState(ctx, claim, []flow.ArtifactSpec{
+		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
+	}); err != nil {
+		t.Fatalf("SeedState: %v", err)
+	}
+
+	out := &bytes.Buffer{}
+	errBuf := &bytes.Buffer{}
+	app.Out, app.Err = out, errBuf
+
+	code := app.cmdStatus(ctx, []string{"1"})
+	if code != 0 {
+		t.Fatalf("exit code = %d; stderr=%q", code, errBuf.String())
+	}
+
+	output := out.String()
+	// Must show the item's title.
+	if !strings.Contains(output, "inspect me") {
+		t.Errorf("output should contain the item title; got:\n%s", output)
+	}
+	// Must show the owner from LookupClaim, not "(unclaimed)".
+	if !strings.Contains(output, "bob") {
+		t.Errorf("output should show the claim owner 'bob'; got:\n%s", output)
+	}
+	// Must NOT have claimed via Alice (the app's Owner).
+	if strings.Contains(output, "alice") {
+		t.Errorf("output should not mention alice (no claim taken); got:\n%s", output)
 	}
 }
