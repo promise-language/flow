@@ -185,4 +185,3 @@ func (b *Backend) deriveBlockReason(lblNames []string) string {
 	}
 	return "blocked"
 }
-

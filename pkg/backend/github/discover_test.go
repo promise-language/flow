@@ -210,6 +210,196 @@ func TestBackend_Discover_ItemRefConversion(t *testing.T) {
 	}
 }
 
+// TestBackend_Discover_SkipsPullRequests verifies that the Issues API's
+// inclusion of pull requests is filtered out by Discover.
+func TestBackend_Discover_SkipsPullRequests(t *testing.T) {
+	mock := newGHMock(t)
+
+	mux := http.NewServeMux()
+	prefix := fmt.Sprintf("/repos/%s/%s", mock.owner, mock.repo)
+
+	mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"name":        mock.repo,
+			"full_name":   mock.owner + "/" + mock.repo,
+			"permissions": mock.perms,
+		})
+	})
+
+	mux.HandleFunc(prefix+"/issues", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, []map[string]any{
+			{
+				"number":     42,
+				"title":      "Real issue",
+				"state":      "open",
+				"labels":     toLabelObjs([]string{"flow:implement"}),
+				"assignees":  toLoginObjs([]string{}),
+				"html_url":   "https://github.com/o/r/issues/42",
+				"updated_at": "2025-01-01T00:00:00Z",
+			},
+			{
+				"number":       99,
+				"title":        "A pull request",
+				"state":        "open",
+				"labels":       toLabelObjs([]string{"flow:implement"}),
+				"assignees":    toLoginObjs([]string{}),
+				"html_url":     "https://github.com/o/r/pull/99",
+				"updated_at":   "2025-01-01T00:00:00Z",
+				"pull_request": map[string]any{"url": "https://api.github.com/repos/o/r/pulls/99"},
+			},
+		})
+	})
+
+	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"login": "alice"})
+	})
+
+	srv := startMockServer(t, mock, mux)
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	items, err := b.Discover(t.Context(), flow.ScopeOpen, "implement")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1 (PR should be filtered out)", len(items))
+	}
+	if items[0].Display != "o/r#42" {
+		t.Errorf("remaining item = %q, want o/r#42", items[0].Display)
+	}
+}
+
+// TestBackend_Discover_HolderFromOwnerLabel verifies that Holder is populated
+// from the flow:owner:<login> label.
+func TestBackend_Discover_HolderFromOwnerLabel(t *testing.T) {
+	mock := newGHMock(t)
+
+	mux := http.NewServeMux()
+	prefix := fmt.Sprintf("/repos/%s/%s", mock.owner, mock.repo)
+
+	mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"name":        mock.repo,
+			"full_name":   mock.owner + "/" + mock.repo,
+			"permissions": mock.perms,
+		})
+	})
+
+	mux.HandleFunc(prefix+"/issues", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, []map[string]any{
+			{
+				"number":     42,
+				"title":      "Held issue",
+				"state":      "open",
+				"labels":     toLabelObjs([]string{"flow:implement", "flow:owner:bob"}),
+				"assignees":  toLoginObjs([]string{"bob"}),
+				"html_url":   "https://github.com/o/r/issues/42",
+				"updated_at": "2025-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"login": "alice"})
+	})
+
+	srv := startMockServer(t, mock, mux)
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	items, err := b.Discover(t.Context(), flow.ScopeOpen, "implement")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if items[0].Holder != "bob" {
+		t.Errorf("Holder = %q, want %q", items[0].Holder, "bob")
+	}
+	if items[0].Availability != flow.AvailHeld {
+		t.Errorf("Availability = %q, want %q", items[0].Availability, flow.AvailHeld)
+	}
+}
+
+// TestBackend_Discover_BlockReason verifies that blocked items carry a reason.
+func TestBackend_Discover_BlockReason(t *testing.T) {
+	mock := newGHMock(t)
+
+	mux := http.NewServeMux()
+	prefix := fmt.Sprintf("/repos/%s/%s", mock.owner, mock.repo)
+
+	mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"name":        mock.repo,
+			"full_name":   mock.owner + "/" + mock.repo,
+			"permissions": mock.perms,
+		})
+	})
+
+	mux.HandleFunc(prefix+"/issues", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, []map[string]any{
+			{
+				"number":     42,
+				"title":      "Blocked issue",
+				"state":      "open",
+				"labels":     toLabelObjs([]string{"flow:implement", "flow:needs-answer"}),
+				"assignees":  toLoginObjs([]string{}),
+				"html_url":   "https://github.com/o/r/issues/42",
+				"updated_at": "2025-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"login": "alice"})
+	})
+
+	srv := startMockServer(t, mock, mux)
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	items, err := b.Discover(t.Context(), flow.ScopeProcessable, "implement")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if items[0].Availability != flow.AvailBlocked {
+		t.Errorf("Availability = %q, want %q", items[0].Availability, flow.AvailBlocked)
+	}
+	if items[0].BlockReason != "needs answer" {
+		t.Errorf("BlockReason = %q, want %q", items[0].BlockReason, "needs answer")
+	}
+}
+
+// TestBackend_DeriveBlockReason verifies each blocking label produces a
+// distinct reason string.
+func TestBackend_DeriveBlockReason(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	tests := []struct {
+		labels []string
+		want   string
+	}{
+		{[]string{"flow:implement", "flow:blocked"}, "blocked"},
+		{[]string{"flow:implement", "flow:disabled"}, "disabled"},
+		{[]string{"flow:implement", "flow:needs-answer"}, "needs answer"},
+		{[]string{"flow:implement", "flow:budget-exhausted:plan"}, `budget exhausted on "plan"`},
+	}
+	for _, tt := range tests {
+		got := b.deriveBlockReason(tt.labels)
+		if got != tt.want {
+			t.Errorf("deriveBlockReason(%v) = %q, want %q", tt.labels, got, tt.want)
+		}
+	}
+}
+
 // TestBackend_ListEligibleWithTags verifies the tag-filtered search.
 func TestBackend_ListEligibleWithTags(t *testing.T) {
 	mock := newGHMock(t)

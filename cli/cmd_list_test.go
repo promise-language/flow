@@ -239,6 +239,90 @@ func TestCmdList_JSON_Availability(t *testing.T) {
 	}
 }
 
+// TestCmdList_TagWithoutDiscoverer verifies that --tag is refused when the
+// backend doesn't implement Discoverer.
+func TestCmdList_TagWithoutDiscoverer(t *testing.T) {
+	be := fake.New()
+	app := &App{
+		Backend:   be,
+		Agent:     &stubAgent{name: "stub"},
+		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:     []*flow.Flow{makeTestFlow(t)},
+		Owner:     "alice",
+	}
+	if err := app.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	app.Out = newDiscardWriter()
+	errBuf := &bytes.Buffer{}
+	app.Err = errBuf
+
+	code := app.cmdList(context.Background(), []string{"--tag", "priority:high"})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(errBuf.String(), "does not support --tag") {
+		t.Errorf("expected --tag refusal message; got %q", errBuf.String())
+	}
+}
+
+// TestCmdList_ScopeWithoutDiscoverer verifies that non-default scopes other
+// than auto are refused when the backend lacks Discoverer.
+func TestCmdList_ScopeWithoutDiscoverer(t *testing.T) {
+	be := fake.New()
+	app := &App{
+		Backend:   be,
+		Agent:     &stubAgent{name: "stub"},
+		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:     []*flow.Flow{makeTestFlow(t)},
+		Owner:     "alice",
+	}
+	if err := app.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	app.Out = newDiscardWriter()
+	errBuf := &bytes.Buffer{}
+	app.Err = errBuf
+
+	code := app.cmdList(context.Background(), []string{"--scope", "open"})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(errBuf.String(), "does not support --scope") {
+		t.Errorf("expected --scope refusal message; got %q", errBuf.String())
+	}
+}
+
+// TestCmdList_EmptyDiscovery verifies the empty-result message includes the
+// scope name, not a generic "no eligible items".
+func TestCmdList_EmptyDiscovery(t *testing.T) {
+	be := &discovererBackend{
+		Backend: fake.New(),
+		items:   nil, // empty
+	}
+	app := &App{
+		Backend:   be,
+		Agent:     &stubAgent{name: "stub"},
+		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:     []*flow.Flow{makeTestFlow(t)},
+		Owner:     "alice",
+	}
+	if err := app.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
+	out := &bytes.Buffer{}
+	app.Out, app.Err = out, newDiscardWriter()
+
+	code := app.cmdList(context.Background(), []string{"--scope", "workable", "--human"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if !strings.Contains(out.String(), "no items at scope workable") {
+		t.Errorf("expected scope-specific empty message; got %q", out.String())
+	}
+}
+
 // makeTestFlow creates a minimal flow for test App validation.
 func makeTestFlow(t *testing.T) *flow.Flow {
 	t.Helper()
