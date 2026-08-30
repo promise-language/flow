@@ -18,7 +18,7 @@ import (
 // state, tags, and holder from the issue's labels and assignees — no per-item
 // round-trip.
 func (b *Backend) Discover(ctx context.Context, scope flow.DiscoveryScope, binaryName string) ([]flow.DiscoveryItem, error) {
-	login, err := resolveLogin(ctx)
+	login, err := b.out.GetAuthenticatedUser(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolve login: %w", err)
 	}

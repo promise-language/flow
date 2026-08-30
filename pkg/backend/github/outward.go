@@ -399,6 +399,23 @@ func (o *outward) ListCommentsPage(ctx context.Context, issue int, opt *github.I
 	return o.client.Issues.ListComments(ctx, o.owner, o.repo, issue, opt)
 }
 
+// GetAuthenticatedUser returns the login the client's credentials act as, via
+// `GET /user`.
+//
+// Through the client rather than `gh api user`, because the shell-out is a
+// route around this seam: it ignores o.client, so it ignores the token the
+// backend was configured with AND the base URL that points the client at a test
+// server. A caller that mocked /user got a handler nothing reached, and a unit
+// test silently depended on whoever last ran `gh auth login` — passing on a
+// developer's machine and failing anywhere without ambient credentials.
+func (o *outward) GetAuthenticatedUser(ctx context.Context) (string, error) {
+	u, _, err := o.client.Users.Get(ctx, "")
+	if err != nil {
+		return "", err
+	}
+	return u.GetLogin(), nil
+}
+
 func (o *outward) GetRepo(ctx context.Context) (*github.Repository, error) {
 	repo, _, err := o.client.Repositories.Get(ctx, o.owner, o.repo)
 	return repo, err

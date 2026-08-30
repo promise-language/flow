@@ -134,8 +134,12 @@ func TestBackend_Discover_BasicScopes(t *testing.T) {
 	if items[0].Display != "o/r#42" {
 		t.Errorf("item.Display = %q, want o/r#42", items[0].Display)
 	}
-	if items[0].Availability != flow.AvailAvailable {
-		t.Errorf("Availability = %q, want %q", items[0].Availability, flow.AvailAvailable)
+	// auto, not available: #42 carries flow:implement AND is assigned to the
+	// authenticated user (the mock's /user answers "alice", and the fixture
+	// assigns alice), which is exactly ListEligible's `label:flow:<binary>
+	// assignee:@me`. resolve would pick this item, so the marker must say so.
+	if items[0].Availability != flow.AvailAuto {
+		t.Errorf("Availability = %q, want %q", items[0].Availability, flow.AvailAuto)
 	}
 	// Tags must be ALL labels, not just flow:*.
 	if len(items[0].Tags) != 2 {
