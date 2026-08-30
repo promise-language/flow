@@ -166,7 +166,8 @@ func TestBackend_Discover_AvailabilityStates(t *testing.T) {
 		{"needs-answer label", []string{"flow:implement", "flow:needs-answer"}, nil, "open", "alice", "implement", flow.AvailBlocked},
 		{"budget-exhausted", []string{"flow:implement", "flow:budget-exhausted:plan"}, nil, "open", "alice", "implement", flow.AvailBlocked},
 		{"held by another", []string{"flow:implement", "flow:owner:bob"}, []string{"bob"}, "open", "alice", "implement", flow.AvailHeld},
-		{"available — no owner", []string{"flow:implement"}, nil, "open", "alice", "implement", flow.AvailAvailable},
+		{"available — not assigned", []string{"flow:implement"}, nil, "open", "alice", "implement", flow.AvailAvailable},
+		{"auto — assigned, no owner label", []string{"flow:implement"}, []string{"alice"}, "open", "alice", "implement", flow.AvailAuto},
 		{"auto — owned+assigned", []string{"flow:implement", "flow:owner:alice"}, []string{"alice"}, "open", "alice", "implement", flow.AvailAuto},
 	}
 

@@ -115,7 +115,7 @@ func (b *Backend) deriveAvailability(
 
 	// Level 3: processable — this binary's label is present.
 	binaryLabel := b.labels.Binary(binaryName)
-	if !containsStr(lblNames, binaryLabel) {
+	if !hasLabel(lblNames, binaryLabel) {
 		return flow.AvailUnhandled
 	}
 
@@ -137,16 +137,14 @@ func (b *Backend) deriveAvailability(
 	}
 
 	// Level 6: auto — assigned to me AND has the binary label.
-	// The ListEligible query is: label:flow:<binary> assignee:@me
-	assignedToMe := false
+	// The ListEligible query is: label:flow:<binary> assignee:@me — the
+	// owner label is not part of that query, so auto must not require it.
+	// An issue assigned via the GitHub UI (no claim, no owner label) is
+	// still auto-selectable by resolve.
 	for _, u := range assignees {
 		if u.GetLogin() == myLogin {
-			assignedToMe = true
-			break
+			return flow.AvailAuto
 		}
-	}
-	if assignedToMe && holder == myLogin {
-		return flow.AvailAuto
 	}
 
 	return flow.AvailAvailable
@@ -188,11 +186,3 @@ func (b *Backend) deriveBlockReason(lblNames []string) string {
 	return "blocked"
 }
 
-func containsStr(ss []string, want string) bool {
-	for _, s := range ss {
-		if s == want {
-			return true
-		}
-	}
-	return false
-}
