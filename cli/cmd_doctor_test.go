@@ -67,6 +67,66 @@ func newDummyFlow(name string) *flow.Flow {
 	return f
 }
 
+// The doctor command must report whether the backend supports StateInspector.
+// The fake backend does not implement it, so doctor should print "unavailable".
+func TestCmdDoctor_ReportsStateInspectorUnavailable(t *testing.T) {
+	be := fake.New()
+	app := App{
+		Backend:   be,
+		Agent:     &stubAgent{name: "stub"},
+		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:     []*flow.Flow{newDummyFlow("x")},
+	}
+	if err := app.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	out := &bytes.Buffer{}
+	app.Out = out
+	app.Err = &bytes.Buffer{}
+
+	code := app.cmdDoctor(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if !strings.Contains(out.String(), "unavailable") {
+		t.Errorf("doctor output should report StateInspector as unavailable; got %q", out.String())
+	}
+}
+
+// When the backend implements StateInspector, doctor should report "available".
+func TestCmdDoctor_ReportsStateInspectorAvailable(t *testing.T) {
+	be := &inspectingBackend{Backend: fake.New()}
+	app := App{
+		Backend:   be,
+		Agent:     &stubAgent{name: "stub"},
+		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:     []*flow.Flow{newDummyFlow("x")},
+	}
+	if err := app.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	out := &bytes.Buffer{}
+	app.Out = out
+	app.Err = &bytes.Buffer{}
+
+	code := app.cmdDoctor(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if !strings.Contains(out.String(), "available (backend supports StateInspector)") {
+		t.Errorf("doctor output should report StateInspector as available; got %q", out.String())
+	}
+}
+
+// inspectingBackend wraps the fake backend and adds a stub StateInspector.
+type inspectingBackend struct {
+	*fake.Backend
+}
+
+func (b *inspectingBackend) LoadStateByRef(ctx context.Context, ref flow.ItemRef) (*flow.ItemState, error) {
+	return &flow.ItemState{}, nil
+}
+
 // failingBackend wraps the fake backend and forces ListEligible to error so
 // cmdDoctor's fallback probe fails.
 type failingBackend struct {

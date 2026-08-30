@@ -195,7 +195,26 @@ func (b *Backend) LoadState(ctx context.Context, claim flow.Claim) (*flow.ItemSt
 	if err != nil {
 		return nil, err
 	}
+	return b.loadState(ctx, issueNum, tok.StateCommentID)
+}
 
+// LoadStateByRef implements flow.StateInspector: the state document is
+// addressed by issue number, and fetchStateComment already finds it with no
+// cached id.
+func (b *Backend) LoadStateByRef(ctx context.Context, ref flow.ItemRef) (*flow.ItemState, error) {
+	issueNum, err := b.issueNumber(ref)
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	cachedID := b.stateCommentCache[issueNum]
+	b.mu.Unlock()
+	return b.loadState(ctx, issueNum, cachedID)
+}
+
+// loadState is the shared core of LoadState and LoadStateByRef: everything
+// after the issue number is known.
+func (b *Backend) loadState(ctx context.Context, issueNum int, cachedCommentID int64) (*flow.ItemState, error) {
 	issue, err := b.out.GetIssue(ctx, issueNum)
 	if err != nil {
 		return nil, fmt.Errorf("get issue %d: %w", issueNum, err)
@@ -216,7 +235,7 @@ func (b *Backend) LoadState(ctx context.Context, claim flow.Claim) (*flow.ItemSt
 	}
 
 	// State comment.
-	stateBody, stateID, err := b.fetchStateComment(ctx, issueNum, tok.StateCommentID)
+	stateBody, stateID, err := b.fetchStateComment(ctx, issueNum, cachedCommentID)
 	if err != nil {
 		return nil, err
 	}
@@ -441,6 +460,11 @@ func (b *Backend) postStateComment(ctx context.Context, issueNum int, doc stateD
 
 // nowUTC is the time source for state comment timestamps. Patched by tests.
 var nowUTC = func() time.Time { return time.Now().UTC() }
+
+// Compile-time conformance checks for optional capabilities the CLI reaches
+// via type assertion. A missing method degrades silently to "not supported" at
+// runtime, so a dropped signature is only caught here.
+var _ flow.StateInspector = (*Backend)(nil)
 
 // suppressWarnings keeps the linter quiet about helpers used only across
 // other sub-files.

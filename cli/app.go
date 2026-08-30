@@ -327,7 +327,7 @@ usage:
   %[1]s resolve [<item-id>]          run ALL steps until finalized or parked (alias: run-all).
                                      With <item-id>, claims it first; else uses the active claim.
   %[1]s status [<item-id>]           read-only lifecycle checklist. With <item-id>, inspects
-                                     that item from the tracker without claiming it.
+                                     that item without claiming it (requires StateInspector).
   %[1]s grant                        top up the parked step's parked axis (the usual case)
   %[1]s grant --all                  top up every pending step over its consumption
   %[1]s grant <step-id> [--invocations N] [--cost USD] [--prompts N] [--timeout SECONDS]

@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"fmt"
+
+	"github.com/promise-language/flow"
 )
 
 // Output glyphs visually distinct from the rest of the SDK output so the
@@ -29,6 +31,7 @@ func (app *App) cmdDoctor(ctx context.Context, args []string) int {
 			return 1
 		}
 		fmt.Fprintf(app.Out, "%s doctor: OK\n", glyphOK)
+		app.reportCapabilities()
 		return 0
 	}
 	// Fallback: list eligible items as a connectivity probe.
@@ -37,5 +40,16 @@ func (app *App) cmdDoctor(ctx context.Context, args []string) int {
 		return 1
 	}
 	fmt.Fprintf(app.Out, "%s doctor: OK (no backend.Doctor; probed via ListEligible)\n", glyphOK)
+	app.reportCapabilities()
 	return 0
+}
+
+// reportCapabilities prints which optional Backend capabilities are available.
+func (app *App) reportCapabilities() {
+	_, hasInspector := app.Backend.(flow.StateInspector)
+	if hasInspector {
+		fmt.Fprintf(app.Out, "  status <id>: available (backend supports StateInspector)\n")
+	} else {
+		fmt.Fprintf(app.Out, "  status <id>: unavailable (backend does not support StateInspector; use claim first)\n")
+	}
 }
