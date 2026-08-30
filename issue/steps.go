@@ -50,10 +50,32 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(resp.LastText) == "" {
+	// The plan is what the agent SUBMITTED, when it submitted one. A plan-mode
+	// turn ends at the submission tool, so preferring it here is preferring the
+	// deliverable over whatever the agent happened to say on the way.
+	plan := resp.LastText
+	if resp.PlanText != "" {
+		plan = resp.PlanText
+	}
+	// An emptiness check is not enough, and this is the case that proves it: an
+	// agent that submitted a plan the transport dropped leaves behind the
+	// one-line preambles it emitted before each tool call. That is not empty,
+	// so it resolved — and implement, review and coverage each rendered seven
+	// lines of narration into their prompts as though it were the design.
+	//
+	// Failing here rather than resolving is the point: "the agent planned and
+	// we lost it" is a defect in this program, and publishing narration under
+	// the plan's name buries it where the next three steps pay for it.
+	if resp.PlanSubmitted && strings.TrimSpace(resp.PlanText) == "" {
+		return fmt.Errorf(
+			"agent submitted a plan and none was captured — refusing to resolve "+
+				"the plan artifact from the turn's narration instead (tools used: %v)",
+			resp.ToolsUsed)
+	}
+	if strings.TrimSpace(plan) == "" {
 		return fmt.Errorf("agent returned an empty plan")
 	}
-	return b.resolveMarkdown(ctx, pc, resp.SessionID, resp.LastText)
+	return b.resolveMarkdown(ctx, pc, resp.SessionID, plan)
 }
 
 // stepOpenBranch puts the worktree on this item's branch and records the commit

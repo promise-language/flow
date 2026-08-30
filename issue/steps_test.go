@@ -341,6 +341,16 @@ type scriptedAgent struct {
 	// substrate that dies part-way through a step. A shorter slice than the
 	// number of calls means every later call succeeds.
 	errs []error
+	// plans scripts what a plan-mode turn returns on successive calls. A
+	// plan-mode turn ends AT the submission tool, so its deliverable arrives
+	// separately from whatever the agent said on the way — which is the
+	// distinction the plan step now turns on.
+	plans []planReply
+}
+
+type planReply struct {
+	submitted bool
+	text      string
 }
 
 func (a *scriptedAgent) Name() string { return "scripted" }
@@ -361,7 +371,15 @@ func (a *scriptedAgent) Run(_ context.Context, req flow.AgentRequest) (*flow.Age
 	}
 	// One session per turn, numbered: a re-prompt that resumes the wrong one is
 	// asking a session that never saw the text it is being asked to fix.
-	return &flow.AgentResponse{LastText: reply, SessionID: fmt.Sprintf("session-%d", a.calls)}, nil
+	resp := &flow.AgentResponse{LastText: reply, SessionID: fmt.Sprintf("session-%d", a.calls)}
+	if idx := a.calls - 1; idx < len(a.plans) {
+		resp.PlanSubmitted = a.plans[idx].submitted
+		resp.PlanText = a.plans[idx].text
+		if a.plans[idx].submitted {
+			resp.ToolsUsed = append(resp.ToolsUsed, "ExitPlanMode")
+		}
+	}
+	return resp, nil
 }
 
 func testBuilder(t *testing.T) *builder {
@@ -1586,5 +1604,74 @@ func TestARevisionThatCannotRunKeepsTheRefusedWork(t *testing.T) {
 	if !strings.Contains(ctx.wipSaves[0], "the plan") ||
 		!strings.Contains(ctx.wipSaves[0], "an absolute home path was found") {
 		t.Errorf("the stash carries neither the text nor the reason: %q", ctx.wipSaves[0])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The plan is what was submitted, not what was narrated.
+// ---------------------------------------------------------------------------
+
+// A plan-mode turn ends at the submission tool, so its deliverable arrives in
+// PlanText while LastText holds the preamble that preceded the last tool call.
+// Resolving LastText publishes narration under the plan's name.
+func TestPlanStepResolvesTheSubmittedPlanNotTheNarration(t *testing.T) {
+	agent := &scriptedAgent{
+		replies: []string{"Now let me write the plan."},
+		plans:   []planReply{{submitted: true, text: "## Plan\n\nChange the parser."}},
+	}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	if err := testBuilder(t).stepPlan(ctx); err != nil {
+		t.Fatalf("stepPlan: %v", err)
+	}
+	if !ctx.didResolve {
+		t.Fatal("plan artifact was not resolved")
+	}
+	if !strings.Contains(ctx.resolved.Markdown, "Change the parser") {
+		t.Errorf("resolved %q, want the SUBMITTED plan", ctx.resolved.Markdown)
+	}
+	if strings.Contains(ctx.resolved.Markdown, "Now let me write the plan") {
+		t.Errorf("resolved the turn's narration: %q", ctx.resolved.Markdown)
+	}
+}
+
+// The reported failure, end to end: the agent submitted a plan, the transport
+// dropped it, and the preambles were left behind. They are not empty, so the
+// old emptiness check passed and the artifact resolved — after which implement,
+// review and coverage each rendered narration into their prompts as the design.
+//
+// It must FAIL rather than resolve. "The agent planned and we lost it" is a
+// defect in this program, and publishing narration under the plan's name buries
+// it where the next three steps pay for it.
+func TestPlanStepRefusesWhenASubmittedPlanWasLost(t *testing.T) {
+	agent := &scriptedAgent{
+		replies: []string{"Now I have a complete understanding. Let me write the plan."},
+		plans:   []planReply{{submitted: true, text: ""}},
+	}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	err := testBuilder(t).stepPlan(ctx)
+	if err == nil {
+		t.Fatal("stepPlan succeeded on a lost plan — narration would publish as the design")
+	}
+	if !strings.Contains(err.Error(), "submitted a plan") {
+		t.Errorf("error = %v, want it to name the lost submission", err)
+	}
+	if ctx.didResolve {
+		t.Errorf("resolved the plan artifact anyway: %q", ctx.resolved.Markdown)
+	}
+}
+
+// A turn that never entered plan mode is unaffected — the agent's final text is
+// still the plan. Without this, the guard would break every non-plan-mode path.
+func TestPlanStepStillAcceptsATurnThatNeverSubmitted(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{"## Plan\n\nDo the thing."}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	if err := testBuilder(t).stepPlan(ctx); err != nil {
+		t.Fatalf("stepPlan: %v", err)
+	}
+	if !strings.Contains(ctx.resolved.Markdown, "Do the thing") {
+		t.Errorf("resolved %q, want the agent's text", ctx.resolved.Markdown)
 	}
 }

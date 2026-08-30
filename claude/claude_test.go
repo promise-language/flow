@@ -229,3 +229,104 @@ func TestRun_WorktreeSetsDir(t *testing.T) {
 		t.Errorf("dir = %q, want /work/here", captured.dir)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Plan-mode turns: the deliverable is a tool call's input, not assistant text.
+// ---------------------------------------------------------------------------
+
+// planStream is the shape a headless plan-mode turn actually has: a preamble
+// before each tool call, then ExitPlanMode carrying the plan, then a result
+// event with an EMPTY result because the turn did not end in assistant text.
+const planStream = `{"type":"system","session_id":"sess-p"}
+{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Let me read the key files first."},{"type":"tool_use","name":"Read","input":{"file_path":"/x"}}]}}
+{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"Now let me write the plan."},{"type":"tool_use","name":"ExitPlanMode","input":{"plan":"## Plan\n\n1. Capture the tool input.\n2. Stop joining every text block."}}]}}
+{"type":"result","session_id":"sess-p","result":"","total_cost_usd":0.5,"duration_ms":1000}
+`
+
+// The reported bug, as a test: the plan reached the parser inside the
+// ExitPlanMode call and was discarded, leaving the preambles as the answer.
+func TestRun_PlanModeCapturesTheSubmittedPlan(t *testing.T) {
+	c := clientWith(&fakeCmd{stdoutStream: planStream})
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "plan it", PermissionMode: "plan"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !resp.PlanSubmitted {
+		t.Error("PlanSubmitted = false, want true — the turn called ExitPlanMode")
+	}
+	if !strings.Contains(resp.PlanText, "Capture the tool input") {
+		t.Errorf("PlanText = %q, want the submitted plan", resp.PlanText)
+	}
+	// The whole point: LastText must be the plan, never the narration that
+	// preceded the tool calls.
+	if !strings.Contains(resp.LastText, "Capture the tool input") {
+		t.Errorf("LastText = %q, want the plan", resp.LastText)
+	}
+	if strings.Contains(resp.LastText, "Let me read the key files") {
+		t.Errorf("LastText carries tool-call narration: %q", resp.LastText)
+	}
+}
+
+// PlanSubmitted must be true even when the input does not decode, because
+// "planned and we lost it" is the case the plan step refuses on. Reporting it
+// as "never planned" would let the narration resolve as the artifact.
+func TestRun_PlanSubmittedEvenWhenInputUndecodable(t *testing.T) {
+	stream := `{"type":"assistant","message":{"id":"m","content":[{"type":"text","text":"Now let me write the plan."},{"type":"tool_use","name":"ExitPlanMode","input":"not-an-object"}]}}
+{"type":"result","session_id":"s","result":"","total_cost_usd":0.1,"duration_ms":10}
+`
+	c := clientWith(&fakeCmd{stdoutStream: stream})
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "plan it"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !resp.PlanSubmitted {
+		t.Error("PlanSubmitted = false, want true — the call happened regardless of its payload")
+	}
+	if resp.PlanText != "" {
+		t.Errorf("PlanText = %q, want empty — nothing decodable was carried", resp.PlanText)
+	}
+}
+
+// LastText is the LAST text block, not every block joined. The old behaviour
+// concatenated them, which is what turned a series of preambles into something
+// that looked like content and passed every emptiness check.
+func TestRun_LastTextIsTheLastBlockNotTheConcatenation(t *testing.T) {
+	stream := `{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"First preamble."},{"type":"tool_use","name":"Read","input":{}}]}}
+{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"Second preamble."},{"type":"tool_use","name":"Grep","input":{}}]}}
+{"type":"result","session_id":"s","result":"","total_cost_usd":0.1,"duration_ms":10}
+`
+	c := clientWith(&fakeCmd{stdoutStream: stream})
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.LastText != "Second preamble." {
+		t.Errorf("LastText = %q, want only the last block", resp.LastText)
+	}
+	if resp.PlanSubmitted {
+		t.Error("PlanSubmitted = true with no ExitPlanMode call")
+	}
+}
+
+// A turn that ends in assistant text is unaffected: the result event still
+// wins, so ordinary (non-plan) steps keep the behaviour they had.
+func TestRun_ResultEventStillWinsOverAPlan(t *testing.T) {
+	stream := `{"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","name":"ExitPlanMode","input":{"plan":"the plan"}}]}}
+{"type":"result","session_id":"s","result":"the final answer","total_cost_usd":0.1,"duration_ms":10}
+`
+	c := clientWith(&fakeCmd{stdoutStream: stream})
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.LastText != "the final answer" {
+		t.Errorf("LastText = %q, want the result event's text", resp.LastText)
+	}
+	if resp.PlanText != "the plan" {
+		t.Errorf("PlanText = %q, want it captured alongside", resp.PlanText)
+	}
+}

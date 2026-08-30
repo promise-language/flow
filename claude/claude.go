@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 
 	"github.com/promise-language/flow"
 )
@@ -159,7 +160,7 @@ func parseStream(r io.Reader) (*flow.AgentResponse, error) {
 	resp := &flow.AgentResponse{}
 	toolSeen := map[string]struct{}{}
 	var (
-		textBuf      []byte
+		lastText     string
 		resultEvent  bool
 		isError      bool
 		errorSubtype string
@@ -191,14 +192,29 @@ func parseStream(r io.Reader) (*flow.AgentResponse, error) {
 			for _, block := range ev.Message.Content {
 				switch block.Type {
 				case "text":
-					if len(textBuf) > 0 {
-						textBuf = append(textBuf, '\n')
+					// The LAST block, not the accumulation. Every tool call is
+					// preceded by a one-line preamble; joining them yields
+					// narration that reads like content and passes any
+					// emptiness check.
+					if strings.TrimSpace(block.Text) != "" {
+						lastText = block.Text
 					}
-					textBuf = append(textBuf, block.Text...)
 				case "tool_use":
 					if _, dup := toolSeen[block.Name]; !dup && block.Name != "" {
 						toolSeen[block.Name] = struct{}{}
 						resp.ToolsUsed = append(resp.ToolsUsed, block.Name)
+					}
+					if block.Name == exitPlanTool {
+						// Recorded even when the input will not decode, so a
+						// caller can tell "never planned" from "planned and we
+						// lost it".
+						resp.PlanSubmitted = true
+						var in struct {
+							Plan string `json:"plan"`
+						}
+						if err := json.Unmarshal(block.Input, &in); err == nil {
+							resp.PlanText = in.Plan
+						}
 					}
 				}
 			}
@@ -211,10 +227,17 @@ func parseStream(r io.Reader) (*flow.AgentResponse, error) {
 			if ev.SessionID != "" {
 				resp.SessionID = ev.SessionID
 			}
-			if ev.Result != "" {
+			// ev.Result is the harness's own view of the turn's answer and
+			// wins when present. It is EMPTY for a turn that ended on a tool
+			// call — which is exactly how a plan-mode turn ends — and the plan
+			// is the deliverable there, so it comes before the preamble.
+			switch {
+			case ev.Result != "":
 				resp.LastText = ev.Result
-			} else if len(textBuf) > 0 {
-				resp.LastText = string(textBuf)
+			case resp.PlanText != "":
+				resp.LastText = resp.PlanText
+			default:
+				resp.LastText = lastText
 			}
 			resp.CostUSD = ev.TotalCostUSD
 			resp.DurationSeconds = float64(ev.DurationMs) / 1000.0
@@ -235,8 +258,14 @@ func parseStream(r io.Reader) (*flow.AgentResponse, error) {
 			Message: "claude reported is_error (subtype=" + errorSubtype + ")",
 		}
 	}
-	if resp.LastText == "" && len(textBuf) > 0 {
-		resp.LastText = string(textBuf)
+	// Same precedence as the result branch, for a stream that carried text or a
+	// plan but no result event to hang them on.
+	if resp.LastText == "" {
+		if resp.PlanText != "" {
+			resp.LastText = resp.PlanText
+		} else {
+			resp.LastText = lastText
+		}
 	}
 	return resp, nil
 }
@@ -292,7 +321,17 @@ type contentBlock struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
 	Name string `json:"name,omitempty"` // for tool_use
+	// Input is a tool_use call's arguments. Kept as RawMessage because only
+	// the tools whose input IS the deliverable are decoded (see exitPlanTool);
+	// every other tool's arguments are none of this parser's business.
+	Input json.RawMessage `json:"input,omitempty"`
 }
+
+// exitPlanTool is the tool a plan-mode turn ends on. Its input carries the
+// plan, and the turn produces no assistant text after it — so a parser that
+// reads only block.Name discards the entire deliverable and leaves the
+// tool-call preambles behind as if they were the answer.
+const exitPlanTool = "ExitPlanMode"
 
 type systemEvent struct {
 	Type      string `json:"type"`

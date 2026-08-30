@@ -23,7 +23,31 @@ type AgentRequest struct {
 // AgentResponse is the aggregated result of one Agent.Run call. Failure==nil
 // indicates success; if non-nil, Failure.Kind describes the failure category.
 type AgentResponse struct {
-	LastText        string
+	// LastText is the LAST assistant text block of the turn — not every text
+	// block joined. A turn that ends on a tool call emits a preamble before
+	// each one ("Let me check the tests first"), and concatenating those
+	// produced an artifact made entirely of narration that no emptiness check
+	// could catch.
+	LastText string
+
+	// PlanText is what the agent submitted through the harness's plan-
+	// submission tool, when it has one — the deliverable of a PermissionMode
+	// "plan" turn, which ends AT that tool call rather than in assistant text.
+	// Empty when the turn did not end that way.
+	//
+	// Separate from LastText because they answer different questions: LastText
+	// is what the agent said, PlanText is what it submitted. A caller that
+	// wanted a plan and got prose needs to be able to tell the difference —
+	// see PlanSubmitted.
+	PlanText string
+
+	// PlanSubmitted reports that the agent CALLED the plan-submission tool,
+	// independent of whether anything was captured from it. The pair
+	// (PlanSubmitted true, PlanText empty) is the case worth failing on: the
+	// agent produced a plan and the transport lost it, which is not the same
+	// fact as an agent that never planned.
+	PlanSubmitted bool
+
 	ToolsUsed       []string
 	CostUSD         float64
 	DurationSeconds float64
