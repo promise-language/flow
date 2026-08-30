@@ -1405,6 +1405,62 @@ func TestPushMaterialCleanMergeDoesNotFail(t *testing.T) {
 	}
 }
 
+// The sharpest form of the bug: when a merge commit is the ONLY unpushed
+// commit, git log --patch (without --diff-merges) returns an empty diff. The
+// guard sees nothing, yet the push publishes the conflict resolution — exactly
+// the disclosure gap that must not happen. This test isolates the merge as the
+// sole unpushed commit so that any regression empties the patch entirely rather
+// than merely omitting one commit among several.
+//
+// Against a real repository, for the reason TestPushMaterial is.
+func TestPushMaterialMergeOnlyCommit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	origin := t.TempDir()
+	gitInTest(t, origin, "init", "--bare", "-b", "main", ".")
+	gitInTest(t, dir, "init", "-b", "main", ".")
+	commitFile(t, dir, "a.txt", "original\n", "base")
+	gitInTest(t, dir, "remote", "add", "origin", origin)
+	gitInTest(t, dir, "push", "origin", "main")
+
+	// A branch whose only content is also on main — nothing unpushed yet.
+	gitInTest(t, dir, "checkout", "-b", "topic")
+	commitFile(t, dir, "a.txt", "topic-side\n", "topic change")
+	gitInTest(t, dir, "push", "origin", "topic")
+
+	// A conflicting change on main.
+	gitInTest(t, dir, "checkout", "main")
+	commitFile(t, dir, "a.txt", "main-side\n", "main change")
+	gitInTest(t, dir, "push", "origin", "main")
+
+	// Merge main into topic, resolve by hand. The merge commit is now the
+	// ONLY unpushed commit on topic.
+	gitInTest(t, dir, "checkout", "topic")
+	g := newGitOps(dir)
+	g.run(t.Context(), "merge", "main") // conflict expected
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("MERGE-ONLY-SECRET\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInTest(t, dir, "add", "a.txt")
+	gitInTest(t, dir, "commit", "-m", "merge main into topic")
+
+	msgs, patch, err := g.PushMaterial(t.Context(), "topic")
+	if err != nil {
+		t.Fatalf("PushMaterial (merge-only): %v", err)
+	}
+	if len(msgs) == 0 {
+		t.Fatal("messages is empty — the merge commit's message was lost")
+	}
+	if !slices.Contains(msgs, "merge main into topic") {
+		t.Errorf("messages = %v, want the merge commit", msgs)
+	}
+	if !strings.Contains(patch, "MERGE-ONLY-SECRET") {
+		t.Errorf("patch is missing the conflict resolution (the only unpushed content):\n%s", patch)
+	}
+}
+
 // A push whose material cannot be computed must not happen. docs/disclosure.md
 // fails closed — "a disclosure guard that cannot answer refuses to send" — and
 // the material query is what gives this guard something to answer about, so a
