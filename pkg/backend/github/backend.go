@@ -140,6 +140,39 @@ func (b *Backend) ListEligible(ctx context.Context) ([]flow.ItemRef, error) {
 	return refs, nil
 }
 
+// ResolveRef implements flow.RefResolver: turn a user-supplied issue number
+// (e.g. "42") directly into an ItemRef, without enumerating eligible items.
+// Resolution is direct — the ref is constructed from the number alone, no API
+// call — so `claim 42` and `status 42` reach any issue regardless of labels,
+// assignee, or search-index lag.
+func (b *Backend) ResolveRef(ctx context.Context, id string) (flow.ItemRef, error) {
+	n, err := strconv.Atoi(id)
+	if err != nil || n <= 0 {
+		return flow.ItemRef{}, fmt.Errorf("github: %q is not a valid issue number", id)
+	}
+	return b.refFromIssue(n), nil
+}
+
+// ListEligibleWithTags implements flow.TagFilterer: the same search as
+// ListEligible with additional `label:<tag>` terms for each tag. The filter
+// is conjunctive — an item must carry all tags.
+func (b *Backend) ListEligibleWithTags(ctx context.Context, tags []string) ([]flow.ItemRef, error) {
+	q := fmt.Sprintf("repo:%s/%s is:issue is:open label:%s assignee:@me",
+		b.cfg.Owner, b.cfg.Repo, b.labels.Binary(b.cfg.BinaryName))
+	for _, tag := range tags {
+		q += " label:" + tag
+	}
+	result, err := b.out.SearchIssues(ctx, q, &github.SearchOptions{ListOptions: github.ListOptions{PerPage: 100}})
+	if err != nil {
+		return nil, fmt.Errorf("search issues: %w", err)
+	}
+	refs := make([]flow.ItemRef, 0, len(result.Issues))
+	for _, issue := range result.Issues {
+		refs = append(refs, b.refFromIssue(issue.GetNumber()))
+	}
+	return refs, nil
+}
+
 func (b *Backend) refFromIssue(number int) flow.ItemRef {
 	raw, _ := json.Marshal(map[string]int{"issue": number})
 	return flow.ItemRef{
@@ -464,7 +497,10 @@ var nowUTC = func() time.Time { return time.Now().UTC() }
 // Compile-time conformance checks for optional capabilities the CLI reaches
 // via type assertion. A missing method degrades silently to "not supported" at
 // runtime, so a dropped signature is only caught here.
+var _ flow.RefResolver = (*Backend)(nil)
 var _ flow.StateInspector = (*Backend)(nil)
+var _ flow.Discoverer = (*Backend)(nil)
+var _ flow.TagFilterer = (*Backend)(nil)
 
 // suppressWarnings keeps the linter quiet about helpers used only across
 // other sub-files.

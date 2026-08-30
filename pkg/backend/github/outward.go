@@ -418,6 +418,12 @@ func (o *outward) GetRef(ctx context.Context, ref string) (*github.Reference, *g
 	return o.client.Git.GetRef(ctx, o.owner, o.repo, ref)
 }
 
+// ListIssues pages through the authoritative Issues API (not Search), which
+// returns immediately-consistent results. Used by Discover.
+func (o *outward) ListIssues(ctx context.Context, opt *github.IssueListByRepoOptions) ([]*github.Issue, *github.Response, error) {
+	return o.client.Issues.ListByRepo(ctx, o.owner, o.repo, opt)
+}
+
 func (o *outward) ListPullRequests(ctx context.Context, opt *github.PullRequestListOptions) ([]*github.PullRequest, error) {
 	prs, _, err := o.client.PullRequests.List(ctx, o.owner, o.repo, opt)
 	return prs, err
