@@ -242,6 +242,42 @@ func TestStageAll_AbsoluteFlowDir(t *testing.T) {
 	}
 }
 
+func TestCommit_AbsoluteFlowDir(t *testing.T) {
+	// The full Commit path — StageAll → HasStaged → git commit — must
+	// succeed when FLOW_DIR is an absolute path outside the worktree.
+	// Before the filepath.IsAbs guard this was fatal: git refused the
+	// exclude pathspec, so every step's commit failed.
+	t.Setenv("FLOW_DIR", t.TempDir())
+	g := initTestRepo(t)
+	ctx := t.Context()
+
+	if err := os.WriteFile(filepath.Join(g.dir, "README"), []byte("changed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write state in the external FLOW_DIR — must not leak into the commit.
+	if err := os.WriteFile(filepath.Join(clistate.Dir(), "active.json"), []byte(`{"token":"t"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := g.Commit(ctx, "commit with absolute FLOW_DIR"); err != nil {
+		t.Fatalf("Commit with absolute FLOW_DIR: %v", err)
+	}
+
+	stdout, _, err := g.run(ctx, "ls-tree", "-r", "--name-only", "HEAD")
+	if err != nil {
+		t.Fatalf("git ls-tree: %v", err)
+	}
+	tree := string(stdout)
+
+	if !strings.Contains(tree, "README") {
+		t.Errorf("README should be in commit, got: %q", tree)
+	}
+	if strings.Contains(tree, "active.json") {
+		t.Errorf("external state file should NOT be in commit, got: %q", tree)
+	}
+}
+
 func TestCommit_ExcludesFlowDir(t *testing.T) {
 	t.Setenv("FLOW_DIR", ".flow")
 	g := initTestRepo(t)
