@@ -23,6 +23,18 @@ type Client struct {
 	Binary    string
 	ExtraArgs []string
 
+	// AllowedTools restricts the agent to exactly these tools. Each entry
+	// is a tool name or pattern the CLI accepts (e.g. "Read", "Bash(git *)").
+	// Empty means no restriction (all tools permitted). This is the SDK's
+	// expression of the "run tool" gate (docs/gates-and-commands.md §Gates
+	// on what an agent does).
+	AllowedTools []string
+
+	// DisallowedTools forbids specific tools. Each entry is a tool name or
+	// pattern. Applied after AllowedTools when both are set.
+	// Empty means nothing explicitly forbidden.
+	DisallowedTools []string
+
 	// spawn is the seam tests use to substitute a fake process. nil means
 	// use os/exec.CommandContext.
 	spawn spawnFunc
@@ -52,6 +64,12 @@ func (c *Client) Run(ctx context.Context, req flow.AgentRequest) (*flow.AgentRes
 	}
 	if req.ResumeSessionID != "" {
 		args = append(args, "--resume", req.ResumeSessionID)
+	}
+	for _, t := range c.AllowedTools {
+		args = append(args, "--allowed-tools", t)
+	}
+	for _, t := range c.DisallowedTools {
+		args = append(args, "--disallowed-tools", t)
 	}
 	args = append(args, c.ExtraArgs...)
 

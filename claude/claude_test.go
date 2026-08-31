@@ -231,6 +231,111 @@ func TestRun_WorktreeSetsDir(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Tool-policy fields: AllowedTools / DisallowedTools → CLI flags.
+// ---------------------------------------------------------------------------
+
+func TestRun_AllowedToolsArgs(t *testing.T) {
+	var capturedArgs []string
+	c := &Client{
+		Binary:       "claude",
+		AllowedTools: []string{"Read", "Bash(git *)"},
+		spawn: func(ctx context.Context, name string, args ...string) cmdHandle {
+			capturedArgs = args
+			return &fakeCmd{stdoutStream: successStream}
+		},
+	}
+	_, _ = c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+
+	joined := strings.Join(capturedArgs, " ")
+	for _, want := range []string{
+		"--allowed-tools Read",
+		"--allowed-tools Bash(git *)",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("args missing %q; full: %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "--disallowed-tools") {
+		t.Errorf("unexpected --disallowed-tools in args: %s", joined)
+	}
+}
+
+func TestRun_DisallowedToolsArgs(t *testing.T) {
+	var capturedArgs []string
+	c := &Client{
+		Binary:          "claude",
+		DisallowedTools: []string{"Write", "Edit"},
+		spawn: func(ctx context.Context, name string, args ...string) cmdHandle {
+			capturedArgs = args
+			return &fakeCmd{stdoutStream: successStream}
+		},
+	}
+	_, _ = c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+
+	joined := strings.Join(capturedArgs, " ")
+	for _, want := range []string{
+		"--disallowed-tools Write",
+		"--disallowed-tools Edit",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("args missing %q; full: %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "--allowed-tools") {
+		t.Errorf("unexpected --allowed-tools in args: %s", joined)
+	}
+}
+
+func TestRun_BothToolPolicies(t *testing.T) {
+	var capturedArgs []string
+	c := &Client{
+		Binary:          "claude",
+		AllowedTools:    []string{"Read"},
+		DisallowedTools: []string{"Write"},
+		spawn: func(ctx context.Context, name string, args ...string) cmdHandle {
+			capturedArgs = args
+			return &fakeCmd{stdoutStream: successStream}
+		},
+	}
+	_, _ = c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+
+	joined := strings.Join(capturedArgs, " ")
+	if !strings.Contains(joined, "--allowed-tools Read") {
+		t.Errorf("args missing --allowed-tools Read; full: %s", joined)
+	}
+	if !strings.Contains(joined, "--disallowed-tools Write") {
+		t.Errorf("args missing --disallowed-tools Write; full: %s", joined)
+	}
+
+	// Allowed flags must appear before disallowed flags.
+	allowedIdx := strings.Index(joined, "--allowed-tools")
+	disallowedIdx := strings.Index(joined, "--disallowed-tools")
+	if allowedIdx >= disallowedIdx {
+		t.Errorf("--allowed-tools (at %d) should precede --disallowed-tools (at %d)", allowedIdx, disallowedIdx)
+	}
+}
+
+func TestRun_EmptyPoliciesNoFlags(t *testing.T) {
+	var capturedArgs []string
+	c := &Client{
+		Binary: "claude",
+		spawn: func(ctx context.Context, name string, args ...string) cmdHandle {
+			capturedArgs = args
+			return &fakeCmd{stdoutStream: successStream}
+		},
+	}
+	_, _ = c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+
+	joined := strings.Join(capturedArgs, " ")
+	if strings.Contains(joined, "--allowed-tools") {
+		t.Errorf("unexpected --allowed-tools in args: %s", joined)
+	}
+	if strings.Contains(joined, "--disallowed-tools") {
+		t.Errorf("unexpected --disallowed-tools in args: %s", joined)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Plan-mode turns: the deliverable is a tool call's input, not assistant text.
 // ---------------------------------------------------------------------------
 
