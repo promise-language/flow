@@ -216,6 +216,26 @@ A step declares whether it may modify the worktree, and the declaration is expli
 
 **Every modification a step makes is either recorded or refused.** A flow does not leave a step's changes uncommitted for a later step to sweep up, and does not complete an item while carrying changes no step recorded. Silent loss and silent inclusion are the same defect seen from two sides.
 
+### The commit contract
+
+**A step commits the tree whole.** Every file the tree carries — everything not already ignored — is staged, and the commit captures all of them or it is rejected. A half-staged tree, some files in and the rest left behind, is not a commit this contract permits: a commit of part of the tree is not the tree the gate measured, so a passing gate would certify a state that never lands.
+
+**So nothing uncommittable may be in the tree.** Not as a third tolerated state beside committed and ignored — this is what makes committing the tree whole safe rather than merely conventional. While such a file is present — a build artifact a repository guard refuses, anything a commit hook rejects — no step can satisfy the requirement above.
+
+**The remedy is deletion.** Not leaving the file uncommitted, and not marking it ignored. An ignore rule that predates the failure is a different thing — build output a project has always excluded is in a settled state, and the contract is already satisfied. What is forbidden is reaching for the ignore list *because* something was refused. The three moves are not stylistic variants:
+
+| Move | Effect |
+|---|---|
+| **Delete it** | The tree becomes committable. The failure ends. |
+| Leave it uncommitted | The file survives; the next step commits the tree whole and is refused identically |
+| Mark it ignored | The file survives and stops being reported |
+
+Ignoring is the worst of the three and reads as the most helpful. The gate measures the **working tree**, so it measures a tree containing the file and passes; what lands never contains it, and breaks. A loud, local, immediate failure becomes a silent one that surfaces later, on somebody else's change. Whatever repair a flow offers must name deletion and must not name the other two: an error that volunteers "or ignore it" is teaching the failing move.
+
+**A refusal returns to the step that caused it, in the refusing tool's own words.** The refusal names the offending file and the remedy precisely; a step told only that committing failed has to rediscover both. This is the path a failing gate already takes.
+
+**A refusal that survives repair parks, and costs nothing.** Once retrying is known to be pointless — the same tree, committed again, refused identically — the step parks carrying the refusal's own message, rather than spending invocations on a repetition it cannot change.
+
 ## Finalizing
 
 Finalizing marks an item's resolution complete and releases the claim. It is terminal: a finalized item is not reprocessed.
