@@ -287,6 +287,7 @@ func (b *Backend) loadState(ctx context.Context, issueNum int, cachedCommentID i
 				state.Signals[flow.SignalId(sd.Id)] = signalStateFromDoc(sd)
 			}
 			state.Park = parkRequestFromDoc(doc.Park)
+			state.Item.Finalized = doc.Finalized
 		}
 	}
 	b.mu.Lock()

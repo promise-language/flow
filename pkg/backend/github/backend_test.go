@@ -1266,6 +1266,10 @@ func (r *gitRecorder) called(sub string) bool {
 	return false
 }
 
+// stateCommentID is the comment ID pre-seeded into the mock for Finalize
+// tests. Matches what claimForFinalize puts in the claim token.
+const finalizeStateCommentID = 999
+
 // newFinalizeBackend sets up a mocked backend with a git recorder for
 // Finalize tests. Returns the backend, the mock, and the recorder.
 func newFinalizeBackend(t *testing.T) (*Backend, *ghMock, *gitRecorder) {
@@ -1274,6 +1278,17 @@ func newFinalizeBackend(t *testing.T) (*Backend, *ghMock, *gitRecorder) {
 	// Pre-set owner label and assignee so Release has something to clean up.
 	mock.issueLabels = []string{"flow:owner:alice", "flow:implement"}
 	mock.assignees = []string{"alice"}
+	// Pre-seed a state comment so Finalize can read and update it.
+	stateBody, err := renderStateComment("alice", stateDoc{
+		Flow:   "issue",
+		Schema: stateSchemaVersion,
+	})
+	if err != nil {
+		t.Fatalf("render seed state: %v", err)
+	}
+	mock.comments = []ghMockComment{
+		{ID: finalizeStateCommentID, Body: stateBody, User: "alice"},
+	}
 	srv := mock.server()
 	t.Cleanup(srv.Close)
 	b := newMockedBackend(t, mock, srv)
@@ -1287,7 +1302,7 @@ func newFinalizeBackend(t *testing.T) (*Backend, *ghMock, *gitRecorder) {
 // hitting the GitHub API (the git recorder can't serve the Claim flow).
 func claimForFinalize(b *Backend) flow.Claim {
 	ref := b.refFromIssue(42)
-	tok, _ := b.saveClaimToken(claimToken{StateCommentID: 0, ClaimID: "test"})
+	tok, _ := b.saveClaimToken(claimToken{StateCommentID: finalizeStateCommentID, ClaimID: "test"})
 	return flow.Claim{
 		BackendName: b.Name(),
 		ItemRef:     ref,
@@ -1334,6 +1349,19 @@ func TestBackend_Finalize_ReturnsWorktreeToBaseAndReleases(t *testing.T) {
 	}
 	if c, _ := clistate.Load(); c != nil {
 		t.Errorf("claim file not cleared: %+v", c)
+	}
+
+	// State comment now carries finalized: true.
+	mock.mu.Lock()
+	var finalizedInDoc bool
+	for _, c := range mock.comments {
+		if doc, _, found, _ := extractStateDoc(c.Body); found && doc != nil {
+			finalizedInDoc = doc.Finalized
+		}
+	}
+	mock.mu.Unlock()
+	if !finalizedInDoc {
+		t.Error("state comment should carry finalized: true after Finalize")
 	}
 }
 

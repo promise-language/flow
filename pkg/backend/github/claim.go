@@ -175,11 +175,42 @@ func (b *Backend) Release(ctx context.Context, claim flow.Claim) error {
 	return nil
 }
 
-// Finalize marks the item's flow run complete: returns the worktree to the
-// base branch (if not already there) and releases the claim. The worktree
-// return precedes the release so that a checkout failure leaves the claim
-// intact (recoverable) rather than the reverse.
+// Finalize marks the item's flow run complete: persists the finalized flag
+// in the state comment, returns the worktree to the base branch (if not
+// already there), and releases the claim. The state-comment write comes
+// first so a failure there leaves the claim intact; the worktree return
+// precedes the release so a checkout failure also keeps the claim
+// recoverable.
 func (b *Backend) Finalize(ctx context.Context, claim flow.Claim) error {
+	issueNum, err := b.issueNumber(claim.ItemRef)
+	if err != nil {
+		return fmt.Errorf("github.Finalize: %w", err)
+	}
+
+	// Mark the item terminal in the state comment so LoadState returns
+	// Item.Finalized=true and `status` can distinguish "finalized" from
+	// "no flow currently eligible".
+	tok, err := b.loadClaimToken(claim)
+	if err != nil {
+		return fmt.Errorf("github.Finalize: %w", err)
+	}
+	body, stateID, err := b.fetchStateComment(ctx, issueNum, tok.StateCommentID)
+	if err != nil {
+		return fmt.Errorf("github.Finalize: fetch state comment: %w", err)
+	}
+	if body != "" {
+		doc, _, found, perr := extractStateDoc(body)
+		if perr != nil {
+			return fmt.Errorf("github.Finalize: parse state comment: %w", perr)
+		}
+		if found && doc != nil {
+			doc.Finalized = true
+			if _, err := b.updateStateComment(ctx, issueNum, stateID, *doc, claim.Owner); err != nil {
+				return fmt.Errorf("github.Finalize: update state comment: %w", err)
+			}
+		}
+	}
+
 	base, err := b.DefaultBranch(ctx)
 	if err != nil {
 		return fmt.Errorf("github.Finalize: resolve default branch: %w", err)

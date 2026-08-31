@@ -38,6 +38,10 @@ type stateDoc struct {
 	// reading it costs no extra API call and a new park supersedes the old
 	// one instead of accumulating.
 	Park *stateParkDoc `yaml:"park,omitempty"`
+	// Finalized marks the item's flow run as complete. Set by Finalize and
+	// read back by LoadState into Item.Finalized so `status` can distinguish
+	// "finalized" from "no flow currently eligible".
+	Finalized bool `yaml:"finalized,omitempty"`
 }
 
 type stateParkDoc struct {
