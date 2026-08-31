@@ -1888,13 +1888,26 @@ func TestCommitRepair_Succeeds(t *testing.T) {
 	if !ctx.didResolve {
 		t.Error("step did not resolve after a successful repair")
 	}
+	// The orchestrator must see a notification — it is the only observable
+	// signal that a repair was attempted.
+	found := false
+	for _, n := range ctx.notices {
+		if strings.Contains(n, "commit refused by pre-commit hook") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("notices = %v, want one containing the hook refusal", ctx.notices)
+	}
 }
 
 // Both commits fail — the error wraps flow.ErrRefused so the orchestrator
 // parks at zero cost.
 func TestCommitRepair_SecondRefusalParks(t *testing.T) {
 	wt := resumedWorktree()
-	wt.commitErrs = []error{hookErr, hookErr}
+	secondHookErr := errors.New("pre-commit: still refusing — bigfile.bin remains")
+	wt.commitErrs = []error{hookErr, secondHookErr}
 	agent := &scriptedAgent{replies: []string{"done", "deleted the file"}}
 	ctx := ctxWithPlan(wt, agent)
 
@@ -1907,6 +1920,14 @@ func TestCommitRepair_SecondRefusalParks(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "commit refused twice") {
 		t.Errorf("err = %v, want it to say the commit was refused twice", err)
+	}
+	// Both error messages must survive — if either is dropped from the format
+	// string, the park reason loses the diagnostic that names the offending file.
+	if !strings.Contains(err.Error(), hookErr.Error()) {
+		t.Errorf("err = %v, want the first hook message preserved", err)
+	}
+	if !strings.Contains(err.Error(), secondHookErr.Error()) {
+		t.Errorf("err = %v, want the second hook message preserved", err)
 	}
 }
 
