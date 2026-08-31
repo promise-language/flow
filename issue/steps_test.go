@@ -1778,6 +1778,46 @@ func TestPlanStepParksOnQuestionEvenWhenWIPSaveFails(t *testing.T) {
 	}
 }
 
+// A whitespace-only PlanText is not a plan. The step must not attempt a
+// combined WIP save for it — the runAgent stash of LastText is sufficient.
+func TestPlanStepSkipsWIPSaveWhenPlanTextIsWhitespaceOnly(t *testing.T) {
+	agent := &scriptedAgent{
+		replies: []string{"Ambiguity found.\nNEEDS-ANSWER: which approach?"},
+		plans:   []planReply{{submitted: true, text: "   \n  "}},
+	}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	err := testBuilder(t).stepPlan(ctx)
+	if err == nil {
+		t.Fatal("want the ask sentinel to stop the step")
+	}
+	// runAgent stashes LastText as WIP (1 save). stepPlan must NOT overwrite
+	// with a combined record because there is no real plan to combine.
+	if len(ctx.wipSaves) != 1 {
+		t.Errorf("wipSaves = %d, want exactly 1 (runAgent only, no combined save)", len(ctx.wipSaves))
+	}
+}
+
+// When the agent hard-errors (returns nil, error from Run), the new resp!=nil
+// guard in stepPlan's error path must not panic and must propagate the error.
+func TestPlanStepPropagatesAgentHardError(t *testing.T) {
+	boom := errors.New("substrate down")
+	agent := &scriptedAgent{errs: []error{boom}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	err := testBuilder(t).stepPlan(ctx)
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the agent's error", err)
+	}
+	if ctx.didResolve {
+		t.Error("resolved a plan from an agent that crashed")
+	}
+	// No WIP save should happen — resp is nil.
+	if len(ctx.wipSaves) != 0 {
+		t.Errorf("wipSaves = %d, want 0 when the agent returned no response", len(ctx.wipSaves))
+	}
+}
+
 // runAgent returns the response alongside a question error so callers can
 // inspect what the agent produced. Other callers that do `if err != nil {
 // return err }` are unaffected because they never access resp.

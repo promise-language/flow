@@ -395,6 +395,28 @@ func TestAnswerGate_PassesWhenAllQuestionsAnswered(t *testing.T) {
 	}
 }
 
+// A mix of answered and unanswered questions with no park: PendingQuestions
+// filters to the unanswered subset, and even one remaining blocks.
+func TestAnswerGate_BlocksOnMixedQuestionsWithNoPark(t *testing.T) {
+	gate := answerGate(&stubBackend{}, self("flowbot"))
+	state := &flow.ItemState{
+		Questions: []flow.Question{
+			{ID: "q1", AgentQuestion: flow.AgentQuestion{Text: "which db?"}, UserAnswer: flow.UserAnswer{Answer: "postgres"}},
+			{ID: "q2", AgentQuestion: flow.AgentQuestion{Text: "cache layer?"}},
+		},
+	}
+	err := gate(context.Background(), state)
+	if err == nil {
+		t.Fatal("want a refusal when one question remains unanswered")
+	}
+	if !errors.Is(err, flow.ErrBlocked) {
+		t.Errorf("err = %v, want it to wrap flow.ErrBlocked", err)
+	}
+	if !strings.Contains(err.Error(), "1 unanswered") {
+		t.Errorf("err = %q, want it to report the count of pending questions", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Verify tail.
 // ---------------------------------------------------------------------------
