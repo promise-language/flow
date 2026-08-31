@@ -287,6 +287,7 @@ func (b *Backend) loadState(ctx context.Context, issueNum int, cachedCommentID i
 				state.Signals[flow.SignalId(sd.Id)] = signalStateFromDoc(sd)
 			}
 			state.Park = parkRequestFromDoc(doc.Park)
+			state.Item.Finalized = doc.Finalized
 		}
 	}
 	b.mu.Lock()
@@ -501,6 +502,7 @@ var _ flow.RefResolver = (*Backend)(nil)
 var _ flow.StateInspector = (*Backend)(nil)
 var _ flow.Discoverer = (*Backend)(nil)
 var _ flow.TagFilterer = (*Backend)(nil)
+var _ flow.Finalizer = (*Backend)(nil)
 
 // suppressWarnings keeps the linter quiet about helpers used only across
 // other sub-files.

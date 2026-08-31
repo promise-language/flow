@@ -175,6 +175,77 @@ func (b *Backend) Release(ctx context.Context, claim flow.Claim) error {
 	return nil
 }
 
+// Finalize marks the item's flow run complete: persists the finalized flag
+// in the state comment, returns the worktree to the base branch (if not
+// already there), and releases the claim. The state-comment write comes
+// first so a failure there leaves the claim intact; the worktree return
+// precedes the release so a checkout failure also keeps the claim
+// recoverable.
+func (b *Backend) Finalize(ctx context.Context, claim flow.Claim) error {
+	issueNum, err := b.issueNumber(claim.ItemRef)
+	if err != nil {
+		return fmt.Errorf("github.Finalize: %w", err)
+	}
+
+	// Mark the item terminal in the state comment so LoadState returns
+	// Item.Finalized=true and `status` can distinguish "finalized" from
+	// "no flow currently eligible".
+	tok, err := b.loadClaimToken(claim)
+	if err != nil {
+		return fmt.Errorf("github.Finalize: %w", err)
+	}
+	body, stateID, err := b.fetchStateComment(ctx, issueNum, tok.StateCommentID)
+	if err != nil {
+		return fmt.Errorf("github.Finalize: fetch state comment: %w", err)
+	}
+	if body != "" {
+		doc, _, found, perr := extractStateDoc(body)
+		if perr != nil {
+			return fmt.Errorf("github.Finalize: parse state comment: %w", perr)
+		}
+		if found && doc != nil {
+			doc.Finalized = true
+			if _, err := b.updateStateComment(ctx, issueNum, stateID, *doc, claim.Owner); err != nil {
+				return fmt.Errorf("github.Finalize: update state comment: %w", err)
+			}
+		}
+	}
+
+	base, err := b.DefaultBranch(ctx)
+	if err != nil {
+		return fmt.Errorf("github.Finalize: resolve default branch: %w", err)
+	}
+
+	current, err := b.git.CurrentBranch(ctx)
+	if err != nil {
+		return fmt.Errorf("github.Finalize: current branch: %w", err)
+	}
+
+	if current != base {
+		dirty, err := b.git.IsDirty(ctx)
+		if err != nil {
+			return fmt.Errorf("github.Finalize: check dirty: %w", err)
+		}
+		if dirty {
+			return fmt.Errorf("github.Finalize: worktree is dirty on %s — refusing to discard uncommitted changes", current)
+		}
+
+		exists, err := b.git.BranchExists(ctx, base)
+		if err != nil {
+			return fmt.Errorf("github.Finalize: check base branch: %w", err)
+		}
+		if !exists {
+			return fmt.Errorf("github.Finalize: base branch %q does not exist locally", base)
+		}
+
+		if err := b.git.Checkout(ctx, base, "", false); err != nil {
+			return fmt.Errorf("github.Finalize: checkout %s: %w", base, err)
+		}
+	}
+
+	return b.Release(ctx, claim)
+}
+
 // LookupActiveClaim returns the active claim held by owner. The github
 // backend's lease store is the worktree-local .flow/active.json file; this
 // reads that file and confirms the owner matches.
