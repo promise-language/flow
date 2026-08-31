@@ -45,6 +45,21 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, for
 	if otherBinary, wrong := b.otherBinaryLabel(names); wrong {
 		return flow.Claim{}, fmt.Errorf("issue #%d is owned by other flow binary %q", issueNum, otherBinary)
 	}
+	if !force {
+		// Refuse when another person holds the issue — either via an
+		// assignee or a flow:owner:<login> label. The caller must pass
+		// force=true to take over deliberately.
+		for _, u := range issue.Assignees {
+			if login := u.GetLogin(); login != "" && login != owner {
+				return flow.Claim{}, fmt.Errorf("issue #%d is assigned to %s (use force to take over)", issueNum, login)
+			}
+		}
+		for _, name := range names {
+			if login, ok := b.labels.OwnerFromLabel(name); ok && login != owner {
+				return flow.Claim{}, fmt.Errorf("issue #%d carries owner label for %s (use force to take over)", issueNum, login)
+			}
+		}
+	}
 
 	// Phase 1: post a random claim label.
 	token := randomClaimToken()
@@ -79,7 +94,10 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, for
 	// Clear any stale owner labels first (other than our own).
 	for _, name := range labelNamesOf(issue2.Labels) {
 		if login, ok := b.labels.OwnerFromLabel(name); ok && login != owner {
-			_ = b.out.RemoveLabel(ctx, issueNum, name)
+			if err := b.out.RemoveLabel(ctx, issueNum, name); err != nil {
+				_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
+				return flow.Claim{}, fmt.Errorf("remove stale owner label %s: %w", name, err)
+			}
 		}
 	}
 	if err := b.out.AddLabels(ctx, issueNum, []string{

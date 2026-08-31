@@ -856,6 +856,111 @@ func TestSanitizeFilename(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Claim: refuse when another person holds the issue
+// ---------------------------------------------------------------------------
+
+// An issue assigned to someone else must be refused without force.
+func TestBackend_Claim_RefusesWhenAssignedToAnother(t *testing.T) {
+	mock := newGHMock(t)
+	mock.assignees = []string{"bob"}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", false)
+	if err == nil {
+		t.Fatal("Claim should refuse when the issue is assigned to another person")
+	}
+	if !strings.Contains(err.Error(), "assigned to bob") {
+		t.Errorf("error = %v, want mention of bob", err)
+	}
+
+	// No claim label should have been posted — the refusal is in preflight.
+	mock.mu.Lock()
+	mutations := append([]string(nil), mock.mutations...)
+	mock.mu.Unlock()
+	for _, m := range mutations {
+		if strings.Contains(m, "labels") {
+			t.Errorf("a label mutation reached GitHub despite preflight refusal: %s", m)
+		}
+	}
+}
+
+// An issue carrying a flow:owner:<other> label must be refused without force.
+func TestBackend_Claim_RefusesWhenOwnerLabelForAnother(t *testing.T) {
+	mock := newGHMock(t)
+	mock.issueLabels = []string{"flow:owner:carol"}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", false)
+	if err == nil {
+		t.Fatal("Claim should refuse when owner label names another login")
+	}
+	if !strings.Contains(err.Error(), "owner label for carol") {
+		t.Errorf("error = %v, want mention of carol", err)
+	}
+}
+
+// Both assignee and owner-label checks are bypassed when force=true.
+func TestBackend_Claim_ForceOverridesHeldIssue(t *testing.T) {
+	mock := newGHMock(t)
+	mock.assignees = []string{"bob"}
+	mock.issueLabels = []string{"flow:owner:bob"}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	claim, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", true)
+	if err != nil {
+		t.Fatalf("Claim with force=true should succeed: %v", err)
+	}
+	if claim.Owner != "alice" {
+		t.Errorf("claim.Owner = %q, want alice", claim.Owner)
+	}
+
+	// bob's stale owner label should have been removed.
+	mock.mu.Lock()
+	labels := append([]string(nil), mock.issueLabels...)
+	mock.mu.Unlock()
+	if contains(labels, "flow:owner:bob") {
+		t.Errorf("bob's owner label was not removed; labels = %v", labels)
+	}
+	if !contains(labels, "flow:owner:alice") {
+		t.Errorf("alice's owner label missing; labels = %v", labels)
+	}
+}
+
+// Self-assignment (already assigned to owner) is not a refusal.
+func TestBackend_Claim_AllowsSelfAssigned(t *testing.T) {
+	mock := newGHMock(t)
+	mock.assignees = []string{"alice"}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", false)
+	if err != nil {
+		t.Fatalf("Claim should allow self-assigned issues: %v", err)
+	}
+}
+
+// Self owner-label is not a refusal.
+func TestBackend_Claim_AllowsSelfOwnerLabel(t *testing.T) {
+	mock := newGHMock(t)
+	mock.issueLabels = []string{"flow:owner:alice"}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", false)
+	if err != nil {
+		t.Fatalf("Claim should allow own owner label: %v", err)
+	}
+}
+
 func contains(s []string, want string) bool {
 	for _, v := range s {
 		if v == want {
