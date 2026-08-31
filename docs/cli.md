@@ -10,6 +10,7 @@ Every binary built on `cli.Run` exposes exactly this surface.
 |---|---|
 | `claim <item-id>` | Acquire an exclusive claim on an item |
 | `release` | Drop the active claim |
+| `reseed [--force]` | Clear the active claim's seed — artifacts, budgets, park state — for re-seeding |
 | `run-step` | Advance the claimed item by exactly one step |
 | `resolve [<item-id>]` | Drive an item to completion, one step at a time |
 | `status [<item-id>]` | Report an item's lifecycle checklist |

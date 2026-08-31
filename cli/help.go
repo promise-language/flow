@@ -69,6 +69,17 @@ this?" belongs in the listing.`},
 		detail: "Acquires a claim (lease) on <item-id> so this owner can advance it.\nTakes exactly one item id."},
 	"release": {name: "release", summary: "drop the active claim",
 		detail: "Releases the claim currently held by this owner. Takes no arguments."},
+	"reseed": {name: "reseed", syntax: "[--force]", summary: "clear the seed and start fresh",
+		detail: `Clears the active claim's artifact records, budget counters, and park
+state so the next run-step or resolve re-seeds from the current flow.
+
+This is the escape hatch when a flow's step set changes and an item already
+seeded against the old set is stranded — or when a wrongly-resolved artifact
+needs to be recovered. Re-seeding discards work that was paid for.
+
+Without --force, prints what would be discarded and refuses.
+
+  --force    actually clear the seed (required)`},
 	"status": {name: "status", syntax: "[<item-id>]", summary: "print the lifecycle checklist",
 		detail: "Prints the read-only lifecycle checklist. With <item-id>, inspects that\nitem from the backend without claiming it; without, uses the active claim."},
 	"run-step": {name: "run-step", summary: "advance one lifecycle item",

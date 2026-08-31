@@ -38,7 +38,7 @@ func TestTopLevelHelp_AllForms(t *testing.T) {
 // command (run-step with no claim -> 1).
 func TestPerCommandHelp_PrintsAndDoesNotExecute(t *testing.T) {
 	commands := []string{
-		"doctor", "list", "claim", "lease", "release",
+		"doctor", "list", "claim", "lease", "release", "reseed",
 		"status", "grant", "run-step", "resolve", "run-all",
 	}
 	for _, cmd := range commands {

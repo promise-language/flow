@@ -152,6 +152,8 @@ func RunWithArgs(app App, args []string) int {
 		return app.cmdClaim(ctx, rest)
 	case "release":
 		return app.cmdRelease(ctx, rest)
+	case "reseed":
+		return app.cmdReseed(ctx, rest)
 	case "status":
 		return app.cmdStatus(ctx, rest)
 	case "grant":
@@ -335,6 +337,7 @@ usage:
                                      id from AddStep (e.g. "plan") — the first column of
                                      "status" — never the label (e.g. "write plan")
   %[1]s release                      drop the claim
+  %[1]s reseed [--force]              clear seed state (artifacts, budgets, park) on the active claim
 
 status, list, grant, and resolve print human-readable text on a terminal and
 JSON when piped or redirected; --json / --human (or FLOW_OUTPUT=json|human)
