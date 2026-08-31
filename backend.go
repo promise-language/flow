@@ -728,6 +728,41 @@ func Merge(ctx context.Context, wt Worktree, url string) error {
 	return rq.Merge(ctx, url)
 }
 
+// PRFinder is an optional RequestManager capability: look up the pull
+// request for the current claim branch. Backends whose Worktree knows its
+// claim branch implement this; others make the merge step unreachable.
+type PRFinder interface {
+	FindPR(ctx context.Context) (PRInfo, error)
+}
+
+// PRInfo is the read-only snapshot a PRFinder returns.
+type PRInfo struct {
+	URL            string
+	MergeCommitSHA string // the merge commit; reliable only when the PR is merged
+}
+
+// FindPR is a nil-safe convenience for PRFinder, parallel to Open/Merge.
+// Returns ErrRequestNotSupported when the worktree's RequestManager does not
+// implement PRFinder.
+func FindPR(ctx context.Context, wt Worktree) (PRInfo, error) {
+	rq := wt.Request()
+	if isNilRequest(rq) {
+		return PRInfo{}, ErrRequestNotSupported
+	}
+	finder, ok := rq.(PRFinder)
+	if !ok {
+		return PRInfo{}, ErrRequestNotSupported
+	}
+	return finder.FindPR(ctx)
+}
+
+// MergeResultPreparer is an optional Worktree capability: set up the tree
+// to reflect the merge result so the gate measures what will actually land.
+type MergeResultPreparer interface {
+	PrepareMergeResult(ctx context.Context, base string) error
+	RevertMergePrep(ctx context.Context) error
+}
+
 // isNilRequest catches both untyped-nil interfaces and the typed-nil pitfall
 // (a non-nil interface header pointing at a nil concrete pointer), which a
 // plain `rq == nil` check misses and which would otherwise panic on the

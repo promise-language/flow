@@ -52,4 +52,7 @@ func (app *App) reportCapabilities() {
 	} else {
 		fmt.Fprintf(app.Out, "  status <id>: unavailable (backend does not support StateInspector; use claim first)\n")
 	}
+	if app.CarryThrough {
+		fmt.Fprintf(app.Out, "  carry-through: enabled — carries to merge (not independent review)\n")
+	}
 }

@@ -420,7 +420,7 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 	// will review. Before, because a branch that cannot pass must not leave the
 	// machine: the maintainer runs the same gate, and a request that fails it
 	// spends a reviewer's attention on a change that was never going to land.
-	verdict, err := b.runIntegrationGate(ctx, wt)
+	verdict, err := b.runIntegrationGate(ctx, wt, "the branch as it will be proposed")
 	if err != nil {
 		return err
 	}
@@ -433,8 +433,11 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 	return err
 }
 
-// runIntegrationGate measures the branch and asks the project whether the
-// measurement is acceptable.
+// runIntegrationGate measures subject and asks the project whether the
+// measurement is acceptable. subject names what is being measured — "the
+// branch as it will be proposed" for the contributor gate, "the merge result"
+// for the integration phase — and appears in every notification and error so
+// a reader knows which context the gate ran in.
 //
 // Each way this can stop returns an ERROR rather than a park, for the reason
 // already recorded on the implement loop: no preflight refuses a ParkBlocked
@@ -454,29 +457,29 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 //
 // Only the fourth — a verdict that is a refusal — is about the change, and it
 // is a perfectly good answer arriving with a nil error.
-func (b *builder) runIntegrationGate(ctx flow.StepCtx, wt flow.Worktree) (flow.GateVerdict, error) {
-	ctx.Notify("", fmt.Sprintf("running the %s gate on the branch as it will be proposed", flow.GateIntegration))
+func (b *builder) runIntegrationGate(ctx flow.StepCtx, wt flow.Worktree, subject string) (flow.GateVerdict, error) {
+	ctx.Notify("", fmt.Sprintf("running the %s gate on %s", flow.GateIntegration, subject))
 	run, err := wt.RunGate(ctx.Context(), flow.GateIntegration)
 	if err != nil {
 		return flow.GateVerdict{}, fmt.Errorf(
-			"no %s gate ran, so nothing was measured about this branch — this is not the "+
-				"change failing: %w", flow.GateIntegration, err)
+			"no %s gate ran on %s, so nothing was measured — this is not the "+
+				"change failing: %w", flow.GateIntegration, subject, err)
 	}
 	if run.Outcome != flow.OutcomeMeasured {
 		return flow.GateVerdict{}, fmt.Errorf(
-			"the %s gate reports %q, so nothing was measured about this change — this is not "+
-				"the change failing%s", flow.GateIntegration, run.Outcome, detailSuffix(run.Detail))
+			"the %s gate reports %q on %s, so nothing was measured — this is not "+
+				"the change failing%s", flow.GateIntegration, run.Outcome, subject, detailSuffix(run.Detail))
 	}
 	verdict, err := wt.Judge(ctx.Context(), run)
 	if err != nil {
 		return flow.GateVerdict{}, fmt.Errorf(
-			"the %s gate measured this branch but no verdict exists, which is not a refusal — "+
-				"the project's judging layer could not answer: %w", flow.GateIntegration, err)
+			"the %s gate measured %s but no verdict exists, which is not a refusal — "+
+				"the project's judging layer could not answer: %w", flow.GateIntegration, subject, err)
 	}
 	if !verdict.Acceptable {
 		return flow.GateVerdict{}, fmt.Errorf(
-			"the %s gate's verdict on this branch is not acceptable, so it is not proposed%s",
-			flow.GateIntegration, detailSuffix(verdict.Detail))
+			"the %s gate's verdict on %s is not acceptable%s",
+			flow.GateIntegration, subject, detailSuffix(verdict.Detail))
 	}
 	return verdict, nil
 }

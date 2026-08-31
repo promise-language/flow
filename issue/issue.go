@@ -209,6 +209,16 @@ type Config struct {
 	// own change through the contributor flow.
 	Role Role
 
+	// CarryThrough declares that this binary runs both the contributor and
+	// integration phases in one resolution, ending at a merged change rather
+	// than a proposed one. Requires maintainer capability (Role == RoleMaintainer
+	// or detected as such); refused at construction with RoleContributor.
+	//
+	// This is not independent review. A single principal reviewing its own
+	// agent's work buys a second pass with different prompts against a
+	// different target — real value, but not a second opinion.
+	CarryThrough bool
+
 	// BaseBranch overrides the base the working branch is cut from. Zero value
 	// means detect it (see BranchDetector).
 	BaseBranch string

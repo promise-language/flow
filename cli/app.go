@@ -77,6 +77,10 @@ type App struct {
 	Out io.Writer
 	Err io.Writer
 
+	// CarryThrough is true when the binary runs both the contributor and
+	// integration phases in one resolution. Reported by doctor.
+	CarryThrough bool
+
 	// Output selects how command results are rendered. The zero value
 	// (OutputAuto) decides per invocation: JSON when stdout is piped or
 	// redirected, human text on a terminal — so a tool driving this binary

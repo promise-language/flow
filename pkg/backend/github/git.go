@@ -237,6 +237,37 @@ func (g *gitOps) RevParse(ctx context.Context, rev string) (string, error) {
 	return strings.TrimSpace(string(stdout)), nil
 }
 
+// Fetch fetches from the named remote.
+func (g *gitOps) Fetch(ctx context.Context, remote string) error {
+	_, stderr, err := g.run(ctx, "fetch", remote)
+	if err != nil {
+		return fmt.Errorf("git fetch %s: %w (%s)", remote, err, string(stderr))
+	}
+	return nil
+}
+
+// MergeLocal merges the given ref into the current branch without opening an
+// editor. Conflicts produce an error.
+func (g *gitOps) MergeLocal(ctx context.Context, ref string) error {
+	_, stderr, err := g.run(ctx, "merge", ref, "--no-edit")
+	if err != nil {
+		// Abort any in-progress merge so the tree is not left in a conflict state.
+		_, _, _ = g.run(ctx, "merge", "--abort")
+		return fmt.Errorf("git merge %s: %w (%s)", ref, err, string(stderr))
+	}
+	return nil
+}
+
+// ResetHardTo resets the current branch to the given ref, discarding all
+// changes.
+func (g *gitOps) ResetHardTo(ctx context.Context, ref string) error {
+	_, stderr, err := g.run(ctx, "reset", "--hard", ref)
+	if err != nil {
+		return fmt.Errorf("git reset --hard %s: %w (%s)", ref, err, string(stderr))
+	}
+	return nil
+}
+
 func (g *gitOps) HeadSHA(ctx context.Context) (string, error) {
 	stdout, _, err := g.run(ctx, "rev-parse", "HEAD")
 	if err != nil {

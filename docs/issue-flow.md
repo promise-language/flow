@@ -227,5 +227,3 @@ The gate answers one question: *will the mainline still be green*. It measures a
 Landing is a push to the mainline, or a merge of the request — the same act by two routes, and which one depends on how the change was proposed.
 
 A failing gate does not land, and does not return the change to the producing phase. The producing steps have had their turns; a gate failing after all of them is a fact for a person.
-
-> Not built. The step identities exist and the flow that would use them refuses on dispatch — [#29](https://github.com/promise-language/flow/issues/29).

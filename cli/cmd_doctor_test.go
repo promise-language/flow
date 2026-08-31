@@ -127,6 +127,60 @@ func (b *inspectingBackend) LoadStateByRef(ctx context.Context, ref flow.ItemRef
 	return &flow.ItemState{}, nil
 }
 
+// When CarryThrough is set, doctor should print the carry-through caveat.
+func TestCmdDoctor_ReportsCarryThrough(t *testing.T) {
+	be := fake.New()
+	app := App{
+		Backend:      be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:        []*flow.Flow{newDummyFlow("x")},
+		CarryThrough: true,
+	}
+	if err := app.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	out := &bytes.Buffer{}
+	app.Out = out
+	app.Err = &bytes.Buffer{}
+
+	code := app.cmdDoctor(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if !strings.Contains(out.String(), "carry-through: enabled") {
+		t.Errorf("doctor output should report carry-through; got %q", out.String())
+	}
+	if !strings.Contains(out.String(), "not independent review") {
+		t.Errorf("doctor output should state the caveat; got %q", out.String())
+	}
+}
+
+// When CarryThrough is not set, doctor should not mention it.
+func TestCmdDoctor_OmitsCarryThroughWhenDisabled(t *testing.T) {
+	be := fake.New()
+	app := App{
+		Backend:   be,
+		Agent:     &stubAgent{name: "stub"},
+		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:     []*flow.Flow{newDummyFlow("x")},
+	}
+	if err := app.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	out := &bytes.Buffer{}
+	app.Out = out
+	app.Err = &bytes.Buffer{}
+
+	code := app.cmdDoctor(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if strings.Contains(out.String(), "carry-through") {
+		t.Errorf("doctor output should not mention carry-through when disabled; got %q", out.String())
+	}
+}
+
 // failingBackend wraps the fake backend and forces ListEligible to error so
 // cmdDoctor's fallback probe fails.
 type failingBackend struct {

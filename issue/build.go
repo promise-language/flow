@@ -66,6 +66,16 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 		return cli.App{}, err
 	}
 
+	// CarryThrough with RoleContributor asks to integrate without the
+	// capability to integrate. That is a configuration that cannot produce
+	// correct behaviour, so it is a startup error naming the field.
+	if cfg.CarryThrough && role == RoleContributor {
+		return cli.App{}, fmt.Errorf(
+			"issue: Config.CarryThrough requires maintainer capability, "+
+				"but the resolved role is %q — a binary that intends to integrate "+
+				"must be able to", RoleContributor)
+	}
+
 	b := &builder{cfg: cfg, role: role, backend: deps.Backend}
 	if cfg.BaseBranch != "" {
 		b.base.Store(&cfg.BaseBranch)
@@ -79,19 +89,25 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 	//
 	// Refusing beats silently running the contributor set, which would have a
 	// maintainer opening a pull request against their own review.
-	flows := []*flow.Flow{b.contributorFlow(cfg)}
-	if role == RoleMaintainer {
+	var flows []*flow.Flow
+	switch {
+	case cfg.CarryThrough:
+		flows = []*flow.Flow{b.carryThroughFlow(cfg)}
+	case role == RoleMaintainer:
 		flows = []*flow.Flow{b.unimplementedMaintainerFlow(cfg)}
+	default:
+		flows = []*flow.Flow{b.contributorFlow(cfg)}
 	}
 
 	app := cli.App{
-		Name:      cfg.BinaryName,
-		Backend:   deps.Backend,
-		Agent:     deps.Agent,
-		Telemetry: deps.Telemetry,
-		Artifacts: artifactsFor(role),
-		Signals:   signalsFor(role),
-		Flows:     flows,
+		Name:         cfg.BinaryName,
+		Backend:      deps.Backend,
+		Agent:        deps.Agent,
+		Telemetry:    deps.Telemetry,
+		Artifacts:    artifactsFor(role, cfg.CarryThrough),
+		Signals:      signalsFor(role, cfg.CarryThrough),
+		Flows:        flows,
+		CarryThrough: cfg.CarryThrough,
 		// cli.App wants the display form (it reaches prompts and messages);
 		// cfg.VerifyCmd is argv because that is what a backend execs.
 		VerifyCmd: strings.Join(cfg.VerifyCmd, " "),
@@ -103,6 +119,20 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 // contributorFlow is the canonical contributor step set, in order.
 func (b *builder) contributorFlow(cfg Config) *flow.Flow {
 	f := flow.NewFlow("resolve", itemTypes(cfg))
+	b.addContributorSteps(f, cfg)
+	// Closing the branch needs no "did the resolution complete" test of its
+	// own: DeriveNext returns the first PENDING step in registration order, so
+	// a run that parked, was blocked or failed never reaches a step registered
+	// after the request. The ordering is the condition.
+	f.AddStep("close branch", flow.ArtifactId(StepCloseBranch), b.stepCloseBranch,
+		flow.StepConfig{Budget: cfg.budgetFor(StepCloseBranch)})
+	return f
+}
+
+// addContributorSteps registers the plan-through-openPR steps that every
+// contributor-capable flow uses. Factored out so the carry-through flow
+// composes it with the integration steps without duplicating the list.
+func (b *builder) addContributorSteps(f *flow.Flow, cfg Config) {
 	f.AddStep("write plan", flow.ArtifactId(StepPlan), b.stepPlan,
 		flow.StepConfig{Budget: cfg.budgetFor(StepPlan)})
 	f.AddStep("open branch", flow.ArtifactId(StepBranch), b.stepOpenBranch,
@@ -115,10 +145,25 @@ func (b *builder) contributorFlow(cfg Config) *flow.Flow {
 		flow.StepConfig{Budget: cfg.budgetFor(StepCoverage)})
 	f.AddSignalStep("create pull request", flow.SignalId(StepOpenPR), b.stepOpenPR,
 		flow.StepConfig{Budget: cfg.budgetFor(StepOpenPR)})
-	// Closing the branch needs no "did the resolution complete" test of its
-	// own: DeriveNext returns the first PENDING step in registration order, so
-	// a run that parked, was blocked or failed never reaches a step registered
-	// after the request. The ordering is the condition.
+}
+
+// addIntegrationSteps registers the three integration steps: verify the merge
+// result, merge, record the merge commit.
+func (b *builder) addIntegrationSteps(f *flow.Flow, cfg Config) {
+	f.AddStep("verify merge result", flow.ArtifactId(StepVerifyMerge), b.stepVerifyMerge,
+		flow.StepConfig{Budget: cfg.budgetFor(StepVerifyMerge)})
+	f.AddSignalStep("merge pull request", flow.SignalId(StepMerge), b.stepMerge,
+		flow.StepConfig{Budget: cfg.budgetFor(StepMerge)})
+	f.AddStep("record merge commit", flow.ArtifactId(StepRecordMerge), b.stepRecordMerge,
+		flow.StepConfig{Budget: cfg.budgetFor(StepRecordMerge)})
+}
+
+// carryThroughFlow composes the contributor steps and the integration steps
+// into one flow that ends at a merged change rather than a proposed one.
+func (b *builder) carryThroughFlow(cfg Config) *flow.Flow {
+	f := flow.NewFlow("resolve", itemTypes(cfg))
+	b.addContributorSteps(f, cfg)
+	b.addIntegrationSteps(f, cfg)
 	f.AddStep("close branch", flow.ArtifactId(StepCloseBranch), b.stepCloseBranch,
 		flow.StepConfig{Budget: cfg.budgetFor(StepCloseBranch)})
 	return f
@@ -202,9 +247,27 @@ func contributorArtifacts() []flow.ArtifactDef {
 	}
 }
 
+// integrationArtifacts is the artifact vocabulary the integration steps use.
+func integrationArtifacts() []flow.ArtifactDef {
+	return []flow.ArtifactDef{
+		flow.Artifact(flow.ArtifactId(StepVerifyMerge), flow.ArtifactMarkdown),
+		flow.Artifact(flow.ArtifactId(StepRecordMerge), flow.ArtifactCommitHash),
+	}
+}
+
+// integrationSignals is the signal vocabulary the integration steps use.
+func integrationSignals() []flow.SignalDef {
+	return []flow.SignalDef{
+		flow.Signal(flow.SignalId(StepMerge), "pull request has been merged"),
+	}
+}
+
 // artifactsFor is the artifact vocabulary the registered flow uses. cli.App
 // refuses at startup if a flow names anything outside it.
-func artifactsFor(role Role) []flow.ArtifactDef {
+func artifactsFor(role Role, carryThrough bool) []flow.ArtifactDef {
+	if carryThrough {
+		return append(contributorArtifacts(), integrationArtifacts()...)
+	}
 	if role == RoleMaintainer {
 		return []flow.ArtifactDef{
 			flow.Artifact(flow.ArtifactId(StepReviewMaint), flow.ArtifactMarkdown),
@@ -213,8 +276,11 @@ func artifactsFor(role Role) []flow.ArtifactDef {
 	return contributorArtifacts()
 }
 
-// signalsFor mirrors artifactsFor: the stand-in maintainer flow declares none.
-func signalsFor(role Role) []flow.SignalDef {
+// signalsFor mirrors artifactsFor.
+func signalsFor(role Role, carryThrough bool) []flow.SignalDef {
+	if carryThrough {
+		return append(contributorSignals(), integrationSignals()...)
+	}
 	if role == RoleMaintainer {
 		return nil
 	}
