@@ -45,6 +45,16 @@ func answerGate(backend flow.Backend, self func(context.Context) string) flow.Pr
 	return func(ctx context.Context, state *flow.ItemState) error {
 		park := state.Park
 		if park == nil || park.Kind != flow.ParkQuestion {
+			// No question park, but the item may still carry unanswered
+			// questions from a run whose park was cleared (e.g. by a manual
+			// takeover or a backend-specific resolution path). Dispatching
+			// against these re-discovers and re-asks — discarding whatever
+			// work the agent produced — so block before the spend.
+			if pqs := state.PendingQuestions(); len(pqs) > 0 {
+				return fmt.Errorf(
+					"%d unanswered question(s) on item — answer before resuming: %w",
+					len(pqs), flow.ErrBlocked)
+			}
 			return nil
 		}
 		since := flow.QuestionAskedAt(park)

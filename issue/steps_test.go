@@ -1675,3 +1675,169 @@ func TestPlanStepStillAcceptsATurnThatNeverSubmitted(t *testing.T) {
 		t.Errorf("resolved %q, want the agent's text", ctx.resolved.Markdown)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Plan saved as WIP alongside a question (defect 2 fix).
+// ---------------------------------------------------------------------------
+
+// The critical case: a plan-mode turn submits the plan (PlanText) and then
+// continues reasoning until the agent discovers an ambiguity (NEEDS-ANSWER in
+// LastText). Both coexist on the response. Without the fix, the plan is
+// discarded and the $19 invocation produces nothing.
+//
+// The plan is saved as WIP, not resolved: resolution.md § "Work in progress"
+// requires that a step stopped by a question does not resolve its artifact.
+// Resolving would let the next derive skip plan and run implement, silently
+// ignoring an answer that might need to change the plan.
+func TestPlanStepSavesPlanAsWIPWhenAgentAlsoAsksAQuestion(t *testing.T) {
+	agent := &scriptedAgent{
+		replies: []string{"I analysed the code and found an ambiguity.\nNEEDS-ANSWER: amend or reject?"},
+		plans:   []planReply{{submitted: true, text: "## Plan\n\nChange the parser to handle both cases."}},
+	}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	err := testBuilder(t).stepPlan(ctx)
+	if err == nil {
+		t.Fatal("want the ask sentinel to stop the step")
+	}
+	if len(ctx.asked) != 1 {
+		t.Fatalf("asked %d questions, want 1", len(ctx.asked))
+	}
+	// The step must NOT resolve — the question may require changing the plan.
+	if ctx.didResolve {
+		t.Fatal("resolved the plan artifact despite an open question — " +
+			"the answer may need to change the plan, so the step must not resolve")
+	}
+	// The plan must survive as WIP so the resumed step can re-submit it.
+	// runAgent saves LastText first; stepPlan overwrites with a combined
+	// record carrying both the plan and the reasoning.
+	if len(ctx.wipSaves) < 2 {
+		t.Fatalf("wipSaves = %d, want at least 2 (runAgent + stepPlan)", len(ctx.wipSaves))
+	}
+	last := ctx.wipSaves[len(ctx.wipSaves)-1]
+	if !strings.Contains(last, "Change the parser") {
+		t.Errorf("WIP does not carry the submitted plan: %q", last)
+	}
+	if !strings.Contains(last, "amend or reject") {
+		t.Errorf("WIP does not carry the agent's reasoning: %q", last)
+	}
+}
+
+// When the agent asks a question but did NOT submit a plan (no PlanText),
+// nothing is resolved — the step parks normally and the WIP carries the
+// agent's reasoning for the resume.
+func TestPlanStepDoesNotResolveEmptyPlanOnQuestion(t *testing.T) {
+	agent := &scriptedAgent{
+		replies: []string{"I cannot decide.\nNEEDS-ANSWER: which approach?"},
+	}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	err := testBuilder(t).stepPlan(ctx)
+	if err == nil {
+		t.Fatal("want the ask sentinel to stop the step")
+	}
+	if ctx.didResolve {
+		t.Error("resolved a plan artifact from an agent that produced no plan")
+	}
+	// The WIP should carry the agent's reasoning.
+	if len(ctx.wipSaves) == 0 {
+		t.Error("no WIP stashed — the agent's reasoning is lost")
+	}
+}
+
+// When the WIP save fails, the step still parks with the question — the
+// error path is best-effort, not fatal.
+func TestPlanStepParksOnQuestionEvenWhenWIPSaveFails(t *testing.T) {
+	agent := &scriptedAgent{
+		replies: []string{"Found a problem.\nNEEDS-ANSWER: amend the spec?"},
+		plans:   []planReply{{submitted: true, text: "## Plan with detail"}},
+	}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+	ctx.wipSaveErr = errors.New("nowhere to write")
+
+	err := testBuilder(t).stepPlan(ctx)
+	if err == nil {
+		t.Fatal("want the ask sentinel to stop the step")
+	}
+	if len(ctx.asked) != 1 {
+		t.Fatalf("asked %d questions, want 1 — a failed WIP save must not swallow the park", len(ctx.asked))
+	}
+	// The step must not resolve.
+	if ctx.didResolve {
+		t.Error("resolved the plan despite the step not completing")
+	}
+	// A notice should report the failure.
+	var reported bool
+	for _, n := range ctx.notices {
+		if strings.Contains(n, "could not persist plan") {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Errorf("the failed persist went unreported; notices = %v", ctx.notices)
+	}
+}
+
+// A whitespace-only PlanText is not a plan. The step must not attempt a
+// combined WIP save for it — the runAgent stash of LastText is sufficient.
+func TestPlanStepSkipsWIPSaveWhenPlanTextIsWhitespaceOnly(t *testing.T) {
+	agent := &scriptedAgent{
+		replies: []string{"Ambiguity found.\nNEEDS-ANSWER: which approach?"},
+		plans:   []planReply{{submitted: true, text: "   \n  "}},
+	}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	err := testBuilder(t).stepPlan(ctx)
+	if err == nil {
+		t.Fatal("want the ask sentinel to stop the step")
+	}
+	// runAgent stashes LastText as WIP (1 save). stepPlan must NOT overwrite
+	// with a combined record because there is no real plan to combine.
+	if len(ctx.wipSaves) != 1 {
+		t.Errorf("wipSaves = %d, want exactly 1 (runAgent only, no combined save)", len(ctx.wipSaves))
+	}
+}
+
+// When the agent hard-errors (returns nil, error from Run), the new resp!=nil
+// guard in stepPlan's error path must not panic and must propagate the error.
+func TestPlanStepPropagatesAgentHardError(t *testing.T) {
+	boom := errors.New("substrate down")
+	agent := &scriptedAgent{errs: []error{boom}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	err := testBuilder(t).stepPlan(ctx)
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the agent's error", err)
+	}
+	if ctx.didResolve {
+		t.Error("resolved a plan from an agent that crashed")
+	}
+	// No WIP save should happen — resp is nil.
+	if len(ctx.wipSaves) != 0 {
+		t.Errorf("wipSaves = %d, want 0 when the agent returned no response", len(ctx.wipSaves))
+	}
+}
+
+// runAgent returns the response alongside a question error so callers can
+// inspect what the agent produced. Other callers that do `if err != nil {
+// return err }` are unaffected because they never access resp.
+func TestRunAgentReturnsResponseAlongsideQuestionError(t *testing.T) {
+	const reply = "Analysis done.\nNEEDS-ANSWER: which database?"
+	agent := &scriptedAgent{
+		replies: []string{reply},
+		plans:   []planReply{{submitted: true, text: "the plan"}},
+	}
+	wt := resumedWorktree()
+	ctx := ctxWithPlan(wt, agent)
+
+	resp, err := testBuilder(t).runAgent(ctx, flow.AgentRequest{Prompt: "test"})
+	if err == nil {
+		t.Fatal("want the ask sentinel error")
+	}
+	if resp == nil {
+		t.Fatal("resp is nil — callers cannot inspect what the agent produced")
+	}
+	if resp.PlanText != "the plan" {
+		t.Errorf("PlanText = %q, want the submitted plan to be accessible", resp.PlanText)
+	}
+}

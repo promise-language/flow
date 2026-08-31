@@ -48,6 +48,27 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 		Effort:         "high",
 	})
 	if err != nil {
+		// The agent asked a question (or failed), but may have produced a
+		// plan first — a plan-mode turn submits the plan and THEN continues
+		// to reason, so PlanText and NEEDS-ANSWER can coexist.
+		//
+		// The plan is saved as WIP, not resolved: resolution.md § "Work in
+		// progress" requires that a step stopped by a question does not
+		// resolve its artifact. Resolving would let the next derive skip
+		// plan and run implement — and the answer to the question, which
+		// may need to change the plan, would be silently ignored.
+		//
+		// runAgent already saved resp.LastText as WIP (the reasoning and
+		// the question). When a PlanText also exists, overwrite with a
+		// combined record so the resumed step has both the submitted plan
+		// and the reasoning that led to the question.
+		if resp != nil && strings.TrimSpace(resp.PlanText) != "" {
+			combined := "## Submitted plan\n\n" + resp.PlanText +
+				"\n\n---\n\n## Agent reasoning\n\n" + resp.LastText
+			if wipErr := ctx.RecordWorkInProgress(combined); wipErr != nil {
+				ctx.Notify("", "could not persist plan as work in progress: "+wipErr.Error())
+			}
+		}
 		return err
 	}
 	// The plan is what the agent SUBMITTED, when it submitted one. A plan-mode
@@ -596,7 +617,13 @@ func (b *builder) runAgent(ctx flow.StepCtx, req flow.AgentRequest) (*flow.Agent
 		// own identity is not repeated here — the park record already names the
 		// step, and a header that led with it would push the actual question
 		// off the first line a human reads.
-		return nil, ctx.AskQuestions(flow.AgentQuestion{Header: header, Text: body})
+		//
+		// The response is returned alongside the error so callers that produced
+		// a usable artifact (e.g. stepPlan with a PlanText) can persist it
+		// before propagating the question. Discarding a paid artifact because
+		// the agent also asked a question is the worst outcome — the money is
+		// spent and the work is gone.
+		return resp, ctx.AskQuestions(flow.AgentQuestion{Header: header, Text: body})
 	}
 	return resp, nil
 }

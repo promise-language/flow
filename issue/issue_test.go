@@ -331,6 +331,92 @@ func TestAnswerGate_NilWhenBackendCannotRead(t *testing.T) {
 	}
 }
 
+// An item whose park was cleared but whose questions were never formally
+// answered must not pass: dispatching a handler re-discovers and re-asks,
+// discarding whatever work it produced. This is the pre-flight half of
+// the spend-before-terminal-check fix.
+func TestAnswerGate_BlocksWhenParkClearedButQuestionsRemain(t *testing.T) {
+	gate := answerGate(&stubBackend{}, self("flowbot"))
+	state := &flow.ItemState{
+		// Park is nil — cleared by a manual takeover or backend resolution.
+		Questions: []flow.Question{
+			{ID: "q1", AgentQuestion: flow.AgentQuestion{Text: "cache or store?"}},
+		},
+	}
+	err := gate(context.Background(), state)
+	if err == nil {
+		t.Fatal("want a refusal when questions remain after park cleared")
+	}
+	if !errors.Is(err, flow.ErrBlocked) {
+		t.Errorf("err = %v, want it to wrap flow.ErrBlocked", err)
+	}
+	if !strings.Contains(err.Error(), "unanswered question") {
+		t.Errorf("err = %q, want it to name the pending questions", err)
+	}
+}
+
+// Same check with a non-question park: the park is budget-exhausted, but
+// questions from an earlier run remain unanswered.
+func TestAnswerGate_BlocksWhenNonQuestionParkButQuestionsRemain(t *testing.T) {
+	gate := answerGate(&stubBackend{}, self("flowbot"))
+	state := &flow.ItemState{
+		Park: &flow.ParkRequest{Kind: flow.ParkBudgetExhausted, Step: "plan"},
+		Questions: []flow.Question{
+			{ID: "q1", AgentQuestion: flow.AgentQuestion{Text: "cache or store?"}},
+		},
+	}
+	err := gate(context.Background(), state)
+	if err == nil {
+		t.Fatal("want a refusal when questions remain alongside a budget park")
+	}
+	if !errors.Is(err, flow.ErrBlocked) {
+		t.Errorf("err = %v, want it to wrap flow.ErrBlocked", err)
+	}
+}
+
+// An item with no park and no pending questions passes cleanly.
+func TestAnswerGate_PassesWhenNoParkAndNoQuestions(t *testing.T) {
+	gate := answerGate(&stubBackend{}, self("flowbot"))
+	if err := gate(context.Background(), &flow.ItemState{}); err != nil {
+		t.Errorf("gate = %v, want nil for a clean item", err)
+	}
+}
+
+// Answered questions (Answer field populated) do not block.
+func TestAnswerGate_PassesWhenAllQuestionsAnswered(t *testing.T) {
+	gate := answerGate(&stubBackend{}, self("flowbot"))
+	state := &flow.ItemState{
+		Questions: []flow.Question{
+			{ID: "q1", AgentQuestion: flow.AgentQuestion{Text: "which db?"}, UserAnswer: flow.UserAnswer{Answer: "postgres"}},
+		},
+	}
+	if err := gate(context.Background(), state); err != nil {
+		t.Errorf("gate = %v, want nil when all questions are answered", err)
+	}
+}
+
+// A mix of answered and unanswered questions with no park: PendingQuestions
+// filters to the unanswered subset, and even one remaining blocks.
+func TestAnswerGate_BlocksOnMixedQuestionsWithNoPark(t *testing.T) {
+	gate := answerGate(&stubBackend{}, self("flowbot"))
+	state := &flow.ItemState{
+		Questions: []flow.Question{
+			{ID: "q1", AgentQuestion: flow.AgentQuestion{Text: "which db?"}, UserAnswer: flow.UserAnswer{Answer: "postgres"}},
+			{ID: "q2", AgentQuestion: flow.AgentQuestion{Text: "cache layer?"}},
+		},
+	}
+	err := gate(context.Background(), state)
+	if err == nil {
+		t.Fatal("want a refusal when one question remains unanswered")
+	}
+	if !errors.Is(err, flow.ErrBlocked) {
+		t.Errorf("err = %v, want it to wrap flow.ErrBlocked", err)
+	}
+	if !strings.Contains(err.Error(), "1 unanswered") {
+		t.Errorf("err = %q, want it to report the count of pending questions", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Verify tail.
 // ---------------------------------------------------------------------------
