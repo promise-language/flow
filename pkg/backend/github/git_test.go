@@ -142,3 +142,132 @@ func TestStageAll_ExcludesCustomFlowDir(t *testing.T) {
 		t.Errorf(".custom-state/active.json should NOT be staged, got: %q", staged)
 	}
 }
+
+func TestStageAll_ExcludesNestedFlowSubtree(t *testing.T) {
+	t.Setenv("FLOW_DIR", ".flow")
+	g := initTestRepo(t)
+	ctx := t.Context()
+
+	if err := os.WriteFile(filepath.Join(g.dir, "README"), []byte("changed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create nested work-in-progress records like the real SDK writes.
+	workDir := filepath.Join(g.dir, ".flow", "work", "issue-9")
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "plan.json"), []byte(`{"step":"plan"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := g.StageAll(ctx); err != nil {
+		t.Fatalf("StageAll: %v", err)
+	}
+
+	stdout, _, err := g.run(ctx, "diff", "--cached", "--name-only")
+	if err != nil {
+		t.Fatalf("git diff --cached: %v", err)
+	}
+	staged := strings.TrimSpace(string(stdout))
+
+	if !strings.Contains(staged, "README") {
+		t.Errorf("README should be staged, got: %q", staged)
+	}
+	if strings.Contains(staged, ".flow") {
+		t.Errorf("nested .flow/work/ should NOT be staged, got: %q", staged)
+	}
+}
+
+func TestStageAll_DoesNotOverExclude(t *testing.T) {
+	t.Setenv("FLOW_DIR", ".flow")
+	g := initTestRepo(t)
+	ctx := t.Context()
+
+	// A file whose name starts with ".flow" but is not inside .flow/ must
+	// still be staged — the pathspec must not glob beyond the directory.
+	if err := os.WriteFile(filepath.Join(g.dir, ".flowconfig"), []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := g.StageAll(ctx); err != nil {
+		t.Fatalf("StageAll: %v", err)
+	}
+
+	stdout, _, err := g.run(ctx, "diff", "--cached", "--name-only")
+	if err != nil {
+		t.Fatalf("git diff --cached: %v", err)
+	}
+	staged := strings.TrimSpace(string(stdout))
+
+	if !strings.Contains(staged, ".flowconfig") {
+		t.Errorf(".flowconfig should be staged (not inside .flow/), got: %q", staged)
+	}
+}
+
+func TestCommit_ExcludesFlowDir(t *testing.T) {
+	t.Setenv("FLOW_DIR", ".flow")
+	g := initTestRepo(t)
+	ctx := t.Context()
+
+	if err := os.WriteFile(filepath.Join(g.dir, "README"), []byte("changed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	flowDir := filepath.Join(g.dir, ".flow")
+	if err := os.MkdirAll(flowDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(flowDir, "active.json"), []byte(`{"token":"t"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := g.Commit(ctx, "test commit"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// Verify committed tree does not contain .flow/.
+	stdout, _, err := g.run(ctx, "ls-tree", "-r", "--name-only", "HEAD")
+	if err != nil {
+		t.Fatalf("git ls-tree: %v", err)
+	}
+	tree := string(stdout)
+
+	if !strings.Contains(tree, "README") {
+		t.Errorf("README should be in commit, got: %q", tree)
+	}
+	if strings.Contains(tree, ".flow") {
+		t.Errorf(".flow/ should NOT be in commit, got: %q", tree)
+	}
+}
+
+func TestCommit_OnlyFlowDirChange_NoCommit(t *testing.T) {
+	t.Setenv("FLOW_DIR", ".flow")
+	g := initTestRepo(t)
+	ctx := t.Context()
+
+	headBefore, err := g.HeadSHA(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The only change is inside .flow/ — after exclusion, nothing to commit.
+	flowDir := filepath.Join(g.dir, ".flow")
+	if err := os.MkdirAll(flowDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(flowDir, "active.json"), []byte(`{"token":"t"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := g.Commit(ctx, "should be a no-op"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	headAfter, err := g.HeadSHA(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if headBefore != headAfter {
+		t.Errorf("HEAD should not have moved: before=%s after=%s", headBefore, headAfter)
+	}
+}
