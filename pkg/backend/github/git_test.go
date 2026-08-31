@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/flow/pkg/clistate"
 )
 
 func TestParseGitHubRemote(t *testing.T) {
@@ -202,6 +204,41 @@ func TestStageAll_DoesNotOverExclude(t *testing.T) {
 
 	if !strings.Contains(staged, ".flowconfig") {
 		t.Errorf(".flowconfig should be staged (not inside .flow/), got: %q", staged)
+	}
+}
+
+func TestStageAll_AbsoluteFlowDir(t *testing.T) {
+	// FLOW_DIR is an absolute path outside the worktree. The exclude pathspec
+	// must be omitted — git refuses an exclude that points outside the repo.
+	t.Setenv("FLOW_DIR", t.TempDir())
+	g := initTestRepo(t)
+	ctx := t.Context()
+
+	// Modify the tracked file.
+	if err := os.WriteFile(filepath.Join(g.dir, "README"), []byte("changed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a state file in the external FLOW_DIR — it must not appear in the index.
+	if err := os.WriteFile(filepath.Join(clistate.Dir(), "active.json"), []byte(`{"token":"t"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := g.StageAll(ctx); err != nil {
+		t.Fatalf("StageAll with absolute FLOW_DIR: %v", err)
+	}
+
+	stdout, _, err := g.run(ctx, "diff", "--cached", "--name-only")
+	if err != nil {
+		t.Fatalf("git diff --cached: %v", err)
+	}
+	staged := strings.TrimSpace(string(stdout))
+
+	if !strings.Contains(staged, "README") {
+		t.Errorf("README should be staged, got: %q", staged)
+	}
+	if strings.Contains(staged, "active.json") {
+		t.Errorf("external state file should NOT be staged, got: %q", staged)
 	}
 }
 
