@@ -46,6 +46,10 @@ type PromptContext struct {
 	// PromptRevise.
 	RefusedText string
 
+	// CommitRefusal is the pre-commit hook's error message, verbatim.
+	// Non-empty ONLY when rendering PromptCommitRepair.
+	CommitRefusal string
+
 	// Prior carries upstream artifacts as records rather than strings, so a
 	// body cannot silently interpolate a patch into a markdown slot. Read them
 	// through PriorMarkdown / PriorPatch / PriorJSON.
@@ -287,6 +291,21 @@ change can see what you did rather than reconstruct it from the diff.
 {{.WorkInProgressBlock}}
 
 {{.AnswersBlock}}`,
+
+	PromptCommitRepair: `The commit was refused by a pre-commit hook. Its error message:
+
+` + "```" + `
+{{.CommitRefusal}}
+` + "```" + `
+
+Delete the offending file(s). That is the ONLY permitted action:
+- Do NOT unstage them — the next stage will re-add them and the refusal repeats.
+- Do NOT add them to .gitignore — an ignored file survives in the tree, passes
+  verify, and breaks the mainline that never receives it.
+- Do NOT edit any tracked source file — the gate already passed on what is here,
+  and a change after it breaks the invariant that what was verified is what lands.
+
+Delete the file(s) the hook named and nothing else.`,
 
 	PromptRevise: `The text you just produced was NOT published. A guard examines everything this
 flow writes outward before it is sent, and it refused this:
