@@ -287,10 +287,7 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 // carries the closes-reference, and a second commit repeating it would read as a
 // second resolution of the same item.
 func (b *builder) recordStepWork(ctx flow.StepCtx, wt flow.Worktree, label, msg string) error {
-	if err := wt.Stage(ctx.Context()); err != nil {
-		return err
-	}
-	if err := wt.Commit(ctx.Context(), msg); err != nil {
+	if err := b.commitWithRepair(ctx, wt, msg); err != nil {
 		return err
 	}
 	// Not redundant with the commit: staging cannot pick up what a backend
@@ -307,6 +304,56 @@ func (b *builder) recordStepWork(ctx flow.StepCtx, wt flow.Worktree, label, msg 
 			label, len(patch))
 	}
 	return nil
+}
+
+// commitWithRepair stages, commits, and on a pre-commit hook refusal runs one
+// bounded agent repair turn — constrained to deleting the offending files —
+// then retries. A second refusal wraps flow.ErrRefused so the orchestrator
+// parks the item at zero cost.
+//
+// One repair turn, not a loop: the issue says "one bounded agent repair turn,
+// retry the commit once." A fresh session, because the repair is a different
+// task from the producing step — "delete a file the agent may not have
+// created."
+func (b *builder) commitWithRepair(ctx flow.StepCtx, wt flow.Worktree, msg string) error {
+	if err := wt.Stage(ctx.Context()); err != nil {
+		return err
+	}
+	firstErr := wt.Commit(ctx.Context(), msg)
+	if firstErr == nil {
+		return nil
+	}
+
+	// First refusal: surface the hook's message and let the agent delete the
+	// offending files.
+	ctx.Notify("", fmt.Sprintf("commit refused by pre-commit hook: %s", firstErr))
+
+	pc := PromptContext{CommitRefusal: firstErr.Error()}
+	prompt, err := renderPrompt(b.cfg, PromptCommitRepair, pc)
+	if err != nil {
+		return err
+	}
+	// acceptEdits: the agent needs filesystem access to rm the files.
+	_, err = ctx.Agent().Run(ctx.Context(), flow.AgentRequest{
+		Prompt:         prompt,
+		PermissionMode: "acceptEdits",
+	})
+	if err != nil {
+		return err
+	}
+
+	// Re-stage and re-commit.
+	if err := wt.Stage(ctx.Context()); err != nil {
+		return err
+	}
+	secondErr := wt.Commit(ctx.Context(), msg)
+	if secondErr == nil {
+		return nil
+	}
+
+	// Second refusal: deterministic, park at zero cost.
+	return fmt.Errorf("commit refused twice — first: %s — second: %s: %w",
+		firstErr, secondErr, flow.ErrRefused)
 }
 
 // itemLabel names the item in a commit subject, without the closes-reference:
@@ -504,12 +551,7 @@ func (b *builder) recordOutstanding(ctx flow.StepCtx, wt flow.Worktree) error {
 	if err != nil {
 		return err
 	}
-	if err := wt.Stage(ctx.Context()); err != nil {
-		return err
-	}
-	// Commit is a deliberate no-op when nothing is staged, so a clean tree
-	// costs one call and records nothing.
-	if err := wt.Commit(ctx.Context(), b.followUpCommitMessage(ctx)); err != nil {
+	if err := b.commitWithRepair(ctx, wt, b.followUpCommitMessage(ctx)); err != nil {
 		return err
 	}
 	after, err := wt.RevParse(ctx.Context(), "HEAD")

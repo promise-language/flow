@@ -95,6 +95,10 @@ const (
 	// belongs to no single step, because every step that publishes prose can be
 	// refused.
 	PromptRevise PromptID = "revise"
+
+	// PromptCommitRepair is the repair prompt issued when a pre-commit hook
+	// refuses a file. PromptContext.CommitRefusal carries the hook's stderr.
+	PromptCommitRepair PromptID = "commit:repair"
 )
 
 // Role is the capability the authenticated principal holds on the repository,

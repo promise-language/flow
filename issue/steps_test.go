@@ -38,6 +38,10 @@ type fakeWorktree struct {
 	opened      bool
 	openBody    string
 	captured    []byte
+	// commitErrs scripts what Commit returns on successive calls. A nil entry
+	// means success for that call. When exhausted, Commit falls back to the
+	// noCommit flag as before.
+	commitErrs []error
 	// dirty models work appearing in the tree AFTER a commit — what the review
 	// and coverage steps do. A Commit that lands clears it, as git does; a
 	// Commit that lands nothing (noCommit) leaves it, as git also does. It also
@@ -112,7 +116,14 @@ func (w *fakeWorktree) Branch(_ context.Context, name, base string) (bool, error
 func (w *fakeWorktree) CurrentBranch(context.Context) (string, error) { return w.branch, nil }
 func (w *fakeWorktree) Commit(_ context.Context, msg string) error {
 	w.calls = append(w.calls, "commit")
-	if w.noCommit {
+	if len(w.commitErrs) > 0 {
+		err := w.commitErrs[0]
+		w.commitErrs = w.commitErrs[1:]
+		if err != nil {
+			return err
+		}
+		// nil entry: fall through to normal commit behavior.
+	} else if w.noCommit {
 		return nil // git's own behavior with nothing staged
 	}
 	w.commits++
@@ -1839,5 +1850,125 @@ func TestRunAgentReturnsResponseAlongsideQuestionError(t *testing.T) {
 	}
 	if resp.PlanText != "the plan" {
 		t.Errorf("PlanText = %q, want the submitted plan to be accessible", resp.PlanText)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Commit-refusal repair (#72).
+// ---------------------------------------------------------------------------
+
+// hookErr is the shape a real pre-commit hook refusal takes. The message names
+// the offending file and the remedy — which is the point: the repair prompt
+// surfaces it verbatim.
+var hookErr = errors.New(`git commit: exit status 1 (❌ pre-commit: refusing to commit binary or oversized files: do — 11874066 bytes exceeds the 256 KiB limit)`)
+
+// First commit fails, agent deletes the file, second commit succeeds.
+func TestCommitRepair_Succeeds(t *testing.T) {
+	wt := resumedWorktree()
+	wt.commitErrs = []error{hookErr, nil}
+	agent := &scriptedAgent{replies: []string{"done", "deleted the file"}}
+	ctx := ctxWithPlan(wt, agent)
+
+	if err := testBuilder(t).stepImplement(ctx); err != nil {
+		t.Fatalf("stepImplement: %v", err)
+	}
+	// The agent was called twice: once for implement, once for repair.
+	if agent.calls != 2 {
+		t.Errorf("agent ran %d times, want 2 (implement + repair)", agent.calls)
+	}
+	// The repair prompt must carry the hook's error message.
+	if !strings.Contains(agent.prompts[1], "refusing to commit binary") {
+		t.Errorf("repair prompt = %q, want the hook's stderr", agent.prompts[1])
+	}
+	// The repair agent must have acceptEdits permission to delete files.
+	if agent.reqs[1].PermissionMode != "acceptEdits" {
+		t.Errorf("repair PermissionMode = %q, want acceptEdits", agent.reqs[1].PermissionMode)
+	}
+	// The step should resolve normally.
+	if !ctx.didResolve {
+		t.Error("step did not resolve after a successful repair")
+	}
+}
+
+// Both commits fail — the error wraps flow.ErrRefused so the orchestrator
+// parks at zero cost.
+func TestCommitRepair_SecondRefusalParks(t *testing.T) {
+	wt := resumedWorktree()
+	wt.commitErrs = []error{hookErr, hookErr}
+	agent := &scriptedAgent{replies: []string{"done", "deleted the file"}}
+	ctx := ctxWithPlan(wt, agent)
+
+	err := testBuilder(t).stepImplement(ctx)
+	if err == nil {
+		t.Fatal("want an error wrapping ErrRefused")
+	}
+	if !errors.Is(err, flow.ErrRefused) {
+		t.Errorf("err = %v, want it to wrap flow.ErrRefused", err)
+	}
+	if !strings.Contains(err.Error(), "commit refused twice") {
+		t.Errorf("err = %v, want it to say the commit was refused twice", err)
+	}
+}
+
+// The same repair path through recordOutstanding (the stepOpenPR commit path).
+func TestCommitRepair_RecordOutstanding(t *testing.T) {
+	wt := resumedWorktree()
+	wt.commits = 1              // implement already committed
+	wt.dirty = []byte("diff\n") // review/coverage changed something
+	wt.commitErrs = []error{hookErr, nil}
+	agent := &scriptedAgent{replies: []string{"deleted the file"}}
+	ctx := ctxWithPlan(wt, agent)
+
+	if err := testBuilder(t).stepOpenPR(ctx); err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	// The repair agent was called.
+	if agent.calls != 1 {
+		t.Errorf("agent ran %d times, want 1 (repair only, no agent in stepOpenPR)", agent.calls)
+	}
+	if !strings.Contains(agent.prompts[0], "refusing to commit binary") {
+		t.Errorf("repair prompt = %q, want the hook's stderr", agent.prompts[0])
+	}
+}
+
+// The rendered prompt must carry the hook's stderr verbatim.
+func TestCommitRepair_PromptCarriesHookMessage(t *testing.T) {
+	pc := PromptContext{CommitRefusal: "refusing to commit binary: do — 11 MB"}
+	got, err := renderPrompt(Config{}, PromptCommitRepair, pc)
+	if err != nil {
+		t.Fatalf("renderPrompt: %v", err)
+	}
+	if !strings.Contains(got, "refusing to commit binary: do — 11 MB") {
+		t.Errorf("prompt does not carry the hook's message: %q", got)
+	}
+	// It must name deletion as the only move.
+	if !strings.Contains(got, "Delete") {
+		t.Errorf("prompt does not name deletion: %q", got)
+	}
+	// It must prohibit unstaging and .gitignore.
+	if !strings.Contains(got, "unstage") || !strings.Contains(got, ".gitignore") {
+		t.Errorf("prompt does not prohibit the wrong remedies: %q", got)
+	}
+}
+
+// When the repair agent itself errors (substrate down), the error propagates
+// as-is — NOT as ErrRefused. The step failed for an infrastructure reason, and
+// reporting it as a deterministic refusal would park the item permanently.
+func TestCommitRepair_AgentFailurePropagates(t *testing.T) {
+	wt := resumedWorktree()
+	boom := errors.New("substrate is down")
+	wt.commitErrs = []error{hookErr}
+	agent := &scriptedAgent{replies: []string{"done"}, errs: []error{nil, boom}}
+	ctx := ctxWithPlan(wt, agent)
+
+	err := testBuilder(t).stepImplement(ctx)
+	if err == nil {
+		t.Fatal("want an error from the agent")
+	}
+	if errors.Is(err, flow.ErrRefused) {
+		t.Errorf("err wraps ErrRefused — an agent failure is not a deterministic refusal: %v", err)
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("err = %v, want the agent's own error propagated", err)
 	}
 }

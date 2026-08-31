@@ -605,6 +605,7 @@ func TestEveryPromptSlotBelongsToARegisteredStep(t *testing.T) {
 	inSessionReprompts := map[PromptID]bool{
 		PromptImplementFix: true,
 		PromptRevise:       true,
+		PromptCommitRepair: true,
 	}
 	for id := range defaultPrompts {
 		if inSessionReprompts[id] {
@@ -881,7 +882,7 @@ func TestDefaultPromptsRender(t *testing.T) {
 func TestEveryPromptSlotHasADefault(t *testing.T) {
 	for _, id := range []PromptID{
 		PromptPlan, PromptImplement, PromptImplementFix,
-		PromptReview, PromptCoverage,
+		PromptReview, PromptCoverage, PromptCommitRepair,
 	} {
 		if _, ok := defaultPrompts[id]; !ok {
 			t.Errorf("no library default for %q", id)
@@ -918,6 +919,7 @@ func TestAnswersReachEveryResumableDefaultPrompt(t *testing.T) {
 	inSessionReprompts := map[PromptID]bool{
 		PromptImplementFix: true,
 		PromptRevise:       true,
+		PromptCommitRepair: true,
 	}
 	for id := range defaultPrompts {
 		if inSessionReprompts[id] {
@@ -1045,6 +1047,7 @@ func TestWorkInProgressReachesEveryResumableDefaultPrompt(t *testing.T) {
 	inSessionReprompts := map[PromptID]bool{
 		PromptImplementFix: true,
 		PromptRevise:       true,
+		PromptCommitRepair: true,
 	}
 	for id := range defaultPrompts {
 		if inSessionReprompts[id] {
