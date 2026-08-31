@@ -175,6 +175,46 @@ func (b *Backend) Release(ctx context.Context, claim flow.Claim) error {
 	return nil
 }
 
+// Finalize marks the item's flow run complete: returns the worktree to the
+// base branch (if not already there) and releases the claim. The worktree
+// return precedes the release so that a checkout failure leaves the claim
+// intact (recoverable) rather than the reverse.
+func (b *Backend) Finalize(ctx context.Context, claim flow.Claim) error {
+	base, err := b.DefaultBranch(ctx)
+	if err != nil {
+		return fmt.Errorf("github.Finalize: resolve default branch: %w", err)
+	}
+
+	current, err := b.git.CurrentBranch(ctx)
+	if err != nil {
+		return fmt.Errorf("github.Finalize: current branch: %w", err)
+	}
+
+	if current != base {
+		dirty, err := b.git.IsDirty(ctx)
+		if err != nil {
+			return fmt.Errorf("github.Finalize: check dirty: %w", err)
+		}
+		if dirty {
+			return fmt.Errorf("github.Finalize: worktree is dirty on %s — refusing to discard uncommitted changes", current)
+		}
+
+		exists, err := b.git.BranchExists(ctx, base)
+		if err != nil {
+			return fmt.Errorf("github.Finalize: check base branch: %w", err)
+		}
+		if !exists {
+			return fmt.Errorf("github.Finalize: base branch %q does not exist locally", base)
+		}
+
+		if err := b.git.Checkout(ctx, base, "", false); err != nil {
+			return fmt.Errorf("github.Finalize: checkout %s: %w", base, err)
+		}
+	}
+
+	return b.Release(ctx, claim)
+}
+
 // LookupActiveClaim returns the active claim held by owner. The github
 // backend's lease store is the worktree-local .flow/active.json file; this
 // reads that file and confirms the owner matches.

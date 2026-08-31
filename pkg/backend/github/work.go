@@ -20,8 +20,8 @@ import (
 // Records are keyed by the issue number and the step's result id. Release
 // already clears the claim state through clistate.Clear, which removes the work
 // tree with it, so a released claim leaves no reasoning behind. This backend
-// implements no flow.Finalizer (#28); when one lands it releases through the
-// same path.
+// implements flow.Finalizer (see claim.go), which releases through the same
+// path.
 
 // workItemKey is the item half of a record's key: the issue number, which is
 // this backend's item identity everywhere else too.

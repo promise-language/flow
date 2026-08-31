@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/promise-language/flow"
+	"github.com/promise-language/flow/pkg/clistate"
 )
 
 // ghMock is a tiny httptest.Server that emulates the GitHub REST API
@@ -100,9 +102,10 @@ func (m *ghMock) server() *httptest.Server {
 	// GET /repos/{o}/{r}
 	mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
-			"name":        m.repo,
-			"full_name":   m.owner + "/" + m.repo,
-			"permissions": m.perms,
+			"name":           m.repo,
+			"full_name":      m.owner + "/" + m.repo,
+			"permissions":    m.perms,
+			"default_branch": "main",
 		})
 	})
 
@@ -1207,5 +1210,225 @@ func TestBackend_LoadStateByRef_NoStateComment(t *testing.T) {
 	}
 	if got.Item.Title != "Test issue" {
 		t.Errorf("Title = %q, want %q", got.Item.Title, "Test issue")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Finalize (flow.Finalizer)
+// ---------------------------------------------------------------------------
+
+// gitRecorder is a runner that records git commands and replays scripted
+// responses. Only commands matching a registered pattern fire; the rest
+// fall through to an optional fallback.
+type gitRecorder struct {
+	mu       sync.Mutex
+	calls    [][]string                                     // every invocation's args
+	handlers map[string]func(args []string) ([]byte, error) // key = first distinguishing arg
+}
+
+func newGitRecorder() *gitRecorder {
+	return &gitRecorder{handlers: map[string]func([]string) ([]byte, error){}}
+}
+
+func (r *gitRecorder) run(_ context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
+	r.mu.Lock()
+	r.calls = append(r.calls, args)
+	r.mu.Unlock()
+
+	// Match on the git sub-command (args after -C <dir>): args[0]="-C",
+	// args[1]=dir, args[2]=sub-command.
+	if len(args) >= 3 {
+		// Build a lookup key from all args after -C <dir>.
+		key := strings.Join(args[2:], " ")
+		r.mu.Lock()
+		h, ok := r.handlers[key]
+		r.mu.Unlock()
+		if ok {
+			out, err := h(args)
+			var stderr []byte
+			if err != nil {
+				stderr = []byte(err.Error())
+			}
+			return out, stderr, err
+		}
+	}
+	return nil, []byte("unhandled git call"), fmt.Errorf("unhandled git call: %v", args)
+}
+
+func (r *gitRecorder) called(sub string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, c := range r.calls {
+		if len(c) >= 3 && strings.HasPrefix(strings.Join(c[2:], " "), sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// newFinalizeBackend sets up a mocked backend with a git recorder for
+// Finalize tests. Returns the backend, the mock, and the recorder.
+func newFinalizeBackend(t *testing.T) (*Backend, *ghMock, *gitRecorder) {
+	t.Helper()
+	mock := newGHMock(t)
+	// Pre-set owner label and assignee so Release has something to clean up.
+	mock.issueLabels = []string{"flow:owner:alice", "flow:implement"}
+	mock.assignees = []string{"alice"}
+	srv := mock.server()
+	t.Cleanup(srv.Close)
+	b := newMockedBackend(t, mock, srv)
+
+	rec := newGitRecorder()
+	b.git.runner = rec.run
+	return b, mock, rec
+}
+
+// claimForFinalize builds a claim suitable for Finalize tests without
+// hitting the GitHub API (the git recorder can't serve the Claim flow).
+func claimForFinalize(b *Backend) flow.Claim {
+	ref := b.refFromIssue(42)
+	tok, _ := b.saveClaimToken(claimToken{StateCommentID: 0, ClaimID: "test"})
+	return flow.Claim{
+		BackendName: b.Name(),
+		ItemRef:     ref,
+		Owner:       "alice",
+		Token:       tok,
+	}
+}
+
+func TestBackend_Finalize_ReturnsWorktreeToBaseAndReleases(t *testing.T) {
+	b, mock, rec := newFinalizeBackend(t)
+
+	// Script: on a feature branch, clean, base exists.
+	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+		return []byte("flow/issue-42\n"), nil
+	}
+	rec.handlers["status --porcelain --untracked-files=no"] = func([]string) ([]byte, error) {
+		return []byte(""), nil // clean
+	}
+	rec.handlers["rev-parse --verify refs/heads/main"] = func([]string) ([]byte, error) {
+		return []byte("abc123\n"), nil // exists
+	}
+	rec.handlers["checkout main"] = func([]string) ([]byte, error) {
+		return []byte(""), nil
+	}
+
+	claim := claimForFinalize(b)
+	// Save claim file so Release can clear it.
+	if err := clistate.Save(claim); err != nil {
+		t.Fatalf("clistate.Save: %v", err)
+	}
+
+	if err := b.Finalize(t.Context(), claim); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	// Checkout to base was issued.
+	if !rec.called("checkout") {
+		t.Error("expected checkout to main")
+	}
+
+	// Release ran: owner label removed, assignee removed, claim file cleared.
+	if contains(mock.labelNames(), "flow:owner:alice") {
+		t.Error("owner label not removed")
+	}
+	if c, _ := clistate.Load(); c != nil {
+		t.Errorf("claim file not cleared: %+v", c)
+	}
+}
+
+func TestBackend_Finalize_AlreadyOnBase(t *testing.T) {
+	b, mock, rec := newFinalizeBackend(t)
+
+	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+		return []byte("main\n"), nil
+	}
+
+	claim := claimForFinalize(b)
+	if err := clistate.Save(claim); err != nil {
+		t.Fatalf("clistate.Save: %v", err)
+	}
+
+	if err := b.Finalize(t.Context(), claim); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	// No checkout issued.
+	if rec.called("checkout") {
+		t.Error("checkout should not be called when already on base")
+	}
+
+	// Release still ran.
+	if contains(mock.labelNames(), "flow:owner:alice") {
+		t.Error("owner label not removed")
+	}
+}
+
+func TestBackend_Finalize_RefusesDirtyWorktree(t *testing.T) {
+	b, _, rec := newFinalizeBackend(t)
+
+	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+		return []byte("flow/issue-42\n"), nil
+	}
+	rec.handlers["status --porcelain --untracked-files=no"] = func([]string) ([]byte, error) {
+		return []byte(" M dirty-file.go\n"), nil // dirty
+	}
+
+	claim := claimForFinalize(b)
+	if err := clistate.Save(claim); err != nil {
+		t.Fatalf("clistate.Save: %v", err)
+	}
+
+	err := b.Finalize(t.Context(), claim)
+	if err == nil {
+		t.Fatal("Finalize should refuse a dirty worktree")
+	}
+	if !strings.Contains(err.Error(), "dirty") {
+		t.Errorf("error = %v, want mention of dirty", err)
+	}
+
+	// No checkout, claim NOT released.
+	if rec.called("checkout") {
+		t.Error("checkout should not be called on dirty worktree")
+	}
+	c, _ := clistate.Load()
+	if c == nil {
+		t.Error("claim file should not be cleared on dirty worktree")
+	}
+}
+
+func TestBackend_Finalize_RefusesMissingBaseBranch(t *testing.T) {
+	b, _, rec := newFinalizeBackend(t)
+
+	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+		return []byte("flow/issue-42\n"), nil
+	}
+	rec.handlers["status --porcelain --untracked-files=no"] = func([]string) ([]byte, error) {
+		return []byte(""), nil // clean
+	}
+	rec.handlers["rev-parse --verify refs/heads/main"] = func([]string) ([]byte, error) {
+		return nil, fmt.Errorf("base branch main not found")
+	}
+
+	claim := claimForFinalize(b)
+	if err := clistate.Save(claim); err != nil {
+		t.Fatalf("clistate.Save: %v", err)
+	}
+
+	err := b.Finalize(t.Context(), claim)
+	if err == nil {
+		t.Fatal("Finalize should refuse when base branch is missing")
+	}
+	if !strings.Contains(err.Error(), "base branch") {
+		t.Errorf("error = %v, want mention of base branch", err)
+	}
+
+	// No checkout, claim NOT released.
+	if rec.called("checkout") {
+		t.Error("checkout should not be called when base branch is missing")
+	}
+	c, _ := clistate.Load()
+	if c == nil {
+		t.Error("claim file should not be cleared when base branch is missing")
 	}
 }
