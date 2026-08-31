@@ -48,6 +48,22 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 		Effort:         "high",
 	})
 	if err != nil {
+		// The agent asked a question (or failed), but may have produced a
+		// plan first — a plan-mode turn submits the plan and THEN continues
+		// to reason, so PlanText and NEEDS-ANSWER can coexist. Persisting
+		// the plan before propagating saves the $19 invocation that produced
+		// it; discarding it forces the step to re-run and re-spend.
+		//
+		// Best-effort: if the resolve fails (disclosure guard, backend
+		// error), the WIP stash from runAgent still carries the agent's
+		// reasoning. The plan is lost, but the step parks with the question
+		// and can re-derive on resume — no worse than the old path, and
+		// strictly better when the resolve succeeds.
+		if resp != nil && strings.TrimSpace(resp.PlanText) != "" {
+			if resolveErr := ctx.ResolveMarkdown(resp.PlanText); resolveErr != nil {
+				ctx.Notify("", "could not persist plan alongside question: "+resolveErr.Error())
+			}
+		}
 		return err
 	}
 	// The plan is what the agent SUBMITTED, when it submitted one. A plan-mode
@@ -596,7 +612,13 @@ func (b *builder) runAgent(ctx flow.StepCtx, req flow.AgentRequest) (*flow.Agent
 		// own identity is not repeated here — the park record already names the
 		// step, and a header that led with it would push the actual question
 		// off the first line a human reads.
-		return nil, ctx.AskQuestions(flow.AgentQuestion{Header: header, Text: body})
+		//
+		// The response is returned alongside the error so callers that produced
+		// a usable artifact (e.g. stepPlan with a PlanText) can persist it
+		// before propagating the question. Discarding a paid artifact because
+		// the agent also asked a question is the worst outcome — the money is
+		// spent and the work is gone.
+		return resp, ctx.AskQuestions(flow.AgentQuestion{Header: header, Text: body})
 	}
 	return resp, nil
 }
