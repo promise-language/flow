@@ -50,18 +50,23 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 	if err != nil {
 		// The agent asked a question (or failed), but may have produced a
 		// plan first — a plan-mode turn submits the plan and THEN continues
-		// to reason, so PlanText and NEEDS-ANSWER can coexist. Persisting
-		// the plan before propagating saves the $19 invocation that produced
-		// it; discarding it forces the step to re-run and re-spend.
+		// to reason, so PlanText and NEEDS-ANSWER can coexist.
 		//
-		// Best-effort: if the resolve fails (disclosure guard, backend
-		// error), the WIP stash from runAgent still carries the agent's
-		// reasoning. The plan is lost, but the step parks with the question
-		// and can re-derive on resume — no worse than the old path, and
-		// strictly better when the resolve succeeds.
+		// The plan is saved as WIP, not resolved: resolution.md § "Work in
+		// progress" requires that a step stopped by a question does not
+		// resolve its artifact. Resolving would let the next derive skip
+		// plan and run implement — and the answer to the question, which
+		// may need to change the plan, would be silently ignored.
+		//
+		// runAgent already saved resp.LastText as WIP (the reasoning and
+		// the question). When a PlanText also exists, overwrite with a
+		// combined record so the resumed step has both the submitted plan
+		// and the reasoning that led to the question.
 		if resp != nil && strings.TrimSpace(resp.PlanText) != "" {
-			if resolveErr := ctx.ResolveMarkdown(resp.PlanText); resolveErr != nil {
-				ctx.Notify("", "could not persist plan alongside question: "+resolveErr.Error())
+			combined := "## Submitted plan\n\n" + resp.PlanText +
+				"\n\n---\n\n## Agent reasoning\n\n" + resp.LastText
+			if wipErr := ctx.RecordWorkInProgress(combined); wipErr != nil {
+				ctx.Notify("", "could not persist plan as work in progress: "+wipErr.Error())
 			}
 		}
 		return err

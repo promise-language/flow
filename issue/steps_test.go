@@ -1677,14 +1677,19 @@ func TestPlanStepStillAcceptsATurnThatNeverSubmitted(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Plan persisted alongside a question (defect 2 fix).
+// Plan saved as WIP alongside a question (defect 2 fix).
 // ---------------------------------------------------------------------------
 
 // The critical case: a plan-mode turn submits the plan (PlanText) and then
 // continues reasoning until the agent discovers an ambiguity (NEEDS-ANSWER in
 // LastText). Both coexist on the response. Without the fix, the plan is
 // discarded and the $19 invocation produces nothing.
-func TestPlanStepPersistsPlanWhenAgentAlsoAsksAQuestion(t *testing.T) {
+//
+// The plan is saved as WIP, not resolved: resolution.md § "Work in progress"
+// requires that a step stopped by a question does not resolve its artifact.
+// Resolving would let the next derive skip plan and run implement, silently
+// ignoring an answer that might need to change the plan.
+func TestPlanStepSavesPlanAsWIPWhenAgentAlsoAsksAQuestion(t *testing.T) {
 	agent := &scriptedAgent{
 		replies: []string{"I analysed the code and found an ambiguity.\nNEEDS-ANSWER: amend or reject?"},
 		plans:   []planReply{{submitted: true, text: "## Plan\n\nChange the parser to handle both cases."}},
@@ -1698,12 +1703,23 @@ func TestPlanStepPersistsPlanWhenAgentAlsoAsksAQuestion(t *testing.T) {
 	if len(ctx.asked) != 1 {
 		t.Fatalf("asked %d questions, want 1", len(ctx.asked))
 	}
-	// The plan must be resolved despite the question.
-	if !ctx.didResolve {
-		t.Fatal("plan artifact was not resolved — the $19 plan was discarded")
+	// The step must NOT resolve — the question may require changing the plan.
+	if ctx.didResolve {
+		t.Fatal("resolved the plan artifact despite an open question — " +
+			"the answer may need to change the plan, so the step must not resolve")
 	}
-	if !strings.Contains(ctx.resolved.Markdown, "Change the parser") {
-		t.Errorf("resolved %q, want the submitted plan", ctx.resolved.Markdown)
+	// The plan must survive as WIP so the resumed step can re-submit it.
+	// runAgent saves LastText first; stepPlan overwrites with a combined
+	// record carrying both the plan and the reasoning.
+	if len(ctx.wipSaves) < 2 {
+		t.Fatalf("wipSaves = %d, want at least 2 (runAgent + stepPlan)", len(ctx.wipSaves))
+	}
+	last := ctx.wipSaves[len(ctx.wipSaves)-1]
+	if !strings.Contains(last, "Change the parser") {
+		t.Errorf("WIP does not carry the submitted plan: %q", last)
+	}
+	if !strings.Contains(last, "amend or reject") {
+		t.Errorf("WIP does not carry the agent's reasoning: %q", last)
 	}
 }
 
@@ -1729,27 +1745,26 @@ func TestPlanStepDoesNotResolveEmptyPlanOnQuestion(t *testing.T) {
 	}
 }
 
-// When the resolve fails (e.g. disclosure guard), the step still parks with
-// the question — the error path is best-effort, not fatal.
-func TestPlanStepParksOnQuestionEvenWhenResolveFails(t *testing.T) {
+// When the WIP save fails, the step still parks with the question — the
+// error path is best-effort, not fatal.
+func TestPlanStepParksOnQuestionEvenWhenWIPSaveFails(t *testing.T) {
 	agent := &scriptedAgent{
 		replies: []string{"Found a problem.\nNEEDS-ANSWER: amend the spec?"},
-		plans:   []planReply{{submitted: true, text: "## Plan with /home/user/.secret"}},
+		plans:   []planReply{{submitted: true, text: "## Plan with detail"}},
 	}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
-	// First ResolveMarkdown call fails (disclosure guard).
-	ctx.resolveErrs = []error{errors.New("disclosure: absolute path")}
+	ctx.wipSaveErr = errors.New("nowhere to write")
 
 	err := testBuilder(t).stepPlan(ctx)
 	if err == nil {
 		t.Fatal("want the ask sentinel to stop the step")
 	}
 	if len(ctx.asked) != 1 {
-		t.Fatalf("asked %d questions, want 1 — a failed resolve must not swallow the park", len(ctx.asked))
+		t.Fatalf("asked %d questions, want 1 — a failed WIP save must not swallow the park", len(ctx.asked))
 	}
-	// The resolve failed, so the artifact should NOT be marked resolved.
+	// The step must not resolve.
 	if ctx.didResolve {
-		t.Error("resolved the plan despite the disclosure guard refusing it")
+		t.Error("resolved the plan despite the step not completing")
 	}
 	// A notice should report the failure.
 	var reported bool
