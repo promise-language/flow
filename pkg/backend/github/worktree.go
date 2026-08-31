@@ -27,6 +27,10 @@ type worktree struct {
 	b        *Backend
 	claim    flow.Claim
 	issueNum int
+
+	// mergeRestorePoint is the HEAD SHA saved by PrepareMergeResult, used by
+	// RevertMergePrep to undo the local merge simulation.
+	mergeRestorePoint string
 }
 
 func (w *worktree) Branch(ctx context.Context, name, base string) (bool, error) {
@@ -102,6 +106,22 @@ func (w *worktree) Open(ctx context.Context, base, title, body string) (string, 
 	return url, nil
 }
 
+// FindPR implements flow.PRFinder: look up the pull request for the current
+// claim branch.
+func (w *worktree) FindPR(ctx context.Context) (flow.PRInfo, error) {
+	pr, err := w.b.findPRForBranch(ctx, w.b.claimBranch(w.issueNum))
+	if err != nil {
+		return flow.PRInfo{}, err
+	}
+	if pr == nil {
+		return flow.PRInfo{}, fmt.Errorf("no pull request found for branch %q", w.b.claimBranch(w.issueNum))
+	}
+	return flow.PRInfo{
+		URL:            pr.GetHTMLURL(),
+		MergeCommitSHA: pr.GetMergeCommitSHA(),
+	}, nil
+}
+
 func (w *worktree) Merge(ctx context.Context, url string) error {
 	if err := w.b.out.MergePullRequest(ctx, url); err != nil {
 		return err
@@ -110,6 +130,33 @@ func (w *worktree) Merge(ctx context.Context, url string) error {
 		_ = err
 	}
 	return nil
+}
+
+// PrepareMergeResult implements flow.MergeResultPreparer: create a local merge
+// of origin/<base> into the current branch so the integration gate measures the
+// merge result, not just the branch.
+func (w *worktree) PrepareMergeResult(ctx context.Context, base string) error {
+	head, err := w.b.git.HeadSHA(ctx)
+	if err != nil {
+		return fmt.Errorf("save restore point: %w", err)
+	}
+	w.mergeRestorePoint = head
+	if err := w.b.git.Fetch(ctx, "origin"); err != nil {
+		return err
+	}
+	if err := w.b.git.MergeLocal(ctx, "origin/"+base); err != nil {
+		return fmt.Errorf("merge simulation with origin/%s: %w", base, err)
+	}
+	return nil
+}
+
+// RevertMergePrep implements flow.MergeResultPreparer: restore the branch to
+// the state it was in before the merge simulation.
+func (w *worktree) RevertMergePrep(ctx context.Context) error {
+	if w.mergeRestorePoint == "" {
+		return nil
+	}
+	return w.b.git.ResetHardTo(ctx, w.mergeRestorePoint)
 }
 
 // Verify runs cfg.VerifyCmd in cfg.WorktreeDir. Exit-0 → success.
