@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"github.com/promise-language/flow/pkg/clistate"
 )
 
 // gitOps wraps local `git` invocations. Returned by newGitOps; tests can
@@ -130,8 +132,9 @@ func (g *gitOps) BranchExists(ctx context.Context, name string) (bool, error) {
 // if there's nothing to commit (idempotent).
 // StageAll adds every change, untracked files included, to the index.
 func (g *gitOps) StageAll(ctx context.Context) error {
-	if _, stderr, err := g.run(ctx, "add", "-A"); err != nil {
-		return fmt.Errorf("git add -A: %w (%s)", err, string(stderr))
+	exclude := ":(exclude)" + clistate.Dir()
+	if _, stderr, err := g.run(ctx, "add", "-A", "--", ".", exclude); err != nil {
+		return fmt.Errorf("git add -A (excluding %s): %w (%s)", clistate.Dir(), err, string(stderr))
 	}
 	return nil
 }
