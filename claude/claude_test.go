@@ -335,6 +335,32 @@ func TestRun_EmptyPoliciesNoFlags(t *testing.T) {
 	}
 }
 
+func TestRun_ToolPoliciesPrecedeExtraArgs(t *testing.T) {
+	var capturedArgs []string
+	c := &Client{
+		Binary:          "claude",
+		AllowedTools:    []string{"Read"},
+		DisallowedTools: []string{"Write"},
+		ExtraArgs:       []string{"--extra", "val"},
+		spawn: func(ctx context.Context, name string, args ...string) cmdHandle {
+			capturedArgs = args
+			return &fakeCmd{stdoutStream: successStream}
+		},
+	}
+	_, _ = c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+
+	joined := strings.Join(capturedArgs, " ")
+	disallowedIdx := strings.Index(joined, "--disallowed-tools")
+	extraIdx := strings.Index(joined, "--extra")
+	if disallowedIdx < 0 || extraIdx < 0 {
+		t.Fatalf("expected both --disallowed-tools and --extra in args: %s", joined)
+	}
+	if disallowedIdx >= extraIdx {
+		t.Errorf("tool policy flags (at %d) must precede ExtraArgs (at %d); full: %s",
+			disallowedIdx, extraIdx, joined)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Plan-mode turns: the deliverable is a tool call's input, not assistant text.
 // ---------------------------------------------------------------------------
