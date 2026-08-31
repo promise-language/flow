@@ -1460,3 +1460,80 @@ func TestBackend_Finalize_RefusesMissingBaseBranch(t *testing.T) {
 		t.Error("claim file should not be cleared when base branch is missing")
 	}
 }
+
+func TestBackend_Finalize_CheckoutFailureKeepsClaimIntact(t *testing.T) {
+	b, mock, rec := newFinalizeBackend(t)
+
+	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+		return []byte("flow/issue-42\n"), nil
+	}
+	rec.handlers["status --porcelain --untracked-files=no"] = func([]string) ([]byte, error) {
+		return []byte(""), nil // clean
+	}
+	rec.handlers["rev-parse --verify refs/heads/main"] = func([]string) ([]byte, error) {
+		return []byte("abc123\n"), nil
+	}
+	rec.handlers["checkout main"] = func([]string) ([]byte, error) {
+		return nil, fmt.Errorf("checkout failed: locked index")
+	}
+
+	claim := claimForFinalize(b)
+	if err := clistate.Save(claim); err != nil {
+		t.Fatalf("clistate.Save: %v", err)
+	}
+
+	err := b.Finalize(t.Context(), claim)
+	if err == nil {
+		t.Fatal("Finalize should fail when checkout fails")
+	}
+	if !strings.Contains(err.Error(), "checkout") {
+		t.Errorf("error = %v, want mention of checkout", err)
+	}
+
+	// Claim must still be held: owner label present, claim file intact.
+	if !contains(mock.labelNames(), "flow:owner:alice") {
+		t.Error("owner label should still be present after checkout failure")
+	}
+	c, _ := clistate.Load()
+	if c == nil {
+		t.Error("claim file should not be cleared after checkout failure")
+	}
+}
+
+func TestBackend_LoadState_RoundTripsFinalized(t *testing.T) {
+	mock := newGHMock(t)
+	// Pre-seed a state comment with finalized: true.
+	stateBody, err := renderStateComment("alice", stateDoc{
+		Flow:      "issue",
+		Schema:    stateSchemaVersion,
+		Finalized: true,
+	})
+	if err != nil {
+		t.Fatalf("render state: %v", err)
+	}
+	mock.comments = []ghMockComment{
+		{ID: 800, Body: stateBody, User: "alice"},
+	}
+	mock.issueLabels = []string{"flow:owner:alice"}
+	mock.assignees = []string{"alice"}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	ref := b.refFromIssue(42)
+	tok, _ := b.saveClaimToken(claimToken{StateCommentID: 800, ClaimID: "test"})
+	claim := flow.Claim{
+		BackendName: b.Name(),
+		ItemRef:     ref,
+		Owner:       "alice",
+		Token:       tok,
+	}
+
+	state, err := b.LoadState(t.Context(), claim)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if !state.Item.Finalized {
+		t.Error("LoadState should return Item.Finalized=true when state comment carries finalized: true")
+	}
+}
