@@ -243,6 +243,41 @@ func TestStepVerifyMerge_RevertCalledEvenOnGateFailure(t *testing.T) {
 	}
 }
 
+// stepVerifyMerge on a worktree that does NOT implement MergeResultPreparer —
+// the gate runs on the branch directly, with no merge simulation.
+func TestStepVerifyMerge_WithoutMergeResultPreparer(t *testing.T) {
+	wt := resumedWorktree()
+	wt.envelope = []byte(`{"coverage": 95}`)
+	wt.thresholds = []byte(`{"coverage": 80}`)
+	// Use fakeCtx directly — fakeWorktree does NOT implement
+	// MergeResultPreparer, so the if-prep branch is skipped.
+	ctx := &fakeCtx{
+		item: flow.Item{ID: "42", Type: "task", Title: "widget is broken"},
+		wt:   wt,
+		arts: map[flow.ArtifactId]flow.ArtifactRecord{
+			"plan":           {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "the plan"},
+			"branch":         {Resolved: true, Type: flow.ArtifactCommitHash, CommitHash: "base"},
+			"implementation": {Resolved: true, Type: flow.ArtifactCommitHash, CommitHash: "sha-1"},
+			"review":         {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "looks good"},
+			"coverage":       {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "95%"},
+		},
+	}
+
+	if err := testBuilder(t).stepVerifyMerge(ctx); err != nil {
+		t.Fatalf("stepVerifyMerge: %v", err)
+	}
+	if !ctx.didResolve {
+		t.Fatal("step did not resolve")
+	}
+	// No merge prep calls should have happened — fakeWorktree is not a
+	// MergeResultPreparer.
+	for _, c := range wt.calls {
+		if c == "merge-prep" {
+			t.Error("merge-prep should not have been called on a non-MergeResultPreparer worktree")
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // stepMerge.
 // ---------------------------------------------------------------------------
