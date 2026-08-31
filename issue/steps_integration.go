@@ -47,28 +47,9 @@ func (b *builder) stepVerifyMerge(ctx flow.StepCtx) error {
 		}()
 	}
 
-	ctx.Notify("", fmt.Sprintf("running the %s gate on the merge result", flow.GateIntegration))
-	run, err := wt.RunGate(ctx.Context(), flow.GateIntegration)
+	verdict, err := b.runIntegrationGate(ctx, wt, "the merge result")
 	if err != nil {
-		return fmt.Errorf(
-			"no %s gate ran on the merge result, so nothing was measured — this is not the "+
-				"change failing: %w", flow.GateIntegration, err)
-	}
-	if run.Outcome != flow.OutcomeMeasured {
-		return fmt.Errorf(
-			"the %s gate reports %q on the merge result, so nothing was measured — this is not "+
-				"the change failing%s", flow.GateIntegration, run.Outcome, detailSuffix(run.Detail))
-	}
-	verdict, err := wt.Judge(ctx.Context(), run)
-	if err != nil {
-		return fmt.Errorf(
-			"the %s gate measured the merge result but no verdict exists, which is not a refusal — "+
-				"the project's judging layer could not answer: %w", flow.GateIntegration, err)
-	}
-	if !verdict.Acceptable {
-		return fmt.Errorf(
-			"the %s gate's verdict on the merge result is not acceptable — a failing gate does "+
-				"not land%s", flow.GateIntegration, detailSuffix(verdict.Detail))
+		return err
 	}
 
 	return ctx.ResolveMarkdown(gateSection(verdict))

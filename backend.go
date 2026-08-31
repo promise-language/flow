@@ -738,7 +738,7 @@ type PRFinder interface {
 // PRInfo is the read-only snapshot a PRFinder returns.
 type PRInfo struct {
 	URL            string
-	MergeCommitSHA string // empty until merged
+	MergeCommitSHA string // the merge commit; reliable only when the PR is merged
 }
 
 // FindPR is a nil-safe convenience for PRFinder, parallel to Open/Merge.
