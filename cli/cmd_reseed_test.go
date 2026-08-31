@@ -148,3 +148,30 @@ func TestCmdReseed_UnexpectedArg(t *testing.T) {
 		t.Errorf("stderr = %q, want 'unexpected argument'", errBuf.String())
 	}
 }
+
+func TestCmdReseed_LookupActiveClaimError(t *testing.T) {
+	app, _, _, errBuf := reseedTestSetup(t)
+	app.Backend = &failingLookupActiveClaimBackend{
+		Backend: app.Backend.(*fake.Backend),
+		err:     errors.New("network timeout"),
+	}
+
+	code := app.cmdReseed(context.Background(), []string{"--force"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(errBuf.String(), "network timeout") {
+		t.Errorf("stderr = %q, want 'network timeout'", errBuf.String())
+	}
+}
+
+func TestCmdReseed_NoForce_PreviewIncludesItemRef(t *testing.T) {
+	app, _, _, errBuf := reseedTestSetup(t)
+
+	app.cmdReseed(context.Background(), nil)
+	// The preview must name the item so the operator knows what will be
+	// discarded before they reach for --force.
+	if !strings.Contains(errBuf.String(), " on 1\n") {
+		t.Errorf("stderr = %q, want item display name", errBuf.String())
+	}
+}
