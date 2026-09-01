@@ -734,6 +734,111 @@ func TestDetectQuestion(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// The refusal side: plan-step refusals.
+// ---------------------------------------------------------------------------
+
+func TestDetectRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		in           string
+		wantKind     RefusalKind
+		wantSummary  string
+		wantEvidence string
+		wantOK       bool
+	}{
+		{
+			"already-done with evidence",
+			"I checked the tree.\nPLAN-REFUSAL: already-done The fix is already in main\n```\ncommit abc123 added the check\n```",
+			RefusalAlreadyDone, "The fix is already in main", "commit abc123 added the check", true,
+		},
+		{
+			"duplicate without evidence block",
+			"PLAN-REFUSAL: duplicate Covered by issue #12",
+			RefusalDuplicate, "Covered by issue #12", "Covered by issue #12", true,
+		},
+		{
+			"conflicts with evidence",
+			"PLAN-REFUSAL: conflicts Normative doc forbids this\n```\ndocs/design.md §3: No macros.\n```",
+			RefusalConflicts, "Normative doc forbids this", "docs/design.md §3: No macros.", true,
+		},
+		{
+			"not-viable with evidence",
+			"PLAN-REFUSAL: not-viable Cannot be done without breaking the API\n```\nThe public API has no extension point.\n```",
+			RefusalNotViable, "Cannot be done without breaking the API", "The public API has no extension point.", true,
+		},
+		{
+			"bare sentinel with no kind",
+			"PLAN-REFUSAL:",
+			"", "", "", false,
+		},
+		{
+			"unknown kind skipped",
+			"PLAN-REFUSAL: wontfix Not worth doing",
+			"", "", "", false,
+		},
+		{
+			"sentinel not at column zero",
+			"    PLAN-REFUSAL: already-done Something",
+			"", "", "", false,
+		},
+		{
+			"multiple sentinels — last one wins",
+			"PLAN-REFUSAL: duplicate Earlier guess\nPLAN-REFUSAL: already-done The real finding",
+			RefusalAlreadyDone, "The real finding", "The real finding", true,
+		},
+		{
+			"empty text",
+			"",
+			"", "", "", false,
+		},
+		{
+			"kind with no summary",
+			"PLAN-REFUSAL: already-done",
+			"", "", "", false,
+		},
+		{
+			"kind with whitespace-only summary",
+			"PLAN-REFUSAL: already-done   ",
+			"", "", "", false,
+		},
+		{
+			"mid-line mention does not trip",
+			"the convention is PLAN-REFUSAL: already-done at line start",
+			"", "", "", false,
+		},
+		{
+			"indented example ignored, real one honored",
+			"    PLAN-REFUSAL: already-done <placeholder>\nPLAN-REFUSAL: not-viable Real reason here",
+			RefusalNotViable, "Real reason here", "Real reason here", true,
+		},
+		{
+			"blank lines before fence tolerated",
+			"PLAN-REFUSAL: already-done Already there\n\n\n```\nevidence\n```",
+			RefusalAlreadyDone, "Already there", "evidence", true,
+		},
+		{
+			"unterminated fence keeps remainder",
+			"PLAN-REFUSAL: duplicate Covered by #5\n```\nevidence that never closes",
+			RefusalDuplicate, "Covered by #5", "evidence that never closes", true,
+		},
+		{
+			"later invalid kind falls through to earlier valid",
+			"PLAN-REFUSAL: already-done Real finding\nPLAN-REFUSAL: wontfix Not a real kind",
+			RefusalAlreadyDone, "Real finding", "Real finding", true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, summary, evidence, ok := detectRefusal(tc.in)
+			if ok != tc.wantOK || kind != tc.wantKind || summary != tc.wantSummary || evidence != tc.wantEvidence {
+				t.Errorf("detectRefusal(%q) = (%q, %q, %q, %v), want (%q, %q, %q, %v)",
+					tc.in, kind, summary, evidence, ok,
+					tc.wantKind, tc.wantSummary, tc.wantEvidence, tc.wantOK)
+			}
+		})
+	}
+}
+
 // The sentinel has to survive a round trip through the whole contract: agent
 // text -> question park (stamped by the SDK) -> gate reads the marker.
 func TestAskAndGateComposeEndToEnd(t *testing.T) {
@@ -854,6 +959,17 @@ func TestPromptOverridesAreNotTrackerSpecific(t *testing.T) {
 	for _, line := range strings.Split(pc.AskGuidance, "\n") {
 		if strings.HasPrefix(line, AskSentinel) {
 			t.Errorf("AskGuidance shows the sentinel at column zero: %q — an echo would self-trigger", line)
+		}
+	}
+	// PlanStepResolution must teach the refusal sentinel the handler enforces.
+	if !strings.Contains(pc.PlanStepResolution, RefusalSentinel) {
+		t.Error("PlanStepResolution must teach the refusal sentinel that detectRefusal actually enforces")
+	}
+	// The illustration has to be indented, or the agent's echo of it triggers
+	// a refusal on a placeholder.
+	for _, line := range strings.Split(pc.PlanStepResolution, "\n") {
+		if strings.HasPrefix(line, RefusalSentinel) {
+			t.Errorf("PlanStepResolution shows the refusal sentinel at column zero: %q — an echo would self-trigger", line)
 		}
 	}
 }

@@ -83,6 +83,78 @@ var (
 	QuestionAskedAt   = flow.QuestionAskedAt
 )
 
+// RefusalKind names one of the four reasons a plan step can conclude that the
+// work should not be done. The set is closed: a refusal fitting none of the
+// four means the vocabulary is wrong, not that a fifth may be invented in prose.
+type RefusalKind string
+
+const (
+	RefusalAlreadyDone RefusalKind = "already-done"
+	RefusalDuplicate   RefusalKind = "duplicate"
+	RefusalConflicts   RefusalKind = "conflicts"
+	RefusalNotViable   RefusalKind = "not-viable"
+)
+
+// validRefusalKinds is the closed set. An unknown kind is not a refusal — it
+// keeps scanning backwards, same as a bare AskSentinel with no question.
+var validRefusalKinds = map[RefusalKind]bool{
+	RefusalAlreadyDone: true,
+	RefusalDuplicate:   true,
+	RefusalConflicts:   true,
+	RefusalNotViable:   true,
+}
+
+// RefusalSentinel is how an agent signals that the item should not be done.
+//
+// Structurally identical to AskSentinel: column-zero token, followed by a kind
+// and a summary on the same line, optionally followed by a fenced evidence
+// block. The same column-zero enforcement prevents an indented example in the
+// prompt from self-triggering.
+//
+// The format after the colon is: <kind> <summary>
+// where kind is the first whitespace-delimited token and must be one of the
+// four RefusalKind constants. An unknown kind is skipped (keeps scanning).
+const RefusalSentinel = "PLAN-REFUSAL:"
+
+// detectRefusal looks for the refusal sentinel in an agent's final message and
+// returns the kind, summary, and evidence block.
+//
+// It scans from the END, same rationale as detectQuestion: the operative line
+// is the agent's last word on the matter. A line whose kind is not in the
+// closed set is skipped — this is the "closed set" enforcement.
+func detectRefusal(lastText string) (kind RefusalKind, summary string, evidence string, ok bool) {
+	lines := strings.Split(lastText, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		// Column zero, deliberately not trimmed first — see RefusalSentinel.
+		if !strings.HasPrefix(lines[i], RefusalSentinel) {
+			continue
+		}
+		after := strings.TrimSpace(strings.TrimPrefix(lines[i], RefusalSentinel))
+		if after == "" {
+			continue // bare sentinel with no kind
+		}
+		// First whitespace-delimited token is the kind.
+		parts := strings.SplitN(after, " ", 2)
+		candidate := RefusalKind(parts[0])
+		if !validRefusalKinds[candidate] {
+			continue // unknown kind — keep scanning
+		}
+		kind = candidate
+		if len(parts) > 1 {
+			summary = strings.TrimSpace(parts[1])
+		}
+		if summary == "" {
+			continue // a kind with no summary says nothing checkable
+		}
+		evidence = fencedBlockAfter(lines[i+1:])
+		if evidence == "" {
+			evidence = summary
+		}
+		return kind, summary, evidence, true
+	}
+	return "", "", "", false
+}
+
 // AskSentinel is how an agent signals that it needs a human decision.
 //
 // The canonical steps own the convention rather than each project inventing

@@ -153,16 +153,34 @@ when you genuinely cannot proceed — it stops the flow until a human replies.`
 // The shared version resolves an unnecessary item by setting tracker statuses
 // (duplicate / cant_reproduce / works_as_intended / wontfix) through the
 // tracker MCP. None of that exists here, so the same decisions route through
-// the sentinel instead — a human closes the issue, which is the correct
-// authority for it on a GitHub repository anyway.
+// the PLAN-REFUSAL sentinel instead — a human clears the block, which is the
+// correct authority for it on a GitHub repository anyway.
 const planResolutionPartial = `Producing a plan is the expected outcome: assume the work is real and needed.
 
-If you conclude it is NOT — the change is already present in the tree, the bug
-provably no longer reproduces, the current behavior already matches the request,
-or the item is not feasible as specified — do not quietly plan around it and do
-not close anything yourself. Say so as a question, with the proof in the block:
-the exact code, commit, or issue that makes the case. A human decides whether
-the item closes.`
+If you conclude it is NOT, emit a refusal. A refusal blocks the resolution on a
+named reason; you do not close anything yourself. The four refusal kinds are a
+closed set — do not invent others:
+
+- already-done — the change exists or the desired state already holds.
+- duplicate — the work is pending under another item.
+- conflicts — what the item asks for is forbidden by the normative documents.
+- not-viable — the item cannot be done as asked. The evidence requirement
+  matters most here: a refusal that says only "this cannot be done" is
+  indistinguishable from giving up.
+
+Emit the refusal flush against the left margin, with the kind as the first word
+after the colon and a one-line summary after it, optionally followed by a fenced
+block carrying the evidence. The shape (shown indented here; write yours flush
+left):
+
+    PLAN-REFUSAL: <kind> <one-line summary>
+    ` + "```" + `
+    <the specific evidence: code, commit, issue, or document that makes the case>
+    ` + "```" + `
+
+The evidence block is what makes the refusal checkable — without it a reader
+cannot tell whether the finding was correct. Not knowing enough to plan is
+different and is not a refusal: ask a question instead.`
 
 // repoRelativePaths is carried by every default prompt whose product is
 // published on the item.
