@@ -2337,3 +2337,34 @@ func TestStageRepair_RecordOutstanding(t *testing.T) {
 		t.Errorf("repair prompt = %q, want the staging error", agent.prompts[0])
 	}
 }
+
+// Stage repair and commit repair both fire in the same commitWithRepair call:
+// stage fails, agent fixes, re-stage succeeds, commit fails, agent fixes,
+// re-commit succeeds. Tests that a successful stage repair falls through into
+// the commit path correctly.
+func TestStageRepair_ThenCommitRepair(t *testing.T) {
+	wt := resumedWorktree()
+	wt.stageErrs = []error{stageErr, nil}
+	wt.commitErrs = []error{hookErr, nil}
+	// Three agent calls: implement, stage repair, commit repair.
+	agent := &scriptedAgent{replies: []string{"done", "deleted the ignored file", "deleted the binary"}}
+	ctx := ctxWithPlan(wt, agent)
+
+	if err := testBuilder(t).stepImplement(ctx); err != nil {
+		t.Fatalf("stepImplement: %v", err)
+	}
+	if agent.calls != 3 {
+		t.Errorf("agent ran %d times, want 3 (implement + stage repair + commit repair)", agent.calls)
+	}
+	// Second call is the stage repair prompt.
+	if !strings.Contains(agent.prompts[1], "Staging") {
+		t.Errorf("second prompt = %q, want stage repair", agent.prompts[1])
+	}
+	// Third call is the commit repair prompt.
+	if !strings.Contains(agent.prompts[2], "pre-commit") {
+		t.Errorf("third prompt = %q, want commit repair", agent.prompts[2])
+	}
+	if !ctx.didResolve {
+		t.Error("step did not resolve after both repairs succeeded")
+	}
+}
