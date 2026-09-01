@@ -916,7 +916,7 @@ func TestBackend_Claim_ForceOverridesHeldIssue(t *testing.T) {
 	defer srv.Close()
 	b := newMockedBackend(t, mock, srv)
 
-	claim, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", []flow.ClaimOverride{flow.OverrideDirtyTree})
+	claim, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", []flow.ClaimOverride{flow.OverrideAlreadyHeld})
 	if err != nil {
 		t.Fatalf("Claim with force=true should succeed: %v", err)
 	}

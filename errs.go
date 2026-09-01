@@ -173,8 +173,9 @@ func (e ErrBudgetExhausted) Error() string {
 type ClaimOverride string
 
 const (
-	OverrideDirtyTree  ClaimOverride = "dirty-tree"
-	OverrideUnadmitted ClaimOverride = "unadmitted"
+	OverrideDirtyTree   ClaimOverride = "dirty-tree"
+	OverrideAlreadyHeld ClaimOverride = "already-held"
+	OverrideUnadmitted  ClaimOverride = "unadmitted"
 )
 
 // ClaimRefusalCode is the backend's own refusal vocabulary, carried through

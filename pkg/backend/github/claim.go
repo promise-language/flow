@@ -52,10 +52,10 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, ove
 			Reason: fmt.Sprintf("issue #%d is owned by other flow binary %q", issueNum, otherBinary),
 		}
 	}
-	if !slices.Contains(overrides, flow.OverrideDirtyTree) {
+	if !slices.Contains(overrides, flow.OverrideAlreadyHeld) {
 		// Refuse when another person holds the issue — either via an
 		// assignee or a flow:owner:<login> label. The caller must pass
-		// OverrideDirtyTree to take over deliberately.
+		// OverrideAlreadyHeld to take over deliberately.
 		for _, u := range issue.Assignees {
 			if login := u.GetLogin(); login != "" && login != owner {
 				return flow.Claim{}, flow.ErrClaimRefused{

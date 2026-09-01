@@ -108,4 +108,7 @@ func TestCmdClaim_ForceAfterPositional(t *testing.T) {
 	if !slices.Contains(wrapped.lastOverrides, flow.OverrideDirtyTree) {
 		t.Errorf("Backend.Claim received overrides=%v, want OverrideDirtyTree", wrapped.lastOverrides)
 	}
+	if !slices.Contains(wrapped.lastOverrides, flow.OverrideAlreadyHeld) {
+		t.Errorf("Backend.Claim received overrides=%v, want OverrideAlreadyHeld", wrapped.lastOverrides)
+	}
 }

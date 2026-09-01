@@ -32,7 +32,7 @@ func (app *App) cmdClaim(ctx context.Context, args []string) int {
 
 	var overrides []flow.ClaimOverride
 	if *force {
-		overrides = append(overrides, flow.OverrideDirtyTree)
+		overrides = append(overrides, flow.OverrideDirtyTree, flow.OverrideAlreadyHeld)
 	}
 	if *forceUnadmitted {
 		overrides = append(overrides, flow.OverrideUnadmitted)
