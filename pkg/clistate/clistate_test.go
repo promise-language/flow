@@ -271,6 +271,29 @@ func TestClear_RemovesRunning(t *testing.T) {
 	}
 }
 
+// A corrupt running.json reads as an error, not as a partial record.
+func TestLoadRunning_Corrupt(t *testing.T) {
+	dir := t.TempDir()
+	flowDir := filepath.Join(dir, ".flow")
+	t.Setenv("FLOW_DIR", flowDir)
+
+	// Write a valid record first so the directory exists.
+	if err := clistate.SaveRunning(clistate.RunningRecord{Item: "1", Step: "plan", PID: 1, Exe: "/x"}); err != nil {
+		t.Fatalf("SaveRunning: %v", err)
+	}
+	// Overwrite with truncated JSON.
+	if err := os.WriteFile(clistate.RunningJSONPath(), []byte(`{"item":"1","step":"pl`), 0o644); err != nil {
+		t.Fatalf("write corrupt file: %v", err)
+	}
+	got, err := clistate.LoadRunning()
+	if err == nil {
+		t.Errorf("LoadRunning on corrupt file = (%+v, nil), want an error", got)
+	}
+	if got != nil {
+		t.Errorf("LoadRunning on corrupt file returned non-nil record: %+v", got)
+	}
+}
+
 // A record whose bytes are not a record — a write cut off by the crash that
 // ended the run that was writing it — reads as an error, never as a body. The
 // caller is told; what it must never get is a fragment of one, or of something

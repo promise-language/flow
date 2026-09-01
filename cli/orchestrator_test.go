@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/promise-language/flow"
 	"github.com/promise-language/flow/pkg/backend/fake"
+	"github.com/promise-language/flow/pkg/clistate"
 )
 
 // stubAgent is a fake flow.Agent that returns canned responses and records
@@ -165,6 +168,58 @@ func TestRunOne_AutoEmitSkipsWhenTelemetryNil(t *testing.T) {
 	}
 	if res.Status != "done" {
 		t.Errorf("status = %q, want done", res.Status)
+	}
+}
+
+// RunOne must write a running record before dispatch and clear it after.
+// The handler observes the record mid-flight; after RunOne returns it must
+// be gone.
+func TestRunOne_WritesAndClearsRunningRecord(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+
+	var mu sync.Mutex
+	var midFlightRec *clistate.RunningRecord
+
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			// Read the running record from inside the handler.
+			rec, err := clistate.LoadRunning()
+			mu.Lock()
+			midFlightRec = rec
+			mu.Unlock()
+			if err != nil {
+				return fmt.Errorf("LoadRunning inside handler: %w", err)
+			}
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	if _, err := RunOne(context.Background(), app, claim); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+
+	// Mid-flight: the record must have been present and named the step.
+	mu.Lock()
+	rec := midFlightRec
+	mu.Unlock()
+	if rec == nil {
+		t.Fatal("running record was nil inside the handler — SaveRunning did not write before dispatch")
+	}
+	if rec.Step != "plan" {
+		t.Errorf("running record step = %q, want %q", rec.Step, "plan")
+	}
+	if rec.PID == 0 {
+		t.Error("running record PID = 0, want the current process PID")
+	}
+
+	// After RunOne: the record must be cleared.
+	after, err := clistate.LoadRunning()
+	if err != nil {
+		t.Fatalf("LoadRunning after RunOne: %v", err)
+	}
+	if after != nil {
+		t.Errorf("running record still present after RunOne: %+v", after)
 	}
 }
 

@@ -484,6 +484,91 @@ func TestStatusStaleRecord(t *testing.T) {
 	}
 }
 
+// A corrupt running.json must not crash status or promote any step. The
+// error path in stepPayloads silently ignores the bad record.
+func TestStatusCorruptRunningRecord(t *testing.T) {
+	dir := t.TempDir()
+	flowDir := filepath.Join(dir, ".flow")
+	t.Setenv("FLOW_DIR", flowDir)
+
+	env := newParkGrantEnv(t)
+	// Write truncated JSON so LoadRunning returns an error.
+	if err := os.MkdirAll(flowDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(flowDir, "running.json"), []byte(`{"step":"pl`), 0o644); err != nil {
+		t.Fatalf("write corrupt file: %v", err)
+	}
+	t.Cleanup(func() { _ = clistate.ClearRunning() })
+
+	env.out.Reset()
+	if code := env.app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+
+	var payload statusPayload
+	if err := json.Unmarshal(env.out.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, s := range payload.Steps {
+		if s.State == stateRunning {
+			t.Errorf("step %q is running despite a corrupt record", s.ID)
+		}
+	}
+}
+
+// When a running record names one step, only that step is promoted — other
+// pending steps must remain pending, and their running_pid/running_exe must
+// be absent (zero/empty).
+func TestStatusRunningOnlyPromotesNamedStep(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+
+	env := newParkGrantEnv(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	// Mark "plan" as running — "commit" and "pr-open" should stay pending.
+	if err := clistate.SaveRunning(clistate.RunningRecord{
+		Item: "test#1",
+		Step: "plan",
+		PID:  os.Getpid(),
+		Exe:  exe,
+	}); err != nil {
+		t.Fatalf("SaveRunning: %v", err)
+	}
+	t.Cleanup(func() { _ = clistate.ClearRunning() })
+
+	env.out.Reset()
+	if code := env.app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+
+	var payload statusPayload
+	if err := json.Unmarshal(env.out.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, s := range payload.Steps {
+		switch s.ID {
+		case "plan":
+			if s.State != stateRunning {
+				t.Errorf("step %q state = %q, want %q", s.ID, s.State, stateRunning)
+			}
+		default:
+			if s.State == stateRunning {
+				t.Errorf("step %q is running but the record names 'plan'", s.ID)
+			}
+			if s.RunningPID != 0 {
+				t.Errorf("step %q has running_pid = %d, want 0", s.ID, s.RunningPID)
+			}
+			if s.RunningExe != "" {
+				t.Errorf("step %q has running_exe = %q, want empty", s.ID, s.RunningExe)
+			}
+		}
+	}
+}
+
 func TestStatusRunningDoesNotOverrideResolved(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
