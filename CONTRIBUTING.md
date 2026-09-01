@@ -31,7 +31,7 @@ provenance.
 
 flow is a Go SDK for declarative, stateless-per-step automation against
 task-tracking systems (see the [README](README.md), and
-[docs/design.md](docs/design.md) for the full architecture spec).
+[docs/](docs/) for the architecture docs).
 
 1. Open an issue describing the bug or feature, where practical, so the design
    can be discussed before you invest in a PR.
