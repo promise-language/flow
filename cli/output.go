@@ -153,6 +153,7 @@ type statusPayload struct {
 	// no title reports "" rather than dropping the field.
 	Title     string            `json:"title"`
 	Owner     string            `json:"owner"`
+	Overrides []string          `json:"overrides,omitempty"`
 	Flow      string            `json:"flow"`
 	FlowState string            `json:"flow_state"`
 	Finalized bool              `json:"finalized"`

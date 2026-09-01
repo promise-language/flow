@@ -196,7 +196,7 @@ func (b *Backend) ListEligible(ctx context.Context) ([]flow.ItemRef, error) {
 	return out, nil
 }
 
-func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, force bool) (flow.Claim, error) {
+func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
 	id, err := refID(ref)
 	if err != nil {
 		return flow.Claim{}, err
@@ -208,7 +208,10 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, for
 		return flow.Claim{}, fmt.Errorf("fake: item %q not registered", id)
 	}
 	if rec.claim != nil && rec.owner != owner {
-		return flow.Claim{}, fmt.Errorf("fake: item %q already claimed by %q", id, rec.owner)
+		return flow.Claim{}, flow.ErrClaimRefused{
+			Code: "already-claimed", ItemScoped: true,
+			Reason: fmt.Sprintf("fake: item %q already claimed by %q", id, rec.owner),
+		}
 	}
 	now := b.clock()
 	c := flow.Claim{

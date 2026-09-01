@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -23,7 +24,7 @@ import (
 //  4. Winner: POST self as assignee, POST flow:owner:<login>, DELETE
 //     flow:claim:<hex>.
 //  5. POST or supersede the state comment.
-func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, force bool) (flow.Claim, error) {
+func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
 	issueNum, err := b.issueNumber(ref)
 	if err != nil {
 		return flow.Claim{}, err
@@ -40,23 +41,37 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, for
 	}
 	names := labelNamesOf(issue.Labels)
 	if hasLabel(names, b.labels.Disabled()) {
-		return flow.Claim{}, fmt.Errorf("issue #%d carries %s label", issueNum, b.labels.Disabled())
+		return flow.Claim{}, flow.ErrClaimRefused{
+			Code: "disabled", ItemScoped: true,
+			Reason: fmt.Sprintf("issue #%d carries %s label", issueNum, b.labels.Disabled()),
+		}
 	}
 	if otherBinary, wrong := b.otherBinaryLabel(names); wrong {
-		return flow.Claim{}, fmt.Errorf("issue #%d is owned by other flow binary %q", issueNum, otherBinary)
+		return flow.Claim{}, flow.ErrClaimRefused{
+			Code: "other-binary", ItemScoped: true,
+			Reason: fmt.Sprintf("issue #%d is owned by other flow binary %q", issueNum, otherBinary),
+		}
 	}
-	if !force {
+	if !slices.Contains(overrides, flow.OverrideAlreadyHeld) {
 		// Refuse when another person holds the issue — either via an
 		// assignee or a flow:owner:<login> label. The caller must pass
-		// force=true to take over deliberately.
+		// OverrideAlreadyHeld to take over deliberately.
 		for _, u := range issue.Assignees {
 			if login := u.GetLogin(); login != "" && login != owner {
-				return flow.Claim{}, fmt.Errorf("issue #%d is assigned to %s (use force to take over)", issueNum, login)
+				return flow.Claim{}, flow.ErrClaimRefused{
+					Code: "already-held", ItemScoped: true,
+					Reason:   fmt.Sprintf("issue #%d is assigned to %s (use --force to take over)", issueNum, login),
+					Override: "force",
+				}
 			}
 		}
 		for _, name := range names {
 			if login, ok := b.labels.OwnerFromLabel(name); ok && login != owner {
-				return flow.Claim{}, fmt.Errorf("issue #%d carries owner label for %s (use force to take over)", issueNum, login)
+				return flow.Claim{}, flow.ErrClaimRefused{
+					Code: "already-held", ItemScoped: true,
+					Reason:   fmt.Sprintf("issue #%d carries owner label for %s (use --force to take over)", issueNum, login),
+					Override: "force",
+				}
 			}
 		}
 	}
@@ -77,13 +92,19 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, for
 	contenders := b.claimContenders(labelNamesOf(issue2.Labels))
 	if len(contenders) == 0 {
 		// Race condition — our label was stripped before we could read it.
-		return flow.Claim{}, errors.New("claim race: label removed before observation")
+		return flow.Claim{}, flow.ErrClaimRefused{
+			Code: "claim-race", ItemScoped: true,
+			Reason: "claim race: label removed before observation",
+		}
 	}
 	sort.Strings(contenders)
 	if contenders[0] != token {
 		// Lost the race — clean up our label.
 		_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
-		return flow.Claim{}, fmt.Errorf("claim race lost to %s", contenders[0])
+		return flow.Claim{}, flow.ErrClaimRefused{
+			Code: "claim-race", ItemScoped: true,
+			Reason: fmt.Sprintf("claim race lost to %s", contenders[0]),
+		}
 	}
 
 	// Phase 3: assert ownership.

@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -581,7 +582,7 @@ func TestBackend_ClaimSeedResolveRoundTrip(t *testing.T) {
 	ref := b.refFromIssue(42)
 
 	// Claim. The race-check sees only one flow:claim:* label (ours), so we win.
-	claim, err := b.Claim(ctx, ref, "alice", false)
+	claim, err := b.Claim(ctx, ref, "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -657,7 +658,7 @@ func TestBackend_BumpInvocations_PersistsViaStateComment(t *testing.T) {
 
 	ctx := t.Context()
 	ref := b.refFromIssue(42)
-	claim, err := b.Claim(ctx, ref, "alice", false)
+	claim, err := b.Claim(ctx, ref, "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -693,7 +694,7 @@ func TestBackend_ResolveFileArtifactSpills(t *testing.T) {
 
 	ctx := t.Context()
 	ref := b.refFromIssue(42)
-	claim, err := b.Claim(ctx, ref, "alice", false)
+	claim, err := b.Claim(ctx, ref, "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -747,7 +748,7 @@ func TestBackend_ResolvePatchArtifactSpills(t *testing.T) {
 
 	ctx := t.Context()
 	ref := b.refFromIssue(42)
-	claim, _ := b.Claim(ctx, ref, "alice", false)
+	claim, _ := b.Claim(ctx, ref, "alice", nil)
 	_ = b.SeedState(ctx, claim, []flow.ArtifactSpec{
 		{Id: "implementation", Type: flow.ArtifactPatch, Required: true, Budget: flow.DefaultStepBudget()},
 	})
@@ -779,7 +780,7 @@ func TestBackend_LargeMarkdownAutoSpills(t *testing.T) {
 
 	ctx := t.Context()
 	ref := b.refFromIssue(42)
-	claim, _ := b.Claim(ctx, ref, "alice", false)
+	claim, _ := b.Claim(ctx, ref, "alice", nil)
 	_ = b.SeedState(ctx, claim, []flow.ArtifactSpec{
 		{Id: "log", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
 	})
@@ -810,7 +811,7 @@ func TestBackend_SecondSpillUpdatesViaContentsAPI(t *testing.T) {
 
 	ctx := t.Context()
 	ref := b.refFromIssue(42)
-	claim, _ := b.Claim(ctx, ref, "alice", false)
+	claim, _ := b.Claim(ctx, ref, "alice", nil)
 	_ = b.SeedState(ctx, claim, []flow.ArtifactSpec{
 		{Id: "blob", Type: flow.ArtifactFile, Required: true, Budget: flow.DefaultStepBudget()},
 	})
@@ -871,12 +872,22 @@ func TestBackend_Claim_RefusesWhenAssignedToAnother(t *testing.T) {
 	defer srv.Close()
 	b := newMockedBackend(t, mock, srv)
 
-	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", false)
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", nil)
 	if err == nil {
 		t.Fatal("Claim should refuse when the issue is assigned to another person")
 	}
 	if !strings.Contains(err.Error(), "assigned to bob") {
 		t.Errorf("error = %v, want mention of bob", err)
+	}
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T", err)
+	}
+	if refused.Code != "already-held" {
+		t.Errorf("Code = %q, want already-held", refused.Code)
+	}
+	if !refused.ItemScoped {
+		t.Error("ItemScoped = false, want true (another item could succeed)")
 	}
 
 	// No claim label should have been posted — the refusal is in preflight.
@@ -898,12 +909,19 @@ func TestBackend_Claim_RefusesWhenOwnerLabelForAnother(t *testing.T) {
 	defer srv.Close()
 	b := newMockedBackend(t, mock, srv)
 
-	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", false)
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", nil)
 	if err == nil {
 		t.Fatal("Claim should refuse when owner label names another login")
 	}
 	if !strings.Contains(err.Error(), "owner label for carol") {
 		t.Errorf("error = %v, want mention of carol", err)
+	}
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T", err)
+	}
+	if refused.Code != "already-held" {
+		t.Errorf("Code = %q, want already-held", refused.Code)
 	}
 }
 
@@ -916,7 +934,7 @@ func TestBackend_Claim_ForceOverridesHeldIssue(t *testing.T) {
 	defer srv.Close()
 	b := newMockedBackend(t, mock, srv)
 
-	claim, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", true)
+	claim, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", []flow.ClaimOverride{flow.OverrideAlreadyHeld})
 	if err != nil {
 		t.Fatalf("Claim with force=true should succeed: %v", err)
 	}
@@ -944,7 +962,7 @@ func TestBackend_Claim_AllowsSelfAssigned(t *testing.T) {
 	defer srv.Close()
 	b := newMockedBackend(t, mock, srv)
 
-	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", false)
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim should allow self-assigned issues: %v", err)
 	}
@@ -958,7 +976,7 @@ func TestBackend_Claim_AllowsSelfOwnerLabel(t *testing.T) {
 	defer srv.Close()
 	b := newMockedBackend(t, mock, srv)
 
-	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", false)
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim should allow own owner label: %v", err)
 	}
@@ -983,7 +1001,7 @@ func TestBackend_ParkSurvivesLoadAndClearsOnGrant(t *testing.T) {
 	b := newMockedBackend(t, mock, srv)
 
 	ctx := t.Context()
-	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
+	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -1057,7 +1075,7 @@ func TestBackend_SignalWritePreservesPark(t *testing.T) {
 	b := newMockedBackend(t, mock, srv)
 
 	ctx := t.Context()
-	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
+	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -1113,7 +1131,7 @@ func TestBackend_LoadStateByRef_MatchesLoadState(t *testing.T) {
 	ctx := t.Context()
 	ref := b.refFromIssue(42)
 
-	claim, err := b.Claim(ctx, ref, "alice", false)
+	claim, err := b.Claim(ctx, ref, "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -1169,7 +1187,7 @@ func TestBackend_LoadStateByRef_ColdCache(t *testing.T) {
 	// Claim and seed via a SEPARATE backend instance (simulating a different
 	// process) so b's stateCommentCache is cold.
 	b2 := newMockedBackend(t, mock, srv)
-	claim, err := b2.Claim(ctx, ref, "alice", false)
+	claim, err := b2.Claim(ctx, ref, "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}

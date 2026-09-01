@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/promise-language/flow"
@@ -71,17 +74,17 @@ func TestResolveClaimRef_FallbackNoMatch(t *testing.T) {
 	}
 }
 
-// recordingClaimBackend captures the `force` argument passed to Claim so the
-// flag-after-positional test can assert that the bool flag is actually
+// recordingClaimBackend captures the overrides passed to Claim so the
+// flag-after-positional test can assert that the flag is actually
 // parsed (and not silently dropped).
 type recordingClaimBackend struct {
 	*fake.Backend
-	lastForce bool
+	lastOverrides []flow.ClaimOverride
 }
 
-func (r *recordingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, force bool) (flow.Claim, error) {
-	r.lastForce = force
-	return r.Backend.Claim(ctx, ref, owner, force)
+func (r *recordingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
+	r.lastOverrides = overrides
+	return r.Backend.Claim(ctx, ref, owner, overrides)
 }
 
 // T0484: `claim <id> --force` (bool flag after the positional) must parse and
@@ -104,7 +107,86 @@ func TestCmdClaim_ForceAfterPositional(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("cmdClaim = %d, want 0", code)
 	}
-	if !wrapped.lastForce {
-		t.Error("Backend.Claim received force=false, want force=true")
+	if !slices.Contains(wrapped.lastOverrides, flow.OverrideDirtyTree) {
+		t.Errorf("Backend.Claim received overrides=%v, want OverrideDirtyTree", wrapped.lastOverrides)
+	}
+	if !slices.Contains(wrapped.lastOverrides, flow.OverrideAlreadyHeld) {
+		t.Errorf("Backend.Claim received overrides=%v, want OverrideAlreadyHeld", wrapped.lastOverrides)
+	}
+}
+
+// --force-unadmitted must pass OverrideUnadmitted to Backend.Claim.
+func TestCmdClaim_ForceUnadmittedFlag(t *testing.T) {
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "T0001", Type: "task", Title: "T0001"})
+	wrapped := &recordingClaimBackend{Backend: be}
+
+	app := &App{
+		Backend: wrapped,
+		Owner:   "alice",
+		Out:     newDiscardWriter(),
+		Err:     newDiscardWriter(),
+	}
+
+	code := app.cmdClaim(context.Background(), []string{"T0001", "--force-unadmitted"})
+	if code != 0 {
+		t.Fatalf("cmdClaim = %d, want 0", code)
+	}
+	if !slices.Contains(wrapped.lastOverrides, flow.OverrideUnadmitted) {
+		t.Errorf("Backend.Claim received overrides=%v, want OverrideUnadmitted", wrapped.lastOverrides)
+	}
+	// --force-unadmitted alone must NOT include the dirty-tree or already-held overrides.
+	if slices.Contains(wrapped.lastOverrides, flow.OverrideDirtyTree) {
+		t.Errorf("OverrideDirtyTree present without --force; overrides=%v", wrapped.lastOverrides)
+	}
+}
+
+// refusingClaimBackend always returns an ErrClaimRefused from Claim.
+type refusingClaimBackend struct {
+	*fake.Backend
+	refusal flow.ErrClaimRefused
+}
+
+func (b *refusingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
+	return flow.Claim{}, b.refusal
+}
+
+// cmdClaim must render a typed refusal via formatClaimRefusal and exit 1.
+func TestCmdClaim_RefusalRendering(t *testing.T) {
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "T0001", Type: "task", Title: "T0001"})
+	errBuf := &bytes.Buffer{}
+	app := &App{
+		Backend: &refusingClaimBackend{
+			Backend: be,
+			refusal: flow.ErrClaimRefused{
+				Code:     "not-admitted",
+				Reason:   "arena not admitted",
+				Check:    "git-identity",
+				Detail:   `author email "djabi@kmac" is not valid`,
+				Override: "force-unadmitted",
+			},
+		},
+		Owner: "alice",
+		Out:   newDiscardWriter(),
+		Err:   errBuf,
+	}
+
+	code := app.cmdClaim(context.Background(), []string{"T0001"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	got := errBuf.String()
+	if !strings.Contains(got, "refused") {
+		t.Errorf("expected 'refused' in output; got %q", got)
+	}
+	if !strings.Contains(got, `check "git-identity"`) {
+		t.Errorf("expected check name in output; got %q", got)
+	}
+	if !strings.Contains(got, "author email") {
+		t.Errorf("expected detail in output; got %q", got)
+	}
+	if !strings.Contains(got, "--force-unadmitted") {
+		t.Errorf("expected override hint in output; got %q", got)
 	}
 }

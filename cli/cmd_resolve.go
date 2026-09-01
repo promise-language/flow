@@ -3,27 +3,13 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
-	"strings"
 	"time"
 
 	"github.com/promise-language/flow"
 )
-
-// isLeaseItemConflict reports whether err from Backend.Claim is the tracker
-// lease ledger's "item already leased to a different arena" refusal. The
-// signal travels as the runner's 502 body text (the runner flattens the
-// tracker's 409 into 502 Bad Gateway), so we match on the stable error
-// suffix from the tracker's ErrItemAlreadyLeased.Error() format string
-// (see lease_ledger.go: `item %q already leased to arena %q; incoming
-// arena %q refused`).
-//
-// Used by the auto-select branch to iterate to the next eligible ref on a
-// conflict instead of livelock-cycling on the same item.
-func isLeaseItemConflict(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "already leased to arena")
-}
 
 // maxResolveSteps backstops cmdResolve's loop. A healthy flow advances through
 // its steps and finalizes well under this; the cap only trips on a step that
@@ -51,6 +37,7 @@ const maxResolveSteps = 50
 func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("resolve")
 	of := addOutputFlags(fs)
+	forceUnadmitted := fs.Bool("force-unadmitted", false, "override the arena admission check (audited)")
 	var tags stringSliceFlag
 	fs.Var(&tags, "tag", "filter eligible set by tag (repeatable, conjunctive)")
 	if !app.parseArgs(fs, args) {
@@ -71,6 +58,11 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		return 2
 	}
 
+	var resolveOverrides []flow.ClaimOverride
+	if *forceUnadmitted {
+		resolveOverrides = append(resolveOverrides, flow.OverrideUnadmitted)
+	}
+
 	var claim *flow.Claim
 	if fs.NArg() == 1 {
 		ref, err := app.resolveClaimRef(ctx, fs.Arg(0))
@@ -78,8 +70,13 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			fmt.Fprintln(app.Err, "resolve:", err)
 			return 1
 		}
-		c, err := app.Backend.Claim(ctx, ref, app.Owner, false)
+		c, err := app.Backend.Claim(ctx, ref, app.Owner, resolveOverrides)
 		if err != nil {
+			var refused flow.ErrClaimRefused
+			if errors.As(err, &refused) {
+				fmt.Fprintln(app.Err, formatClaimRefusal("resolve", refused))
+				return 1
+			}
 			fmt.Fprintln(app.Err, "resolve:", err)
 			return 1
 		}
@@ -139,15 +136,20 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			claimed := false
 			for i, ref := range refs {
 				fmt.Fprintf(app.Err, "resolve: no active claim — auto-selecting %s (%d/%d)\n", ref.Display, i+1, len(refs))
-				c, err := app.Backend.Claim(ctx, ref, app.Owner, false)
+				c, err := app.Backend.Claim(ctx, ref, app.Owner, resolveOverrides)
 				if err == nil {
 					newClaim = c
 					claimed = true
 					break
 				}
-				if isLeaseItemConflict(err) {
-					fmt.Fprintf(app.Err, "resolve: %s already leased by another arena — trying next\n", ref.Display)
+				var refused flow.ErrClaimRefused
+				if errors.As(err, &refused) && refused.ItemScoped {
+					fmt.Fprintf(app.Err, "resolve: %s — %s — trying next\n", ref.Display, refused.Reason)
 					continue
+				}
+				if errors.As(err, &refused) {
+					fmt.Fprintln(app.Err, formatClaimRefusal("resolve", refused))
+					return 1
 				}
 				fmt.Fprintln(app.Err, "resolve:", err)
 				return 1
@@ -211,22 +213,22 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		}
 		fmt.Fprintln(app.Err, outcome)
 
-		switch res.Status {
-		case "failed":
+		switch flow.InvocationStatus(res.Status) {
+		case flow.StatusFailed:
 			fmt.Fprintf(app.Err, "resolve: %s stopped on a failed step\n", claim.ItemRef.Display)
 			return 1
-		case "blocked":
+		case flow.StatusBlocked:
 			// A gate only a human can clear. Looping would re-run it to the
 			// runaway guard, paying a full state load and comment scan each
 			// time, and then report the guard rather than the real reason.
 			fmt.Fprintf(app.Err, "resolve: %s is blocked — %s\n", claim.ItemRef.Display, res.Reason)
 			return 1
-		case "parked", "skipped":
+		case flow.StatusParked, flow.StatusSkipped:
 			// Parked (question/budget/timeout) or skipped (preflight refusal,
 			// e.g. an already-finalized item). Stop and let the operator act.
 			fmt.Fprintf(app.Err, "resolve: %s %s — run `status %s` to inspect\n", claim.ItemRef.Display, res.Status, claim.ItemRef.Display)
 			return 0
-		case "done":
+		case flow.StatusDone:
 			// Finalize case: RunOne ran no step (empty Step) because no eligible
 			// flow remained — the item is fully resolved.
 			if res.Step == "" {
