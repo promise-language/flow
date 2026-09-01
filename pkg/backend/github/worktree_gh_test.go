@@ -124,3 +124,43 @@ func TestVerifyRunsTheConfiguredCommand(t *testing.T) {
 		t.Errorf("Verify ran with args %v, want the configured VerifyCmd", args)
 	}
 }
+
+// A Config with no VerifyCmd, after withDefaults, must dispatch "bin/verify"
+// to the runner. This closes the gap between the default-value test
+// (config_test.go) and the dispatch test above: neither alone would catch a
+// default that is non-empty but names the wrong command.
+func TestVerifyDispatchesTheDefault(t *testing.T) {
+	cfg := Config{WorktreeDir: "/tmp/wt"}.withDefaults()
+
+	name, args := runArgsFor(t, cfg, func(w *worktree) error { return w.Verify(context.Background()) })
+
+	if name != "bin/verify" {
+		t.Errorf("Verify dispatched %q, want the default bin/verify", name)
+	}
+	if len(args) != 0 {
+		t.Errorf("Verify dispatched with args %v, want none for the bare default", args)
+	}
+}
+
+// An empty VerifyCmd must be refused, not passed to exec (which would panic
+// on a zero-length slice). This is the failure path: if withDefaults were
+// ever broken to leave the field empty, this error is what surfaces.
+func TestVerifyRefusesEmptyCmd(t *testing.T) {
+	cfg := Config{WorktreeDir: "/tmp/wt"} // deliberately skip withDefaults
+
+	b := &Backend{cfg: cfg}
+	b.git = &gitOps{
+		dir: cfg.WorktreeDir,
+		runner: func(_ context.Context, _ string, _ string, _ ...string) ([]byte, []byte, error) {
+			t.Fatal("runner should not be called with an empty VerifyCmd")
+			return nil, nil, nil
+		},
+	}
+	err := (&worktree{b: b}).Verify(context.Background())
+	if err == nil {
+		t.Fatal("Verify with empty VerifyCmd should return an error")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error = %q, want mention of empty VerifyCmd", err)
+	}
+}
