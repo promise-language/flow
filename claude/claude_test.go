@@ -203,6 +203,7 @@ func TestRun_ArgsIncludeStreamFlags(t *testing.T) {
 	joined := strings.Join(capturedArgs, " ")
 	for _, want := range []string{
 		"--print",
+		"--verbose",
 		"--input-format stream-json",
 		"--output-format stream-json",
 		"--model claude-opus-4-7",
@@ -439,6 +440,77 @@ func TestRun_LastTextIsTheLastBlockNotTheConcatenation(t *testing.T) {
 	}
 	if resp.PlanSubmitted {
 		t.Error("PlanSubmitted = true with no ExitPlanMode call")
+	}
+}
+
+// --verbose may introduce event types the parser does not know about (e.g.
+// tool_result echoes, progress events). They must be silently ignored.
+func TestParseStream_UnknownEventTypesIgnored(t *testing.T) {
+	stream := strings.NewReader(
+		`{"type":"system","session_id":"sess-u"}` + "\n" +
+			`{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Hello"}]}}` + "\n" +
+			`{"type":"tool_result","content":"some echoed tool output"}` + "\n" +
+			`{"type":"progress","percent":50}` + "\n" +
+			`{"type":"result","session_id":"sess-u","result":"done","total_cost_usd":0.1,"duration_ms":10}` + "\n",
+	)
+
+	resp, err := parseStream(stream)
+	if err != nil {
+		t.Fatalf("parseStream: %v", err)
+	}
+	if resp.SessionID != "sess-u" {
+		t.Errorf("SessionID = %q, want sess-u", resp.SessionID)
+	}
+	if resp.LastText != "done" {
+		t.Errorf("LastText = %q, want done", resp.LastText)
+	}
+}
+
+// --verbose can emit non-JSON diagnostic lines (timestamps, debug info).
+// The parser must skip them without error rather than aborting the stream.
+func TestParseStream_NonJSONLinesSkipped(t *testing.T) {
+	stream := strings.NewReader(
+		"[2026-08-31 12:00:00] claude: loading session\n" +
+			`{"type":"system","session_id":"sess-n"}` + "\n" +
+			"VERBOSE: model turn started\n" +
+			`{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Hi"}]}}` + "\n" +
+			`{"type":"result","session_id":"sess-n","result":"done","total_cost_usd":0.1,"duration_ms":10}` + "\n",
+	)
+
+	resp, err := parseStream(stream)
+	if err != nil {
+		t.Fatalf("parseStream: %v", err)
+	}
+	if resp.SessionID != "sess-n" {
+		t.Errorf("SessionID = %q, want sess-n", resp.SessionID)
+	}
+	if resp.LastText != "done" {
+		t.Errorf("LastText = %q, want done", resp.LastText)
+	}
+}
+
+// Blank lines can appear between events (e.g. verbose separators). The parser
+// must tolerate them without treating them as errors or truncating the stream.
+func TestParseStream_BlankLinesSkipped(t *testing.T) {
+	stream := strings.NewReader(
+		"\n" +
+			`{"type":"system","session_id":"sess-b"}` + "\n" +
+			"\n" +
+			"\n" +
+			`{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Hi"}]}}` + "\n" +
+			"\n" +
+			`{"type":"result","session_id":"sess-b","result":"ok","total_cost_usd":0.1,"duration_ms":10}` + "\n",
+	)
+
+	resp, err := parseStream(stream)
+	if err != nil {
+		t.Fatalf("parseStream: %v", err)
+	}
+	if resp.SessionID != "sess-b" {
+		t.Errorf("SessionID = %q, want sess-b", resp.SessionID)
+	}
+	if resp.LastText != "ok" {
+		t.Errorf("LastText = %q, want ok", resp.LastText)
 	}
 }
 
