@@ -77,7 +77,7 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 		// Save the full agent output as WIP so the reasoning survives if
 		// the refusal is cleared and the step resumes.
 		combined := resp.LastText
-		if resp.PlanText != "" {
+		if strings.TrimSpace(resp.PlanText) != "" {
 			combined = "## Submitted plan\n\n" + resp.PlanText +
 				"\n\n---\n\n## Agent reasoning\n\n" + resp.LastText
 		}
