@@ -26,9 +26,18 @@ type AgentRequest struct {
 	// that reaches it stops there rather than discovering the overrun at the
 	// next dispatch, which is one whole unbounded turn too late.
 	//
+	// The bound is not exact, and no impl should be described as if it were:
+	// a substrate learns what a model call cost only once that call has
+	// returned, so the turn stops at the FIRST call that crosses the cap and
+	// the overrun is bounded by one model call rather than by a whole turn.
+	// That is the difference the axis is for — one call is a quantity an
+	// operator can reason about; one turn is not.
+	//
 	// An impl whose substrate accepts a spend limit MUST pass it through and
 	// report the stop as AgentFailure{Kind: FailureCostCap}, keeping the
-	// turn's cost in AgentResponse.CostUSD so the meter still bills it. An
+	// turn's cost in AgentResponse.CostUSD so the meter still bills it. A
+	// caller that sets this field itself is asking for a tighter ceiling
+	// than the step's; a metered wrapper must narrow it, never widen it. An
 	// impl that cannot enforce it may ignore the field; the caller's
 	// pre-dispatch and pre-prompt gates still apply.
 	MaxCostUSD float64

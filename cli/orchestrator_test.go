@@ -430,6 +430,50 @@ func TestRunOne_AgentRequestCarriesRemainingCostHeadroom(t *testing.T) {
 	}
 }
 
+// A handler that set its own ceiling asked for a TIGHTER turn than the step's
+// grant allows. The meter narrows to the headroom, it never widens: overwriting
+// a $1 request with the $5 grant would spend four dollars the handler said it
+// did not want spent.
+func TestRunOne_HandlerCostCeilingIsNarrowedNotWidened(t *testing.T) {
+	a := &stubAgent{
+		name: "stub",
+		responses: []flow.AgentResponse{
+			{LastText: "first"},
+			{LastText: "second"},
+		},
+	}
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("two prompts", "plan", func(ctx flow.StepCtx) error {
+			// Tighter than the grant: must survive.
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1", MaxCostUSD: 1}); err != nil {
+				return err
+			}
+			// Looser than the grant: must be cut down to it.
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p2", MaxCostUSD: 9}); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{Budget: flow.StepBudget{MaxCostUSD: 5}})
+	}, a)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "done" {
+		t.Fatalf("status = %q, want done. res=%+v", res.Status, res)
+	}
+	if len(a.reqs) != 2 {
+		t.Fatalf("agent requests = %d, want 2", len(a.reqs))
+	}
+	if a.reqs[0].MaxCostUSD != 1 {
+		t.Errorf("first MaxCostUSD = %v, want 1 (the handler's own tighter ceiling)", a.reqs[0].MaxCostUSD)
+	}
+	if a.reqs[1].MaxCostUSD != 5 {
+		t.Errorf("second MaxCostUSD = %v, want 5 (the grant, which is tighter than the handler's 9)", a.reqs[1].MaxCostUSD)
+	}
+}
+
 // The turn the substrate stopped at the cap IS the step reaching its cost cap:
 // it parks on cost, and the spend it reports is the real one — including the
 // response that crossed the cap.

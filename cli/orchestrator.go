@@ -841,11 +841,15 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 		}
 	}
 	// Hand the turn the headroom left in the grant, so the substrate can stop
-	// it AT the cap. Without this the grant only bounds when a step stops
+	// it at the cap. Without this the grant only bounds when a step stops
 	// being dispatched: a turn that starts inside the grant can spend
 	// whatever it spends, and the overrun is discovered one whole turn late.
-	if art.GrantedCostUSD > 0 {
-		req.MaxCostUSD = art.GrantedCostUSD - art.CostUSDSpent
+	// A handler that set its own ceiling asked for a TIGHTER one than the
+	// step's, so narrow to it — overwriting would silently widen the very
+	// bound the handler wrote down.
+	if headroom := art.GrantedCostUSD - art.CostUSDSpent; art.GrantedCostUSD > 0 &&
+		(req.MaxCostUSD <= 0 || headroom < req.MaxCostUSD) {
+		req.MaxCostUSD = headroom
 	}
 	if err := m.backend.BumpPrompts(ctx, m.claim, string(li.ArtifactId)); err != nil {
 		return nil, fmt.Errorf("bump prompts: %w", err)

@@ -17,9 +17,9 @@ type StepBudget struct {
 // The prompt cap is a runaway backstop, not a budget. What a step actually
 // costs is capped by MaxCostUSD — checked before each prompt and passed to the
 // agent as that turn's own ceiling (AgentRequest.MaxCostUSD), so a turn stops
-// AT the cap rather than overrunning it and being caught one dispatch later —
-// and what it actually occupies is gated by Timeout; the number of prompts it
-// takes to get there moves neither. Capping
+// at the first model call that crosses the cap rather than running to the end
+// and being caught a whole turn later — and what it actually occupies is gated
+// by Timeout; the number of prompts it takes to get there moves neither. Capping
 // prompts at 1 therefore bought no protection the other two axes did not
 // already provide, while making a prompts park the normal outcome for any
 // step that talks to the agent twice — and each of those cost an operator a
