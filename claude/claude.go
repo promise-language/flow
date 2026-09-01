@@ -53,6 +53,7 @@ func (c *Client) Name() string {
 func (c *Client) Run(ctx context.Context, req flow.AgentRequest) (*flow.AgentResponse, error) {
 	args := []string{
 		"--print",
+		"--verbose",
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 	}

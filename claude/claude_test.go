@@ -203,6 +203,7 @@ func TestRun_ArgsIncludeStreamFlags(t *testing.T) {
 	joined := strings.Join(capturedArgs, " ")
 	for _, want := range []string{
 		"--print",
+		"--verbose",
 		"--input-format stream-json",
 		"--output-format stream-json",
 		"--model claude-opus-4-7",
@@ -439,6 +440,29 @@ func TestRun_LastTextIsTheLastBlockNotTheConcatenation(t *testing.T) {
 	}
 	if resp.PlanSubmitted {
 		t.Error("PlanSubmitted = true with no ExitPlanMode call")
+	}
+}
+
+// --verbose may introduce event types the parser does not know about (e.g.
+// tool_result echoes, progress events). They must be silently ignored.
+func TestParseStream_UnknownEventTypesIgnored(t *testing.T) {
+	stream := strings.NewReader(
+		`{"type":"system","session_id":"sess-u"}` + "\n" +
+			`{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Hello"}]}}` + "\n" +
+			`{"type":"tool_result","content":"some echoed tool output"}` + "\n" +
+			`{"type":"progress","percent":50}` + "\n" +
+			`{"type":"result","session_id":"sess-u","result":"done","total_cost_usd":0.1,"duration_ms":10}` + "\n",
+	)
+
+	resp, err := parseStream(stream)
+	if err != nil {
+		t.Fatalf("parseStream: %v", err)
+	}
+	if resp.SessionID != "sess-u" {
+		t.Errorf("SessionID = %q, want sess-u", resp.SessionID)
+	}
+	if resp.LastText != "done" {
+		t.Errorf("LastText = %q, want done", resp.LastText)
 	}
 }
 
