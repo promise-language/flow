@@ -579,6 +579,92 @@ func TestRunOne_CostCapWithoutAGrantIsAPlainFailure(t *testing.T) {
 	}
 }
 
+// Without a grant there is no headroom to narrow to, so the handler's own
+// ceiling is the only one there is and must survive untouched. Narrowing
+// unconditionally would compute a NEGATIVE headroom once the step has spent
+// anything (0 - spent), and hand the turn a ceiling tighter than any real
+// budget — or, at zero spend, a 0 that means unbounded.
+func TestRunOne_NoCostGrantLeavesTheHandlerCeilingAlone(t *testing.T) {
+	a := &stubAgent{
+		name: "stub",
+		responses: []flow.AgentResponse{
+			{LastText: "first", CostUSD: 2},
+			{LastText: "second"},
+		},
+	}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("two prompts", "plan", func(ctx flow.StepCtx) error {
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1", MaxCostUSD: 3}); err != nil {
+				return err
+			}
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p2", MaxCostUSD: 3}); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+	}, a)
+	app.Backend = zeroCostGrantBackend{Backend: be}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "done" {
+		t.Fatalf("status = %q, want done. res=%+v", res.Status, res)
+	}
+	if len(a.reqs) != 2 {
+		t.Fatalf("agent requests = %d, want 2", len(a.reqs))
+	}
+	for i, req := range a.reqs {
+		if req.MaxCostUSD != 3 {
+			t.Errorf("req[%d] MaxCostUSD = %v, want 3 (the handler's ceiling, ungranted step)", i, req.MaxCostUSD)
+		}
+	}
+}
+
+// A grant spent to the last cent leaves zero headroom, and zero means
+// UNBOUNDED to the substrate. So the pre-prompt gate has to fire first: the
+// step parks without a second dispatch. A weakened gate would turn the fully
+// spent grant into a turn with no ceiling at all — worse than the overrun the
+// cap exists to stop.
+func TestRunOne_SpentGrantParksInsteadOfDispatchingAnUncappedTurn(t *testing.T) {
+	a := &stubAgent{
+		name: "stub",
+		responses: []flow.AgentResponse{
+			{LastText: "first", CostUSD: 5}, // spends the grant exactly
+			{LastText: "second"},
+		},
+	}
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("two prompts", "plan", func(ctx flow.StepCtx) error {
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1"}); err != nil {
+				return err
+			}
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p2"}); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("never reached")
+		}, flow.StepConfig{Budget: flow.StepBudget{MaxCostUSD: 5}})
+	}, a)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "parked" || res.Park == nil {
+		t.Fatalf("res = %+v, want parked", res)
+	}
+	if res.Park.Axis != flow.AxisCost {
+		t.Errorf("Park = %+v, want axis=cost", res.Park)
+	}
+	if len(a.reqs) != 1 {
+		t.Fatalf("agent requests = %d, want 1 (the second must never be dispatched)", len(a.reqs))
+	}
+	if a.reqs[0].MaxCostUSD != 5 {
+		t.Errorf("first MaxCostUSD = %v, want 5", a.reqs[0].MaxCostUSD)
+	}
+}
+
 func TestRunOne_ParksOnTimeout(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("slow", "plan", func(ctx flow.StepCtx) error {
