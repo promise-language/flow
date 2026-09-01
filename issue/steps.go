@@ -116,7 +116,64 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 	if strings.TrimSpace(plan) == "" {
 		return fmt.Errorf("agent returned an empty plan")
 	}
+	// Emptiness is the wrong property to test, and this is the case that proves
+	// THAT: a turn that delegates its planning to a subagent leaves the parent's
+	// narration as the only text the stream carries, and one sentence announcing
+	// the delegation is not empty. Two observed artifacts resolved that way —
+	// "Now let me write the final plan." and a longer preamble naming the agent
+	// it was about to launch — and both passed every emptiness check between the
+	// turn and the implement step.
+	//
+	// So the floor is structural rather than a byte count. It refuses only text
+	// that is BOTH unstructured and short, which is what narration is and what a
+	// plan is not: a plan carries headings, and a plan without headings is at
+	// least long. Deliberately permissive — the point is to catch the sentence,
+	// not to adjudicate plan quality, which is the review step's job.
+	//
+	// This fails rather than parking refused: the plan step keeps its remaining
+	// invocations and a retry re-runs planning, which may well produce a real
+	// plan, since whether the agent delegates is its own choice each turn. The
+	// artifact never resolves, so nothing downstream reads narration.
+	if !looksLikePlan(plan) {
+		return fmt.Errorf(
+			"plan artifact is %d bytes with no headings — refusing to resolve what "+
+				"looks like the turn's narration rather than a plan (plan submitted: %t, "+
+				"tools used: %v): %q",
+			len(strings.TrimSpace(plan)), resp.PlanSubmitted, resp.ToolsUsed,
+			firstLine(plan))
+	}
 	return b.resolveMarkdown(ctx, pc, resp.SessionID, plan)
+}
+
+// planProseFloor is the length above which unstructured text is accepted as a
+// plan. A plan with no heading at all is unusual but not impossible; a plan
+// that is also shorter than a paragraph is narration. The two observed
+// narration artifacts were 32 and 135 bytes, and every real plan produced by
+// this flow has been thousands, so the gap either side of this is wide.
+const planProseFloor = 400
+
+// looksLikePlan reports whether text is structurally a plan rather than the
+// sentence an agent said on its way to writing one. A markdown heading is
+// sufficient on its own — writing one is an act of structuring, which
+// narration does not do — and unstructured text passes on length alone.
+func looksLikePlan(plan string) bool {
+	for _, line := range strings.Split(plan, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			return true
+		}
+	}
+	return len(strings.TrimSpace(plan)) >= planProseFloor
+}
+
+// firstLine returns the first non-blank line, trimmed, for use in an error that
+// has to show what was rejected without reproducing a whole document.
+func firstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if t := strings.TrimSpace(line); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 // stepOpenBranch puts the worktree on this item's branch and records the commit

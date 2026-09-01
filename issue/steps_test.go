@@ -1371,15 +1371,23 @@ func refusal(what string) flow.ErrDisclosureRefused {
 // docs/disclosure.md: "A refusal is not a failure of the step. The text is
 // revised and re-offered." The revision costs one prompt, in the session the
 // agent is already holding — not an invocation, and not a re-derivation.
+// planned wraps a fixture so it passes stepPlan's structural check (#85), which
+// refuses an artifact that is both unstructured and short. These tests are
+// about the disclosure-revision loop, not about plan content, so their
+// fixtures stay as short and distinguishable as they were — the heading is the
+// only thing added, and the original text is preserved verbatim for the
+// assertions that match on it.
+func planned(s string) string { return "## Plan\n\n" + s }
+
 func TestRefusedProseIsRevisedAndPublished(t *testing.T) {
-	agent := &scriptedAgent{replies: []string{"the plan mentioning /home/someone/", "the plan, relative"}}
+	agent := &scriptedAgent{replies: []string{planned("the plan mentioning /home/someone/"), planned("the plan, relative")}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 	ctx.resolveErrs = []error{refusal(`an absolute home path names the machine's user`)}
 
 	if err := testBuilder(t).stepPlan(ctx); err != nil {
 		t.Fatalf("stepPlan: %v", err)
 	}
-	if !ctx.didResolve || ctx.resolved.Markdown != "the plan, relative" {
+	if !ctx.didResolve || ctx.resolved.Markdown != planned("the plan, relative") {
 		t.Errorf("resolved %q, want the REVISED text", ctx.resolved.Markdown)
 	}
 	if agent.calls != 2 {
@@ -1416,7 +1424,7 @@ func TestProseRefusedEveryTimeParksAndKeepsTheWork(t *testing.T) {
 	// Stands for the fragment a real refusal quotes back — "what it found and
 	// where", which is the disclosure itself.
 	const guardAnswer = "an absolute home path was found"
-	agent := &scriptedAgent{}
+	agent := &scriptedAgent{replies: []string{planned("the plan")}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 	ctx.resolveErrs = []error{
 		refusal(guardAnswer), refusal(guardAnswer),
@@ -1474,7 +1482,7 @@ func TestProseRefusedEveryTimeParksAndKeepsTheWork(t *testing.T) {
 // Anything that is not a refusal is a real failure of the write. Re-prompting
 // over it would ask an agent to revise text that was never examined.
 func TestANonRefusalFromResolveIsReturnedUnchanged(t *testing.T) {
-	agent := &scriptedAgent{}
+	agent := &scriptedAgent{replies: []string{planned("the plan")}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 	boom := errors.New("github: 502 bad gateway")
 	ctx.resolveErrs = []error{boom}
@@ -1497,7 +1505,7 @@ func TestANonRefusalFromResolveIsReturnedUnchanged(t *testing.T) {
 // An empty revision is not an empty artifact. Recording one would resolve the
 // step with nothing in it — the plan section of a pull request, blank.
 func TestAnEmptyRevisionIsAnError(t *testing.T) {
-	agent := &scriptedAgent{replies: []string{"the plan", "   "}}
+	agent := &scriptedAgent{replies: []string{planned("the plan"), "   "}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 	ctx.resolveErrs = []error{refusal("an absolute home path was found")}
 
@@ -1521,14 +1529,14 @@ func TestEveryProseStepRevisesARefusal(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			wt := resumedWorktree()
-			agent := &scriptedAgent{replies: []string{"first draft", "revised draft"}}
+			agent := &scriptedAgent{replies: []string{planned("first draft"), planned("revised draft")}}
 			ctx := ctxWithPlan(wt, agent)
 			ctx.resolveErrs = []error{refusal("an absolute home path was found")}
 
 			if err := step(testBuilder(t), ctx); err != nil {
 				t.Fatalf("%s: %v", name, err)
 			}
-			if !ctx.didResolve || ctx.resolved.Markdown != "revised draft" {
+			if !ctx.didResolve || ctx.resolved.Markdown != planned("revised draft") {
 				t.Errorf("resolved %q, want the revised text", ctx.resolved.Markdown)
 			}
 			if len(ctx.wipSaves) != 1 {
@@ -1543,14 +1551,14 @@ func TestEveryProseStepRevisesARefusal(t *testing.T) {
 // it. A round that re-sent the ORIGINAL text would ask for a change already
 // made, and the loop could only run out its rounds and park.
 func TestASecondRefusalRevisesTheRevision(t *testing.T) {
-	agent := &scriptedAgent{replies: []string{"draft one", "draft two", "draft three"}}
+	agent := &scriptedAgent{replies: []string{planned("draft one"), planned("draft two"), planned("draft three")}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 	ctx.resolveErrs = []error{refusal("first refusal"), refusal("second refusal")}
 
 	if err := testBuilder(t).stepPlan(ctx); err != nil {
 		t.Fatalf("stepPlan: %v", err)
 	}
-	if ctx.resolved.Markdown != "draft three" {
+	if ctx.resolved.Markdown != planned("draft three") {
 		t.Errorf("resolved %q, want the second revision", ctx.resolved.Markdown)
 	}
 	if agent.calls != 3 {
@@ -1583,7 +1591,7 @@ func TestASecondRefusalRevisesTheRevision(t *testing.T) {
 // revision possible — that is the session and the prompt. A store that cannot
 // take the text must cost the record and nothing else.
 func TestRefusedProseIsRevisedEvenWhenTheStashFails(t *testing.T) {
-	agent := &scriptedAgent{replies: []string{"the plan, absolute", "the plan, relative"}}
+	agent := &scriptedAgent{replies: []string{planned("the plan, absolute"), planned("the plan, relative")}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 	ctx.resolveErrs = []error{refusal("an absolute home path was found")}
 	ctx.wipSaveErr = errors.New("nowhere to write")
@@ -1591,7 +1599,7 @@ func TestRefusedProseIsRevisedEvenWhenTheStashFails(t *testing.T) {
 	if err := testBuilder(t).stepPlan(ctx); err != nil {
 		t.Fatalf("stepPlan: %v", err)
 	}
-	if ctx.resolved.Markdown != "the plan, relative" {
+	if ctx.resolved.Markdown != planned("the plan, relative") {
 		t.Errorf("resolved %q, want the revised text", ctx.resolved.Markdown)
 	}
 	var reported bool
@@ -1611,7 +1619,7 @@ func TestRefusedProseIsRevisedEvenWhenTheStashFails(t *testing.T) {
 // stopped here can no longer reach — it was never published.
 func TestARevisionThatCannotRunKeepsTheRefusedWork(t *testing.T) {
 	boom := errors.New("agent substrate is down")
-	agent := &scriptedAgent{replies: []string{"the plan"}, errs: []error{nil, boom}}
+	agent := &scriptedAgent{replies: []string{planned("the plan")}, errs: []error{nil, boom}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 	ctx.resolveErrs = []error{refusal("an absolute home path was found")}
 
@@ -1892,9 +1900,17 @@ func TestPlanStepRefusalParksBlocked(t *testing.T) {
 	}
 }
 
+// planBody is a minimally-structured real plan. The malformed-refusal tests
+// below pair it with a sentinel that must NOT be detected: what they assert is
+// that detectRefusal declines and the step then resolves normally. They
+// previously used the bare sentinel as the entire reply, which #85's structural
+// guard now refuses — correctly, since one line is not a plan. Pairing keeps
+// every original assertion and makes the fixture what a real turn looks like.
+const planBody = "## Plan\n\nReplace the fallback with a refusal."
+
 func TestPlanStepRefusalUnknownKindTreatedAsNormalPlan(t *testing.T) {
 	// An unknown kind is not a refusal — the plan resolves normally.
-	agent := &scriptedAgent{replies: []string{"PLAN-REFUSAL: wontfix Not worth doing"}}
+	agent := &scriptedAgent{replies: []string{planBody + "\n\nPLAN-REFUSAL: wontfix Not worth doing"}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
 	err := testBuilder(t).stepPlan(ctx)
@@ -1910,7 +1926,7 @@ func TestPlanStepRefusalUnknownKindTreatedAsNormalPlan(t *testing.T) {
 }
 
 func TestPlanStepRefusalNotAtColumnZeroTreatedAsNormalPlan(t *testing.T) {
-	agent := &scriptedAgent{replies: []string{"    PLAN-REFUSAL: already-done Something"}}
+	agent := &scriptedAgent{replies: []string{planBody + "\n\n    PLAN-REFUSAL: already-done Something"}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
 	err := testBuilder(t).stepPlan(ctx)
@@ -1939,7 +1955,7 @@ func TestPlanStepRefusalWithoutEvidenceBlockTreatedAsNormalPlan(t *testing.T) {
 		{"conflicts", "PLAN-REFUSAL: conflicts Normative doc forbids this"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			agent := &scriptedAgent{replies: []string{tc.reply}}
+			agent := &scriptedAgent{replies: []string{planBody + "\n\n" + tc.reply}}
 			ctx := ctxWithPlan(newFakeWorktree(), agent)
 
 			err := testBuilder(t).stepPlan(ctx)
@@ -2397,5 +2413,101 @@ func TestStageRepair_ThenCommitRepair(t *testing.T) {
 	}
 	if !ctx.didResolve {
 		t.Error("step did not resolve after both repairs succeeded")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The plan artifact must look like a plan, not like narration (#85).
+// ---------------------------------------------------------------------------
+
+// The two artifacts observed in the wild. Both are the sentence an agent said
+// on its way to producing a plan it then delegated to a subagent, and both are
+// non-empty, so every emptiness check between the turn and implement passed
+// them through.
+func TestPlanStepRefusesNarrationArtifact(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+	}{
+		{"observed on issue 85", "Now let me write the final plan."},
+		{
+			"observed on the preceding run",
+			"Now I have a thorough understanding of the code. Let me now launch a " +
+				"Plan agent to design the implementation, then write the final plan.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := &scriptedAgent{replies: []string{tc.text}}
+			ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+			err := testBuilder(t).stepPlan(ctx)
+			if err == nil {
+				t.Fatal("stepPlan resolved narration as a plan, want a refusal")
+			}
+			if ctx.didResolve {
+				t.Error("plan artifact resolved despite the refusal")
+			}
+			// The message has to show what was rejected: an operator reading
+			// "refused to resolve a plan" with no text cannot tell a defect in
+			// this check from a genuinely bad turn.
+			if !strings.Contains(err.Error(), "narration") {
+				t.Errorf("err = %v, want it to name what it suspected", err)
+			}
+			if !strings.Contains(err.Error(), tc.text[:20]) {
+				t.Errorf("err = %v, want it to quote the rejected text", err)
+			}
+		})
+	}
+}
+
+// A heading is sufficient on its own. Writing one is an act of structuring,
+// which narration does not do, so a short plan with a heading passes where the
+// same length of prose would not.
+func TestPlanStepAcceptsShortPlanWithHeading(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{"## Plan\n\nDelete the fallback."}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	if err := testBuilder(t).stepPlan(ctx); err != nil {
+		t.Fatalf("stepPlan: %v", err)
+	}
+	if !strings.Contains(ctx.resolved.Markdown, "Delete the fallback") {
+		t.Errorf("resolved %q, want the plan", ctx.resolved.Markdown)
+	}
+}
+
+// Unstructured text passes on length alone. A plan with no heading at all is
+// unusual but not impossible, and this check is a floor against narration, not
+// a judgement on formatting.
+func TestPlanStepAcceptsLongProsePlanWithoutHeading(t *testing.T) {
+	prose := strings.Repeat("The change replaces the fallback with a refusal. ", 12)
+	if len(prose) < planProseFloor {
+		t.Fatalf("test fixture is %d bytes, need >= %d", len(prose), planProseFloor)
+	}
+	agent := &scriptedAgent{replies: []string{prose}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	if err := testBuilder(t).stepPlan(ctx); err != nil {
+		t.Fatalf("stepPlan: %v", err)
+	}
+	if !ctx.didResolve {
+		t.Error("long headingless prose was refused, want it accepted")
+	}
+}
+
+// The submitted plan is what gets checked, not the narration alongside it. A
+// plan-mode turn carries both, and preferring PlanText is what makes the check
+// test the deliverable.
+func TestPlanStepChecksTheSubmittedPlanNotTheNarration(t *testing.T) {
+	agent := &scriptedAgent{
+		replies: []string{"Now let me write the final plan."},
+		plans:   []planReply{{submitted: true, text: "## Design\n\nWrap the call in ErrRefused."}},
+	}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	if err := testBuilder(t).stepPlan(ctx); err != nil {
+		t.Fatalf("stepPlan refused a submitted plan because the narration was short: %v", err)
+	}
+	if !strings.Contains(ctx.resolved.Markdown, "ErrRefused") {
+		t.Errorf("resolved %q, want the submitted plan", ctx.resolved.Markdown)
 	}
 }
