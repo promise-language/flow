@@ -756,7 +756,7 @@ func TestDetectRefusal(t *testing.T) {
 		{
 			"duplicate without evidence block",
 			"PLAN-REFUSAL: duplicate Covered by issue #12",
-			RefusalDuplicate, "Covered by issue #12", "Covered by issue #12", true,
+			"", "", "", false,
 		},
 		{
 			"conflicts with evidence",
@@ -785,8 +785,8 @@ func TestDetectRefusal(t *testing.T) {
 		},
 		{
 			"multiple sentinels — last one wins",
-			"PLAN-REFUSAL: duplicate Earlier guess\nPLAN-REFUSAL: already-done The real finding",
-			RefusalAlreadyDone, "The real finding", "The real finding", true,
+			"PLAN-REFUSAL: duplicate Earlier guess\n```\nitem #7 covers this\n```\nPLAN-REFUSAL: already-done The real finding\n```\ncommit def456 already landed the fix\n```",
+			RefusalAlreadyDone, "The real finding", "commit def456 already landed the fix", true,
 		},
 		{
 			"empty text",
@@ -810,8 +810,8 @@ func TestDetectRefusal(t *testing.T) {
 		},
 		{
 			"indented example ignored, real one honored",
-			"    PLAN-REFUSAL: already-done <placeholder>\nPLAN-REFUSAL: not-viable Real reason here",
-			RefusalNotViable, "Real reason here", "Real reason here", true,
+			"    PLAN-REFUSAL: already-done <placeholder>\nPLAN-REFUSAL: not-viable Real reason here\n```\nThe API has no extension point for this.\n```",
+			RefusalNotViable, "Real reason here", "The API has no extension point for this.", true,
 		},
 		{
 			"blank lines before fence tolerated",
@@ -825,8 +825,13 @@ func TestDetectRefusal(t *testing.T) {
 		},
 		{
 			"later invalid kind falls through to earlier valid",
-			"PLAN-REFUSAL: already-done Real finding\nPLAN-REFUSAL: wontfix Not a real kind",
-			RefusalAlreadyDone, "Real finding", "Real finding", true,
+			"PLAN-REFUSAL: already-done Real finding\n```\nline 42 of cmd/main.go already does this\n```\nPLAN-REFUSAL: wontfix Not a real kind",
+			RefusalAlreadyDone, "Real finding", "line 42 of cmd/main.go already does this", true,
+		},
+		{
+			"later sentinel without block falls through to earlier with block",
+			"PLAN-REFUSAL: duplicate Covered by #5\n```\nissue #5 tracks the same defect\n```\nPLAN-REFUSAL: already-done No block here",
+			RefusalDuplicate, "Covered by #5", "issue #5 tracks the same defect", true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1853,7 +1853,7 @@ func TestPlanStepRefusalParksBlocked(t *testing.T) {
 		wantKind RefusalKind
 	}{
 		{"already-done", "PLAN-REFUSAL: already-done The fix is in main\n```\ncommit abc123\n```", RefusalAlreadyDone},
-		{"duplicate", "PLAN-REFUSAL: duplicate Covered by #12", RefusalDuplicate},
+		{"duplicate", "PLAN-REFUSAL: duplicate Covered by #12\n```\nissue #12 tracks the same defect\n```", RefusalDuplicate},
 		{"conflicts", "PLAN-REFUSAL: conflicts Normative doc forbids this\n```\ndocs/design.md §3\n```", RefusalConflicts},
 		{"not-viable", "PLAN-REFUSAL: not-viable No extension point in the API\n```\nThe public API cannot be extended.\n```", RefusalNotViable},
 	} {
@@ -1928,7 +1928,7 @@ func TestPlanStepRefusalNotAtColumnZeroTreatedAsNormalPlan(t *testing.T) {
 func TestPlanStepRefusalWithPlanTextCombinesWIP(t *testing.T) {
 	// Agent submitted a plan AND refused: combined WIP saved.
 	agent := &scriptedAgent{
-		replies: []string{"PLAN-REFUSAL: already-done Already present in the tree"},
+		replies: []string{"PLAN-REFUSAL: already-done Already present in the tree\n```\ncommit def789 added the check\n```"},
 		plans:   []planReply{{submitted: true, text: "the submitted plan"}},
 	}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
@@ -1953,7 +1953,7 @@ func TestPlanStepRefusalWithPlanTextCombinesWIP(t *testing.T) {
 }
 
 func TestPlanStepRefusalWIPSaveFailureStillParks(t *testing.T) {
-	agent := &scriptedAgent{replies: []string{"PLAN-REFUSAL: duplicate Covered by #5"}}
+	agent := &scriptedAgent{replies: []string{"PLAN-REFUSAL: duplicate Covered by #5\n```\nissue #5 tracks this\n```"}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 	ctx.wipSaveErr = errors.New("disk full")
 
@@ -1984,7 +1984,7 @@ func TestPlanStepQuestionTakesPriorityOverRefusal(t *testing.T) {
 	// runAgent detects the question first and returns an error, so the refusal
 	// check in stepPlan never runs. Reordering the checks would silently
 	// change this — this test locks the priority.
-	reply := "PLAN-REFUSAL: already-done The fix is in main\nNEEDS-ANSWER: should we close this?"
+	reply := "PLAN-REFUSAL: already-done The fix is in main\n```\ncommit abc123 added the check\n```\nNEEDS-ANSWER: should we close this?"
 	agent := &scriptedAgent{replies: []string{reply}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
@@ -2003,7 +2003,7 @@ func TestPlanStepQuestionTakesPriorityOverRefusal(t *testing.T) {
 
 func TestPlanStepRefusalReasonIncludesSummary(t *testing.T) {
 	const summary = "The fix landed in commit abc123"
-	reply := "PLAN-REFUSAL: already-done " + summary
+	reply := "PLAN-REFUSAL: already-done " + summary + "\n```\ncommit abc123 added the check in cmd/main.go\n```"
 	agent := &scriptedAgent{replies: []string{reply}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
@@ -2019,7 +2019,7 @@ func TestPlanStepRefusalReasonIncludesSummary(t *testing.T) {
 func TestPlanStepRefusalWithoutPlanTextSavesBarLastText(t *testing.T) {
 	// No PlanText → WIP is resp.LastText alone, not wrapped in the combined
 	// "## Submitted plan" format.
-	reply := "PLAN-REFUSAL: duplicate Covered by #12"
+	reply := "PLAN-REFUSAL: duplicate Covered by #12\n```\nissue #12 tracks the same defect\n```"
 	agent := &scriptedAgent{replies: []string{reply}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
