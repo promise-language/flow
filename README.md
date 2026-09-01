@@ -37,7 +37,7 @@ Each `run-step` is a single forward tick: inspect state, pick the first
 pending lifecycle item, run its handler, persist the result, exit. Re-run
 until the flow reports `done`, parks, or asks a question.
 
-Full architecture spec: [docs/design.md](docs/design.md).
+Architecture docs: [docs/](docs/).
 
 ---
 
@@ -780,14 +780,14 @@ usage and exits 0 without running it.
 ├── pkg/backend/github/     GitHub-Issues backend: state-comment index, claim race-lock, worktree, signal polling, orphan-branch artifact spillover
 ├── examples/verify/        minimal one-step "run go test" flow
 ├── examples/issue/         contributor (fix) + maintainer (merge) flows on one issue
-└── docs/design.md          full architecture spec
+└── docs/                   architecture docs
 ```
 
 The reference **GitHub backend** stores all item state in comments (a single
 machine-managed state comment carrying a YAML index, plus one append-only
 comment per artifact), spills large artifacts to a `flow-artifacts` orphan
 branch, and races claims via a two-phase label lock — no server, no body
-read-modify-write. See [docs/design.md](docs/design.md) for the full schema.
+read-modify-write. See [docs/archive/design.md](docs/archive/design.md) for the storage schema (archived; no normative document covers it yet — see #22).
 
 ## License
 
