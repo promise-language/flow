@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/promise-language/flow"
 	"github.com/promise-language/flow/pkg/backend/fake"
+	"github.com/promise-language/flow/pkg/clistate"
 )
 
 // statusFlowLine is the source of the "flow:" status line. The key invariant
@@ -344,5 +349,183 @@ func TestStatusHuman_OmitsOverridesWhenEmpty(t *testing.T) {
 	}
 	if strings.Contains(env.out.String(), "overrides:") {
 		t.Errorf("empty overrides should not print an 'overrides:' line; got:\n%s", env.out.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Running-step state: status must report a live step as "running" with its
+// PID and executable, and must not report a dead process as running.
+// ---------------------------------------------------------------------------
+
+func TestStatusRunningStep_JSON(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+
+	env := newParkGrantEnv(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	// Write a running record for this test process's own PID/exe — it is
+	// alive by definition.
+	if err := clistate.SaveRunning(clistate.RunningRecord{
+		Item: "test#1",
+		Step: "plan",
+		PID:  os.Getpid(),
+		Exe:  exe,
+	}); err != nil {
+		t.Fatalf("SaveRunning: %v", err)
+	}
+	t.Cleanup(func() { _ = clistate.ClearRunning() })
+
+	env.out.Reset()
+	if code := env.app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+
+	var payload statusPayload
+	if err := json.Unmarshal(env.out.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	found := false
+	for _, s := range payload.Steps {
+		if s.ID == "plan" {
+			found = true
+			if s.State != stateRunning {
+				t.Errorf("step %q state = %q, want %q", s.ID, s.State, stateRunning)
+			}
+			if s.RunningPID != os.Getpid() {
+				t.Errorf("step %q running_pid = %d, want %d", s.ID, s.RunningPID, os.Getpid())
+			}
+			if s.RunningExe != exe {
+				t.Errorf("step %q running_exe = %q, want %q", s.ID, s.RunningExe, exe)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("step 'plan' not found in payload steps: %+v", payload.Steps)
+	}
+}
+
+func TestStatusRunningStep_Human(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+
+	env := newParkGrantEnv(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	if err := clistate.SaveRunning(clistate.RunningRecord{
+		Item: "test#1",
+		Step: "plan",
+		PID:  os.Getpid(),
+		Exe:  exe,
+	}); err != nil {
+		t.Fatalf("SaveRunning: %v", err)
+	}
+	t.Cleanup(func() { _ = clistate.ClearRunning() })
+
+	env.out.Reset()
+	if code := env.app.cmdStatus(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	out := env.out.String()
+	if !strings.Contains(out, "[>]") {
+		t.Errorf("human output missing [>] marker for running step:\n%s", out)
+	}
+	pidStr := fmt.Sprintf("pid %d", os.Getpid())
+	if !strings.Contains(out, pidStr) {
+		t.Errorf("human output missing pid annotation %q:\n%s", pidStr, out)
+	}
+}
+
+func TestStatusStaleRecord(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+
+	env := newParkGrantEnv(t)
+	// Start and wait for a subprocess to get a dead PID.
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	deadPID := cmd.Process.Pid
+	_ = cmd.Wait()
+
+	if err := clistate.SaveRunning(clistate.RunningRecord{
+		Item: "test#1",
+		Step: "plan",
+		PID:  deadPID,
+		Exe:  "/bin/true",
+	}); err != nil {
+		t.Fatalf("SaveRunning: %v", err)
+	}
+	t.Cleanup(func() { _ = clistate.ClearRunning() })
+
+	env.out.Reset()
+	if code := env.app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+
+	var payload statusPayload
+	if err := json.Unmarshal(env.out.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, s := range payload.Steps {
+		if s.ID == "plan" {
+			if s.State == stateRunning {
+				t.Errorf("step %q should be pending (dead PID), got running", s.ID)
+			}
+			if s.State != statePending {
+				t.Errorf("step %q state = %q, want %q", s.ID, s.State, statePending)
+			}
+		}
+	}
+}
+
+func TestStatusRunningDoesNotOverrideResolved(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+
+	env := newParkGrantEnv(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	// Resolve the "plan" artifact so its state is "resolved".
+	ctx := context.Background()
+	if err := env.be.ResolveArtifact(ctx, env.claim, "plan", flow.ArtifactBody{
+		Type:     flow.ArtifactMarkdown,
+		Markdown: "the plan",
+	}); err != nil {
+		t.Fatalf("ResolveArtifact: %v", err)
+	}
+	// Write a running record naming the now-resolved step.
+	if err := clistate.SaveRunning(clistate.RunningRecord{
+		Item: "test#1",
+		Step: "plan",
+		PID:  os.Getpid(),
+		Exe:  exe,
+	}); err != nil {
+		t.Fatalf("SaveRunning: %v", err)
+	}
+	t.Cleanup(func() { _ = clistate.ClearRunning() })
+
+	env.out.Reset()
+	if code := env.app.cmdStatus(ctx, []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+
+	var payload statusPayload
+	if err := json.Unmarshal(env.out.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, s := range payload.Steps {
+		if s.ID == "plan" {
+			if s.State != stateResolved {
+				t.Errorf("step %q state = %q, want %q — running must not override resolved", s.ID, s.State, stateResolved)
+			}
+		}
 	}
 }

@@ -79,9 +79,9 @@ func Save(c flow.Claim) error {
 	return nil
 }
 
-// Clear removes the worktree-local claim state: `active.json` and every
-// work-in-progress record (and the directory if empty). Idempotent — no error
-// if already absent.
+// Clear removes the worktree-local claim state: `active.json`, the running
+// record, and every work-in-progress record (and the directory if empty).
+// Idempotent — no error if already absent.
 //
 // The work tree goes first, and not only so `os.Remove(Dir())` can succeed
 // again: releasing a claim ends that reasoning's life. Prose left on disk after
@@ -89,6 +89,9 @@ func Save(c flow.Claim) error {
 func Clear() error {
 	if err := os.RemoveAll(WorkDir()); err != nil {
 		return fmt.Errorf("remove %s: %w", WorkDir(), err)
+	}
+	if err := ClearRunning(); err != nil {
+		return fmt.Errorf("clear running: %w", err)
 	}
 	if err := os.Remove(ActiveJSONPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove %s: %w", ActiveJSONPath(), err)
@@ -213,5 +216,71 @@ func ClearWork(item, step string) error {
 	// The per-item directory is worth nothing empty; failing to drop it is not
 	// worth failing a clear over.
 	_ = os.Remove(filepath.Dir(path))
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Running-step record.
+//
+// One step executes at a time in a given worktree (enforced by the claim).
+// The record lives at `.flow/running.json`, alongside `active.json`, and
+// carries enough to verify liveness: the PID and the executable path. status
+// reads it back and confirms the process is alive before reporting "running".
+// ---------------------------------------------------------------------------
+
+const runningJSONRel = "running.json"
+
+// RunningJSONPath returns the resolved path to running.json.
+func RunningJSONPath() string {
+	return filepath.Join(Dir(), runningJSONRel)
+}
+
+// RunningRecord identifies the process executing a step.
+type RunningRecord struct {
+	Item string `json:"item"`
+	Step string `json:"step"`
+	PID  int    `json:"pid"`
+	Exe  string `json:"exe"`
+}
+
+// SaveRunning writes the running record to `.flow/running.json`, creating the
+// directory if needed.
+func SaveRunning(rec RunningRecord) error {
+	if err := os.MkdirAll(Dir(), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", Dir(), err)
+	}
+	b, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal running record: %w", err)
+	}
+	if err := os.WriteFile(RunningJSONPath(), b, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", RunningJSONPath(), err)
+	}
+	return nil
+}
+
+// LoadRunning reads the running record from `.flow/running.json`. Returns
+// (nil, nil) when no record exists on disk.
+func LoadRunning() (*RunningRecord, error) {
+	b, err := os.ReadFile(RunningJSONPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read %s: %w", RunningJSONPath(), err)
+	}
+	var rec RunningRecord
+	if err := json.Unmarshal(b, &rec); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", RunningJSONPath(), err)
+	}
+	return &rec, nil
+}
+
+// ClearRunning removes the running record. Idempotent — no error if already
+// absent.
+func ClearRunning() error {
+	if err := os.Remove(RunningJSONPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove %s: %w", RunningJSONPath(), err)
+	}
 	return nil
 }
