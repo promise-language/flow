@@ -269,6 +269,43 @@ func TestCmdRun_PipedStdoutSelectsJSON(t *testing.T) {
 	}
 }
 
+// TestCmdRun_EnvHumanProducesHumanOutput: FLOW_OUTPUT=human selects human
+// mode — the env var was previously ignored by run-step entirely.
+func TestCmdRun_EnvHumanProducesHumanOutput(t *testing.T) {
+	t.Setenv(outputEnv, "human")
+	app, _, _ := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	// Use an os.Pipe so auto-detect would pick JSON — the env var must override.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	app.Out = w
+
+	if code := app.cmdRun(context.Background(), nil); code != 0 {
+		t.Fatalf("cmdRun = %d, want 0", code)
+	}
+	w.Close()
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	got := buf.String()
+
+	// Must be human (arrow format), not JSON.
+	if !strings.Contains(got, "→") {
+		t.Errorf("FLOW_OUTPUT=human output %q should be human format with arrow", got)
+	}
+	var probe json.RawMessage
+	if json.Unmarshal(buf.Bytes(), &probe) == nil {
+		t.Errorf("FLOW_OUTPUT=human output %q is valid JSON — env var did not take effect", got)
+	}
+}
+
 // TestCmdRun_MutuallyExclusiveFlags: --json --human together is a usage
 // error (exit 2).
 func TestCmdRun_MutuallyExclusiveFlags(t *testing.T) {
