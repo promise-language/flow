@@ -107,9 +107,10 @@ var validRefusalKinds = map[RefusalKind]bool{
 // RefusalSentinel is how an agent signals that the item should not be done.
 //
 // Structurally identical to AskSentinel: column-zero token, followed by a kind
-// and a summary on the same line, optionally followed by a fenced evidence
-// block. The same column-zero enforcement prevents an indented example in the
-// prompt from self-triggering.
+// and a summary on the same line, followed by a fenced evidence block — a
+// sentinel without one is skipped, enforcing the normative requirement that
+// every refusal carries checkable evidence. The same column-zero enforcement
+// prevents an indented example in the prompt from self-triggering.
 //
 // The format after the colon is: <kind> <summary>
 // where kind is the first whitespace-delimited token and must be one of the
@@ -121,7 +122,9 @@ const RefusalSentinel = "PLAN-REFUSAL:"
 //
 // It scans from the END, same rationale as detectQuestion: the operative line
 // is the agent's last word on the matter. A line whose kind is not in the
-// closed set is skipped — this is the "closed set" enforcement.
+// closed set is skipped — this is the "closed set" enforcement. A valid kind
+// and summary without a fenced evidence block is also skipped: the normative
+// document requires every refusal to carry evidence a person can check.
 func detectRefusal(lastText string) (kind RefusalKind, summary string, evidence string, ok bool) {
 	lines := strings.Split(lastText, "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -148,7 +151,7 @@ func detectRefusal(lastText string) (kind RefusalKind, summary string, evidence 
 		}
 		evidence = fencedBlockAfter(lines[i+1:])
 		if evidence == "" {
-			evidence = summary
+			continue // no evidence block — not a refusal
 		}
 		return kind, summary, evidence, true
 	}
