@@ -99,6 +99,10 @@ const (
 	// PromptCommitRepair is the repair prompt issued when a pre-commit hook
 	// refuses a file. PromptContext.CommitRefusal carries the hook's stderr.
 	PromptCommitRepair PromptID = "commit:repair"
+
+	// PromptStageRepair is the repair prompt issued when staging (git add)
+	// refuses. PromptContext.StageRefusal carries the error message.
+	PromptStageRepair PromptID = "stage:repair"
 )
 
 // Role is the capability the authenticated principal holds on the repository,
