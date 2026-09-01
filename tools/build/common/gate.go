@@ -66,6 +66,13 @@ func Quantity(name string, v float64, unit string) Metric {
 	return Metric{Name: name, Type: MetricFloat, Float: v, Unit: unit}
 }
 
+// Size is a measurement of how much, in whole units of it. Neither of the two
+// above fits: Count takes an int and carries no unit, and Quantity is a float.
+// Bytes are whole, carry a unit, and outrun what an int holds on a 32-bit host.
+func Size(name string, n int64, unit string) Metric {
+	return Metric{Name: name, Type: MetricInt, Int: n, Unit: unit}
+}
+
 // Number is the value as a float, for comparison against a threshold. Widening
 // is safe HERE and nowhere else: the judging layer compares, it does not store,
 // so nothing downstream can mistake the widened form for what was measured.
@@ -188,6 +195,14 @@ var gates = map[string]gateDef{
 	"integration": {
 		summary: "everything that must hold before a change may land",
 		parts:   []string{"formatted", "builds", "checked", "tested"},
+	},
+	// fit is the one gate here whose subject is not the code: it measures the
+	// machine, before work is given to it. It is deliberately NOT a part of
+	// integration — a machine that cannot build is not a change that may not
+	// land. See docs/environment.md.
+	"fit": {
+		summary: "space where this project's work writes",
+		measure: measureFit,
 	},
 }
 
@@ -400,6 +415,80 @@ func measureCovered(repoRoot string) ([]Metric, string, error) {
 		incomplete = "some packages failed their tests, so their statements were only partly exercised"
 	}
 	return []Metric{Quantity("statement_coverage", pct, "percent")}, incomplete, nil
+}
+
+// measureFit reports the space available where this project's work writes.
+//
+// It reports bytes and stops. How much is enough is a property of this
+// project's build, held by the judging layer: "is there enough disk" reads like
+// a yes/no question and is not one, and a gate that answered it would be the
+// threshold sitting inside the party under measurement.
+//
+// Two filesystems, because they are two requirements and are often not one
+// device: the worktree is where the change is written, and the build cache is
+// where the toolchain writes what it reuses. Both are reported every run even
+// when they resolve to the same filesystem — an envelope whose shape varied by
+// host is one no threshold can be written against.
+func measureFit(repoRoot string) ([]Metric, string, error) {
+	free, err := freeBytesNear(repoRoot)
+	if err != nil {
+		return nil, "", fmt.Errorf("free space at %s: %w", repoRoot, err)
+	}
+	metrics := []Metric{Size("worktree_free_bytes", free, "bytes")}
+
+	// `go env GOCACHE` is the only authoritative answer to where the build
+	// cache is. Recomputing it here would be a second copy of the toolchain's
+	// own resolution, wrong on every machine that configured it.
+	out, err := gateOutput(repoRoot, "go", "env", "GOCACHE")
+	cache := strings.TrimSpace(out)
+	if err != nil || cache == "" {
+		// Named rather than omitted. One filesystem of two IS a run that
+		// measured less than a full one, and an incomplete run is never a
+		// pass — which is the right answer here: a machine whose toolchain
+		// cannot say where it writes is not one this project's work runs on.
+		return metrics, "the build cache location is unknown, so only the " +
+			"worktree filesystem was measured: " + gocacheReason(out, err), nil
+	}
+	free, err = freeBytesNear(cache)
+	if err != nil {
+		return nil, "", fmt.Errorf("free space at %s: %w", cache, err)
+	}
+	return append(metrics, Size("build_cache_free_bytes", free, "bytes")), "", nil
+}
+
+// gocacheReason accounts for a `go env GOCACHE` that did not answer.
+//
+// Never empty, which is the whole of it. An unfit machine is reported with the
+// measurement that established it, and a reason that trails off after a colon
+// leaves an operator to reproduce the condition on the machine that is already
+// the problem. The child's own output is preferred because it says what the
+// toolchain objected to; a child that could not be started produced none, and
+// there the error is the entire account.
+func gocacheReason(out string, err error) string {
+	if line := firstLine(out); line != "" {
+		return line
+	}
+	if err != nil {
+		return err.Error()
+	}
+	return "`go env GOCACHE` printed nothing"
+}
+
+// freeBytesNear reports free space for path, or for the nearest ancestor that
+// exists. A build cache that has never been written has no directory yet, and
+// `fit` runs on exactly that machine — the fresh one, before work is given — so
+// a path that is not there yet is the ordinary case rather than an error.
+func freeBytesNear(path string) (int64, error) {
+	for p := filepath.Clean(path); ; {
+		if Exists(p) {
+			return freeBytes(p)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return 0, fmt.Errorf("nothing on the path %s exists", path)
+		}
+		p = parent
+	}
 }
 
 // gateOutput runs a child and returns its combined output as a string.
