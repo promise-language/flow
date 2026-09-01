@@ -336,8 +336,27 @@ func (b *builder) recordStepWork(ctx flow.StepCtx, wt flow.Worktree, label, msg 
 // task from the producing step — "delete a file the agent may not have
 // created."
 func (b *builder) commitWithRepair(ctx flow.StepCtx, wt flow.Worktree, msg string) error {
-	if err := wt.Stage(ctx.Context()); err != nil {
-		return err
+	firstStageErr := wt.Stage(ctx.Context())
+	if firstStageErr != nil {
+		ctx.Notify("", fmt.Sprintf("staging refused: %s", firstStageErr))
+
+		pc := PromptContext{StageRefusal: firstStageErr.Error()}
+		prompt, err := renderPrompt(b.cfg, PromptStageRepair, pc)
+		if err != nil {
+			return err
+		}
+		_, err = ctx.Agent().Run(ctx.Context(), flow.AgentRequest{
+			Prompt:         prompt,
+			PermissionMode: "acceptEdits",
+		})
+		if err != nil {
+			return err // infrastructure failure, NOT ErrRefused
+		}
+
+		if secondStageErr := wt.Stage(ctx.Context()); secondStageErr != nil {
+			return fmt.Errorf("staging refused twice — first: %s — second: %s: %w",
+				firstStageErr, secondStageErr, flow.ErrRefused)
+		}
 	}
 	firstErr := wt.Commit(ctx.Context(), msg)
 	if firstErr == nil {

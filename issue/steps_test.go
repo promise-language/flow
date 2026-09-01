@@ -42,6 +42,9 @@ type fakeWorktree struct {
 	// means success for that call. When exhausted, Commit falls back to the
 	// noCommit flag as before.
 	commitErrs []error
+	// stageErrs scripts what Stage returns on successive calls. A nil entry
+	// means success for that call. When exhausted, Stage returns nil.
+	stageErrs []error
 	// dirty models work appearing in the tree AFTER a commit — what the review
 	// and coverage steps do. A Commit that lands clears it, as git does; a
 	// Commit that lands nothing (noCommit) leaves it, as git also does. It also
@@ -132,8 +135,18 @@ func (w *fakeWorktree) Commit(_ context.Context, msg string) error {
 	w.dirty = nil
 	return nil
 }
-func (w *fakeWorktree) Stage(context.Context) error { w.staged = true; return nil }
-func (w *fakeWorktree) Push(context.Context) error  { w.pushed = true; return nil }
+func (w *fakeWorktree) Stage(context.Context) error {
+	w.staged = true
+	if len(w.stageErrs) > 0 {
+		err := w.stageErrs[0]
+		w.stageErrs = w.stageErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (w *fakeWorktree) Push(context.Context) error { w.pushed = true; return nil }
 func (w *fakeWorktree) Verify(context.Context) error {
 	w.validates++
 	if w.validates > w.verifyAfter {
@@ -2051,6 +2064,9 @@ func TestRunAgentReturnsResponseAlongsideQuestionError(t *testing.T) {
 // Commit-refusal repair (#72).
 // ---------------------------------------------------------------------------
 
+// stageErr is the shape a real staging refusal takes.
+var stageErr = errors.New(`git add -A (excluding .flow): exit status 1 (The following paths are ignored by one of your .gitignore files: .flow)`)
+
 // hookErr is the shape a real pre-commit hook refusal takes. The message names
 // the offending file and the remedy — which is the point: the repair prompt
 // surfaces it verbatim.
@@ -2185,5 +2201,139 @@ func TestCommitRepair_AgentFailurePropagates(t *testing.T) {
 	}
 	if !errors.Is(err, boom) {
 		t.Errorf("err = %v, want the agent's own error propagated", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Stage repair — the same contract as commit repair, applied to git-add.
+// ---------------------------------------------------------------------------
+
+// Staging fails, agent repairs (deletes the file), re-stage succeeds, commit
+// succeeds — the step resolves normally.
+func TestStageRepair_Succeeds(t *testing.T) {
+	wt := resumedWorktree()
+	wt.stageErrs = []error{stageErr, nil}
+	agent := &scriptedAgent{replies: []string{"done", "deleted the file"}}
+	ctx := ctxWithPlan(wt, agent)
+
+	if err := testBuilder(t).stepImplement(ctx); err != nil {
+		t.Fatalf("stepImplement: %v", err)
+	}
+	// The agent was called twice: once for implement, once for stage repair.
+	if agent.calls != 2 {
+		t.Errorf("agent ran %d times, want 2 (implement + stage repair)", agent.calls)
+	}
+	// The repair prompt must carry the staging error message.
+	if !strings.Contains(agent.prompts[1], "ignored by one of your .gitignore") {
+		t.Errorf("repair prompt = %q, want the staging error", agent.prompts[1])
+	}
+	// The repair agent must have acceptEdits permission to delete files.
+	if agent.reqs[1].PermissionMode != "acceptEdits" {
+		t.Errorf("repair PermissionMode = %q, want acceptEdits", agent.reqs[1].PermissionMode)
+	}
+	// The step should resolve normally.
+	if !ctx.didResolve {
+		t.Error("step did not resolve after a successful stage repair")
+	}
+	// The orchestrator must see a notification.
+	found := false
+	for _, n := range ctx.notices {
+		if strings.Contains(n, "staging refused") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("notices = %v, want one containing the staging refusal", ctx.notices)
+	}
+}
+
+// Both Stage calls fail — the error wraps flow.ErrRefused so the orchestrator
+// parks at zero cost.
+func TestStageRepair_SecondRefusalParks(t *testing.T) {
+	wt := resumedWorktree()
+	secondStageErr := errors.New("git add: still refusing — .flow is ignored")
+	wt.stageErrs = []error{stageErr, secondStageErr}
+	agent := &scriptedAgent{replies: []string{"done", "deleted the file"}}
+	ctx := ctxWithPlan(wt, agent)
+
+	err := testBuilder(t).stepImplement(ctx)
+	if err == nil {
+		t.Fatal("want an error wrapping ErrRefused")
+	}
+	if !errors.Is(err, flow.ErrRefused) {
+		t.Errorf("err = %v, want it to wrap flow.ErrRefused", err)
+	}
+	if !strings.Contains(err.Error(), "staging refused twice") {
+		t.Errorf("err = %v, want it to say staging was refused twice", err)
+	}
+	// Both error messages must survive.
+	if !strings.Contains(err.Error(), stageErr.Error()) {
+		t.Errorf("err = %v, want the first staging message preserved", err)
+	}
+	if !strings.Contains(err.Error(), secondStageErr.Error()) {
+		t.Errorf("err = %v, want the second staging message preserved", err)
+	}
+}
+
+// When the repair agent itself errors (substrate down), the error propagates
+// as-is — NOT as ErrRefused.
+func TestStageRepair_AgentFailurePropagates(t *testing.T) {
+	wt := resumedWorktree()
+	boom := errors.New("substrate is down")
+	wt.stageErrs = []error{stageErr}
+	agent := &scriptedAgent{replies: []string{"done"}, errs: []error{nil, boom}}
+	ctx := ctxWithPlan(wt, agent)
+
+	err := testBuilder(t).stepImplement(ctx)
+	if err == nil {
+		t.Fatal("want an error from the agent")
+	}
+	if errors.Is(err, flow.ErrRefused) {
+		t.Errorf("err wraps ErrRefused — an agent failure is not a deterministic refusal: %v", err)
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("err = %v, want the agent's own error propagated", err)
+	}
+}
+
+// The rendered prompt must carry the staging error verbatim.
+func TestStageRepair_PromptCarriesStageMessage(t *testing.T) {
+	pc := PromptContext{StageRefusal: "git add: The following paths are ignored: .flow"}
+	got, err := renderPrompt(Config{}, PromptStageRepair, pc)
+	if err != nil {
+		t.Fatalf("renderPrompt: %v", err)
+	}
+	if !strings.Contains(got, "git add: The following paths are ignored: .flow") {
+		t.Errorf("prompt does not carry the staging error: %q", got)
+	}
+	// It must name deletion as the only move.
+	if !strings.Contains(got, "Delete") {
+		t.Errorf("prompt does not name deletion: %q", got)
+	}
+	// It must prohibit .gitignore — but NOT unstage (nothing is staged yet).
+	if !strings.Contains(got, ".gitignore") {
+		t.Errorf("prompt does not prohibit .gitignore: %q", got)
+	}
+}
+
+// The same repair path through recordOutstanding (the stepOpenPR commit path).
+func TestStageRepair_RecordOutstanding(t *testing.T) {
+	wt := resumedWorktree()
+	wt.commits = 1              // implement already committed
+	wt.dirty = []byte("diff\n") // review/coverage changed something
+	wt.stageErrs = []error{stageErr, nil}
+	agent := &scriptedAgent{replies: []string{"deleted the file"}}
+	ctx := ctxWithPlan(wt, agent)
+
+	if err := testBuilder(t).stepOpenPR(ctx); err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	// The repair agent was called.
+	if agent.calls != 1 {
+		t.Errorf("agent ran %d times, want 1 (repair only, no agent in stepOpenPR)", agent.calls)
+	}
+	if !strings.Contains(agent.prompts[0], "ignored by one of your .gitignore") {
+		t.Errorf("repair prompt = %q, want the staging error", agent.prompts[0])
 	}
 }
