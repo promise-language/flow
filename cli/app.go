@@ -343,7 +343,7 @@ usage:
   %[1]s release                      drop the claim
   %[1]s reseed [--force]              clear seed state (artifacts, budgets, park) on the active claim
 
-status, list, grant, and resolve print human-readable text on a terminal and
+status, list, grant, run-step, and resolve print human-readable text on a terminal and
 JSON when piped or redirected; --json / --human (or FLOW_OUTPUT=json|human)
 force one. resolve's human text is its progress narration on stderr, which it
 prints in both modes — in human mode it writes nothing to stdout at all.`, bin)

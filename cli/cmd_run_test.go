@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/promise-language/flow"
@@ -108,16 +111,20 @@ func TestCmdRun_TakeoverFailureDoesNotBlockStep(t *testing.T) {
 	}
 }
 
-// run-step is a one-shot invocation, not a stream: it emits its single
-// InvocationResult on stdout UNCONDITIONALLY. resolve gained --json/--human
-// and gates its stream on the mode; run-step deliberately did not, and the
-// pressure to "finish the convention" is exactly what would silently break
-// every tool that parses this one line. FLOW_OUTPUT=human is the strongest
-// form of the ask — if any mode gate ever appears here, this fails.
-func TestCmdRun_EmitsJSONRegardlessOfOutputMode(t *testing.T) {
-	for _, mode := range []string{"", "human", "json"} {
-		t.Run("FLOW_OUTPUT="+mode, func(t *testing.T) {
-			t.Setenv(outputEnv, mode)
+// TestCmdRun_JSONModeCompactOutput: --json and FLOW_OUTPUT=json both produce
+// compact single-line JSON — byte-identical to the pre-change unconditional
+// output. Verifies the machine contract is preserved.
+func TestCmdRun_JSONModeCompactOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  string
+	}{
+		{"flag", []string{"--json"}, ""},
+		{"env", nil, "json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(outputEnv, tc.env)
 			app, _, _ := testApp(t, func(f *flow.Flow) {
 				f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 					return ctx.ResolveMarkdown("the plan")
@@ -126,16 +133,153 @@ func TestCmdRun_EmitsJSONRegardlessOfOutputMode(t *testing.T) {
 			out := &bytes.Buffer{}
 			app.Out = out
 
-			if code := app.cmdRun(context.Background(), nil); code != 0 {
+			if code := app.cmdRun(context.Background(), tc.args); code != 0 {
 				t.Fatalf("cmdRun = %d, want 0", code)
 			}
+			// Must be valid JSON on a single line (compact, not indented).
+			raw := out.Bytes()
+			if bytes.Count(raw, []byte("\n")) != 1 {
+				t.Fatalf("expected exactly one line; got %q", raw)
+			}
 			var res flow.InvocationResult
-			if err := json.Unmarshal(out.Bytes(), &res); err != nil {
-				t.Fatalf("stdout %q is not an InvocationResult: %v", out.String(), err)
+			if err := json.Unmarshal(raw, &res); err != nil {
+				t.Fatalf("stdout %q is not an InvocationResult: %v", raw, err)
 			}
 			if res.Step != "write plan" || res.Status != "done" {
 				t.Errorf("result = %+v, want step %q status done", res, "write plan")
 			}
 		})
+	}
+}
+
+// TestCmdRun_HumanModeOneLine: --human renders a one-line summary on stdout,
+// not raw JSON.
+func TestCmdRun_HumanModeOneLine(t *testing.T) {
+	app, _, _ := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	out := &bytes.Buffer{}
+	app.Out = out
+
+	if code := app.cmdRun(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdRun = %d, want 0", code)
+	}
+	got := out.String()
+	if !strings.Contains(got, "write plan") || !strings.Contains(got, "done") {
+		t.Errorf("human output %q should contain step name and status", got)
+	}
+	if !strings.Contains(got, "→") {
+		t.Errorf("human output %q should contain arrow separator", got)
+	}
+	// Must NOT be valid JSON — that would mean the mode gate did nothing.
+	var probe json.RawMessage
+	if json.Unmarshal([]byte(got), &probe) == nil {
+		t.Errorf("human output %q is valid JSON — mode gate did not take effect", got)
+	}
+}
+
+// TestCmdRun_HumanModeWithReason: when a step produces a reason (e.g.
+// blocked), the reason appears in the human one-liner.
+func TestCmdRun_HumanModeWithReason(t *testing.T) {
+	app, _, _ := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	// Use a preflight that returns ErrBlocked to produce a reason.
+	app.Preflight = func(ctx context.Context, state *flow.ItemState) error {
+		return fmt.Errorf("answer needed: %w", flow.ErrBlocked)
+	}
+
+	out := &bytes.Buffer{}
+	app.Out = out
+
+	// blocked exits 1, but we care about the output, not the exit code.
+	app.cmdRun(context.Background(), []string{"--human"})
+
+	got := out.String()
+	if !strings.Contains(got, "answer needed") {
+		t.Errorf("human output %q should contain the reason", got)
+	}
+	if !strings.Contains(got, "→") || !strings.Contains(got, "blocked") {
+		t.Errorf("human output %q should contain arrow and status", got)
+	}
+}
+
+// TestCmdRun_AutoDetectsHuman: with no flags and no FLOW_OUTPUT, a
+// bytes.Buffer as app.Out (which resolveOutput treats as human) produces
+// human output. Validates rule 3 (terminal detection) applies.
+func TestCmdRun_AutoDetectsHuman(t *testing.T) {
+	t.Setenv(outputEnv, "")
+	app, _, _ := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	out := &bytes.Buffer{}
+	app.Out = out
+
+	if code := app.cmdRun(context.Background(), nil); code != 0 {
+		t.Fatalf("cmdRun = %d, want 0", code)
+	}
+	// bytes.Buffer → resolveOutput → human. Must NOT be valid JSON.
+	var probe json.RawMessage
+	if json.Unmarshal(out.Bytes(), &probe) == nil {
+		t.Errorf("auto-detected output %q is valid JSON; expected human (bytes.Buffer is not a terminal)", out.String())
+	}
+	if !strings.Contains(out.String(), "→") {
+		t.Errorf("auto-detected output %q should be human format with arrow", out.String())
+	}
+}
+
+// TestCmdRun_PipedStdoutSelectsJSON: with an *os.File pipe as stdout
+// (not a terminal), auto-detection selects JSON mode.
+func TestCmdRun_PipedStdoutSelectsJSON(t *testing.T) {
+	t.Setenv(outputEnv, "")
+	app, _, _ := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	app.Out = w
+
+	if code := app.cmdRun(context.Background(), nil); code != 0 {
+		t.Fatalf("cmdRun = %d, want 0", code)
+	}
+	w.Close()
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+
+	var res flow.InvocationResult
+	if err := json.Unmarshal(buf.Bytes(), &res); err != nil {
+		t.Fatalf("piped stdout %q is not valid JSON: %v", buf.String(), err)
+	}
+	if res.Step != "write plan" || res.Status != "done" {
+		t.Errorf("result = %+v, want step %q status done", res, "write plan")
+	}
+}
+
+// TestCmdRun_MutuallyExclusiveFlags: --json --human together is a usage
+// error (exit 2).
+func TestCmdRun_MutuallyExclusiveFlags(t *testing.T) {
+	app, _, _ := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	code := app.cmdRun(context.Background(), []string{"--json", "--human"})
+	if code != 2 {
+		t.Errorf("cmdRun(--json --human) = %d, want 2", code)
 	}
 }
