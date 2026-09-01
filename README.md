@@ -357,7 +357,7 @@ Every step is capped on four axes; exhausting any one parks the item with
 |---|---|---|---|
 | invocations | `3` | `MaxInvocations(n)` | SDK pre-dispatch |
 | prompts / invocation | `1` | `MaxPromptsPerInvocation(n)` | metered `Agent` wrapper |
-| cost (USD) | `$10` | `MaxCostUSD(d)` | pre-dispatch + per `Agent.Run` |
+| cost (USD) | `$10` | `MaxCostUSD(d)` | pre-dispatch + per `Agent.Run` + in-turn via `--max-budget-usd` |
 | timeout | `30m` | `Timeout(d)` | `context.WithTimeout` |
 
 ```go

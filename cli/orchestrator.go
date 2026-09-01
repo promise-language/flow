@@ -840,6 +840,13 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 			Cap:  fmt.Sprintf("$%.2f", art.GrantedCostUSD),
 		}
 	}
+	// Hand the turn the headroom left in the grant, so the substrate can stop
+	// it AT the cap. Without this the grant only bounds when a step stops
+	// being dispatched: a turn that starts inside the grant can spend
+	// whatever it spends, and the overrun is discovered one whole turn late.
+	if art.GrantedCostUSD > 0 {
+		req.MaxCostUSD = art.GrantedCostUSD - art.CostUSDSpent
+	}
 	if err := m.backend.BumpPrompts(ctx, m.claim, string(li.ArtifactId)); err != nil {
 		return nil, fmt.Errorf("bump prompts: %w", err)
 	}
@@ -856,6 +863,20 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 		// Update local mirror so subsequent calls see fresh cost.
 		art.CostUSDSpent += resp.CostUSD
 		m.stepCtx.state.Artifacts[li.ArtifactId] = art
+	}
+	// A turn the substrate stopped at the cap we set IS this step reaching
+	// its cost cap, so it parks on cost through the same sentinel the
+	// pre-prompt gate returns — one park path, one axis snapshot, and the
+	// AddCost above has already put the true spend on the mirror the
+	// snapshot reads. Without a cost grant the cap was never ours to claim:
+	// fall through to the ordinary agent failure.
+	if err == nil && resp != nil && resp.Failure != nil &&
+		resp.Failure.Kind == flow.FailureCostCap && art.GrantedCostUSD > 0 {
+		return resp, flow.ErrBudgetExhausted{
+			Step: li.Result(),
+			Axis: flow.AxisCost,
+			Cap:  fmt.Sprintf("$%.2f", art.GrantedCostUSD),
+		}
 	}
 	// Surface AgentResponse.Failure through the error return so the
 	// canonical "if err != nil { return err }" pattern in handlers picks
