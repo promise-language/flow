@@ -436,18 +436,14 @@ func measureFit(repoRoot string) ([]Metric, string, error) {
 	}
 	metrics := []Metric{Size("worktree_free_bytes", free, "bytes")}
 
-	// `go env GOCACHE` is the only authoritative answer to where the build
-	// cache is. Recomputing it here would be a second copy of the toolchain's
-	// own resolution, wrong on every machine that configured it.
-	out, err := gateOutput(repoRoot, "go", "env", "GOCACHE")
-	cache := strings.TrimSpace(out)
-	if err != nil || cache == "" {
+	cache, why := buildCache(repoRoot)
+	if why != "" {
 		// Named rather than omitted. One filesystem of two IS a run that
 		// measured less than a full one, and an incomplete run is never a
 		// pass — which is the right answer here: a machine whose toolchain
 		// cannot say where it writes is not one this project's work runs on.
 		return metrics, "the build cache location is unknown, so only the " +
-			"worktree filesystem was measured: " + gocacheReason(out, err), nil
+			"worktree filesystem was measured: " + why, nil
 	}
 	free, err = freeBytesNear(cache)
 	if err != nil {
@@ -456,16 +452,45 @@ func measureFit(repoRoot string) ([]Metric, string, error) {
 	return append(metrics, Size("build_cache_free_bytes", free, "bytes")), "", nil
 }
 
+// buildCache asks the toolchain where it writes what it reuses, and returns
+// either the path or the reason there is none to report. `go env GOCACHE` is
+// the only authoritative answer: recomputing it here would be a second copy of
+// the toolchain's own resolution, wrong on every machine that configured it.
+//
+// The answer is read from stdout ALONE, which is why this does not go through
+// gateOutput. The counting gates read lines, where a warning on stderr is one
+// more line matching nothing; a path read from the combined stream is a path
+// with the warning glued to the front of it. `go env` writes its diagnostics
+// and its toolchain-download notices to stderr and the value to stdout, and the
+// concatenation names nothing — which freeBytesNear then walks up to the
+// process's own directory and reports as the build cache, at full size, with no
+// incomplete to say the number is about somewhere else.
+func buildCache(repoRoot string) (path, why string) {
+	stdout, stderr, err := gateValue(repoRoot, "go", "env", "GOCACHE")
+	cache := strings.TrimSpace(stdout)
+	if err != nil || cache == "" {
+		return "", gocacheReason(stderr, err)
+	}
+	// An answer that is not an absolute path is not a location. freeBytesNear
+	// walks up to the nearest filesystem it can find, and a relative answer
+	// walks up to the process's own directory — a real number about a
+	// filesystem nobody asked about, which is worse than no number at all.
+	if !filepath.IsAbs(cache) {
+		return "", fmt.Sprintf("`go env GOCACHE` answered %q, which is not an absolute path", cache)
+	}
+	return cache, ""
+}
+
 // gocacheReason accounts for a `go env GOCACHE` that did not answer.
 //
 // Never empty, which is the whole of it. An unfit machine is reported with the
 // measurement that established it, and a reason that trails off after a colon
 // leaves an operator to reproduce the condition on the machine that is already
-// the problem. The child's own output is preferred because it says what the
+// the problem. The child's own stderr is preferred because it says what the
 // toolchain objected to; a child that could not be started produced none, and
 // there the error is the entire account.
-func gocacheReason(out string, err error) string {
-	if line := firstLine(out); line != "" {
+func gocacheReason(stderr string, err error) string {
+	if line := firstLine(strings.TrimSpace(stderr)); line != "" {
 		return line
 	}
 	if err != nil {
@@ -506,6 +531,24 @@ func gateOutput(dir, name string, args ...string) (string, error) {
 	cmd.Stderr = &buf
 	err := cmd.Run()
 	return buf.String(), err
+}
+
+// gateValue runs a child whose output is a VALUE, and keeps its two streams
+// apart.
+//
+// Both are still captured, for gateOutput's reason: our stdout carries the
+// envelope and nothing else. What differs is that the caller can tell the
+// answer from everything said around it — see buildCache, where mixing them
+// turns a warning into part of a path.
+func gateValue(dir, name string, args ...string) (stdout, stderr string, err error) {
+	fmt.Fprintf(os.Stderr, "==> %s %s\n", name, strings.Join(args, " "))
+	var out, errs bytes.Buffer
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Stdout = &out
+	cmd.Stderr = &errs
+	err = cmd.Run()
+	return out.String(), errs.String(), err
 }
 
 func countLines(s string) int {

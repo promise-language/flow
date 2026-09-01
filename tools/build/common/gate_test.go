@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -253,15 +254,99 @@ func TestFitReportsIncompleteWhenTheBuildCacheIsUnknown(t *testing.T) {
 	}
 }
 
+// A toolchain that says something on stderr and names no cache on stdout has
+// not answered, however it exited. What it said reaches the incomplete, and
+// nothing else is reported.
+//
+// The exit-0 case is the one that pins the two streams apart. Read together,
+// the diagnostic IS the answer: it becomes the cache path, freeBytesNear walks
+// it up to the process's own directory, and the run reports a real number about
+// a filesystem nobody asked about — at full size, complete, and wrong.
+func TestFitDoesNotReadTheToolchainsDiagnosticsAsAPath(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		script string
+	}{
+		{"it objected and gave up", `echo 'go: parsing GOFLAGS: non-flag "x"' >&2; exit 2`},
+		{"it warned and answered nothing", `echo 'go: parsing GOFLAGS: non-flag "x"' >&2; echo ""`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fakeGo(t, c.script)
+			metrics, incomplete, err := measureFit(t.TempDir())
+			if err != nil {
+				t.Fatalf("measureFit gave up entirely; the worktree was still measurable: %v", err)
+			}
+			if len(metrics) != 1 || metrics[0].Name != "worktree_free_bytes" {
+				t.Errorf("metrics = %+v, want only the worktree measurement — the toolchain named no cache", metrics)
+			}
+			if !strings.Contains(incomplete, `non-flag "x"`) {
+				t.Errorf("incomplete = %q, want it to carry what the toolchain objected to", incomplete)
+			}
+		})
+	}
+}
+
+// What the toolchain says AROUND its answer is not part of the answer. A
+// machine switching Go versions prints `go: downloading go1.x` to stderr before
+// it prints the path to stdout, and the two read together make a path that
+// names nothing.
+func TestBuildCacheIsTheAnswerAndNotWhatWasSaidAroundIt(t *testing.T) {
+	cache := t.TempDir()
+	fakeGo(t, "echo 'go: downloading go1.99.0 (linux/amd64)' >&2\necho "+cache)
+	path, why := buildCache(t.TempDir())
+	if why != "" {
+		t.Fatalf("the toolchain answered and the answer was refused: %s", why)
+	}
+	if path != cache {
+		t.Errorf("build cache = %q, want %q", path, cache)
+	}
+}
+
+// An answer that is not an absolute path is not a location. freeBytesNear walks
+// up until it finds a filesystem, so a relative answer resolves against the
+// process's own directory — which would be reported as the build cache, and
+// reported completely.
+func TestBuildCacheRefusesAnAnswerThatIsNotAnAbsolutePath(t *testing.T) {
+	fakeGo(t, "echo relative/go-build")
+	path, why := buildCache(t.TempDir())
+	if path != "" {
+		t.Errorf("build cache = %q, want none: it names no filesystem", path)
+	}
+	if !strings.Contains(why, "relative/go-build") || !strings.Contains(why, "absolute") {
+		t.Errorf("why = %q, want it to quote the answer and say what is wrong with it", why)
+	}
+}
+
+// fakeGo puts a `go` on PATH that behaves as body says.
+//
+// Two streams and an exit code are all these tests need of a toolchain, and a
+// real one cannot be asked to warn on demand — which is exactly the condition
+// under test.
+func fakeGo(t *testing.T, body string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake toolchain is a POSIX shell script")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "go")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil { // WriteFile respects umask; Chmod does not
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+}
+
 // Every way `go env GOCACHE` can fail to answer produces a reason, because a
 // condition reported without what established it is one an operator has to
 // reproduce before believing it.
 func TestGocacheReasonIsNeverEmpty(t *testing.T) {
 	for _, c := range []struct {
-		name string
-		out  string
-		err  error
-		want string
+		name   string
+		stderr string
+		err    error
+		want   string
 	}{
 		// The toolchain ran and objected: its own words say the most.
 		{"the child said why", "go: no such env var\nsecond line", errors.New("exit status 1"), "go: no such env var"},
@@ -271,7 +356,7 @@ func TestGocacheReasonIsNeverEmpty(t *testing.T) {
 		{"the child answered nothing", "", nil, "printed nothing"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got := gocacheReason(c.out, c.err)
+			got := gocacheReason(c.stderr, c.err)
 			if got == "" {
 				t.Fatal("the reason is empty; the incomplete message would trail off after its colon")
 			}
