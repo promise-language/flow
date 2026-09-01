@@ -187,6 +187,12 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		if st, serr := app.Backend.LoadState(ctx, *claim); serr == nil {
 			if f, next := SelectFlow(app, st); f != nil {
 				fmt.Fprintf(app.Err, "resolve: running %q…\n", next)
+			} else if flowForType(app, st.Item.Type) == nil {
+				// No flow accepts the type, so RunOne will block rather than
+				// finalize. Announcing "finalizing…" here would tell the
+				// operator the run is completing right before it reports that
+				// nothing ever started.
+				fmt.Fprintf(app.Err, "resolve: no flow accepts this item's type…\n")
 			} else {
 				fmt.Fprintf(app.Err, "resolve: no step eligible — finalizing…\n")
 			}

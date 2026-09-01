@@ -255,9 +255,7 @@ Every invocation reports exactly one status: `done`, `skipped`, `parked`, `block
 
 These five are the vocabulary. A backend that mirrors them mirrors all five.
 
-`done` means work completed. An item that no flow will ever act on — because nothing accepts its type — is not `done`, and is never finalized on that basis: reporting success for work that was never attempted hides a misconfiguration, and finalizing makes it irreversible.
-
-> An unmatched item is currently reported `done` and finalized — [#10](https://github.com/promise-language/flow/issues/10).
+`done` means work completed. An item that no flow will ever act on — because nothing accepts its type — is not `done`, and is never finalized on that basis: reporting success for work that was never attempted hides a misconfiguration, and finalizing makes it irreversible. It is `blocked`, and the reason names the item's type and the registered ones.
 
 ## Startup
 

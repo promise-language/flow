@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/promise-language/flow"
@@ -137,6 +138,29 @@ func flowForType(app *App, itemType flow.ItemType) *flow.Flow {
 		}
 	}
 	return nil
+}
+
+// registeredTypes lists every item type some registered flow accepts, sorted
+// and deduplicated, for a message that has to tell an operator what the item's
+// type should have been. "none" when no flow declares any — which, because an
+// empty Types() set is universal, is also the only case where the caller's
+// no-match verdict could not have come from a type list at all.
+func registeredTypes(app *App) string {
+	seen := map[flow.ItemType]bool{}
+	var types []string
+	for _, f := range app.Flows {
+		for _, t := range f.Types() {
+			if !seen[t] {
+				seen[t] = true
+				types = append(types, string(t))
+			}
+		}
+	}
+	if len(types) == 0 {
+		return "none"
+	}
+	slices.Sort(types)
+	return strings.Join(types, ", ")
 }
 
 // flowName is the bare flow name for the payload: the eligible flow, else the

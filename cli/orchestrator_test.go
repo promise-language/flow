@@ -35,8 +35,15 @@ func (a *stubAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Agent
 // item and a single-flow registration.
 func testApp(t *testing.T, configure func(*flow.Flow), agent flow.Agent) (*App, *fake.Backend, flow.Claim) {
 	t.Helper()
+	return testAppItem(t, flow.Item{ID: "1", Type: "task", Title: "test#1"}, []flow.ItemType{"task"}, configure, agent)
+}
+
+// testAppItem is testApp over a caller-supplied item and flow type set. The
+// item's type is what routes flow selection, so a test about a type no flow
+// accepts has to set both ends; every other test takes the task/task default.
+func testAppItem(t *testing.T, item flow.Item, types []flow.ItemType, configure func(*flow.Flow), agent flow.Agent) (*App, *fake.Backend, flow.Claim) {
+	t.Helper()
 	be := fake.New(flow.Signal("pr-open", "test"))
-	item := flow.Item{ID: "1", Type: "task", Title: "test#1"}
 	be.AddItem(item)
 
 	app := &App{
@@ -51,7 +58,7 @@ func testApp(t *testing.T, configure func(*flow.Flow), agent flow.Agent) (*App, 
 			flow.Signal("pr-open", "test"),
 		},
 	}
-	f := flow.NewFlow("implement", []flow.ItemType{"task"})
+	f := flow.NewFlow("implement", types)
 	configure(f)
 	app.Flows = []*flow.Flow{f}
 	if err := app.validate(); err != nil {
@@ -64,7 +71,7 @@ func testApp(t *testing.T, configure func(*flow.Flow), agent flow.Agent) (*App, 
 	app.Err = newDiscardWriter()
 
 	ctx := context.Background()
-	ref := flow.ItemRef{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)}
+	ref := flow.ItemRef{BackendName: "fake", Display: item.ID, Ref: json.RawMessage(`"` + item.ID + `"`)}
 	claim, err := be.Claim(ctx, ref, "alice", false)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
@@ -773,6 +780,127 @@ func TestRunOne_RefusesFinalizeWhenRequiredArtifactPending(t *testing.T) {
 	}
 	if !strings.Contains(res.Reason, "refusing premature finalize") {
 		t.Errorf("reason = %q, want a 'refusing premature finalize' phrase", res.Reason)
+	}
+}
+
+// unmatchedTypeApp builds an app whose single flow accepts {task,bug} over an
+// item typed "chore" — the shape of an ordinary GitHub issue carrying no
+// type:* label against a binary that registers task/bug flows. The step handler
+// fails the test: nothing may run for an item no flow accepts.
+func unmatchedTypeApp(t *testing.T, item flow.Item) (*App, *fake.Backend, flow.Claim) {
+	t.Helper()
+	return testAppItem(t, item, []flow.ItemType{"task", "bug"}, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			t.Fatal("step handler ran for an item no flow accepts — must not happen")
+			return nil
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+}
+
+// TestRunOne_BlocksWhenNoFlowAcceptsItemType (#10): an item whose type matches
+// no registered flow was never seeded and never ran a step, so it must NOT be
+// reported done and finalized — that reports success for work never attempted,
+// terminally. It is blocked, with a reason naming the item's type, the
+// registered types, and both ways a person can clear it.
+func TestRunOne_BlocksWhenNoFlowAcceptsItemType(t *testing.T) {
+	app, be, claim := unmatchedTypeApp(t, flow.Item{ID: "1", Type: "chore", Title: "test#1"})
+	wrapped := &finalizingBackend{Backend: be}
+	app.Backend = wrapped
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "blocked" {
+		t.Fatalf("status = %q, want blocked. res=%+v", res.Status, res)
+	}
+	for _, want := range []string{`item type "chore"`, "registered: bug, task", "correct the item's type"} {
+		if !strings.Contains(res.Reason, want) {
+			t.Errorf("reason = %q, want it to contain %q", res.Reason, want)
+		}
+	}
+	if wrapped.finalizeCalls != 0 {
+		t.Errorf("finalizeCalls = %d, want 0 — an unmatched item must not be finalized", wrapped.finalizeCalls)
+	}
+	// And nothing was seeded: the blind spot in the pending-artifact guard is
+	// exactly that an unmatched item has no records for it to iterate.
+	state, err := be.LoadState(context.Background(), claim)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Artifacts) != 0 {
+		t.Errorf("artifacts = %+v, want none seeded", state.Artifacts)
+	}
+}
+
+// TestRunOne_BlocksUnmatchedTypeEvenWhenSeeded (#10): the type mismatch is the
+// root cause, so it is reported ahead of the pending-artifact guard — an item
+// that WAS seeded (by an earlier run, or a since-changed type) and now matches
+// nothing reports the mismatch, not "required artifact still pending".
+func TestRunOne_BlocksUnmatchedTypeEvenWhenSeeded(t *testing.T) {
+	app, be, claim := unmatchedTypeApp(t, flow.Item{ID: "1", Type: "chore", Title: "test#1"})
+	app.Backend = &pendingArtifactBackend{Backend: be, pending: "summary"}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "blocked" {
+		t.Fatalf("status = %q, want blocked (type mismatch beats the artifact guard). res=%+v", res.Status, res)
+	}
+	if !strings.Contains(res.Reason, `item type "chore"`) {
+		t.Errorf("reason = %q, want it to name the unmatched type", res.Reason)
+	}
+}
+
+// TestRunOne_FinalizedItemWithUnmatchedTypeStaysDone (#10): the block is for
+// items with work still owed. An already-finalized item's run is over —
+// including one finalized by this very defect before it was fixed — and
+// blocking it would strand it with no route onward.
+func TestRunOne_FinalizedItemWithUnmatchedTypeStaysDone(t *testing.T) {
+	app, be, claim := unmatchedTypeApp(t, flow.Item{ID: "1", Type: "chore", Title: "test#1", Finalized: true})
+	wrapped := &finalizingBackend{Backend: be}
+	app.Backend = wrapped
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "done" {
+		t.Errorf("status = %q, want done for an already-finalized item. res=%+v", res.Status, res)
+	}
+	if wrapped.finalizeCalls != 1 {
+		t.Errorf("finalizeCalls = %d, want 1 (the existing terminal path still runs)", wrapped.finalizeCalls)
+	}
+}
+
+func TestRegisteredTypes(t *testing.T) {
+	cases := []struct {
+		name  string
+		flows []*flow.Flow
+		want  string
+	}{
+		{"no flows", nil, "none"},
+		{
+			"universal flow declares no types",
+			[]*flow.Flow{flow.NewFlow("any", nil)},
+			"none",
+		},
+		{
+			"sorted and deduplicated across flows",
+			[]*flow.Flow{
+				flow.NewFlow("a", []flow.ItemType{"task", "bug"}),
+				flow.NewFlow("b", []flow.ItemType{"bug", "chore"}),
+			},
+			"bug, chore, task",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := registeredTypes(&App{Flows: tc.flows}); got != tc.want {
+				t.Errorf("registeredTypes = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

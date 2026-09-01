@@ -49,6 +49,34 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// tracker") would otherwise refuse it.
 	f, nextName := SelectFlow(app, state)
 	if f == nil {
+		// SelectFlow returns nil for two conditions that mean opposite things:
+		// the flow has no step left (the work is done), and no flow accepts the
+		// item's type (no work was ever attempted). Only the first is success.
+		// Finalizing means the work was done, so an item no flow will act on is
+		// not finalized on that basis — reporting success for work never
+		// attempted hides the misconfiguration, and finalizing makes it
+		// terminal. This is checked BEFORE the pending-artifact guard below so a
+		// seeded-then-unmatched item reports the root cause rather than a
+		// symptom of it; the guard itself is blind here anyway, because seeding
+		// happens after flow selection and an unmatched item has no records to
+		// iterate.
+		//
+		// "blocked", not "failed" or "skipped": nothing failed and no next cycle
+		// will pass — a person has to register a flow for the type or correct
+		// the item's type, and the reason names both so the operator does not
+		// have to read the flow registration to find out what happened.
+		//
+		// An already-finalized item is exempt: its run really is over, and
+		// blocking one that this very defect finalized would strand it.
+		if !state.Item.Finalized && flowForType(app, state.Item.Type) == nil {
+			return flow.InvocationResult{
+				Item:   claim.ItemRef.Display,
+				Status: "blocked",
+				Reason: fmt.Sprintf(
+					"no flow accepts item type %q (registered: %s) — register a flow for this type, or correct the item's type",
+					state.Item.Type, registeredTypes(app)),
+			}, nil
+		}
 		// T0481: refuse to Finalize+release when any required artifact in the
 		// loaded state is still unresolved. status=done ≠ finalized — a missing
 		// summary/inspection means finalization work is owed on this arena, and
