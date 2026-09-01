@@ -216,6 +216,87 @@ func TestRun_ArgsIncludeStreamFlags(t *testing.T) {
 	}
 }
 
+func TestRun_MaxCostUSDBecomesMaxBudgetFlag(t *testing.T) {
+	var capturedArgs []string
+	c := &Client{
+		Binary: "claude",
+		spawn: func(ctx context.Context, name string, args ...string) cmdHandle {
+			capturedArgs = args
+			return &fakeCmd{stdoutStream: successStream}
+		},
+	}
+	_, _ = c.Run(context.Background(), flow.AgentRequest{Prompt: "go", MaxCostUSD: 2.5})
+
+	joined := strings.Join(capturedArgs, " ")
+	if !strings.Contains(joined, "--max-budget-usd 2.5") {
+		t.Errorf("args missing --max-budget-usd 2.5; full: %s", joined)
+	}
+}
+
+// A cap of 20.005 must reach the CLI intact: %.2f would round it up to 20.01
+// and hand the turn more than the step was granted.
+func TestRun_MaxCostUSDIsNotRounded(t *testing.T) {
+	var capturedArgs []string
+	c := &Client{
+		Binary: "claude",
+		spawn: func(ctx context.Context, name string, args ...string) cmdHandle {
+			capturedArgs = args
+			return &fakeCmd{stdoutStream: successStream}
+		},
+	}
+	_, _ = c.Run(context.Background(), flow.AgentRequest{Prompt: "go", MaxCostUSD: 20.005})
+
+	joined := strings.Join(capturedArgs, " ")
+	if !strings.Contains(joined, "--max-budget-usd 20.005") {
+		t.Errorf("args missing --max-budget-usd 20.005; full: %s", joined)
+	}
+}
+
+func TestRun_NoMaxCostUSDOmitsMaxBudgetFlag(t *testing.T) {
+	var capturedArgs []string
+	c := &Client{
+		Binary: "claude",
+		spawn: func(ctx context.Context, name string, args ...string) cmdHandle {
+			capturedArgs = args
+			return &fakeCmd{stdoutStream: successStream}
+		},
+	}
+	_, _ = c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+
+	joined := strings.Join(capturedArgs, " ")
+	if strings.Contains(joined, "--max-budget-usd") {
+		t.Errorf("unexpected --max-budget-usd in args: %s", joined)
+	}
+}
+
+// The budget stop is a clean end-of-run: it reports its own failure kind AND
+// the cost of the turn. Losing the cost is the regression that matters — the
+// next dispatch would re-run the same turn against a meter that never moved.
+func TestRun_MaxBudgetStopIsCostCapAndStillBills(t *testing.T) {
+	stream := `{"type":"system","subtype":"init","session_id":"s"}
+{"type":"result","subtype":"error_max_budget_usd","is_error":true,"session_id":"s","total_cost_usd":21.868663,"duration_ms":100}
+`
+	fc := &fakeCmd{stdoutStream: stream}
+	c := clientWith(fc)
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go", MaxCostUSD: 20})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.Failure == nil || resp.Failure.Kind != flow.FailureCostCap {
+		t.Fatalf("Failure = %+v, want kind=%s", resp.Failure, flow.FailureCostCap)
+	}
+	if resp.Failure.Kind != "cost-cap" {
+		t.Errorf("FailureCostCap = %q, want the wire string cost-cap", resp.Failure.Kind)
+	}
+	if resp.CostUSD != 21.868663 {
+		t.Errorf("CostUSD = %v, want 21.868663 (the stopped turn still bills)", resp.CostUSD)
+	}
+	if resp.SessionID != "s" {
+		t.Errorf("SessionID = %q, want s", resp.SessionID)
+	}
+}
+
 func TestRun_WorktreeSetsDir(t *testing.T) {
 	var captured *fakeCmd
 	c := &Client{

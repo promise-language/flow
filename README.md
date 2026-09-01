@@ -357,8 +357,12 @@ Every step is capped on four axes; exhausting any one parks the item with
 |---|---|---|---|
 | invocations | `3` | `MaxInvocations(n)` | SDK pre-dispatch |
 | prompts / invocation | `1` | `MaxPromptsPerInvocation(n)` | metered `Agent` wrapper |
-| cost (USD) | `$10` | `MaxCostUSD(d)` | pre-dispatch + per `Agent.Run` |
+| cost (USD) | `$10` | `MaxCostUSD(d)` | pre-dispatch + per `Agent.Run` + in-turn via `--max-budget-usd` |
 | timeout | `30m` | `Timeout(d)` | `context.WithTimeout` |
+
+The cost cap is not exact: a substrate learns what a model call cost only once
+that call has returned, so a turn stops at the first call that crosses the
+remaining grant. The overrun is bounded by one model call, not by a whole turn.
 
 ```go
 f.AddStep("implement", "implementation", stepImpl,

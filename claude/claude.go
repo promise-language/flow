@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/promise-language/flow"
@@ -19,6 +20,10 @@ import (
 // Client is the flow.Agent backed by the claude CLI. Binary defaults to
 // "claude" if empty (looked up on PATH). ExtraArgs is appended after every
 // invocation's argv — useful for testing or for forwarding custom flags.
+//
+// Requires claude CLI v2.1.217 or later: that is the first release whose
+// --max-budget-usd actually stops the run at the cap, which is what
+// AgentRequest.MaxCostUSD relies on.
 type Client struct {
 	Binary    string
 	ExtraArgs []string
@@ -65,6 +70,11 @@ func (c *Client) Run(ctx context.Context, req flow.AgentRequest) (*flow.AgentRes
 	}
 	if req.ResumeSessionID != "" {
 		args = append(args, "--resume", req.ResumeSessionID)
+	}
+	if req.MaxCostUSD > 0 {
+		// Exact, not rounded: %.2f would round 20.005 UP and hand the turn
+		// half a cent more than the step was granted.
+		args = append(args, "--max-budget-usd", strconv.FormatFloat(req.MaxCostUSD, 'f', -1, 64))
 	}
 	for _, t := range c.AllowedTools {
 		args = append(args, "--allowed-tools", t)
@@ -272,8 +282,16 @@ func parseStream(r io.Reader) (*flow.AgentResponse, error) {
 		return nil, errors.New("stream ended without a result event")
 	}
 	if isError {
+		// A budget stop is a clean end-of-run, not a broken one: the result
+		// event carries total_cost_usd for everything spent including the
+		// response that crossed the cap, so the caller can bill the turn and
+		// park on cost instead of reporting an opaque exit-error.
+		kind := "exit-error"
+		if errorSubtype == subtypeMaxBudget {
+			kind = flow.FailureCostCap
+		}
 		resp.Failure = &flow.AgentFailure{
-			Kind:    "exit-error",
+			Kind:    kind,
 			Message: "claude reported is_error (subtype=" + errorSubtype + ")",
 		}
 	}
@@ -351,6 +369,10 @@ type contentBlock struct {
 // reads only block.Name discards the entire deliverable and leaves the
 // tool-call preambles behind as if they were the answer.
 const exitPlanTool = "ExitPlanMode"
+
+// subtypeMaxBudget is the result-event subtype the CLI reports when
+// --max-budget-usd stopped the run.
+const subtypeMaxBudget = "error_max_budget_usd"
 
 type systemEvent struct {
 	Type      string `json:"type"`
