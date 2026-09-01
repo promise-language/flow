@@ -133,6 +133,7 @@ func TestUsageError_Arity(t *testing.T) {
 	}{
 		{[]string{"doctor", "oops"}, `doctor: unexpected argument "oops" (this command takes no arguments)`},
 		{[]string{"list", "oops"}, `list: unexpected argument "oops" (this command takes no arguments)`},
+		{[]string{"run-step", "oops"}, `run-step: unexpected argument "oops" (this command takes no arguments)`},
 		{[]string{"claim"}, "claim: missing item id (e.g., `claim 42`)"},
 		{[]string{"claim", "42", "extra"}, `claim: unexpected argument "extra" (claim takes exactly one item id)`},
 		{[]string{"status", "42", "extra"}, `status: unexpected argument "extra" (status takes an optional item id)`},
@@ -151,7 +152,7 @@ func TestUsageError_Arity(t *testing.T) {
 // Contradictory options: --json --human on every command that takes them, and
 // grant's --all against an explicit step id.
 func TestUsageError_ContradictoryOptions(t *testing.T) {
-	for _, cmd := range []string{"list", "status", "grant", "resolve"} {
+	for _, cmd := range []string{"list", "status", "grant", "resolve", "run-step"} {
 		t.Run(cmd, func(t *testing.T) {
 			app, out, errBuf := newArgparseApp(t)
 			code := RunWithArgs(*app, []string{cmd, "--json", "--human"})

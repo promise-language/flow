@@ -47,7 +47,7 @@ Passing both `--json` and `--human` is a usage error, detected before the comman
 
 Commands fall into two shapes, and the shape determines the streams.
 
-### One-shot reports — `list`, `status`, `grant`, `doctor`
+### One-shot reports — `list`, `status`, `grant`, `doctor`, `run-step`
 
 The report *is* the output. It goes to **stdout**, rendered in the selected mode.
 
