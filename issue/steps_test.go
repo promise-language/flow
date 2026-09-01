@@ -1966,6 +1966,63 @@ func TestPlanStepRefusalWIPSaveFailureStillParks(t *testing.T) {
 	}
 }
 
+func TestPlanStepQuestionTakesPriorityOverRefusal(t *testing.T) {
+	// When the agent emits both a question and a refusal, the question wins:
+	// runAgent detects the question first and returns an error, so the refusal
+	// check in stepPlan never runs. Reordering the checks would silently
+	// change this — this test locks the priority.
+	reply := "PLAN-REFUSAL: already-done The fix is in main\nNEEDS-ANSWER: should we close this?"
+	agent := &scriptedAgent{replies: []string{reply}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	err := testBuilder(t).stepPlan(ctx)
+	if err == nil {
+		t.Fatal("want the step to stop (question or refusal)")
+	}
+	// The question was detected, not the refusal.
+	if len(ctx.asked) == 0 {
+		t.Fatal("no question asked — the question sentinel should take priority")
+	}
+	if ctx.park != nil {
+		t.Error("parked on a refusal — the question should have taken priority")
+	}
+}
+
+func TestPlanStepRefusalReasonIncludesSummary(t *testing.T) {
+	const summary = "The fix landed in commit abc123"
+	reply := "PLAN-REFUSAL: already-done " + summary
+	agent := &scriptedAgent{replies: []string{reply}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	_ = testBuilder(t).stepPlan(ctx)
+	if ctx.park == nil {
+		t.Fatal("no park recorded")
+	}
+	if !strings.Contains(ctx.park.Reason, summary) {
+		t.Errorf("park reason = %q, want it to contain the summary %q", ctx.park.Reason, summary)
+	}
+}
+
+func TestPlanStepRefusalWithoutPlanTextSavesBarLastText(t *testing.T) {
+	// No PlanText → WIP is resp.LastText alone, not wrapped in the combined
+	// "## Submitted plan" format.
+	reply := "PLAN-REFUSAL: duplicate Covered by #12"
+	agent := &scriptedAgent{replies: []string{reply}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	_ = testBuilder(t).stepPlan(ctx)
+	if len(ctx.wipSaves) == 0 {
+		t.Fatal("no WIP saved")
+	}
+	wip := ctx.wipSaves[len(ctx.wipSaves)-1]
+	if wip != reply {
+		t.Errorf("WIP = %q, want the bare agent text %q (no plan header)", wip, reply)
+	}
+	if strings.Contains(wip, "## Submitted plan") {
+		t.Error("WIP contains plan heading — there was no PlanText to combine")
+	}
+}
+
 // runAgent returns the response alongside a question error so callers can
 // inspect what the agent produced. Other callers that do `if err != nil {
 // return err }` are unaffected because they never access resp.

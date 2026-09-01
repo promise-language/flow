@@ -822,6 +822,11 @@ func TestDetectRefusal(t *testing.T) {
 			"PLAN-REFUSAL: duplicate Covered by #5\n```\nevidence that never closes",
 			RefusalDuplicate, "Covered by #5", "evidence that never closes", true,
 		},
+		{
+			"later invalid kind falls through to earlier valid",
+			"PLAN-REFUSAL: already-done Real finding\nPLAN-REFUSAL: wontfix Not a real kind",
+			RefusalAlreadyDone, "Real finding", "Real finding", true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			kind, summary, evidence, ok := detectRefusal(tc.in)
