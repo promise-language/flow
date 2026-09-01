@@ -1925,6 +1925,37 @@ func TestPlanStepRefusalNotAtColumnZeroTreatedAsNormalPlan(t *testing.T) {
 	}
 }
 
+func TestPlanStepRefusalWithoutEvidenceBlockTreatedAsNormalPlan(t *testing.T) {
+	// A valid kind and summary but no fenced evidence block is not a refusal.
+	// This is the core behavioural change of #83: the evidence requirement is
+	// enforced at the parser, so the step must resolve normally.
+	for _, tc := range []struct {
+		name  string
+		reply string
+	}{
+		{"not-viable", "PLAN-REFUSAL: not-viable Cannot be done without breaking the API"},
+		{"already-done", "PLAN-REFUSAL: already-done The fix is in main"},
+		{"duplicate", "PLAN-REFUSAL: duplicate Covered by issue #12"},
+		{"conflicts", "PLAN-REFUSAL: conflicts Normative doc forbids this"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := &scriptedAgent{replies: []string{tc.reply}}
+			ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+			err := testBuilder(t).stepPlan(ctx)
+			if err != nil {
+				t.Fatalf("stepPlan: %v — a refusal without evidence should resolve as a normal plan", err)
+			}
+			if ctx.park != nil {
+				t.Error("parked on a refusal without evidence — should resolve as normal plan")
+			}
+			if !ctx.didResolve {
+				t.Error("did not resolve the plan — a bare refusal is not a refusal")
+			}
+		})
+	}
+}
+
 func TestPlanStepRefusalWithPlanTextCombinesWIP(t *testing.T) {
 	// Agent submitted a plan AND refused: combined WIP saved.
 	agent := &scriptedAgent{
