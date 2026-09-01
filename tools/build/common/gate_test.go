@@ -222,6 +222,41 @@ func TestFitIsAGateAndReportsTwoFilesystems(t *testing.T) {
 	}
 }
 
+// The two measurements are two requirements, not two devices, and both are
+// reported on the machine where they are one filesystem — a laptop with a
+// single volume, which is most of them. A run that noticed they resolved to the
+// same place and reported one number would give the envelope a shape that
+// depends on the host: the metric a threshold names would simply be absent on
+// half the machines, and absent reads as nothing to judge.
+func TestFitReportsBothFilesystemsWhenTheyAreOneDevice(t *testing.T) {
+	root := t.TempDir()
+	cache := filepath.Join(root, "go-build") // under the worktree: one filesystem, by construction
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeGo(t, "echo "+cache)
+
+	metrics, incomplete, err := measureFit(root)
+	if err != nil {
+		t.Fatalf("measureFit: %v", err)
+	}
+	if incomplete != "" {
+		t.Fatalf("both filesystems were measured and the run called itself incomplete: %s", incomplete)
+	}
+	if len(metrics) != 2 {
+		t.Fatalf("metrics = %+v, want two — one per requirement, whatever the host mounts", metrics)
+	}
+	byName := map[string]Metric{}
+	for _, m := range metrics {
+		byName[m.Name] = m
+	}
+	for _, want := range []string{"worktree_free_bytes", "build_cache_free_bytes"} {
+		if _, ok := byName[want]; !ok {
+			t.Errorf("no %s metric; the envelope is %+v", want, metrics)
+		}
+	}
+}
+
 // A machine whose toolchain cannot say where it writes is not one this
 // project's work runs on — and saying so is what makes fit non-vacuous before
 // any floor exists, because judge() refuses every incomplete run.
@@ -314,6 +349,23 @@ func TestBuildCacheRefusesAnAnswerThatIsNotAnAbsolutePath(t *testing.T) {
 	}
 	if !strings.Contains(why, "relative/go-build") || !strings.Contains(why, "absolute") {
 		t.Errorf("why = %q, want it to quote the answer and say what is wrong with it", why)
+	}
+}
+
+// A toolchain that failed has not answered, whatever it left on stdout. The
+// exit code is read BEFORE the path is believed, because a `go env` that dies
+// part-way through writing one leaves a TRUNCATED path behind — and a truncated
+// path is a real directory further up the tree, which freeBytesNear measures
+// without complaint and reports as the build cache.
+func TestBuildCacheRefusesAnAnswerFromAToolchainThatFailed(t *testing.T) {
+	cache := t.TempDir()
+	fakeGo(t, "echo "+cache+"\necho 'go: cannot determine GOCACHE: permission denied' >&2\nexit 1")
+	path, why := buildCache(t.TempDir())
+	if path != "" {
+		t.Errorf("build cache = %q, believed from a toolchain that exited 1", path)
+	}
+	if !strings.Contains(why, "permission denied") {
+		t.Errorf("why = %q, want what the toolchain objected to", why)
 	}
 }
 
@@ -418,5 +470,87 @@ func TestFitIsNotPartOfIntegration(t *testing.T) {
 		if part == "fit" {
 			t.Fatal("integration composes fit; an unfit machine would be reported as a change that may not land")
 		}
+	}
+}
+
+// An unfit machine is REPORTED, and reaches the runner as an envelope carrying
+// the reason. Not as an error: bin/gate turns an error from here into no
+// envelope at all, which the runner reads as a gate that printed nothing —
+// the gate looks broken and the machine that is actually the problem is never
+// named. That shape is what this gate exists to replace.
+func TestFitReportsAnUnfitMachineAsAnEnvelopeAndNotAsAnError(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // `go` is now unresolvable
+	env, err := MeasureGate(t.TempDir(), "fit")
+	if err != nil {
+		t.Fatalf("the gate failed instead of reporting the machine: %v", err)
+	}
+	if env.Incomplete == "" {
+		t.Error("the envelope does not say the run measured less than a full one")
+	}
+	if len(env.Metrics) != 1 || env.Metrics[0].Name != "worktree_free_bytes" {
+		t.Errorf("metrics = %+v, want the one filesystem that could be measured", env.Metrics)
+	}
+	// And it is still one object a reader can parse. An envelope that carried
+	// the reason but did not survive the wire would be indistinguishable from
+	// the gate dying, which is the other thing that leaves no measurement.
+	out, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back Envelope
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("the envelope does not round-trip: %v", err)
+	}
+	if back.Incomplete != env.Incomplete {
+		t.Errorf("the reason did not survive the wire: %q, was %q", back.Incomplete, env.Incomplete)
+	}
+}
+
+// Stdout carries the envelope and nothing else.
+//
+// fit is the first gate whose child produces an ANSWER rather than lines to
+// count, and the natural way to write that — letting `go env` print where the
+// caller can see it — puts a path on stdout ahead of the envelope. What the
+// runner reads then is not an envelope, so a measured machine is reported as a
+// gate printing rubbish.
+func TestFitSaysNothingOnStdoutAndAnnouncesItselfOnStderr(t *testing.T) {
+	stdout := captureStream(t, &os.Stdout)
+	stderr := captureStream(t, &os.Stderr)
+	if _, err := MeasureGate(t.TempDir(), "fit"); err != nil {
+		t.Fatalf("MeasureGate(fit): %v", err)
+	}
+	if got := stdout(); got != "" {
+		t.Errorf("the gate wrote to stdout, where only the envelope goes:\n%s", got)
+	}
+	// The other half of the same rule: progress is moved, not discarded. A gate
+	// that runs for minutes and says nothing anywhere cannot be told from one
+	// that is wedged.
+	if got := stderr(); !strings.Contains(got, "go env GOCACHE") {
+		t.Errorf("stderr = %q, want the child this gate ran", got)
+	}
+}
+
+// captureStream redirects one of this process's own streams for the rest of the
+// test and returns what was written to it. The stream is redirected rather than
+// wrapped because the rule under test is about the file descriptor a child
+// inherits, not about anything this package prints through.
+func captureStream(t *testing.T, stream **os.File) func() string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := *stream
+	*stream = f
+	t.Cleanup(func() {
+		*stream = saved
+		f.Close()
+	})
+	return func() string {
+		b, err := os.ReadFile(f.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
 	}
 }
