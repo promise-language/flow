@@ -466,6 +466,54 @@ func TestParseStream_UnknownEventTypesIgnored(t *testing.T) {
 	}
 }
 
+// --verbose can emit non-JSON diagnostic lines (timestamps, debug info).
+// The parser must skip them without error rather than aborting the stream.
+func TestParseStream_NonJSONLinesSkipped(t *testing.T) {
+	stream := strings.NewReader(
+		"[2026-08-31 12:00:00] claude: loading session\n" +
+			`{"type":"system","session_id":"sess-n"}` + "\n" +
+			"VERBOSE: model turn started\n" +
+			`{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Hi"}]}}` + "\n" +
+			`{"type":"result","session_id":"sess-n","result":"done","total_cost_usd":0.1,"duration_ms":10}` + "\n",
+	)
+
+	resp, err := parseStream(stream)
+	if err != nil {
+		t.Fatalf("parseStream: %v", err)
+	}
+	if resp.SessionID != "sess-n" {
+		t.Errorf("SessionID = %q, want sess-n", resp.SessionID)
+	}
+	if resp.LastText != "done" {
+		t.Errorf("LastText = %q, want done", resp.LastText)
+	}
+}
+
+// Blank lines can appear between events (e.g. verbose separators). The parser
+// must tolerate them without treating them as errors or truncating the stream.
+func TestParseStream_BlankLinesSkipped(t *testing.T) {
+	stream := strings.NewReader(
+		"\n" +
+			`{"type":"system","session_id":"sess-b"}` + "\n" +
+			"\n" +
+			"\n" +
+			`{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Hi"}]}}` + "\n" +
+			"\n" +
+			`{"type":"result","session_id":"sess-b","result":"ok","total_cost_usd":0.1,"duration_ms":10}` + "\n",
+	)
+
+	resp, err := parseStream(stream)
+	if err != nil {
+		t.Fatalf("parseStream: %v", err)
+	}
+	if resp.SessionID != "sess-b" {
+		t.Errorf("SessionID = %q, want sess-b", resp.SessionID)
+	}
+	if resp.LastText != "ok" {
+		t.Errorf("LastText = %q, want ok", resp.LastText)
+	}
+}
+
 // A turn that ends in assistant text is unaffected: the result event still
 // wins, so ordinary (non-plan) steps keep the behaviour they had.
 func TestRun_ResultEventStillWinsOverAPlan(t *testing.T) {
