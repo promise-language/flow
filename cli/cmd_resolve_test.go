@@ -210,6 +210,12 @@ func TestCmdResolve_UnmatchedTypeBlocks(t *testing.T) {
 	if strings.Contains(errBuf.String(), "(finalize)") {
 		t.Errorf("outcome line must not label the stop as a finalize; got %q", errBuf.String())
 	}
+	// It says what did happen, rather than leaving the label blank: dropping
+	// "(finalize)" without putting anything in its place prints "resolve:  →
+	// blocked", which passes the check above and tells the operator nothing.
+	if !strings.Contains(errBuf.String(), "(no step) → blocked") {
+		t.Errorf("outcome line must label the stop as reaching no step; got %q", errBuf.String())
+	}
 }
 
 // TestCmdResolve_FinalizedUnmatchedTypeNarratesFinalize (#10): the peek's

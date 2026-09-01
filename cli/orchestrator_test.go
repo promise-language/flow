@@ -874,6 +874,64 @@ func TestRunOne_FinalizedItemWithUnmatchedTypeStaysDone(t *testing.T) {
 	}
 }
 
+// TestRunOne_BlocksWhenItemTypeIsEmpty (#10): the reported case is not a typo'd
+// type but the absence of one — an ordinary GitHub issue carries no `type:*`
+// label, so the backend types it "". The empty type is a mismatch like any
+// other, not a wildcard and not a licence to finalize, and the reason renders it
+// so the operator can see that the item carries no type at all.
+func TestRunOne_BlocksWhenItemTypeIsEmpty(t *testing.T) {
+	app, be, claim := unmatchedTypeApp(t, flow.Item{ID: "1", Type: "", Title: "test#1"})
+	wrapped := &finalizingBackend{Backend: be}
+	app.Backend = wrapped
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "blocked" {
+		t.Fatalf("status = %q, want blocked. res=%+v", res.Status, res)
+	}
+	if !strings.Contains(res.Reason, `item type ""`) {
+		t.Errorf("reason = %q, want it to render the empty type", res.Reason)
+	}
+	if wrapped.finalizeCalls != 0 {
+		t.Errorf("finalizeCalls = %d, want 0 — an untyped item must not be finalized", wrapped.finalizeCalls)
+	}
+}
+
+// TestRunOne_UniversalFlowIsNotATypeMismatch (#10): the block keys off
+// AcceptsType, not off the declared type list, and a flow declaring no types
+// accepts everything. Such an app has an empty registered-types list, so a check
+// written against that list instead would block every item it owns — turning the
+// guard on the very configuration it is meant to leave alone.
+func TestRunOne_UniversalFlowIsNotATypeMismatch(t *testing.T) {
+	app, be, claim := testAppItem(t,
+		flow.Item{ID: "1", Type: "chore", Title: "test#1"},
+		nil, // universal flow: declares no types, accepts all of them
+		func(f *flow.Flow) {
+			// RequireSignal never set, so SelectFlow returns nil and RunOne
+			// reaches the pre-dispatch region with the flow still accepting
+			// the item's type.
+			f.RequireSignal("pr-open")
+			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+				return ctx.ResolveMarkdown("ignored")
+			}, flow.StepConfig{})
+		}, &stubAgent{name: "stub"})
+	wrapped := &finalizingBackend{Backend: be}
+	app.Backend = wrapped
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "done" {
+		t.Fatalf("status = %q, want done — a universal flow accepts %q. res=%+v", res.Status, "chore", res)
+	}
+	if wrapped.finalizeCalls != 1 {
+		t.Errorf("finalizeCalls = %d, want 1 (the finalize path is unchanged for an accepted type)", wrapped.finalizeCalls)
+	}
+}
+
 func TestRegisteredTypes(t *testing.T) {
 	cases := []struct {
 		name  string
