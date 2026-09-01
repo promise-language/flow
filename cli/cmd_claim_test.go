@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/promise-language/flow"
@@ -71,17 +72,17 @@ func TestResolveClaimRef_FallbackNoMatch(t *testing.T) {
 	}
 }
 
-// recordingClaimBackend captures the `force` argument passed to Claim so the
-// flag-after-positional test can assert that the bool flag is actually
+// recordingClaimBackend captures the overrides passed to Claim so the
+// flag-after-positional test can assert that the flag is actually
 // parsed (and not silently dropped).
 type recordingClaimBackend struct {
 	*fake.Backend
-	lastForce bool
+	lastOverrides []flow.ClaimOverride
 }
 
-func (r *recordingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, force bool) (flow.Claim, error) {
-	r.lastForce = force
-	return r.Backend.Claim(ctx, ref, owner, force)
+func (r *recordingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
+	r.lastOverrides = overrides
+	return r.Backend.Claim(ctx, ref, owner, overrides)
 }
 
 // T0484: `claim <id> --force` (bool flag after the positional) must parse and
@@ -104,7 +105,7 @@ func TestCmdClaim_ForceAfterPositional(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("cmdClaim = %d, want 0", code)
 	}
-	if !wrapped.lastForce {
-		t.Error("Backend.Claim received force=false, want force=true")
+	if !slices.Contains(wrapped.lastOverrides, flow.OverrideDirtyTree) {
+		t.Errorf("Backend.Claim received overrides=%v, want OverrideDirtyTree", wrapped.lastOverrides)
 	}
 }

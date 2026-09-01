@@ -61,7 +61,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 			if rec.Required && !rec.Resolved {
 				return flow.InvocationResult{
 					Item:   claim.ItemRef.Display,
-					Status: "failed",
+					Status: string(flow.StatusFailed),
 					Reason: fmt.Sprintf("no eligible flow but required artifact %q still pending — refusing premature finalize/release", rec.Id),
 				}, nil
 			}
@@ -75,7 +75,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 			if err := fz.Finalize(ctx, claim); err != nil {
 				return flow.InvocationResult{
 					Item:   claim.ItemRef.Display,
-					Status: "failed",
+					Status: string(flow.StatusFailed),
 					Reason: "finalize: " + err.Error(),
 				}, nil
 			}
@@ -84,7 +84,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		return flow.InvocationResult{
 			Flow:   "",
 			Item:   claim.ItemRef.Display,
-			Status: "done",
+			Status: string(flow.StatusDone),
 			Reason: reason,
 		}, nil
 	}
@@ -98,9 +98,9 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 			// A gate that a human has to clear is reported as "blocked", not
 			// "skipped": a skip claims the next cycle might pass, and this one
 			// will not until somebody acts. See flow.ErrBlocked.
-			status := "skipped"
+			status := string(flow.StatusSkipped)
 			if errors.Is(perr, flow.ErrBlocked) {
-				status = "blocked"
+				status = string(flow.StatusBlocked)
 			}
 			return flow.InvocationResult{
 				Item:   claim.ItemRef.Display,
@@ -163,7 +163,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// Reaching here means the signal isn't set yet — skip without
 	// consuming budget.
 	if li.Kind == flow.LifecycleAwait {
-		result.Status = "skipped"
+		result.Status = string(flow.StatusSkipped)
 		result.Reason = fmt.Sprintf("awaiting signal %q", li.SignalId)
 		return result, nil
 	}
@@ -305,14 +305,14 @@ func translateHandlerError(
 				Reason: fmt.Sprintf("handler returned nil without calling ctx.Resolve* on %q", li.ArtifactId),
 			})
 		}
-		result.Status = "done"
+		result.Status = string(flow.StatusDone)
 		return result, nil
 	}
 
 	// Sentinel translations.
 	var skip flow.ErrSkip
 	if errors.As(handlerErr, &skip) {
-		result.Status = "skipped"
+		result.Status = string(flow.StatusSkipped)
 		result.Reason = skip.Reason
 		return result, nil
 	}
@@ -373,7 +373,7 @@ func translateHandlerError(
 		})
 	}
 
-	result.Status = "failed"
+	result.Status = string(flow.StatusFailed)
 	result.Reason = handlerErr.Error()
 	return result, nil
 }
@@ -457,7 +457,7 @@ func parkAndReturn(
 	if err := app.Backend.Park(ctx, claim, req); err != nil {
 		return flow.InvocationResult{}, fmt.Errorf("backend.Park: %w", err)
 	}
-	result.Status = "parked"
+	result.Status = string(flow.StatusParked)
 	result.Reason = req.Reason
 	cp := req
 	result.Park = &cp

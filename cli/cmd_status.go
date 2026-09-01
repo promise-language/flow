@@ -23,9 +23,10 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 	}
 
 	var (
-		state   *flow.ItemState
-		display string
-		owner   string
+		state     *flow.ItemState
+		display   string
+		owner     string
+		overrides []string
 	)
 	if fs.NArg() == 1 {
 		// Inspect an arbitrary item READ-ONLY, without claiming it. Requires a
@@ -70,6 +71,7 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		state = st
 		display = claim.ItemRef.Display
 		owner = claim.Owner
+		overrides = claim.Overrides
 	}
 
 	f, _ := SelectFlow(app, state)
@@ -86,6 +88,7 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		Item:      display,
 		Title:     state.Item.Title,
 		Owner:     owner,
+		Overrides: overrides,
 		Flow:      flowName(f, typeFlow),
 		FlowState: statusFlowState(state, f, typeFlow),
 		Finalized: state.Item.Finalized,
@@ -103,6 +106,9 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 			fmt.Fprintf(app.Out, "title: %s\n", line)
 		}
 		fmt.Fprintf(app.Out, "owner: %s\n", payload.Owner)
+		if len(payload.Overrides) > 0 {
+			fmt.Fprintf(app.Out, "overrides: %s\n", strings.Join(payload.Overrides, ", "))
+		}
 		fmt.Fprintf(app.Out, "flow:  %s\n", statusFlowLine(state, f, typeFlow))
 		fmt.Fprintln(app.Out)
 

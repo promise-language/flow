@@ -41,6 +41,16 @@ const (
 	ParkRefused ParkKind = "refused"
 )
 
+// AllParkKinds returns every ParkKind, in declaration order. Downstream
+// crosswalks enumerate it to prove they handle each one.
+func AllParkKinds() []ParkKind {
+	return []ParkKind{
+		ParkBlocked, ParkQuestion, ParkBudgetExhausted,
+		ParkStepDidNotResolve, ParkInfraTransient,
+		ParkRemoteUnreachable, ParkRefused,
+	}
+}
+
 // BudgetAxis identifies which budget axis was exhausted (when
 // ParkKind==ParkBudgetExhausted).
 type BudgetAxis string
@@ -298,6 +308,23 @@ type Grant struct {
 	PromptsPerInvocation int
 	CostUSD              float64
 	TimeoutAdd           int64 // additional seconds; stored as int64 for JSON friendliness
+}
+
+// InvocationStatus discriminates the outcome of a single invocation.
+type InvocationStatus string
+
+const (
+	StatusDone    InvocationStatus = "done"
+	StatusSkipped InvocationStatus = "skipped"
+	StatusFailed  InvocationStatus = "failed"
+	StatusParked  InvocationStatus = "parked"
+	StatusBlocked InvocationStatus = "blocked"
+)
+
+// AllInvocationStatuses returns every InvocationStatus, in declaration order.
+// Downstream crosswalks enumerate it to prove they handle each one.
+func AllInvocationStatuses() []InvocationStatus {
+	return []InvocationStatus{StatusDone, StatusSkipped, StatusFailed, StatusParked, StatusBlocked}
 }
 
 // InvocationResult is the stdout summary one ./binary run invocation prints.

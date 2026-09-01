@@ -163,7 +163,7 @@ func TestStatusHuman_OmitsEmptyTitle(t *testing.T) {
 	ctx := context.Background()
 	env.be.AddItem(flow.Item{ID: "1", Type: "task"})
 	ref := flow.ItemRef{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)}
-	if _, err := env.be.Claim(ctx, ref, "alice", false); err != nil {
+	if _, err := env.be.Claim(ctx, ref, "alice", nil); err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
 	env.out.Reset()
@@ -257,7 +257,7 @@ func TestCmdStatus_WithStateInspector_InspectsById(t *testing.T) {
 	// `status <id>` must NOT need an active claim.
 	ctx := context.Background()
 	ref := flow.ItemRef{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)}
-	claim, err := be.Claim(ctx, ref, "bob", false)
+	claim, err := be.Claim(ctx, ref, "bob", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}

@@ -26,7 +26,7 @@ func TestBackend_ClaimAndLookup(t *testing.T) {
 	b := fake.New()
 	b.AddItem(newItem("1"))
 
-	claim, err := b.Claim(ctx, itemRef("1"), "alice", false)
+	claim, err := b.Claim(ctx, itemRef("1"), "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestBackend_SeedRefusesSecondSeed(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
 	b.AddItem(newItem("1"))
-	claim, _ := b.Claim(ctx, itemRef("1"), "alice", false)
+	claim, _ := b.Claim(ctx, itemRef("1"), "alice", nil)
 
 	specs := []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
@@ -64,7 +64,7 @@ func TestBackend_ResolveArtifactRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
 	b.AddItem(newItem("1"))
-	claim, _ := b.Claim(ctx, itemRef("1"), "alice", false)
+	claim, _ := b.Claim(ctx, itemRef("1"), "alice", nil)
 	_ = b.SeedState(ctx, claim, []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
 	})
@@ -94,7 +94,7 @@ func TestBackend_ResolveArtifactRejectsTypeMismatch(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
 	b.AddItem(newItem("1"))
-	claim, _ := b.Claim(ctx, itemRef("1"), "alice", false)
+	claim, _ := b.Claim(ctx, itemRef("1"), "alice", nil)
 	_ = b.SeedState(ctx, claim, []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
 	})
@@ -109,7 +109,7 @@ func TestBackend_BudgetCountersAndGrant(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
 	b.AddItem(newItem("1"))
-	claim, _ := b.Claim(ctx, itemRef("1"), "alice", false)
+	claim, _ := b.Claim(ctx, itemRef("1"), "alice", nil)
 	_ = b.SeedState(ctx, claim, []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactMarkdown, Budget: flow.DefaultStepBudget()},
 	})
@@ -149,7 +149,7 @@ func TestBackend_SignalSet(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New(flow.Signal("pr-open", "test"))
 	b.AddItem(newItem("1"))
-	claim, _ := b.Claim(ctx, itemRef("1"), "alice", false)
+	claim, _ := b.Claim(ctx, itemRef("1"), "alice", nil)
 
 	b.SetSignal("1", "pr-open", true)
 	state, _ := b.LoadState(ctx, claim)
@@ -162,7 +162,7 @@ func TestBackend_AskQuestionsAssignsIDsAndAnswerFlow(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
 	b.AddItem(newItem("1"))
-	claim, _ := b.Claim(ctx, itemRef("1"), "alice", false)
+	claim, _ := b.Claim(ctx, itemRef("1"), "alice", nil)
 
 	qs := []flow.AgentQuestion{
 		flow.AskYesNo("ship", "Ship it?"),
@@ -205,7 +205,7 @@ func TestBackend_ParkRecordsRequest(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
 	b.AddItem(newItem("1"))
-	claim, _ := b.Claim(ctx, itemRef("1"), "alice", false)
+	claim, _ := b.Claim(ctx, itemRef("1"), "alice", nil)
 
 	req := flow.ParkRequest{
 		Kind:   flow.ParkBudgetExhausted,
@@ -228,7 +228,7 @@ func parkedItem(t *testing.T, b *fake.Backend) flow.Claim {
 	t.Helper()
 	ctx := context.Background()
 	b.AddItem(newItem("1"))
-	claim, err := b.Claim(ctx, itemRef("1"), "alice", false)
+	claim, err := b.Claim(ctx, itemRef("1"), "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -320,7 +320,7 @@ func gateWorktree(t *testing.T, b *fake.Backend) flow.Worktree {
 	t.Helper()
 	ctx := context.Background()
 	b.AddItem(newItem("1"))
-	claim, err := b.Claim(ctx, itemRef("1"), "alice", false)
+	claim, err := b.Claim(ctx, itemRef("1"), "alice", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,8 +496,8 @@ func TestBackend_WorkInProgressIsKeyedByItemAndStep(t *testing.T) {
 	b := fake.New()
 	b.AddItem(newItem("1"))
 	b.AddItem(newItem("2"))
-	claim1, _ := b.Claim(ctx, itemRef("1"), "alice", false)
-	claim2, _ := b.Claim(ctx, itemRef("2"), "alice", false)
+	claim1, _ := b.Claim(ctx, itemRef("1"), "alice", nil)
+	claim2, _ := b.Claim(ctx, itemRef("2"), "alice", nil)
 
 	if got, err := b.LoadWorkInProgress(ctx, claim1, "plan"); got != "" || err != nil {
 		t.Errorf("Load with nothing stored = (%q, %v), want (\"\", nil)", got, err)
@@ -528,7 +528,7 @@ func TestBackend_ReleaseDropsWorkInProgress(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
 	b.AddItem(newItem("1"))
-	claim, _ := b.Claim(ctx, itemRef("1"), "alice", false)
+	claim, _ := b.Claim(ctx, itemRef("1"), "alice", nil)
 
 	if err := b.SaveWorkInProgress(ctx, claim, "plan", "reasoning"); err != nil {
 		t.Fatalf("SaveWorkInProgress: %v", err)

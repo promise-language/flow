@@ -141,7 +141,7 @@ func (b *buildTestBackend) SupportedArtifacts() []flow.ArtifactDef {
 	}
 }
 func (b *buildTestBackend) ListEligible(context.Context) ([]flow.ItemRef, error) { return nil, nil }
-func (b *buildTestBackend) Claim(context.Context, flow.ItemRef, string, bool) (flow.Claim, error) {
+func (b *buildTestBackend) Claim(context.Context, flow.ItemRef, string, []flow.ClaimOverride) (flow.Claim, error) {
 	return flow.Claim{}, nil
 }
 func (b *buildTestBackend) Release(context.Context, flow.Claim) error { return nil }

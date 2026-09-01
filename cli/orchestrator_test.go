@@ -65,7 +65,7 @@ func testApp(t *testing.T, configure func(*flow.Flow), agent flow.Agent) (*App, 
 
 	ctx := context.Background()
 	ref := flow.ItemRef{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)}
-	claim, err := be.Claim(ctx, ref, "alice", false)
+	claim, err := be.Claim(ctx, ref, "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}

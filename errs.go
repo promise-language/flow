@@ -167,3 +167,42 @@ type ErrBudgetExhausted struct {
 func (e ErrBudgetExhausted) Error() string {
 	return fmt.Sprintf("step %q: budget exhausted on axis %s (cap %s)", e.Step, e.Axis, e.Cap)
 }
+
+// ClaimOverride names a safety check the operator chose to bypass. The values
+// are flow's own vocabulary — CLI flag names — not the backend's.
+type ClaimOverride string
+
+const (
+	OverrideDirtyTree  ClaimOverride = "dirty-tree"
+	OverrideUnadmitted ClaimOverride = "unadmitted"
+)
+
+// ClaimRefusalCode is the backend's own refusal vocabulary, carried through
+// verbatim. flow deliberately defines NO constants for it: the vocabulary
+// belongs to the backend's protocol (for the tracker backend, workspace/wire),
+// which flow cannot import. Mirroring it here would be a second enum nothing
+// keeps in sync.
+type ClaimRefusalCode string
+
+// ErrClaimRefused — Backend.Claim determined the claim cannot proceed. The
+// code is the backend's own vocabulary (opaque to flow); ItemScoped reports
+// whether a DIFFERENT item might succeed (true → retry the next ref in an
+// auto-select loop; false → stop). ItemScoped MUST default to false for any
+// code the backend does not recognize: false means "stop", and stopping on an
+// unknown refusal is the safe direction.
+type ErrClaimRefused struct {
+	Code       ClaimRefusalCode // opaque: display, logs, --json passthrough
+	ItemScoped bool             // true → a different item might succeed
+	Reason     string           // one-line, human
+	Detail     string           // verbatim check stderr, printed unmodified
+	Check      string           // failing check name, when the backend has one
+	Override   string           // flag that bypasses it; empty = not overridable
+}
+
+func (e ErrClaimRefused) Error() string {
+	msg := "claim refused: " + e.Reason
+	if e.Check != "" {
+		msg += fmt.Sprintf(" (check %q)", e.Check)
+	}
+	return msg
+}

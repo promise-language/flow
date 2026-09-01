@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 func (app *App) cmdClaim(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("claim")
 	force := fs.Bool("force", false, "claim even if the arena worktree has unsaved work (override the clean-tree check)")
+	forceUnadmitted := fs.Bool("force-unadmitted", false, "override the arena admission check (audited)")
 	if !app.parseArgs(fs, args) {
 		return 2
 	}
@@ -28,8 +30,21 @@ func (app *App) cmdClaim(ctx context.Context, args []string) int {
 		return 1
 	}
 
-	claim, err := app.Backend.Claim(ctx, ref, app.Owner, *force)
+	var overrides []flow.ClaimOverride
+	if *force {
+		overrides = append(overrides, flow.OverrideDirtyTree)
+	}
+	if *forceUnadmitted {
+		overrides = append(overrides, flow.OverrideUnadmitted)
+	}
+
+	claim, err := app.Backend.Claim(ctx, ref, app.Owner, overrides)
 	if err != nil {
+		var refused flow.ErrClaimRefused
+		if errors.As(err, &refused) {
+			fmt.Fprintln(app.Err, formatClaimRefusal("claim", refused))
+			return 1
+		}
 		fmt.Fprintln(app.Err, "claim:", err)
 		return 1
 	}
