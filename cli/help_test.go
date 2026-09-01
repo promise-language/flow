@@ -119,6 +119,31 @@ func TestRemovedAliases_AreUnknownCommands(t *testing.T) {
 	}
 }
 
+// `<bin> help lease` and `<bin> help run-all` fall back to program usage
+// (not to the claim/resolve help), confirming that the help subsystem no
+// longer folds aliases onto canonical names.
+func TestHelpSubcommand_RemovedAliasesFallBackToUsage(t *testing.T) {
+	for _, alias := range []string{"lease", "run-all"} {
+		app, out, _ := newArgparseApp(t)
+		code := RunWithArgs(*app, []string{"help", alias})
+		if code != 0 {
+			t.Errorf("help %s: exit code = %d, want 0", alias, code)
+		}
+		got := out.String()
+		if !strings.Contains(got, "usage:") {
+			t.Errorf("help %s: out = %q, want program usage", alias, got)
+		}
+		// Must NOT contain per-command detail unique to claim or resolve.
+		// "Acquires a claim (lease)" is in claim's detail, not program usage.
+		if strings.Contains(got, "Acquires a claim (lease)") {
+			t.Errorf("help %s: should not show claim's detail text", alias)
+		}
+		if strings.Contains(got, "Runs ALL steps until the item is finalized") {
+			t.Errorf("help %s: should not show resolve's detail text", alias)
+		}
+	}
+}
+
 // `<bin> help <unknown>` falls back to the program usage (exit 0).
 func TestHelpSubcommand_UnknownFallsBackToUsage(t *testing.T) {
 	app, out, _ := newArgparseApp(t)
