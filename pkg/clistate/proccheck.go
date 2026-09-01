@@ -1,6 +1,7 @@
 package clistate
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,15 +37,25 @@ func ProcessAlive(pid int, exe string) bool {
 		}
 	}
 
-	// Verify the executable path matches. Use `ps` for cross-platform
-	// (darwin + linux) support without build tags.
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
-	if err != nil {
-		return false
-	}
-	observed := strings.TrimSpace(string(out))
+	// Verify the executable path matches.
+	observed := exePath(pid)
 	if observed == "" {
 		return false
 	}
 	return filepath.Clean(observed) == filepath.Clean(exe)
+}
+
+// exePath returns the executable path for pid. It tries /proc/<pid>/exe first
+// (Linux), then falls back to `ps -o comm=` (macOS). Returns "" on failure.
+func exePath(pid int) string {
+	// Linux: /proc/<pid>/exe is a symlink to the executable.
+	if target, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)); err == nil {
+		return target
+	}
+	// macOS: `ps -o comm=` returns the full path.
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
