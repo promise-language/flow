@@ -32,14 +32,14 @@ func TestTopLevelHelp_AllForms(t *testing.T) {
 	}
 }
 
-// Every subcommand (incl. aliases) handles --help/-help/-h/--h by printing its
-// usage and exiting 0 WITHOUT executing. The exit-0 is the tell: without
-// interception these args would fail flag parsing (claim -> 2) or run the
-// command (run-step with no claim -> 1).
+// Every subcommand handles --help/-help/-h/--h by printing its usage and
+// exiting 0 WITHOUT executing. The exit-0 is the tell: without interception
+// these args would fail flag parsing (claim -> 2) or run the command
+// (run-step with no claim -> 1).
 func TestPerCommandHelp_PrintsAndDoesNotExecute(t *testing.T) {
 	commands := []string{
-		"doctor", "list", "claim", "lease", "release", "reseed",
-		"status", "grant", "run-step", "resolve", "run-all",
+		"doctor", "list", "claim", "release", "reseed",
+		"status", "grant", "run-step", "resolve",
 	}
 	for _, cmd := range commands {
 		for _, tok := range []string{"-h", "--h", "-help", "--help"} {
@@ -89,6 +89,33 @@ func TestHelpSubcommand_ShowsCommandUsage(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "claim") || !strings.Contains(out.String(), "<item-id>") {
 		t.Errorf("out = %q, want claim usage", out.String())
+	}
+}
+
+// Removed aliases ("lease", "run-all") are no longer dispatched — they hit
+// the unknown-command path: exit 2, stderr says "unknown command". This
+// confirms the spec-required error shape (docs/cli.md:82).
+func TestRemovedAliases_AreUnknownCommands(t *testing.T) {
+	for _, cmd := range []string{"lease", "run-all"} {
+		app, _, errBuf := newArgparseApp(t)
+		code := RunWithArgs(*app, []string{cmd})
+		if code != 2 {
+			t.Errorf("%s: exit code = %d, want 2", cmd, code)
+		}
+		if !strings.Contains(errBuf.String(), "unknown command") {
+			t.Errorf("%s: err = %q, want 'unknown command'", cmd, errBuf.String())
+		}
+	}
+	// A help flag after a removed alias is NOT treated as help — still unknown.
+	for _, cmd := range []string{"lease", "run-all"} {
+		app, _, errBuf := newArgparseApp(t)
+		code := RunWithArgs(*app, []string{cmd, "--help"})
+		if code != 2 {
+			t.Errorf("%s --help: exit code = %d, want 2", cmd, code)
+		}
+		if !strings.Contains(errBuf.String(), "unknown command") {
+			t.Errorf("%s --help: err = %q, want 'unknown command'", cmd, errBuf.String())
+		}
 	}
 }
 

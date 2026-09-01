@@ -22,29 +22,17 @@ func wantsHelp(args []string) bool {
 	return slices.ContainsFunc(args, isHelpArg)
 }
 
-// isKnownCommand reports whether cmd (or its alias) is a dispatchable
-// subcommand. perCommandUsage is the registry — every case in RunWithArgs's
-// dispatch switch must have a matching entry here (and vice versa).
+// isKnownCommand reports whether cmd is a dispatchable subcommand.
+// perCommandUsage is the registry — every case in RunWithArgs's dispatch
+// switch must have a matching entry here (and vice versa).
 func isKnownCommand(cmd string) bool {
-	_, ok := perCommandUsage[canonicalCommand(cmd)]
+	_, ok := perCommandUsage[cmd]
 	return ok
-}
-
-// canonicalCommand folds a command alias onto its canonical name.
-func canonicalCommand(cmd string) string {
-	switch cmd {
-	case "lease":
-		return "claim"
-	case "run-all":
-		return "resolve"
-	}
-	return cmd
 }
 
 // cmdHelp is the per-subcommand help record.
 type cmdHelp struct {
 	name    string
-	aliases []string
 	syntax  string // text after the command name, e.g. "<item-id>"
 	summary string
 	detail  string
@@ -65,7 +53,7 @@ this binary could process).
 The "availability" column marks which items resolve would auto-select (auto)
 versus merely claimable (available) — so the answer to "would resolve pick
 this?" belongs in the listing.`},
-	"claim": {name: "claim", aliases: []string{"lease"}, syntax: "<item-id>", summary: "acquire a claim on an item",
+	"claim": {name: "claim", syntax: "<item-id>", summary: "acquire a claim on an item",
 		detail: "Acquires a claim (lease) on <item-id> so this owner can advance it.\nTakes exactly one item id."},
 	"release": {name: "release", summary: "drop the active claim",
 		detail: "Releases the claim currently held by this owner. Takes no arguments."},
@@ -84,7 +72,7 @@ Without --force, prints what would be discarded and refuses.
 		detail: "Prints the read-only lifecycle checklist. With <item-id>, inspects that\nitem from the backend without claiming it; without, uses the active claim."},
 	"run-step": {name: "run-step", summary: "advance one lifecycle item",
 		detail: "Advances exactly ONE lifecycle item against the active claim\n(one prompt → one artifact). Requires an active claim; takes no arguments."},
-	"resolve": {name: "resolve", aliases: []string{"run-all"}, syntax: "[<item-id>] [--tag TAG]…", summary: "run all steps to completion",
+	"resolve": {name: "resolve", syntax: "[<item-id>] [--tag TAG]…", summary: "run all steps to completion",
 		detail: "Runs ALL steps until the item is finalized or parked. With <item-id>,\nclaims it first; otherwise uses the active claim.\n\n" +
 			"--tag TAG narrows the auto-selectable set to items carrying all given\n" +
 			"tags. Mutually exclusive with <item-id> (the id already answers the\n" +
@@ -128,16 +116,13 @@ nothing.`},
 // commandUsage returns help for a single subcommand. For an unrecognized
 // command it falls back to the program-level usage.
 func commandUsage(bin, cmd string) string {
-	h, ok := perCommandUsage[canonicalCommand(cmd)]
+	h, ok := perCommandUsage[cmd]
 	if !ok {
 		return usage(bin)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s %s — %s\n\nusage:\n  %s %s\n", bin, h.name, h.summary,
 		bin, strings.TrimSpace(h.name+" "+h.syntax))
-	if len(h.aliases) > 0 {
-		fmt.Fprintf(&b, "  (alias: %s)\n", strings.Join(h.aliases, ", "))
-	}
 	if h.detail != "" {
 		fmt.Fprintf(&b, "\n%s\n", h.detail)
 	}
