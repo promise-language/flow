@@ -46,7 +46,7 @@ type Config struct {
 	// VerifyCmd is the project's verify COMMAND, run by Worktree.Verify. It
 	// repairs what has one right answer and then measures, so it may modify the
 	// worktree.
-	// Default: {"bash", "bin/verify.sh"}.
+	// Default: {"bin/verify"}.
 	VerifyCmd []string
 
 	// DefaultType maps issues with no `type:*` label to this Item.Type
@@ -91,7 +91,7 @@ func (c Config) withDefaults() Config {
 		c.WorktreeDir = "."
 	}
 	if len(c.VerifyCmd) == 0 {
-		c.VerifyCmd = []string{"bash", "bin/verify.sh"}
+		c.VerifyCmd = []string{"bin/verify"}
 	}
 	if c.GateTimeout == 0 {
 		c.GateTimeout = 10 * time.Minute

@@ -155,7 +155,7 @@ import (
 func main() {
     backend, err := ghbackend.NewBackend(ghbackend.Config{
         BinaryName: "issue",
-        VerifyCmd:  []string{"bash", "bin/verify.sh"}, // your project's gate
+        VerifyCmd:  []string{"bin/verify"}, // your project's gate
         // Guard is what lets this publish anything at all. With none, reads
         // work and the first write refuses — see docs/disclosure.md.
         Guard: nil,
@@ -439,7 +439,7 @@ reference `do-task` flow implements.
 
 A flow selected for a `task`/`bug` item produces one artifact per step and
 advances to the first unresolved one. The validation gate is your project's
-verify command (`Worktree.Validate`, e.g. `bin/verify.sh`); a passing
+verify command (`Worktree.Validate`, e.g. `bin/verify`); a passing
 validation is always tied to the **exact tree/commit it ran against** —
 changing the tree or rebasing invalidates it.
 

@@ -91,4 +91,4 @@ func main() {
 }
 
 // verifyCmd is the gate every implement round has to make pass.
-var verifyCmd = []string{"bash", "bin/verify.sh"}
+var verifyCmd = []string{"bin/verify"}

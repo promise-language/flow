@@ -27,6 +27,22 @@ func TestConfigGateTimeoutIsFilledIn(t *testing.T) {
 	}
 }
 
+// The default VerifyCmd must point at the compiled binary, not a shell
+// script that no longer exists. A consumer that sets no VerifyCmd gets this
+// default, so it must be a command that can actually run.
+func TestConfigVerifyCmdDefaultIsTheBinary(t *testing.T) {
+	got := Config{}.withDefaults()
+	if len(got.VerifyCmd) != 1 || got.VerifyCmd[0] != "bin/verify" {
+		t.Errorf("default VerifyCmd = %v, want [bin/verify]", got.VerifyCmd)
+	}
+
+	// A declared value must not be overwritten.
+	declared := Config{VerifyCmd: []string{"make", "check"}}.withDefaults()
+	if len(declared.VerifyCmd) != 2 || declared.VerifyCmd[0] != "make" {
+		t.Errorf("VerifyCmd = %v, want the declared [make check]", declared.VerifyCmd)
+	}
+}
+
 // The default sits UNDER the step's own budget, which is what makes a wedged
 // gate get caught by its own deadline and reported as OutcomeTimedOut. Raise
 // it past the step timeout and the step dies first: the gate then has no
