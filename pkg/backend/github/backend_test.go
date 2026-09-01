@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -878,6 +879,16 @@ func TestBackend_Claim_RefusesWhenAssignedToAnother(t *testing.T) {
 	if !strings.Contains(err.Error(), "assigned to bob") {
 		t.Errorf("error = %v, want mention of bob", err)
 	}
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T", err)
+	}
+	if refused.Code != "already-held" {
+		t.Errorf("Code = %q, want already-held", refused.Code)
+	}
+	if !refused.ItemScoped {
+		t.Error("ItemScoped = false, want true (another item could succeed)")
+	}
 
 	// No claim label should have been posted — the refusal is in preflight.
 	mock.mu.Lock()
@@ -904,6 +915,13 @@ func TestBackend_Claim_RefusesWhenOwnerLabelForAnother(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "owner label for carol") {
 		t.Errorf("error = %v, want mention of carol", err)
+	}
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T", err)
+	}
+	if refused.Code != "already-held" {
+		t.Errorf("Code = %q, want already-held", refused.Code)
 	}
 }
 

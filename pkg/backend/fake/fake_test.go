@@ -3,6 +3,7 @@ package fake_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/promise-language/flow"
@@ -40,6 +41,28 @@ func TestBackend_ClaimAndLookup(t *testing.T) {
 	}
 	if info == nil || info.Owner != "alice" {
 		t.Errorf("LookupClaim info = %+v, want owner alice", info)
+	}
+}
+
+// Claiming an item already held by another owner returns a typed
+// ErrClaimRefused with ItemScoped=true, so the auto-select loop can advance.
+func TestBackend_ClaimConflictIsTypedRefusal(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	b.AddItem(newItem("1"))
+	if _, err := b.Claim(ctx, itemRef("1"), "alice", nil); err != nil {
+		t.Fatalf("first Claim: %v", err)
+	}
+	_, err := b.Claim(ctx, itemRef("1"), "bob", nil)
+	if err == nil {
+		t.Fatal("expected error when claiming item held by another owner")
+	}
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is %T, want ErrClaimRefused", err)
+	}
+	if !refused.ItemScoped {
+		t.Error("ItemScoped = false, want true (a different item could succeed)")
 	}
 }
 

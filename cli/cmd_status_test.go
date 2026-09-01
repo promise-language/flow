@@ -291,3 +291,58 @@ func TestCmdStatus_WithStateInspector_InspectsById(t *testing.T) {
 		t.Errorf("output should not mention alice (no claim taken); got:\n%s", output)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Overrides display: Claim.Overrides must appear in human output and in JSON.
+// ---------------------------------------------------------------------------
+
+// overridesClaimBackend wraps a fake backend and patches the claim returned
+// by LookupActiveClaim to carry overrides.
+type overridesClaimBackend struct {
+	*fake.Backend
+	overrides []string
+}
+
+func (b *overridesClaimBackend) LookupActiveClaim(ctx context.Context, owner string) (*flow.Claim, error) {
+	claim, err := b.Backend.LookupActiveClaim(ctx, owner)
+	if claim != nil {
+		claim.Overrides = b.overrides
+	}
+	return claim, err
+}
+
+func TestStatusHuman_ShowsOverrides(t *testing.T) {
+	env := newParkGrantEnv(t)
+	wrapped := &overridesClaimBackend{
+		Backend:   env.be,
+		overrides: []string{"unadmitted", "dirty-tree"},
+	}
+	env.app.Backend = wrapped
+	env.out.Reset()
+
+	if code := env.app.cmdStatus(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	out := env.out.String()
+	if !strings.Contains(out, "overrides:") {
+		t.Errorf("expected 'overrides:' line in human output; got:\n%s", out)
+	}
+	if !strings.Contains(out, "unadmitted") {
+		t.Errorf("expected 'unadmitted' in overrides line; got:\n%s", out)
+	}
+	if !strings.Contains(out, "dirty-tree") {
+		t.Errorf("expected 'dirty-tree' in overrides line; got:\n%s", out)
+	}
+}
+
+func TestStatusHuman_OmitsOverridesWhenEmpty(t *testing.T) {
+	env := newParkGrantEnv(t)
+	env.out.Reset()
+
+	if code := env.app.cmdStatus(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	if strings.Contains(env.out.String(), "overrides:") {
+		t.Errorf("empty overrides should not print an 'overrides:' line; got:\n%s", env.out.String())
+	}
+}

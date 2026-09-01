@@ -823,3 +823,88 @@ func TestCmdResolve_AutoSelectNeverCallsDiscover(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Explicit-ref refusal: `resolve <id>` with a typed claim refusal must render
+// via formatClaimRefusal and exit 1, not fall into the generic error path.
+// ---------------------------------------------------------------------------
+
+// refusingResolveBackend refuses Claim with a typed ErrClaimRefused and
+// implements RefResolver so the explicit-id path can resolve the ref.
+type refusingResolveBackend struct {
+	*fake.Backend
+	refusal flow.ErrClaimRefused
+}
+
+func (b *refusingResolveBackend) ResolveRef(ctx context.Context, id string) (flow.ItemRef, error) {
+	return flow.ItemRef{BackendName: "fake", Display: id, Ref: json.RawMessage(`"` + id + `"`)}, nil
+}
+
+func (b *refusingResolveBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
+	return flow.Claim{}, b.refusal
+}
+
+func TestCmdResolve_ExplicitIdRefusalRendering(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be := &refusingResolveBackend{
+		Backend: inner,
+		refusal: flow.ErrClaimRefused{
+			Code:     "not-admitted",
+			Reason:   "arena not admitted",
+			Check:    "git-identity",
+			Override: "force-unadmitted",
+		},
+	}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), []string{"1"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
+	}
+	got := errBuf.String()
+	if !strings.Contains(got, "refused") {
+		t.Errorf("expected 'refused' in output; got %q", got)
+	}
+	if !strings.Contains(got, `check "git-identity"`) {
+		t.Errorf("expected check name; got %q", got)
+	}
+	if !strings.Contains(got, "--force-unadmitted") {
+		t.Errorf("expected override hint; got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// --force-unadmitted on resolve
+// ---------------------------------------------------------------------------
+
+// overrideRecordingResolveBackend records which overrides Claim receives,
+// implements RefResolver for the explicit-id path, and delegates to fake.
+type overrideRecordingResolveBackend struct {
+	*fake.Backend
+	lastOverrides []flow.ClaimOverride
+}
+
+func (b *overrideRecordingResolveBackend) ResolveRef(ctx context.Context, id string) (flow.ItemRef, error) {
+	return flow.ItemRef{BackendName: "fake", Display: id, Ref: json.RawMessage(`"` + id + `"`)}, nil
+}
+
+func (b *overrideRecordingResolveBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
+	b.lastOverrides = overrides
+	return b.Backend.Claim(ctx, ref, owner, overrides)
+}
+
+func TestCmdResolve_ForceUnadmittedPassesOverride(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be := &overrideRecordingResolveBackend{Backend: inner}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), []string{"1", "--force-unadmitted"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if len(be.lastOverrides) != 1 || be.lastOverrides[0] != flow.OverrideUnadmitted {
+		t.Errorf("Claim received overrides=%v, want [OverrideUnadmitted]", be.lastOverrides)
+	}
+}
