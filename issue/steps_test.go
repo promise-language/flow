@@ -1829,6 +1829,143 @@ func TestPlanStepPropagatesAgentHardError(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Plan step refusals (#36).
+// ---------------------------------------------------------------------------
+
+func TestPlanStepRefusalParksBlocked(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		reply    string
+		wantKind RefusalKind
+	}{
+		{"already-done", "PLAN-REFUSAL: already-done The fix is in main\n```\ncommit abc123\n```", RefusalAlreadyDone},
+		{"duplicate", "PLAN-REFUSAL: duplicate Covered by #12", RefusalDuplicate},
+		{"conflicts", "PLAN-REFUSAL: conflicts Normative doc forbids this\n```\ndocs/design.md §3\n```", RefusalConflicts},
+		{"not-viable", "PLAN-REFUSAL: not-viable No extension point in the API\n```\nThe public API cannot be extended.\n```", RefusalNotViable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := &scriptedAgent{replies: []string{tc.reply}}
+			ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+			err := testBuilder(t).stepPlan(ctx)
+			if err == nil {
+				t.Fatal("want the step to park on a refusal")
+			}
+			if ctx.park == nil {
+				t.Fatal("no park recorded — a refusal must park, not fail")
+			}
+			if ctx.park.Kind != flow.ParkBlocked {
+				t.Errorf("park kind = %q, want %q", ctx.park.Kind, flow.ParkBlocked)
+			}
+			wantDetail := fmt.Sprintf("refusal=%s", tc.wantKind)
+			if ctx.park.Details != wantDetail {
+				t.Errorf("park details = %q, want %q", ctx.park.Details, wantDetail)
+			}
+			if !strings.Contains(ctx.park.Reason, string(tc.wantKind)) {
+				t.Errorf("park reason = %q, want it to carry the refusal kind", ctx.park.Reason)
+			}
+			if ctx.didResolve {
+				t.Error("resolved the plan artifact on a refusal — downstream steps must not run")
+			}
+			// The reasoning must survive in WIP.
+			if len(ctx.wipSaves) == 0 {
+				t.Fatal("no WIP saved — the reasoning behind the refusal is lost")
+			}
+			if !strings.Contains(ctx.wipSaves[len(ctx.wipSaves)-1], string(RefusalSentinel)) {
+				t.Errorf("WIP = %q, want it to contain the agent's refusal text", ctx.wipSaves[len(ctx.wipSaves)-1])
+			}
+		})
+	}
+}
+
+func TestPlanStepRefusalUnknownKindTreatedAsNormalPlan(t *testing.T) {
+	// An unknown kind is not a refusal — the plan resolves normally.
+	agent := &scriptedAgent{replies: []string{"PLAN-REFUSAL: wontfix Not worth doing"}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	err := testBuilder(t).stepPlan(ctx)
+	if err != nil {
+		t.Fatalf("stepPlan: %v — an unknown refusal kind should resolve as a normal plan", err)
+	}
+	if ctx.park != nil {
+		t.Error("parked on an unknown refusal kind — should resolve as normal plan")
+	}
+	if !ctx.didResolve {
+		t.Error("did not resolve the plan — an unknown kind is not a refusal")
+	}
+}
+
+func TestPlanStepRefusalNotAtColumnZeroTreatedAsNormalPlan(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{"    PLAN-REFUSAL: already-done Something"}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	err := testBuilder(t).stepPlan(ctx)
+	if err != nil {
+		t.Fatalf("stepPlan: %v", err)
+	}
+	if ctx.park != nil {
+		t.Error("parked on an indented refusal — should resolve as normal plan")
+	}
+	if !ctx.didResolve {
+		t.Error("did not resolve the plan")
+	}
+}
+
+func TestPlanStepRefusalWithPlanTextCombinesWIP(t *testing.T) {
+	// Agent submitted a plan AND refused: combined WIP saved.
+	agent := &scriptedAgent{
+		replies: []string{"PLAN-REFUSAL: already-done Already present in the tree"},
+		plans:   []planReply{{submitted: true, text: "the submitted plan"}},
+	}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	err := testBuilder(t).stepPlan(ctx)
+	if err == nil {
+		t.Fatal("want the step to park")
+	}
+	if ctx.park == nil {
+		t.Fatal("no park recorded")
+	}
+	if len(ctx.wipSaves) == 0 {
+		t.Fatal("no WIP saved")
+	}
+	wip := ctx.wipSaves[len(ctx.wipSaves)-1]
+	if !strings.Contains(wip, "the submitted plan") {
+		t.Errorf("WIP = %q, want it to contain the submitted plan", wip)
+	}
+	if !strings.Contains(wip, "PLAN-REFUSAL:") {
+		t.Errorf("WIP = %q, want it to contain the agent's reasoning", wip)
+	}
+}
+
+func TestPlanStepRefusalWIPSaveFailureStillParks(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{"PLAN-REFUSAL: duplicate Covered by #5"}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+	ctx.wipSaveErr = errors.New("disk full")
+
+	err := testBuilder(t).stepPlan(ctx)
+	if err == nil {
+		t.Fatal("want the step to park")
+	}
+	if ctx.park == nil {
+		t.Fatal("no park — WIP save failure must not prevent parking")
+	}
+	if ctx.park.Kind != flow.ParkBlocked {
+		t.Errorf("park kind = %q, want %q", ctx.park.Kind, flow.ParkBlocked)
+	}
+	// The notice should mention the failure.
+	found := false
+	for _, n := range ctx.notices {
+		if strings.Contains(n, "disk full") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("notices = %v, want one mentioning the WIP save failure", ctx.notices)
+	}
+}
+
 // runAgent returns the response alongside a question error so callers can
 // inspect what the agent produced. Other callers that do `if err != nil {
 // return err }` are unaffected because they never access resp.

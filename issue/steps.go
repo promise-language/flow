@@ -71,6 +71,26 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 		}
 		return err
 	}
+	// A refusal is the step's work — the agent read enough to conclude the
+	// item should not be done. It blocks rather than resolves.
+	if kind, summary, _, ok := detectRefusal(resp.LastText); ok {
+		// Save the full agent output as WIP so the reasoning survives if
+		// the refusal is cleared and the step resumes.
+		combined := resp.LastText
+		if resp.PlanText != "" {
+			combined = "## Submitted plan\n\n" + resp.PlanText +
+				"\n\n---\n\n## Agent reasoning\n\n" + resp.LastText
+		}
+		if wipErr := ctx.RecordWorkInProgress(combined); wipErr != nil {
+			ctx.Notify("", "could not record refusal reasoning: "+wipErr.Error())
+		}
+		return ctx.Park(flow.ParkRequest{
+			Kind:    flow.ParkBlocked,
+			Reason:  fmt.Sprintf("plan refused (%s): %s", kind, summary),
+			Details: fmt.Sprintf("refusal=%s", kind),
+		})
+	}
+
 	// The plan is what the agent SUBMITTED, when it submitted one. A plan-mode
 	// turn ends at the submission tool, so preferring it here is preferring the
 	// deliverable over whatever the agent happened to say on the way.
