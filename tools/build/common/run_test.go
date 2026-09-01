@@ -102,6 +102,40 @@ func TestJudge_NothingCappedIsAcceptableAndSaysNothingWasJudged(t *testing.T) {
 	}
 }
 
+// fit's measurements are reported and not judged, and the gap is deliberate
+// rather than an oversight to be found later.
+//
+// The caps table expresses "at most": judge() refuses a metric whose value is
+// GREATER than its entry. A disk floor is the opposite — free bytes must be at
+// least something — so giving fit a threshold means giving the table a
+// direction, which is the manifest in #38 and not a line added here. Until then
+// a machine is reported, and what is enough is decided by whoever reads it.
+//
+// What keeps that from being vacuous is the incomplete path, above: a machine
+// whose toolchain cannot be reached is already refused without any floor.
+func TestJudge_FitIsReportedAndNotJudgedUntilAFloorExists(t *testing.T) {
+	env := Envelope{Gate: "fit", Metrics: []Metric{
+		Size("worktree_free_bytes", 12582912, "bytes"),
+		Size("build_cache_free_bytes", 4096, "bytes"),
+	}}
+	acceptable, thresholds, detail := judge(env)
+	if !acceptable {
+		t.Fatalf("a complete fit run was refused by a term nobody declared: %s", detail)
+	}
+	if len(thresholds) != 0 {
+		t.Errorf("thresholds = %v, want none — a floor is a direction the cap table does not have", thresholds)
+	}
+	if !strings.Contains(detail, "judged") {
+		t.Errorf("detail = %q, want it to say nothing was judged", detail)
+	}
+	out := renderVerdict(env)
+	for _, want := range []string{"worktree_free_bytes", "build_cache_free_bytes", "12582912 B", "not judged"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the rendered verdict is missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // The wire form: one JSON object on stdout, whole, with both required fields.
 // The SDK refuses anything else, and a missing "acceptable" would be read as a
 // refusal nobody made.

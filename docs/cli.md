@@ -278,9 +278,13 @@ It checks exactly these things:
 | The backend is reachable and usable | Work is claimed against a store that cannot be read or written |
 | The agent can be invoked | Every step dies on its first turn, reported as an agent fault rather than a broken environment |
 | The verify command exists and is executable, when one is configured | A step finishes its work, goes to verify it, and fails on a missing command |
+| The gate entry point exists and is executable | Every gate reports `could not start`, on every retry, after the budget is spent |
 | Normative documentation is present — `docs/` exists and holds at least one document | An agent works without access to what the project defines as correct, and produces something plausible instead of something right |
+| The `fit` gate reports clear | The machine runs out of what the project's work requires part-way through an item, and the failure is read as a defect in the change |
 
-The set is closed. A check is added only when its failure is one an operator would otherwise diagnose from a mid-item symptom.
+The set is closed. A check is added only when its failure is one an operator would otherwise diagnose from a mid-item symptom — which is the same rule [environment.md](environment.md) closes the wider set with, because these five are the SDK's half of it.
+
+**The last row is the seam, and it is why the other five stay closed.** A project extends what fitness means for it by extending its own `fit` gate and its own thresholds — never by adding a check here, which every other project would then have to understand. What `doctor` does with the result is what it does with the rest: report it.
 
 **Invoking the agent is a real invocation, not a lookup on `PATH`.** A binary that exists but rejects the arguments this SDK passes is exactly as broken as one that is missing, and it is harder to diagnose — it surfaces as an empty result stream, which reads like a model failure. The check must start the agent the same way a step would.
 
@@ -293,3 +297,7 @@ The set is closed. A check is added only when its failure is one an operator wou
 Running the verify command can modify the tree — formatting and other auto-fixes are part of what it does. Anything that runs it re-reads worktree state afterwards and never assumes the tree is unchanged.
 
 `doctor` checks that the verify command exists and is executable. It does not run it, precisely because running it may mutate, and `doctor` must stay safe to run on a machine that is mid-item.
+
+### `fit` is run; the code gates are not
+
+`fit` is the only gate `doctor` runs, and the line is not about cost. A gate modifies nothing, so running any of them would be safe — but `formatted`, `tested` and the rest answer *is this tree sound*, which is a question about the change and none of `doctor`'s business. `fit` answers *is this machine fit to be given an item*, which is `doctor`'s only question. Checking that the gate entry point is executable and then not asking it the one thing `doctor` exists to ask would report a machine fit on the strength of never having looked.

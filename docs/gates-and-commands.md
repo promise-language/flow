@@ -6,12 +6,13 @@
 
 ## Required
 
-Three, and a flow cannot run without them.
+Four, and a flow cannot run without them.
 
 | | Kind | Does |
 |---|---|---|
 | `verify` | command | Repairs what is mechanically repairable, then reports whether what remains is sound |
 | `integration` | gate | Measures whether the mainline would still be green with this in it |
+| `fit` | gate | Measures whether this machine is fit to be given work at all |
 | the judge | judging entry point | Compares a measurement against this project's thresholds and answers |
 
 **The judge is what turns a measurement into an answer.** A gate has no verdict to give and neither has a runner: `measured` says a measurement exists, not that it is acceptable. The SDK does not compute one either, because the thresholds are the project's — so it hands the measurement back to the project and asks. Where the judge lives, how it is invoked and what it must print is [below](#where-the-verdict-is-made).
@@ -59,6 +60,16 @@ So the narrow parts are what iteration uses, and the whole is what a decision re
 The narrow parts inform the work. The whole supports the decision. It is the same division as commands and gates, one level down.
 
 A project may still implement `integration` as a single indivisible command. It will work, and every fix round will cost the full suite.
+
+### `fit` is the one required gate whose subject is not the code
+
+Everything above measures a change. `fit` measures the machine that would work on one — `resolution.md`'s gate table names it as the third thing gates do, *whether a machine is fit to be given work, before work is given* — and it is required for the same reason `verify` is: a flow that cannot ask the question has to discover the answer part-way through an item, after the effort is spent.
+
+**The project provides it because only the project knows what its work requires.** How much disk a build needs, which services a suite expects, what toolchain must be present. A floor compiled into the SDK is a threshold held by the party that cannot know it, which is the boundary this whole document exists to keep.
+
+It divides into instances like any other concept — `fit:disk`, `fit:toolchain` — so a wait on one condition re-measures that condition rather than the whole set.
+
+**It does not appear in the concern table below**, and that is deliberate rather than an omission. A project reads that table to decide what its `integration` is made of, and a machine that cannot build is not a change that may not land. What `fit` measures, what follows from an unfit answer, and why a `fit` gate may live in the tree despite measuring something that does not persist, is [environment.md](environment.md).
 
 ## Running a gate, and reading what it reported
 
@@ -379,6 +390,8 @@ Each concern appears as a command, a gate, or both. Where both exist they are th
 | Enough of it is exercised | — | `covered` — a measurement against a floor |
 
 A project need not have all of them. It must not call any of them something else, and must not use one of these names for something that is not what it says.
+
+**Two concepts are not in this table, because their subject is not one of the code's concerns.** `integration` is the composition these compose into, and `fit` is about the machine rather than the change. Both are required; neither is a row here.
 
 **Names describe the concern, not the tool that historically served it.** `lint` is a C utility from 1978, `vet` is one language's spelling of the same idea, and a reader who knows neither learns nothing from either. What the third row *does* is find code that compiles and is still a mistake — an unused result, a shadowed name, a conversion that cannot be meant — and repair the subset with one obvious fix.
 
