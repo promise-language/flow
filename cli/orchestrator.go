@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/promise-language/flow"
+	"github.com/promise-language/flow/pkg/clistate"
 )
 
 // SelectFlow picks the first flow in app.Flows whose constraints match the
@@ -214,6 +217,19 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	if app.Telemetry != nil {
 		app.Telemetry.StepProgress(stepCtx, claim, li.Name, "")
 	}
+
+	// Record the running step so `status` can report it. The record is
+	// advisory: a failure to write means status will not show "running",
+	// which is a degradation, not a breakage.
+	exe, _ := os.Executable()
+	absExe, _ := filepath.Abs(exe)
+	_ = clistate.SaveRunning(clistate.RunningRecord{
+		Item: claim.ItemRef.Display,
+		Step: li.Result(),
+		PID:  os.Getpid(),
+		Exe:  absExe,
+	})
+	defer clistate.ClearRunning()
 
 	// Dispatch.
 	handlerErr := li.Handler(sctx)

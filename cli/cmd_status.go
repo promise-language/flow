@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/promise-language/flow"
+	"github.com/promise-language/flow/pkg/clistate"
 )
 
 func (app *App) cmdStatus(ctx context.Context, args []string) int {
@@ -209,6 +210,21 @@ func stepPayloads(f *flow.Flow, state *flow.ItemState) []stepPayload {
 	if f == nil {
 		return []stepPayload{}
 	}
+
+	// Load the running-step record and verify liveness before entering the
+	// per-step loop. A stale record (dead PID or wrong exe) is silently
+	// ignored — the step will report as pending.
+	var runningStep string
+	var runningPID int
+	var runningExe string
+	if rec, err := clistate.LoadRunning(); err == nil && rec != nil {
+		if clistate.ProcessAlive(rec.PID, rec.Exe) {
+			runningStep = rec.Step
+			runningPID = rec.PID
+			runningExe = rec.Exe
+		}
+	}
+
 	items := f.Items()
 	out := make([]stepPayload, 0, len(items))
 	for _, li := range items {
@@ -240,6 +256,15 @@ func stepPayloads(f *flow.Flow, state *flow.ItemState) []stepPayload {
 			}
 			// Budget stays nil: signal steps own no budget record, which is
 			// exactly what makes them invalid grant targets.
+		}
+		// A pending step that matches the verified running record is
+		// promoted to running. Running only overrides pending — a
+		// resolved/stale/skipped step keeps its state even if a stale
+		// record names it.
+		if sp.State == statePending && sp.ID == runningStep {
+			sp.State = stateRunning
+			sp.RunningPID = runningPID
+			sp.RunningExe = runningExe
 		}
 		out = append(out, sp)
 	}
@@ -377,6 +402,9 @@ func printChecklist(app *App, steps []stepPayload) {
 		if note := budgetNote(s); note != "" {
 			fmt.Fprintf(app.Out, "  %s", note)
 		}
+		if s.State == stateRunning && s.RunningPID != 0 {
+			fmt.Fprintf(app.Out, "  (pid %d)", s.RunningPID)
+		}
 		fmt.Fprintln(app.Out)
 	}
 }
@@ -389,6 +417,8 @@ func stepMarker(state string) string {
 		return "[~]"
 	case stateSkipped:
 		return "[-]"
+	case stateRunning:
+		return "[>]"
 	}
 	return "[ ]"
 }

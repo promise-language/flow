@@ -187,6 +187,113 @@ func TestClearRemovesEveryWorkRecord(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Running-step record.
+// ---------------------------------------------------------------------------
+
+func TestRunningRecordRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+
+	rec := clistate.RunningRecord{
+		Item: "test#1",
+		Step: "write plan",
+		PID:  12345,
+		Exe:  "/usr/bin/flow",
+	}
+	if err := clistate.SaveRunning(rec); err != nil {
+		t.Fatalf("SaveRunning: %v", err)
+	}
+	got, err := clistate.LoadRunning()
+	if err != nil || got == nil {
+		t.Fatalf("LoadRunning: (%v, %v)", got, err)
+	}
+	if got.Item != rec.Item || got.Step != rec.Step || got.PID != rec.PID || got.Exe != rec.Exe {
+		t.Errorf("LoadRunning = %+v, want %+v", *got, rec)
+	}
+}
+
+func TestLoadRunning_NoFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+
+	got, err := clistate.LoadRunning()
+	if got != nil || err != nil {
+		t.Errorf("LoadRunning on empty dir = (%v, %v), want (nil, nil)", got, err)
+	}
+}
+
+func TestClearRunning_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+
+	// No file exists — must not error.
+	if err := clistate.ClearRunning(); err != nil {
+		t.Errorf("ClearRunning with nothing stored = %v, want nil", err)
+	}
+	// Write and clear — must not error.
+	if err := clistate.SaveRunning(clistate.RunningRecord{Item: "1", Step: "plan", PID: 1, Exe: "/x"}); err != nil {
+		t.Fatalf("SaveRunning: %v", err)
+	}
+	if err := clistate.ClearRunning(); err != nil {
+		t.Fatalf("ClearRunning: %v", err)
+	}
+	// Second clear — must not error.
+	if err := clistate.ClearRunning(); err != nil {
+		t.Errorf("second ClearRunning = %v, want nil", err)
+	}
+	// Verify the file is gone.
+	got, err := clistate.LoadRunning()
+	if got != nil || err != nil {
+		t.Errorf("LoadRunning after ClearRunning = (%v, %v), want (nil, nil)", got, err)
+	}
+}
+
+func TestClear_RemovesRunning(t *testing.T) {
+	dir := t.TempDir()
+	flowDir := filepath.Join(dir, ".flow")
+	t.Setenv("FLOW_DIR", flowDir)
+
+	if err := clistate.Save(flow.Claim{BackendName: "fake", Owner: "alice"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := clistate.SaveRunning(clistate.RunningRecord{Item: "1", Step: "plan", PID: 99, Exe: "/bin/flow"}); err != nil {
+		t.Fatalf("SaveRunning: %v", err)
+	}
+	if err := clistate.Clear(); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if _, err := os.Stat(clistate.RunningJSONPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("running.json should be gone after Clear, stat err = %v", err)
+	}
+	if got, err := clistate.LoadRunning(); got != nil || err != nil {
+		t.Errorf("LoadRunning after Clear = (%v, %v), want (nil, nil)", got, err)
+	}
+}
+
+// A corrupt running.json reads as an error, not as a partial record.
+func TestLoadRunning_Corrupt(t *testing.T) {
+	dir := t.TempDir()
+	flowDir := filepath.Join(dir, ".flow")
+	t.Setenv("FLOW_DIR", flowDir)
+
+	// Write a valid record first so the directory exists.
+	if err := clistate.SaveRunning(clistate.RunningRecord{Item: "1", Step: "plan", PID: 1, Exe: "/x"}); err != nil {
+		t.Fatalf("SaveRunning: %v", err)
+	}
+	// Overwrite with truncated JSON.
+	if err := os.WriteFile(clistate.RunningJSONPath(), []byte(`{"item":"1","step":"pl`), 0o644); err != nil {
+		t.Fatalf("write corrupt file: %v", err)
+	}
+	got, err := clistate.LoadRunning()
+	if err == nil {
+		t.Errorf("LoadRunning on corrupt file = (%+v, nil), want an error", got)
+	}
+	if got != nil {
+		t.Errorf("LoadRunning on corrupt file returned non-nil record: %+v", got)
+	}
+}
+
 // A record whose bytes are not a record — a write cut off by the crash that
 // ended the run that was writing it — reads as an error, never as a body. The
 // caller is told; what it must never get is a fragment of one, or of something
