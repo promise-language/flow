@@ -60,6 +60,16 @@ func initTestRepo(t *testing.T) *gitOps {
 		}
 	}
 
+	// Ignore the SDK state dir, which is what every real project does and what
+	// StageAll now requires: an unignored state dir inside the worktree is
+	// refused, not silently excluded. An absolute FLOW_DIR is outside the
+	// worktree, so there is nothing to ignore.
+	if d := clistate.Dir(); !filepath.IsAbs(d) {
+		if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(d+"/\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// Create and commit an initial file so HEAD exists.
 	if err := os.WriteFile(filepath.Join(dir, "README"), []byte("init"), 0644); err != nil {
 		t.Fatal(err)
@@ -342,5 +352,40 @@ func TestCommit_OnlyFlowDirChange_NoCommit(t *testing.T) {
 	}
 	if headBefore != headAfter {
 		t.Errorf("HEAD should not have moved: before=%s after=%s", headBefore, headAfter)
+	}
+}
+
+// An unignored state dir inside the worktree is refused, not worked around.
+// Excluding it with a pathspec would leave it present-but-never-committed, and
+// naming an already-ignored path makes git reject the whole add.
+func TestStageAll_RefusesUnignoredStateDir(t *testing.T) {
+	t.Setenv("FLOW_DIR", ".flow")
+	dir := t.TempDir()
+	g := newGitOps(dir)
+	ctx := t.Context()
+
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@test"},
+		{"config", "user.name", "test"},
+	} {
+		if _, stderr, err := g.run(ctx, args...); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, string(stderr))
+		}
+	}
+	// Deliberately NO .gitignore.
+	if err := os.WriteFile(filepath.Join(dir, "README"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := g.StageAll(ctx)
+	if err == nil {
+		t.Fatal("StageAll succeeded with an unignored state dir, want a refusal")
+	}
+	if !strings.Contains(err.Error(), ".gitignore") {
+		t.Errorf("err = %v, want it to name the remedy (.gitignore)", err)
+	}
+	if !strings.Contains(err.Error(), ".flow") {
+		t.Errorf("err = %v, want it to name the state dir", err)
 	}
 }

@@ -132,16 +132,50 @@ func (g *gitOps) BranchExists(ctx context.Context, name string) (bool, error) {
 // Commit stages everything and commits with the given message. Returns nil
 // if there's nothing to commit (idempotent).
 // StageAll adds every change, untracked files included, to the index.
+//
+// The SDK's own state directory must be invisible to git before anything is
+// staged, and a bare `git add -A` is what makes that true: it skips an ignored
+// directory, and an absolute state dir lives outside the worktree where git
+// cannot see it at all. The remaining case is refused rather than worked
+// around — a state dir inside the worktree that git does not ignore.
+//
+// Excluding it with a pathspec was the earlier approach and is wrong twice
+// over. It leaves the directory in the tree as a permanent third state —
+// present, unignored, never committed — which docs/resolution.md rules out
+// ("nothing uncommittable may be in the tree ... not as a third tolerated
+// state beside committed and ignored"). And `git add -A -- . :(exclude)<dir>`
+// fails outright once <dir> IS ignored, because git reads it as an explicitly
+// named ignored path — which is the normal case for any project that ignores
+// .flow/, so the workaround broke the configuration it was meant to serve.
 func (g *gitOps) StageAll(ctx context.Context) error {
 	dir := clistate.Dir()
-	args := []string{"add", "-A"}
-	if !filepath.IsAbs(dir) {
-		args = append(args, "--", ".", ":(exclude)"+dir)
+	if !filepath.IsAbs(dir) && !g.ignored(ctx, dir) {
+		return fmt.Errorf(
+			"git add -A: the SDK state dir %q is inside the worktree and git does not "+
+				"ignore it — add %q to .gitignore so claim state is never committed",
+			dir, dir+"/")
 	}
-	if _, stderr, err := g.run(ctx, args...); err != nil {
-		return fmt.Errorf("git add -A (excluding %s): %w (%s)", dir, err, string(stderr))
+	if _, stderr, err := g.run(ctx, "add", "-A"); err != nil {
+		return fmt.Errorf("git add -A: %w (%s)", err, string(stderr))
 	}
 	return nil
+}
+
+// ignored reports whether git already excludes dir through an ignore rule.
+//
+// The probe asks about "dir/" rather than "dir" deliberately. The conventional
+// rule is directory-only (".flow/"), and git matches a bare "dir" against it
+// only when the directory already exists on disk — but StageAll can run before
+// the state dir has been created, and answering "not ignored" then would
+// refuse a correctly configured repository. Asking about "dir/" matches the
+// rule whether or not the directory exists yet.
+//
+// check-ignore exits 0 when the path is ignored and 1 when it is not; any
+// other failure is read as "not ignored", so a broken probe refuses to stage
+// rather than staging state it cannot prove is excluded.
+func (g *gitOps) ignored(ctx context.Context, dir string) bool {
+	_, _, err := g.run(ctx, "check-ignore", "-q", "--", strings.TrimSuffix(dir, "/")+"/")
+	return err == nil
 }
 
 func (g *gitOps) Commit(ctx context.Context, msg string) error {
