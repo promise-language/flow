@@ -374,7 +374,7 @@ f.AddStep("implement", "implementation", stepImpl,
 Other options: `Required` / `Optional` (cardinality for `IsDone`),
 `StaleAfter(id)` and `StaleOnCommit` (re-run triggers when a dependency moves
 or HEAD changes). Unspecified axes inherit the package defaults
-`{3, 1, $10, 30m}` (`flow.DefaultStepBudget()`).
+`{3, 50, $20, 30m}` (`flow.DefaultStepBudget()`).
 
 A park records the step by its **result id** (`plan`), not its label (`"write
 plan"`), and `Backend.LoadState` surfaces it as `ItemState.Park` — that is what
@@ -388,10 +388,10 @@ item the first time it's processed; bumping `MaxInvocations` in your source
 does **not** retroactively re-budget items already in flight. The only
 post-seed knob is `grant` (additive). This is deliberate runaway protection:
 the invocations cap catches "many fresh runs each exiting without progress";
-the prompts/invocation cap catches in-step loops. The `$1`-prompt default
-makes the canonical step shape "one prompt → write artifact → return; the SDK
-re-invokes if more is needed," and forces any in-step loop to be declared
-visibly.
+the prompts/invocation cap catches in-step loops. The 50-prompt default
+is a runaway backstop, not a tight budget — what a step actually costs is
+bounded by `MaxCostUSD` and `Timeout`, and any in-step loop declared via
+`MaxPromptsPerInvocation` overrides it visibly.
 
 ### Asking the user a question
 
@@ -773,7 +773,7 @@ usage and exits 0 without running it.
 ├── artifact.go             ArtifactDef/ArtifactType (the six types), ArtifactRecord, PatchBody/FileBody
 ├── signal.go               SignalDef + SignalState
 ├── backend.go              Backend, Worktree, RequestManager, Item, Claim, ItemRef, ItemState; RefResolver/StateInspector/Finalizer/WorkInProgress
-├── budget.go               StepBudget + defaults {3, 1, $10, 30m}
+├── budget.go               StepBudget + defaults {3, 50, $20, 30m}
 ├── agent.go                Agent interface + AgentRequest/Response/Failure
 ├── preflight.go            PreflightFunc + ChainPreflight
 ├── errs.go wire.go         sentinel errors + ParkRequest/InvocationResult/Question/AgentQuestion
