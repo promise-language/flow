@@ -3,6 +3,7 @@ package common
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -527,6 +528,87 @@ func TestFitSaysNothingOnStdoutAndAnnouncesItselfOnStderr(t *testing.T) {
 	// that is wedged.
 	if got := stderr(); !strings.Contains(got, "go env GOCACHE") {
 		t.Errorf("stderr = %q, want the child this gate ran", got)
+	}
+}
+
+// gateOutput's contract after #40: stdout is captured and returned, stderr is
+// passed through to os.Stderr. Before, both streams shared one buffer — a
+// child's diagnostic output was interleaved with its answer, and a person
+// watching saw nothing until the child exited.
+func TestGateOutputDoesNotCaptureStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell script")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "both")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho answer\necho progress >&2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stderr := captureStream(t, &os.Stderr)
+	out, err := gateOutput(dir, script)
+	if err != nil {
+		t.Fatalf("gateOutput: %v", err)
+	}
+
+	if !strings.Contains(out, "answer") {
+		t.Errorf("stdout not in return value: %q", out)
+	}
+	if strings.Contains(out, "progress") {
+		t.Error("stderr is in the return value — the streams are combined, not separated")
+	}
+	got := stderr()
+	if !strings.Contains(got, "progress") {
+		t.Errorf("stderr was not passed through to os.Stderr: %q", got)
+	}
+}
+
+// A child that writes far more than any measurement should not exhaust the
+// gate runner. The captured stdout is truncated to the bound.
+func TestGateOutputBoundsStdout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell script")
+	}
+	dir := t.TempDir()
+	blocks := (maxToolOutput / 1024) + 10
+	script := filepath.Join(dir, "chatty")
+	if err := os.WriteFile(script, []byte(fmt.Sprintf(
+		"#!/bin/sh\ndd if=/dev/zero bs=1024 count=%d 2>/dev/null\n", blocks,
+	)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Suppress the "==>" prefix on stderr.
+	captureStream(t, &os.Stderr)
+	out, _ := gateOutput(dir, script)
+	if len(out) > maxToolOutput {
+		t.Errorf("output is %d bytes, want at most %d — the capture is unbounded", len(out), maxToolOutput)
+	}
+}
+
+// gateValue keeps the two streams apart AND bounds both. A child that writes
+// far more than its answer on either stream must not exhaust the process.
+func TestGateValueBoundsBothStreams(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell script")
+	}
+	dir := t.TempDir()
+	blocks := (maxToolOutput / 1024) + 10
+	script := filepath.Join(dir, "chatty")
+	if err := os.WriteFile(script, []byte(fmt.Sprintf(
+		"#!/bin/sh\ndd if=/dev/zero bs=1024 count=%d 2>/dev/null\ndd if=/dev/zero bs=1024 count=%d >&2 2>/dev/null\n",
+		blocks, blocks,
+	)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	captureStream(t, &os.Stderr)
+	stdout, stderr, _ := gateValue(dir, script)
+	if len(stdout) > maxToolOutput {
+		t.Errorf("stdout is %d bytes, want at most %d", len(stdout), maxToolOutput)
+	}
+	if len(stderr) > maxToolOutput {
+		t.Errorf("stderr is %d bytes, want at most %d", len(stderr), maxToolOutput)
 	}
 }
 

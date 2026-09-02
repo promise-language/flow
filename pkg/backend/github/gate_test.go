@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -472,6 +473,39 @@ func TestRunGate_RefusesAnUndeclaredNameWithoutSpawning(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "ran")); err == nil {
 		t.Error("spawned a process for an undeclared gate name")
+	}
+}
+
+// A gate that prints far more than an envelope should not exhaust the runner.
+// The captured stdout is truncated to the bound, and the excess is discarded
+// without blocking the child.
+func TestRunGate_BoundsStdoutCapture(t *testing.T) {
+	requireRealProcesses(t)
+
+	// A valid envelope followed by enough padding to exceed maxEnvelopeOutput.
+	// The padding goes past the envelope, so the runner sees trailing content
+	// and reports broke-the-contract — the point is that it SURVIVES to do so
+	// rather than accumulating unboundedly.
+	//
+	// dd writes binary zeros, which are cheaper than generating text and just
+	// as effective at filling a buffer. The count is in 1 KiB blocks.
+	blocks := (maxEnvelopeOutput / 1024) + 10
+	script := fmt.Sprintf(
+		`echo '{"gate":"integration"}'; dd if=/dev/zero bs=1024 count=%d 2>/dev/null`,
+		blocks,
+	)
+	w, _ := gateWorktree(t, script, 30*time.Second)
+	run, err := w.RunGate(context.Background(), flow.GateIntegration)
+	if err != nil {
+		t.Fatalf("RunGate: %v", err)
+	}
+	// The envelope plus padding exceeds the bound, so broke-the-contract is
+	// correct (trailing content). The key assertion is that Stdout is capped.
+	if run.Outcome != flow.OutcomeBrokeContract {
+		t.Errorf("outcome = %q, want %q (detail: %s)", run.Outcome, flow.OutcomeBrokeContract, run.Detail)
+	}
+	if len(run.Stdout) > maxEnvelopeOutput {
+		t.Errorf("Stdout is %d bytes, want at most %d — the capture is unbounded", len(run.Stdout), maxEnvelopeOutput)
 	}
 }
 

@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -536,5 +537,29 @@ func TestJudge_AJudgeThatAlsoWritesToStderrStillAnswers(t *testing.T) {
 	}
 	if strings.Contains(v.Detail, "reading thresholds") {
 		t.Errorf("Detail = %q, want only what the judge put in the verdict", v.Detail)
+	}
+}
+
+// A judge that prints far more than a verdict should not exhaust the SDK.
+// The captured stdout is truncated to the bound, and the verdict still
+// arrives if it fits within the prefix.
+func TestAskJudge_BoundsOutputCapture(t *testing.T) {
+	requireRealProcesses(t)
+
+	// A valid verdict followed by enough padding to exceed the bound. The
+	// verdict itself is small; the padding is what a defective judge might
+	// produce. The trailing content makes this not-a-verdict (trailing content
+	// after the object), which is the correct refusal — the point is that the
+	// SDK survives to report it.
+	blocks := (maxVerdictOutput / 1024) + 10
+	script := fmt.Sprintf(
+		`echo '%s'; dd if=/dev/zero bs=1024 count=%d 2>/dev/null`,
+		aVerdict, blocks,
+	)
+	w, _ := judgeWorktree(t, script, 30*time.Second)
+	v, err := w.Judge(context.Background(), measured(flow.GateTested, `{"gate":"tested"}`))
+	assertNoVerdict(t, v, err)
+	if !strings.Contains(err.Error(), "not a verdict") {
+		t.Errorf("err = %v, want it to name the problem (trailing content)", err)
 	}
 }

@@ -21,6 +21,12 @@ import (
 // without it.
 const envelopeFlag = "--envelope"
 
+// maxEnvelopeOutput bounds what the runner reads from a gate's stdout. An
+// envelope is one small JSON object; anything approaching 1 MiB is already
+// broke-the-contract. The bound prevents a chatty gate from exhausting the
+// runner.
+const maxEnvelopeOutput = 1 << 20 // 1 MiB
+
 // gateStderr is where a gate's progress goes. Typed *os.File deliberately:
 // exec.Cmd hands a real descriptor straight to the child and spawns no copying
 // goroutine, which is the passthrough the contract requires. An io.Writer here
@@ -57,17 +63,18 @@ func runGate(ctx context.Context, dir string, name flow.GateName, argv []string,
 	gateCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var stdout bytes.Buffer
 	// argv[0] contains a separator, so os/exec performs no PATH lookup and the
 	// OS resolves it against Dir after the child chdirs. No shell stands
 	// between here and the gate: a line that is interpreted gives different
 	// answers on different hosts for reasons that have nothing to do with the
 	// subject.
+	out := newBoundedWriter(maxEnvelopeOutput)
 	cmd := exec.CommandContext(gateCtx, argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Stdin = nil // /dev/null — a gate cannot block on a terminal that is not there
-	// Captured, so it can be parsed. Bounding what is read here is #40.
-	cmd.Stdout = &stdout
+	// Captured and bounded, so it can be parsed without a chatty gate
+	// exhausting the runner.
+	cmd.Stdout = out
 	cmd.Stderr = gateStderr
 	cmd.WaitDelay = gateWaitDelay
 
@@ -97,7 +104,7 @@ func runGate(ctx context.Context, dir string, name flow.GateName, argv []string,
 	}
 
 	waitErr := cmd.Wait()
-	run.Stdout = stdout.Bytes()
+	run.Stdout = out.Bytes()
 	if cmd.ProcessState != nil {
 		run.ExitCode = cmd.ProcessState.ExitCode()
 	}

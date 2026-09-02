@@ -28,15 +28,31 @@ func newGitOps(dir string) *gitOps {
 	return &gitOps{dir: dir, runner: defaultGitRunner}
 }
 
+const (
+	// maxGitOutput bounds what the runner reads from a spawned git command's
+	// stdout. Git diffs and logs can be large but not unbounded; 10 MiB is
+	// enough for any diff a resolution produces and small enough that a
+	// runaway child cannot exhaust the process.
+	maxGitOutput = 10 << 20 // 10 MiB
+
+	// maxGitStderr bounds the diagnostic output kept for error messages.
+	// Matches the order of magnitude Go's own prefixSuffixSaver uses.
+	maxGitStderr = 64 << 10 // 64 KiB
+)
+
 func defaultGitRunner(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
-	stdout, err := cmd.Output()
+	out := newBoundedWriter(maxGitOutput)
+	errs := newBoundedWriter(maxGitStderr)
+	cmd.Stdout = out
+	cmd.Stderr = errs
+	err := cmd.Run()
 	var stderr []byte
-	if ee, ok := err.(*exec.ExitError); ok {
-		stderr = ee.Stderr
+	if err != nil {
+		stderr = errs.Bytes()
 	}
-	return stdout, stderr, err
+	return out.Bytes(), stderr, err
 }
 
 // run invokes `git <args>` in g.dir and returns stdout, captured stderr, err.
