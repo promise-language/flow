@@ -96,7 +96,7 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 	f := flowForType(app, state.Item.Type)
 	if f == nil {
 		fmt.Fprintf(app.Err, "grant: no flow in this binary handles item type %q — nothing to grant\n", state.Item.Type)
-		return 2
+		return 1
 	}
 
 	amounts := grantAmounts{

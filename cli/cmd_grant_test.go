@@ -160,3 +160,38 @@ func TestCmdGrant_NoPark_RefusesWithRemedy(t *testing.T) {
 		}
 	}
 }
+
+// TestCmdGrant_UnmatchedTypeExitsOne (#25): an item whose type no flow accepts
+// must exit 1 (could not complete), not 2 (malformed invocation). The command
+// line was valid; the binary simply cannot act on this item type.
+func TestCmdGrant_UnmatchedTypeExitsOne(t *testing.T) {
+	a := &stubAgent{name: "stub"}
+	app, be, claim := testAppItem(t,
+		flow.Item{ID: "1", Type: "chore", Title: "chore#1"},
+		[]flow.ItemType{"task"}, // flow accepts only "task"
+		func(f *flow.Flow) {
+			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+				return ctx.ResolveMarkdown("the plan")
+			}, flow.StepConfig{})
+		}, a)
+
+	if err := be.SeedState(context.Background(), claim, []flow.ArtifactSpec{
+		{Id: "plan", Type: flow.ArtifactMarkdown},
+	}); err != nil {
+		t.Fatalf("SeedState: %v", err)
+	}
+
+	var errBuf bytes.Buffer
+	app.Err = &errBuf
+
+	code := app.cmdGrant(context.Background(), []string{"--invocations", "1", "--all"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), `"chore"`) {
+		t.Errorf("expected stderr to name the unmatched type; got %q", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "no flow in this binary handles item type") {
+		t.Errorf("expected stderr to explain the mismatch; got %q", errBuf.String())
+	}
+}
