@@ -462,6 +462,99 @@ func TestUnknownGateIsRefusedTheSameWayByEveryEntryPoint(t *testing.T) {
 	}
 }
 
+// CappedMetrics reads the manifest — not the judging path, just the usage text.
+// It must not crash on a missing root or a missing file, and must sort the names
+// it returns.
+func TestCappedMetrics(t *testing.T) {
+	// Empty repoRoot: usage text before the repo is known.
+	if got := CappedMetrics(""); got != nil {
+		t.Errorf("CappedMetrics(\"\") = %v, want nil", got)
+	}
+	// No manifest file: returns nil rather than crashing.
+	if got := CappedMetrics(t.TempDir()); got != nil {
+		t.Errorf("CappedMetrics(no manifest) = %v, want nil", got)
+	}
+	// Valid manifest: returns sorted names.
+	dir := writeManifest(t, map[string]Threshold{
+		"vet_findings":    {Direction: AtMost, Cap: 0},
+		"failed_tests":    {Direction: AtMost, Cap: 0},
+		"failed_packages": {Direction: AtMost, Cap: 0},
+	})
+	got := CappedMetrics(dir)
+	want := []string{"failed_packages", "failed_tests", "vet_findings"}
+	if len(got) != len(want) {
+		t.Fatalf("CappedMetrics = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("CappedMetrics[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// JudgeStdin with a missing manifest must return an error and write nothing to
+// stdout. Without this, removing the loadManifest call would silently pass
+// everything — the zero-threshold path is "nothing judged: acceptable".
+func TestJudgeStdin_MissingManifestIsAnErrorAndNotAVerdict(t *testing.T) {
+	dir := t.TempDir() // no thresholds.json
+	env := Envelope{Gate: "tested", Metrics: []Metric{Count("failed_tests", 3)}}
+	var out bytes.Buffer
+	err := JudgeStdin(dir, "tested", bytes.NewReader(marshal(t, env)), &out)
+	if err == nil {
+		t.Fatal("JudgeStdin answered when the manifest was missing")
+	}
+	if out.Len() != 0 {
+		t.Errorf("wrote %q on an error path; a caller must read one verdict or none", out.String())
+	}
+}
+
+// renderVerdict must show the direction and the correct mark for at_least
+// metrics. A passing floor shows ✓; a failing one shows ✗. Without this,
+// the at_least rendering branches in renderVerdict are untested.
+func TestRenderVerdict_AtLeastDirectionShowsCorrectMark(t *testing.T) {
+	manifest := map[string]Threshold{
+		"statement_coverage": {Direction: AtLeast, Cap: 50.0},
+	}
+	// Above the floor: passing mark.
+	env := Envelope{Gate: "covered", Metrics: []Metric{Quantity("statement_coverage", 80.0, "percent")}}
+	out := renderVerdict(env, manifest)
+	if !strings.Contains(out, "✓") {
+		t.Errorf("a metric above its floor should show ✓:\n%s", out)
+	}
+	if !strings.Contains(out, "at_least") {
+		t.Errorf("the rendered verdict should show the direction:\n%s", out)
+	}
+	// Below the floor: failing mark.
+	env.Metrics = []Metric{Quantity("statement_coverage", 30.0, "percent")}
+	out = renderVerdict(env, manifest)
+	if !strings.Contains(out, "✗") {
+		t.Errorf("a metric below its floor should show ✗:\n%s", out)
+	}
+}
+
+// renderVerdict must show ✓ for a passing at_most metric — the marks are
+// direction-specific, and the existing tests never assert them.
+func TestRenderVerdict_AtMostDirectionShowsCorrectMark(t *testing.T) {
+	out := renderVerdict(
+		Envelope{Gate: "tested", Metrics: []Metric{Count("failed_tests", 0)}},
+		testedManifest,
+	)
+	if !strings.Contains(out, "✓") {
+		t.Errorf("a metric at its at_most cap should show ✓:\n%s", out)
+	}
+	if !strings.Contains(out, "at_most") {
+		t.Errorf("the rendered verdict should show the direction:\n%s", out)
+	}
+	// Over the cap: ✗.
+	out = renderVerdict(
+		Envelope{Gate: "tested", Metrics: []Metric{Count("failed_tests", 5)}},
+		testedManifest,
+	)
+	if !strings.Contains(out, "✗") {
+		t.Errorf("a metric over its at_most cap should show ✗:\n%s", out)
+	}
+}
+
 // --- Manifest loading tests ---
 
 func TestLoadManifest_Valid(t *testing.T) {
