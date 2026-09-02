@@ -16,7 +16,8 @@ package common
 // Nothing in here writes to stdout. Stdout carries the envelope and nothing
 // else, so every child process has its stdout captured. A child's stderr is
 // passed through to the process's own stderr, where a person watching a long
-// run can see progress as it happens.
+// run can see progress as it happens — except in gateValue, where the caller
+// needs to parse stderr separately.
 
 import (
 	"encoding/json"
@@ -541,10 +542,10 @@ func gateOutput(dir, name string, args ...string) (string, error) {
 // gateValue runs a child whose output is a VALUE, and keeps its two streams
 // apart.
 //
-// Both are still captured, for gateOutput's reason: our stdout carries the
-// envelope and nothing else. What differs is that the caller can tell the
-// answer from everything said around it — see buildCache, where mixing them
-// turns a warning into part of a path.
+// Both are captured: stdout because our stdout carries the envelope and nothing
+// else, and stderr because the caller parses it — see buildCache, where mixing
+// them turns a warning into part of a path. Stderr is not passed through here,
+// which is the deliberate exception to the file-level rule.
 func gateValue(dir, name string, args ...string) (stdout, stderr string, err error) {
 	fmt.Fprintf(os.Stderr, "==> %s %s\n", name, strings.Join(args, " "))
 	out := newBoundedWriter(maxToolOutput)
