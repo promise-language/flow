@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -104,6 +105,41 @@ func TestGuardLockdown(t *testing.T) {
 		if got := Guard(root, "", c.in); got.Allowed != c.allowed {
 			t.Errorf("%s: allowed=%v want %v (reason=%q)", c.name, got.Allowed, c.allowed, got.Reason)
 		}
+	}
+}
+
+// The lockdown message must carry the specific StaleReason so the three
+// staleness causes are distinguishable.
+func TestGuardLockdownReasonContainsStaleReason(t *testing.T) {
+	const root = "/repo"
+	// Empty compiledHash → "not built via ./make"
+	d := Guard(root, "", bashInput("ls"))
+	if d.Allowed {
+		t.Fatal("expected denial with empty compiledHash")
+	}
+	if !strings.Contains(d.Reason, "not built via") {
+		t.Errorf("denial reason should contain StaleReason text, got %q", d.Reason)
+	}
+
+	// Edit denial should also carry the reason.
+	d = Guard(root, "", editInput("/repo/src/app.go"))
+	if d.Allowed {
+		t.Fatal("expected denial for non-recovery edit")
+	}
+	if !strings.Contains(d.Reason, "not built via") {
+		t.Errorf("edit denial reason should contain StaleReason text, got %q", d.Reason)
+	}
+}
+
+func TestGuardLockdownReasonSourceChanged(t *testing.T) {
+	root := testRepoRoot(t)
+	// A valid but wrong hash triggers "source has changed".
+	d := Guard(root, "0000000000000000000000000000000000000000000000000000000000000000", bashInput("ls"))
+	if d.Allowed {
+		t.Fatal("expected denial with wrong compiledHash")
+	}
+	if !strings.Contains(d.Reason, "source has changed") {
+		t.Errorf("denial reason should mention source change, got %q", d.Reason)
 	}
 }
 

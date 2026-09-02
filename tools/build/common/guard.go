@@ -53,7 +53,8 @@ func Guard(repoRoot, compiledHash string, in HookInput) GuardDecision {
 			return GuardDecision{Reason: reason}
 		}
 	}
-	if StaleReason(repoRoot, compiledHash) == "" {
+	stale := StaleReason(repoRoot, compiledHash)
+	if stale == "" {
 		return GuardDecision{Allowed: true} // tools current — nothing more to enforce
 	}
 	switch in.ToolName {
@@ -62,12 +63,12 @@ func Guard(repoRoot, compiledHash string, in HookInput) GuardDecision {
 		if isRecoveryCommand(cmd) || isToolCommand(repoRoot, cmd) {
 			return GuardDecision{Allowed: true}
 		}
-		return GuardDecision{Reason: lockMsg("only " + MakeCmd() + " and the existing bin/ tools may run")}
+		return GuardDecision{Reason: lockMsg(stale, "only "+MakeCmd()+" and the existing bin/ tools may run")}
 	case "Edit", "Write", "NotebookEdit":
 		if isRecoveryPath(repoRoot, editPath(in.ToolInput)) {
 			return GuardDecision{Allowed: true}
 		}
-		return GuardDecision{Reason: lockMsg("only edits under tools/build/ (to fix the tools) are allowed")}
+		return GuardDecision{Reason: lockMsg(stale, "only edits under tools/build/ (to fix the tools) are allowed")}
 	default:
 		// Task/Skill/mcp__* are wired so the guard can track ai_context — they
 		// are not gated by the stale lockdown. The leaf tools they invoke
@@ -77,8 +78,8 @@ func Guard(repoRoot, compiledHash string, in HookInput) GuardDecision {
 	}
 }
 
-func lockMsg(detail string) string {
-	return "tools are out of sync — " + detail + ". Run " + MakeCmd() + " to recover."
+func lockMsg(reason, detail string) string {
+	return "tools are out of sync (" + reason + ") — " + detail + ". Run " + MakeCmd() + " to recover."
 }
 
 func bashCommand(raw json.RawMessage) string {

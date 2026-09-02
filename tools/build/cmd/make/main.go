@@ -6,6 +6,9 @@
 package main
 
 import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -91,21 +94,77 @@ func main() {
 	}
 
 	// 6. Write the hash sidecar — the staleness contract.
-	must(os.WriteFile(hashFile, []byte(hash+"\n"), 0o644))
+	//    Line 1: source hash. Lines 2+: name:sha256 per binary.
+	var sb strings.Builder
+	sb.WriteString(hash)
+	sb.WriteByte('\n')
+	for _, name := range tools {
+		h, err := fileHash(filepath.Join(binDir, common.BinaryName(name)))
+		if err != nil {
+			fail("hashing %s: %v", name, err)
+		}
+		sb.WriteString(name)
+		sb.WriteByte(':')
+		sb.WriteString(h)
+		sb.WriteByte('\n')
+	}
+	must(os.WriteFile(hashFile, []byte(sb.String()), 0o644))
 	fmt.Printf("built %d tool(s) into bin/\n", len(tools))
 }
 
 func upToDate(hashFile, hash, binDir string, tools []string) bool {
-	data, err := os.ReadFile(hashFile)
-	if err != nil || strings.TrimSpace(string(data)) != hash {
+	f, err := os.Open(hashFile)
+	if err != nil {
 		return false
 	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+
+	// Line 1: source hash.
+	if !sc.Scan() || strings.TrimSpace(sc.Text()) != hash {
+		return false
+	}
+
+	// Lines 2+: name:sha256 per binary. Build a lookup.
+	recorded := make(map[string]string)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			return false // malformed entry
+		}
+		recorded[parts[0]] = parts[1]
+	}
+
+	// Every expected tool must have a recorded hash that matches the binary on disk.
 	for _, name := range tools {
-		if !common.Exists(filepath.Join(binDir, common.BinaryName(name))) {
-			return false
+		want, ok := recorded[name]
+		if !ok {
+			return false // tool not recorded in sidecar
+		}
+		got, err := fileHash(filepath.Join(binDir, common.BinaryName(name)))
+		if err != nil {
+			return false // binary missing or unreadable
+		}
+		if got != want {
+			return false // binary replaced since last build
 		}
 	}
 	return true
+}
+
+// fileHash returns the hex-encoded SHA-256 of the file at path.
+func fileHash(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:]), nil
 }
 
 func must(err error) {
