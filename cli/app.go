@@ -168,6 +168,8 @@ func RunWithArgs(app App, args []string) int {
 		return app.cmdAnswer(ctx, rest)
 	case "resolve":
 		return app.cmdResolve(ctx, rest)
+	case "stale":
+		return app.cmdStale(ctx, rest)
 	default:
 		return app.usageError("%s: unknown command %q", app.Name, cmd)
 	}
@@ -345,8 +347,9 @@ usage:
                                      "status" — never the label (e.g. "write plan")
   %[1]s release                      drop the claim
   %[1]s reseed [--force]              clear seed state (artifacts, budgets, park) on the active claim
+  %[1]s stale <step-id>               mark one resolved artifact stale for re-derivation
 
-answer, status, list, grant, run-step, and resolve print human-readable text on a terminal and
+answer, status, list, grant, stale, run-step, and resolve print human-readable text on a terminal and
 JSON when piped or redirected; --json / --human (or FLOW_OUTPUT=json|human)
 force one. resolve's human text is its progress narration on stderr, which it
 prints in both modes — in human mode it writes nothing to stdout at all.`, bin)

@@ -95,6 +95,22 @@ one being answered. When there is exactly one, it is inferred.
   --question ID   which question to answer (required when multiple are pending)
 
 Answering does not resume the item. Use resolve or run-step to continue.`},
+	"stale": {name: "stale", syntax: "<step-id>",
+		summary: "mark a resolved artifact stale for re-derivation",
+		detail: `Marks one resolved artifact as stale so the next run-step or resolve
+re-derives it. Unlike reseed --force, which clears everything, stale
+targets a single step and preserves the rest of the item's state.
+
+<step-id> is the artifact id (e.g. "plan") — the first column of
+"status". The human label (e.g. "write plan") is not accepted.
+Signal steps cannot be marked stale.
+
+The step must be resolved. Pending and skipped steps are refused.
+An already-stale step is accepted (idempotent, no backend write).
+
+Marking stale does not reset budget counters or clear a park. If
+the step has exhausted its budget, use grant afterward. If the item
+is parked on a question, use answer first.`},
 	"grant": {name: "grant", syntax: "[<step-id>] [--all] [--invocations N] [--prompts N] [--cost USD] [--timeout SECONDS] [--dry-run]", summary: "top up a step's budget",
 		detail: `With no arguments: reads why the item parked and tops up the axis that
 parked it, plus any other axis already at its cap — a step out of both time
