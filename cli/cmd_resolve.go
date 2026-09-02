@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"time"
 
 	"github.com/promise-language/flow"
@@ -18,6 +19,19 @@ import (
 // number of step ATTEMPTS, not wall-clock, so it never false-kills a slow
 // agent turn. When hit, the message says so and points at `status`.
 const maxResolveSteps = 50
+
+// maxFitnessWaits bounds how many times cmdResolve re-measures a machine
+// fitness condition before giving up. The bound protects the claim: an item
+// held indefinitely on a machine nobody is fixing is one no other machine
+// can take (docs/environment.md). Exhausting the bound is still "unfit",
+// never a refusal (gates-and-commands.md: "A wait bound is not a verdict").
+const maxFitnessWaits = 20
+
+// fitnessWaitInterval is the delay between fitness re-measurements in
+// cmdResolve's standalone wait loop. Short enough to resume quickly when
+// the condition clears; long enough to avoid busy-polling.
+// Var (not const) so tests can shorten it without sleeping 30 s per round.
+var fitnessWaitInterval = 30 * time.Second
 
 // cmdResolve drives the FULL lifecycle: it repeatedly advances the item one
 // step at a time (the same RunOne the orchestrator runs in production) until
@@ -64,12 +78,28 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	}
 
 	// Pre-claim fitness check: an unfit machine should not take an item at
-	// all. Fail-open: err != nil proceeds (cannot check → do not refuse).
+	// all. Standalone drives its own lifecycle and holds
+	// (docs/environment.md): the wait is bounded and re-measures rather
+	// than assuming the condition persists.
+	// Fail-open: err != nil proceeds (cannot check → do not refuse).
 	if fc, ok := app.Backend.(flow.FitnessChecker); ok {
-		verdict, err := fc.CheckFit(ctx)
-		if err == nil && !verdict.Acceptable {
-			fmt.Fprintf(app.Err, "resolve: machine unfit — %s\n", verdict.Detail)
-			return 1
+		for fitnessWaits := 0; ; fitnessWaits++ {
+			verdict, err := fc.CheckFit(ctx)
+			if err != nil || verdict.Acceptable {
+				break // fit (or cannot check → fail-open)
+			}
+			if fitnessWaits >= maxFitnessWaits {
+				fmt.Fprintf(app.Err, "resolve: machine unfit — %s\n", verdict.Detail)
+				return 1
+			}
+			fmt.Fprintf(app.Err, "resolve: machine unfit (%d/%d) — %s — waiting…\n",
+				fitnessWaits+1, maxFitnessWaits, verdict.Detail)
+			select {
+			case <-time.After(fitnessWaitInterval):
+			case <-ctx.Done():
+				fmt.Fprintln(app.Err, "resolve: interrupted while waiting for fitness")
+				return 1
+			}
 		}
 	}
 
@@ -189,6 +219,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	// to a named step) and report the outcome after.
 	fmt.Fprintf(app.Err, "resolve: driving %s to completion (until finalized or parked)…\n", claim.ItemRef.Display)
 	enc := json.NewEncoder(app.Out)
+	fitnessWaits := 0
 	for range maxResolveSteps {
 		// Best-effort peek so we can name the step we're about to run. RunOne
 		// re-derives this itself; the peek is purely for the progress line and
@@ -253,9 +284,38 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			fmt.Fprintf(app.Err, "resolve: %s stopped on a failed step\n", claim.ItemRef.Display)
 			return 1
 		case flow.StatusBlocked:
-			// A gate only a human can clear. Looping would re-run it to the
-			// runaway guard, paying a full state load and comment scan each
-			// time, and then report the guard rather than the real reason.
+			// An environment condition is re-measured, never assumed to persist
+			// (docs/environment.md). When the block came from an unfit machine,
+			// cmdResolve holds and re-measures rather than exiting — disk frees,
+			// builds finish, logs rotate — and work resumes when fit reports
+			// clear, with nobody having to say so. The wait is bounded:
+			// exhausting it is still "unfit", not a verdict.
+			//
+			// A block that did NOT come from fitness (e.g. ErrBlocked, a
+			// preflight gate only a human can clear) exits immediately — looping
+			// would re-run it to the runaway guard.
+			if strings.Contains(res.Reason, flow.ErrUnfit.Error()) {
+				if fc, ok := app.Backend.(flow.FitnessChecker); ok && fitnessWaits < maxFitnessWaits {
+					v, ferr := fc.CheckFit(ctx)
+					if ferr == nil && !v.Acceptable {
+						fitnessWaits++
+						fmt.Fprintf(app.Err, "resolve: machine unfit (%d/%d) — %s — waiting…\n",
+							fitnessWaits, maxFitnessWaits, v.Detail)
+						select {
+						case <-time.After(fitnessWaitInterval):
+						case <-ctx.Done():
+							fmt.Fprintln(app.Err, "resolve: interrupted while waiting for fitness")
+							return 1
+						}
+						continue
+					}
+					// Machine recovered — retry the step.
+					fmt.Fprintln(app.Err, "resolve: machine fit again — retrying…")
+					fitnessWaits = 0
+					continue
+				}
+			}
+			// A gate only a human can clear, or the fitness wait exhausted.
 			fmt.Fprintf(app.Err, "resolve: %s is blocked — %s\n", claim.ItemRef.Display, res.Reason)
 			return 1
 		case flow.StatusParked, flow.StatusSkipped:
