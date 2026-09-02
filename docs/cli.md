@@ -64,6 +64,8 @@ The mode is decided by **stdout**, never by stderr. Bare `resolve 2>/dev/null` o
 
 JSON-mode stdout is a stable interface. Its bytes are consumed by other programs.
 
+Each `InvocationResult` object may carry `duration_seconds` (wall-clock time of the step, measured by the orchestrator around handler dispatch) and `cost_usd` (what the invocation spent, as a sum of agent turns). Both fields are optional with `omitempty`: a consumer that does not know them is unaffected, and JSON output for a run that reports neither is byte-identical to before these fields existed. `cost_usd` is a pointer type: `null`/absent means unknown (the step never dispatched), while `0` means the step ran but spent nothing.
+
 ## Invocation errors
 
 An invocation that cannot be understood is rejected before the command takes any action — nothing is claimed, nothing is written, and the exit code is 2.
@@ -256,6 +258,8 @@ Every invocation reports exactly one status: `done`, `skipped`, `parked`, `block
 These five are the vocabulary. A backend that mirrors them mirrors all five.
 
 `done` means work completed. An item that no flow will ever act on — because nothing accepts its type — is not `done`, and is never finalized on that basis: reporting success for work that was never attempted hides a misconfiguration, and finalizing makes it irreversible. It is `blocked`, and the reason names the item's type and the registered ones.
+
+The human narration includes duration and cost when present, as a parenthetical after the status: `resolve: write plan → done (1m22s, $0.34)`. At finalization, the total across all artifacts is reported: `resolve: promise-language/flow#46 finalized ✓ (14m02s, $2.71)`. When any artifact's duration is absent (predates tracking), the total is stated as a lower bound (`≥`).
 
 ## Startup
 

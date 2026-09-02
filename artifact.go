@@ -143,6 +143,7 @@ type ArtifactRecord struct {
 	Invocations           int
 	PromptsThisInvocation int
 	CostUSDSpent          float64
+	DurationWorked        time.Duration
 	LastRunAt             time.Time
 }
 

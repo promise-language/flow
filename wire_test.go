@@ -2,6 +2,7 @@ package flow
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -94,6 +95,77 @@ func TestAgentRequestResponse_JSONShape(t *testing.T) {
 	}
 	if _, err := json.Marshal(resp); err != nil {
 		t.Errorf("AgentResponse marshal: %v", err)
+	}
+}
+
+// ptr returns a pointer to v. Test helper for *float64 fields.
+func ptr(v float64) *float64 { return &v }
+
+func TestInvocationResult_CostZeroVsAbsent(t *testing.T) {
+	withCost := InvocationResult{
+		Flow: "f", Item: "i", Step: "s", Status: "done",
+		CostUSD: ptr(0.0),
+	}
+	withoutCost := InvocationResult{
+		Flow: "f", Item: "i", Step: "s", Status: "done",
+	}
+	bWith, err := json.Marshal(withCost)
+	if err != nil {
+		t.Fatalf("Marshal withCost: %v", err)
+	}
+	bWithout, err := json.Marshal(withoutCost)
+	if err != nil {
+		t.Fatalf("Marshal withoutCost: %v", err)
+	}
+	if string(bWith) == string(bWithout) {
+		t.Errorf("CostUSD=&0.0 and CostUSD=nil must produce different JSON;\ngot: %s", bWith)
+	}
+	// The zero-cost case must contain the field.
+	if !strings.Contains(string(bWith), `"cost_usd":0`) {
+		t.Errorf("CostUSD=&0.0 must serialise as cost_usd:0; got %s", bWith)
+	}
+	// The absent case must NOT contain the field.
+	if strings.Contains(string(bWithout), `"cost_usd"`) {
+		t.Errorf("CostUSD=nil must omit cost_usd; got %s", bWithout)
+	}
+}
+
+func TestInvocationResult_WithDurationAndCost(t *testing.T) {
+	in := InvocationResult{
+		Flow:            "implement",
+		InvocationID:    "inv-1",
+		Item:            "owner/repo#42",
+		Step:            "write plan",
+		Status:          "done",
+		DurationSeconds: 82.5,
+		CostUSD:         ptr(0.34),
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var out InvocationResult
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.DurationSeconds != in.DurationSeconds {
+		t.Errorf("DurationSeconds = %v, want %v", out.DurationSeconds, in.DurationSeconds)
+	}
+	if out.CostUSD == nil || *out.CostUSD != *in.CostUSD {
+		t.Errorf("CostUSD = %v, want %v", out.CostUSD, in.CostUSD)
+	}
+}
+
+func TestInvocationResult_DurationOmittedWhenZero(t *testing.T) {
+	in := InvocationResult{
+		Flow: "f", Item: "i", Step: "s", Status: "done",
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(b), `"duration_seconds"`) {
+		t.Errorf("zero DurationSeconds must be omitted; got %s", b)
 	}
 }
 

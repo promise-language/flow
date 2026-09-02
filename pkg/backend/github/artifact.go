@@ -324,6 +324,12 @@ func (b *Backend) AddCost(ctx context.Context, claim flow.Claim, key string, usd
 	})
 }
 
+func (b *Backend) AddDuration(ctx context.Context, claim flow.Claim, key string, d time.Duration) error {
+	return b.mutateArtifact(ctx, claim, key, func(a *stateArtifactDoc) {
+		a.DurationWorked += d
+	})
+}
+
 // Grant adds budget to the artifact's caps and clears a ParkBudgetExhausted
 // park the grant actually satisfies — the state-doc field AND the
 // flow:budget-exhausted:<step-id> label, so neither outlives the condition

@@ -336,4 +336,15 @@ type InvocationResult struct {
 	Status       string       `json:"status"` // done | skipped | failed | parked | blocked
 	Reason       string       `json:"reason,omitempty"`
 	Park         *ParkRequest `json:"park,omitempty"`
+
+	// DurationSeconds is the step's wall-clock time, measured by the
+	// orchestrator around handler dispatch. Zero-valued with omitempty means
+	// the step never dispatched (pre-dispatch exit). A measured wall-clock of
+	// exactly 0.0s is effectively impossible, so omitempty suffices.
+	DurationSeconds float64 `json:"duration_seconds,omitempty"`
+	// CostUSD is what this invocation spent (sum of agent turns), not the
+	// step's running total. nil means unknown (step never dispatched);
+	// pointer-to-zero means the step ran but spent nothing. With omitempty a
+	// nil pointer is omitted while &0.0 serialises as "cost_usd":0.
+	CostUSD *float64 `json:"cost_usd,omitempty"`
 }

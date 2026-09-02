@@ -131,10 +131,11 @@ type stateArtifactDoc struct {
 	GrantedTimeout              time.Duration `yaml:"granted_timeout,omitempty"`
 
 	// usage counters
-	Invocations           int       `yaml:"invocations,omitempty"`
-	PromptsThisInvocation int       `yaml:"prompts_this_invocation,omitempty"`
-	CostUSDSpent          float64   `yaml:"cost_usd_spent,omitempty"`
-	LastRunAt             time.Time `yaml:"last_run_at,omitempty"`
+	Invocations           int           `yaml:"invocations,omitempty"`
+	PromptsThisInvocation int           `yaml:"prompts_this_invocation,omitempty"`
+	CostUSDSpent          float64       `yaml:"cost_usd_spent,omitempty"`
+	DurationWorked        time.Duration `yaml:"duration_worked,omitempty"`
+	LastRunAt             time.Time     `yaml:"last_run_at,omitempty"`
 }
 
 type stateSignalDoc struct {
@@ -223,6 +224,7 @@ func recordFromArtifactDoc(d stateArtifactDoc) flow.ArtifactRecord {
 		Invocations:                 d.Invocations,
 		PromptsThisInvocation:       d.PromptsThisInvocation,
 		CostUSDSpent:                d.CostUSDSpent,
+		DurationWorked:              d.DurationWorked,
 		LastRunAt:                   d.LastRunAt,
 	}
 	if d.JSONInline != "" {
