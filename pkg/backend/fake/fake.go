@@ -480,6 +480,10 @@ func (b *Backend) AddCost(ctx context.Context, claim flow.Claim, key string, usd
 	return b.bumpField(claim, key, func(a *flow.ArtifactRecord) { a.CostUSDSpent += usd })
 }
 
+func (b *Backend) AddDuration(ctx context.Context, claim flow.Claim, key string, d time.Duration) error {
+	return b.bumpField(claim, key, func(a *flow.ArtifactRecord) { a.DurationWorked += d })
+}
+
 // Grant adds budget to the artifact record and clears a ParkBudgetExhausted
 // park that the grant actually satisfies (see the Backend.Grant contract).
 func (b *Backend) Grant(ctx context.Context, claim flow.Claim, key string, g flow.Grant) error {

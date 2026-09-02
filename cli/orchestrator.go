@@ -278,7 +278,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 				return flow.InvocationResult{}, fmt.Errorf("bump invocations: %w", err)
 			}
 		}
-		return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
+		return sctx.stampResult(parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
 			Kind: flow.ParkBudgetExhausted,
 			Step: li.Result(),
 			Axis: flow.AxisTimeout,
@@ -287,7 +287,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 			// operator back for a second grant.
 			Axes:   sctx.axisReports(timeout),
 			Reason: fmt.Sprintf("step %q exceeded %s", nextName, timeout),
-		})
+		}))
 	}
 
 	// Transient infra failure (handler returned flow.ErrTransient OR the
@@ -296,11 +296,11 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// SKIP the BumpInvocations call — a flapping runner must not burn the
 	// step's invocation budget.
 	if handlerErr != nil && errors.Is(handlerErr, flow.ErrTransient) {
-		return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
+		return sctx.stampResult(parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
 			Kind:   flow.ParkInfraTransient,
 			Step:   li.Result(),
 			Reason: handlerErr.Error(),
-		})
+		}))
 	}
 
 	// Deterministic refusal (handler returned flow.ErrRefused): the failure
@@ -309,11 +309,11 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// ErrTransient branch above. The park reason is the refusal's own
 	// message so the operator sees what was refused.
 	if handlerErr != nil && errors.Is(handlerErr, flow.ErrRefused) {
-		return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
+		return sctx.stampResult(parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
 			Kind:   flow.ParkRefused,
 			Step:   li.Result(),
 			Reason: handlerErr.Error(),
-		})
+		}))
 	}
 
 	// Non-transient: the invocation produced a result (success, skip,
@@ -324,7 +324,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		}
 	}
 
-	return translateHandlerError(ctx, app, claim, result, li, sctx, handlerErr)
+	return sctx.stampResult(translateHandlerError(ctx, app, claim, result, li, sctx, handlerErr))
 }
 
 // translateHandlerError converts the handler's return into an
@@ -595,6 +595,24 @@ func newStepCtx(ctx context.Context, app *App, claim flow.Claim, f *flow.Flow, l
 	return sc
 }
 
+// stampResult fills in duration and cost on a post-dispatch InvocationResult
+// and persists duration to the artifact record. When err is non-nil the
+// orchestrator itself failed catastrophically — there is no meaningful result
+// to stamp.
+func (s *stepCtx) stampResult(r flow.InvocationResult, err error) (flow.InvocationResult, error) {
+	if err != nil {
+		return r, err
+	}
+	elapsed := time.Since(s.startedAt)
+	r.DurationSeconds = elapsed.Seconds()
+	cost := s.agent.costThisInvocation
+	r.CostUSD = &cost
+	if s.li.Kind == flow.LifecycleArtifact {
+		_ = s.app.Backend.AddDuration(s.ctx, s.claim, string(s.li.ArtifactId), elapsed)
+	}
+	return r, nil
+}
+
 func (s *stepCtx) Context() context.Context { return s.ctx }
 func (s *stepCtx) Flow() string             { return s.flow.Name() }
 func (s *stepCtx) StepName() string         { return s.li.Name }
@@ -855,6 +873,7 @@ type meteredAgent struct {
 	stepCtx *stepCtx
 
 	promptsThisInvocation int
+	costThisInvocation    float64
 }
 
 func (m *meteredAgent) Name() string { return m.inner.Name() }
@@ -911,6 +930,7 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 		// Update local mirror so subsequent calls see fresh cost.
 		art.CostUSDSpent += resp.CostUSD
 		m.stepCtx.state.Artifacts[li.ArtifactId] = art
+		m.costThisInvocation += resp.CostUSD
 	}
 	// A turn the substrate stopped at the cap we set IS this step reaching
 	// its cost cap, so it parks on cost through the same sentinel the

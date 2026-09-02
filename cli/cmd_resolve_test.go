@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/promise-language/flow"
 	"github.com/promise-language/flow/pkg/backend/fake"
@@ -968,5 +969,125 @@ func TestCmdResolve_ForceUnadmittedPassesOverride(t *testing.T) {
 	}
 	if len(be.lastOverrides) != 1 || be.lastOverrides[0] != flow.OverrideUnadmitted {
 		t.Errorf("Claim received overrides=%v, want [OverrideUnadmitted]", be.lastOverrides)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// finalTotalSuffix
+// ---------------------------------------------------------------------------
+
+// totalSuffixInspectBackend wraps the fake backend and implements
+// StateInspector with a caller-supplied state, so finalTotalSuffix tests can
+// control exactly which artifacts and figures are returned.
+type totalSuffixInspectBackend struct {
+	*fake.Backend
+	state *flow.ItemState
+	err   error
+}
+
+func (b *totalSuffixInspectBackend) LoadStateByRef(_ context.Context, _ flow.ItemRef) (*flow.ItemState, error) {
+	if b.err != nil {
+		return nil, b.err
+	}
+	return b.state, nil
+}
+
+func TestFinalTotalSuffix_NoStateInspector(t *testing.T) {
+	// Plain fake.Backend does not implement StateInspector.
+	app := &App{Backend: fake.New()}
+	claim := flow.Claim{}
+	got := finalTotalSuffix(context.Background(), app, claim)
+	if got != "" {
+		t.Errorf("expected empty string when backend is not StateInspector; got %q", got)
+	}
+}
+
+func TestFinalTotalSuffix_LoadStateError(t *testing.T) {
+	be := &totalSuffixInspectBackend{
+		Backend: fake.New(),
+		err:     errors.New("state unavailable"),
+	}
+	app := &App{Backend: be}
+	got := finalTotalSuffix(context.Background(), app, flow.Claim{})
+	if got != "" {
+		t.Errorf("expected empty string on LoadStateByRef error; got %q", got)
+	}
+}
+
+func TestFinalTotalSuffix_NoFigures(t *testing.T) {
+	be := &totalSuffixInspectBackend{
+		Backend: fake.New(),
+		state: &flow.ItemState{
+			Artifacts: map[flow.ArtifactId]flow.ArtifactRecord{
+				"plan": {}, // zero duration, zero cost
+			},
+		},
+	}
+	app := &App{Backend: be}
+	got := finalTotalSuffix(context.Background(), app, flow.Claim{})
+	if got != "" {
+		t.Errorf("expected empty string when all figures are zero; got %q", got)
+	}
+}
+
+func TestFinalTotalSuffix_BothFigures(t *testing.T) {
+	be := &totalSuffixInspectBackend{
+		Backend: fake.New(),
+		state: &flow.ItemState{
+			Artifacts: map[flow.ArtifactId]flow.ArtifactRecord{
+				"plan":           {DurationWorked: 5 * time.Minute, CostUSDSpent: 1.20, Resolved: true},
+				"implementation": {DurationWorked: 9*time.Minute + 2*time.Second, CostUSDSpent: 1.51, Resolved: true},
+			},
+		},
+	}
+	app := &App{Backend: be}
+	got := finalTotalSuffix(context.Background(), app, flow.Claim{})
+	if !strings.Contains(got, "14m02s") {
+		t.Errorf("expected total duration 14m02s; got %q", got)
+	}
+	if !strings.Contains(got, "$2.71") {
+		t.Errorf("expected total cost $2.71; got %q", got)
+	}
+	if strings.Contains(got, "≥") {
+		t.Errorf("exact total must not show lower-bound prefix; got %q", got)
+	}
+}
+
+func TestFinalTotalSuffix_LowerBound(t *testing.T) {
+	be := &totalSuffixInspectBackend{
+		Backend: fake.New(),
+		state: &flow.ItemState{
+			Artifacts: map[flow.ArtifactId]flow.ArtifactRecord{
+				"plan":   {DurationWorked: 5 * time.Minute, CostUSDSpent: 1.20, Resolved: true},
+				"legacy": {DurationWorked: 0, CostUSDSpent: 0.50, Resolved: true}, // resolved but no duration → lower bound
+			},
+		},
+	}
+	app := &App{Backend: be}
+	got := finalTotalSuffix(context.Background(), app, flow.Claim{})
+	if !strings.Contains(got, "≥") {
+		t.Errorf("expected lower-bound prefix ≥; got %q", got)
+	}
+	if !strings.Contains(got, "$1.70") {
+		t.Errorf("expected total cost $1.70; got %q", got)
+	}
+}
+
+func TestFinalTotalSuffix_UnresolvedZeroDurationNotLowerBound(t *testing.T) {
+	// An unresolved artifact with zero duration is not a lower bound —
+	// it just hasn't run yet.
+	be := &totalSuffixInspectBackend{
+		Backend: fake.New(),
+		state: &flow.ItemState{
+			Artifacts: map[flow.ArtifactId]flow.ArtifactRecord{
+				"plan":    {DurationWorked: 5 * time.Minute, CostUSDSpent: 1.20, Resolved: true},
+				"pending": {DurationWorked: 0, CostUSDSpent: 0, Resolved: false},
+			},
+		},
+	}
+	app := &App{Backend: be}
+	got := finalTotalSuffix(context.Background(), app, flow.Claim{})
+	if strings.Contains(got, "≥") {
+		t.Errorf("unresolved artifact with zero duration must not trigger lower-bound; got %q", got)
 	}
 }

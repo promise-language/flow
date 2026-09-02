@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/promise-language/flow"
 )
@@ -165,8 +166,11 @@ func (b *buildTestBackend) MarkStale(context.Context, flow.Claim, flow.ArtifactI
 func (b *buildTestBackend) BumpInvocations(context.Context, flow.Claim, string) error    { return nil }
 func (b *buildTestBackend) BumpPrompts(context.Context, flow.Claim, string) error        { return nil }
 func (b *buildTestBackend) AddCost(context.Context, flow.Claim, string, float64) error   { return nil }
-func (b *buildTestBackend) Grant(context.Context, flow.Claim, string, flow.Grant) error  { return nil }
-func (b *buildTestBackend) Park(context.Context, flow.Claim, flow.ParkRequest) error     { return nil }
+func (b *buildTestBackend) AddDuration(context.Context, flow.Claim, string, time.Duration) error {
+	return nil
+}
+func (b *buildTestBackend) Grant(context.Context, flow.Claim, string, flow.Grant) error { return nil }
+func (b *buildTestBackend) Park(context.Context, flow.Claim, flow.ParkRequest) error    { return nil }
 func (b *buildTestBackend) AskQuestions(context.Context, flow.Claim, []flow.AgentQuestion) ([]flow.Question, error) {
 	return nil, nil
 }

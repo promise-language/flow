@@ -74,6 +74,9 @@ func (app *App) cmdRun(ctx context.Context, args []string) int {
 		if res.Reason != "" {
 			line += " — " + res.Reason
 		}
+		if suffix := formatResultSuffix(res); suffix != "" {
+			line += " " + suffix
+		}
 		fmt.Fprintln(app.Out, line)
 	}
 	switch res.Status {

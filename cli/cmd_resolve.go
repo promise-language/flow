@@ -230,6 +230,9 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		if res.Reason != "" {
 			outcome += " — " + res.Reason
 		}
+		if suffix := formatResultSuffix(res); suffix != "" {
+			outcome += " " + suffix
+		}
 		fmt.Fprintln(app.Err, outcome)
 
 		switch flow.InvocationStatus(res.Status) {
@@ -246,12 +249,15 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			// Parked (question/budget/timeout) or skipped (preflight refusal,
 			// e.g. an already-finalized item). Stop and let the operator act.
 			fmt.Fprintf(app.Err, "resolve: %s %s — run `status %s` to inspect\n", claim.ItemRef.Display, res.Status, claim.ItemRef.Display)
+			reportQuota(app.Err)
 			return 0
 		case flow.StatusDone:
 			// Finalize case: RunOne ran no step (empty Step) because no eligible
 			// flow remained — the item is fully resolved.
 			if res.Step == "" {
-				fmt.Fprintf(app.Err, "resolve: %s finalized ✓\n", claim.ItemRef.Display)
+				suffix := finalTotalSuffix(ctx, app, *claim)
+				fmt.Fprintf(app.Err, "resolve: %s finalized ✓%s\n", claim.ItemRef.Display, suffix)
+				reportQuota(app.Err)
 				return 0
 			}
 			// Otherwise a step advanced; loop to run the next one.
@@ -259,4 +265,39 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	}
 	fmt.Fprintf(app.Err, "resolve: stopped after %d step attempts without finalizing (runaway guard); run `status` to inspect\n", maxResolveSteps)
 	return 1
+}
+
+// finalTotalSuffix loads the item's state and computes the total duration and
+// cost across all artifacts. Returns "" when no figures are available.
+//
+// Uses StateInspector.LoadStateByRef (no claim needed) because Finalize has
+// already been called and may have released the claim.
+func finalTotalSuffix(ctx context.Context, app *App, claim flow.Claim) string {
+	si, ok := app.Backend.(flow.StateInspector)
+	if !ok {
+		return ""
+	}
+	state, err := si.LoadStateByRef(ctx, claim.ItemRef)
+	if err != nil {
+		return "" // best-effort; finalization already succeeded
+	}
+	var totalDur time.Duration
+	var totalCost float64
+	lowerBound := false
+	for _, art := range state.Artifacts {
+		totalDur += art.DurationWorked
+		totalCost += art.CostUSDSpent
+		if art.Resolved && art.DurationWorked == 0 {
+			lowerBound = true
+		}
+	}
+	if totalDur == 0 && totalCost == 0 {
+		return ""
+	}
+	dur := formatDurationCompact(totalDur)
+	cost := fmt.Sprintf("$%.2f", totalCost)
+	if lowerBound {
+		return fmt.Sprintf(" (≥%s, ≥%s)", dur, cost)
+	}
+	return fmt.Sprintf(" (%s, %s)", dur, cost)
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/promise-language/flow"
 	"github.com/promise-language/flow/pkg/backend/fake"
@@ -165,6 +166,26 @@ func TestBackend_BudgetCountersAndGrant(t *testing.T) {
 	}
 	if rec.GrantedCostUSD != flow.DefaultStepBudget().MaxCostUSD+20 {
 		t.Errorf("GrantedCostUSD = %v, want %v", rec.GrantedCostUSD, flow.DefaultStepBudget().MaxCostUSD+20)
+	}
+}
+
+func TestBackend_AddDuration(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	b.AddItem(newItem("1"))
+	claim, _ := b.Claim(ctx, itemRef("1"), "alice", nil)
+	_ = b.SeedState(ctx, claim, []flow.ArtifactSpec{
+		{Id: "plan", Type: flow.ArtifactMarkdown, Budget: flow.DefaultStepBudget()},
+	})
+
+	_ = b.AddDuration(ctx, claim, "plan", 5*time.Minute)
+	_ = b.AddDuration(ctx, claim, "plan", 3*time.Minute+30*time.Second)
+
+	state, _ := b.LoadState(ctx, claim)
+	rec := state.Artifact("plan")
+	want := 8*time.Minute + 30*time.Second
+	if rec.DurationWorked != want {
+		t.Errorf("DurationWorked = %v, want %v", rec.DurationWorked, want)
 	}
 }
 

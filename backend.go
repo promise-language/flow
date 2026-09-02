@@ -467,6 +467,7 @@ type Backend interface {
 	BumpInvocations(ctx context.Context, claim Claim, key string) error
 	BumpPrompts(ctx context.Context, claim Claim, key string) error
 	AddCost(ctx context.Context, claim Claim, key string, usd float64) error
+	AddDuration(ctx context.Context, claim Claim, key string, d time.Duration) error
 
 	// Grant adds budget to the artifact record named by key (an ArtifactId as
 	// a string — signal steps own no budget record and are never grantable).
