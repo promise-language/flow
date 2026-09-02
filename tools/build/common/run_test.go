@@ -4,14 +4,37 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// The judging layer holds the caps, so this is where a measurement becomes an
-// answer — the only place in this project that compares a number to a
-// threshold. Both modes come through judge(), so a test of judge() is a test of
-// what a person sees and of what the SDK is told.
+// The judging layer reads the thresholds manifest, so this is where a
+// measurement becomes an answer — the only place in this project that compares
+// a number to a threshold. Both modes come through judge(), so a test of
+// judge() is a test of what a person sees and of what the SDK is told.
+
+// writeManifest writes a thresholds.json into dir and returns the dir.
+func writeManifest(t *testing.T, manifest map[string]Threshold) string {
+	t.Helper()
+	dir := t.TempDir()
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ManifestFile), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// testedManifest is the manifest shape most tests use: the two metrics the
+// "tested" gate reports that have thresholds, both at_most 0.
+var testedManifest = map[string]Threshold{
+	"failed_tests":    {Direction: AtMost, Cap: 0},
+	"failed_packages": {Direction: AtMost, Cap: 0},
+}
 
 // A verdict says what was compared as well as what it concluded. Terms that
 // were not applied are not in it: a verdict has to travel with what it was
@@ -22,7 +45,7 @@ func TestJudge_WithinEveryCapIsAcceptableAndSaysWhatItApplied(t *testing.T) {
 		Count("failed_packages", 0),
 		Quantity("statement_coverage", 61.5, "percent"),
 	}}
-	acceptable, thresholds, detail := judge(env)
+	acceptable, thresholds, detail := judge(env, testedManifest)
 	if !acceptable {
 		t.Fatalf("a complete run inside every cap was refused: %s", detail)
 	}
@@ -34,7 +57,7 @@ func TestJudge_WithinEveryCapIsAcceptableAndSaysWhatItApplied(t *testing.T) {
 	if _, ok := thresholds["statement_coverage"]; ok {
 		t.Error("an uncapped metric appears among the terms it was judged against")
 	}
-	if out := renderVerdict(env); !strings.Contains(out, "not judged") {
+	if out := renderVerdict(env, testedManifest); !strings.Contains(out, "not judged") {
 		t.Errorf("an uncapped metric is not shown as unjudged:\n%s", out)
 	}
 }
@@ -48,11 +71,11 @@ func TestJudge_OverACapNamesTheMetricItsValueAndTheTerm(t *testing.T) {
 		Count("failed_tests", 3),
 		Count("failed_packages", 0),
 	}}
-	acceptable, thresholds, detail := judge(env)
+	acceptable, thresholds, detail := judge(env, testedManifest)
 	if acceptable {
 		t.Fatal("a measurement over its cap passed")
 	}
-	for _, want := range []string{"failed_tests", "3", "cap 0"} {
+	for _, want := range []string{"failed_tests", "3", "at_most 0"} {
 		if !strings.Contains(detail, want) {
 			t.Errorf("detail = %q, want it to carry %q", detail, want)
 		}
@@ -73,7 +96,7 @@ func TestJudge_AnIncompleteRunIsRefusedEvenInsideEveryCap(t *testing.T) {
 		Metrics:    []Metric{Count("failed_tests", 0), Count("failed_packages", 0)},
 		Incomplete: "some packages failed their tests",
 	}
-	acceptable, thresholds, detail := judge(env)
+	acceptable, thresholds, detail := judge(env, testedManifest)
 	if acceptable {
 		t.Fatal("an incomplete run passed; its numbers understate what was checked")
 	}
@@ -86,11 +109,11 @@ func TestJudge_AnIncompleteRunIsRefusedEvenInsideEveryCap(t *testing.T) {
 }
 
 // A gate whose metrics nothing caps is acceptable, and the verdict says so
-// rather than implying a comparison nobody made. The caps table is a
-// placeholder (#38); a metric with no entry is reported and not judged.
+// rather than implying a comparison nobody made. A metric with no entry in the
+// manifest is reported and not judged.
 func TestJudge_NothingCappedIsAcceptableAndSaysNothingWasJudged(t *testing.T) {
 	env := Envelope{Gate: "covered", Metrics: []Metric{Quantity("statement_coverage", 12.5, "percent")}}
-	acceptable, thresholds, detail := judge(env)
+	acceptable, thresholds, detail := judge(env, map[string]Threshold{})
 	if !acceptable {
 		t.Fatalf("an uncapped metric failed a verdict nobody declared: %s", detail)
 	}
@@ -102,33 +125,29 @@ func TestJudge_NothingCappedIsAcceptableAndSaysNothingWasJudged(t *testing.T) {
 	}
 }
 
-// fit's measurements are reported and not judged, and the gap is deliberate
-// rather than an oversight to be found later.
-//
-// The caps table expresses "at most": judge() refuses a metric whose value is
-// GREATER than its entry. A disk floor is the opposite — free bytes must be at
-// least something — so giving fit a threshold means giving the table a
-// direction, which is the manifest in #38 and not a line added here. Until then
-// a machine is reported, and what is enough is decided by whoever reads it.
+// fit's measurements are reported and not judged when the manifest has no
+// entry for them. The manifest format can now express floors (at_least), but
+// this project's manifest has no entry for fit — populating specific floor
+// values is separate follow-up work.
 //
 // What keeps that from being vacuous is the incomplete path, above: a machine
 // whose toolchain cannot be reached is already refused without any floor.
-func TestJudge_FitIsReportedAndNotJudgedUntilAFloorExists(t *testing.T) {
+func TestJudge_FitIsReportedAndNotJudgedWhenNoFloorExists(t *testing.T) {
 	env := Envelope{Gate: "fit", Metrics: []Metric{
 		Size("worktree_free_bytes", 12582912, "bytes"),
 		Size("build_cache_free_bytes", 4096, "bytes"),
 	}}
-	acceptable, thresholds, detail := judge(env)
+	acceptable, thresholds, detail := judge(env, map[string]Threshold{})
 	if !acceptable {
 		t.Fatalf("a complete fit run was refused by a term nobody declared: %s", detail)
 	}
 	if len(thresholds) != 0 {
-		t.Errorf("thresholds = %v, want none — a floor is a direction the cap table does not have", thresholds)
+		t.Errorf("thresholds = %v, want none — no floor declared in this manifest", thresholds)
 	}
 	if !strings.Contains(detail, "judged") {
 		t.Errorf("detail = %q, want it to say nothing was judged", detail)
 	}
-	out := renderVerdict(env)
+	out := renderVerdict(env, map[string]Threshold{})
 	for _, want := range []string{"worktree_free_bytes", "build_cache_free_bytes", "12582912 B", "not judged"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the rendered verdict is missing %q:\n%s", want, out)
@@ -136,13 +155,47 @@ func TestJudge_FitIsReportedAndNotJudgedUntilAFloorExists(t *testing.T) {
 	}
 }
 
+// The at_least direction: a metric below its floor fails; at or above passes.
+func TestJudge_AtLeastDirection(t *testing.T) {
+	manifest := map[string]Threshold{
+		"statement_coverage": {Direction: AtLeast, Cap: 50.0},
+	}
+	// Below the floor: refused.
+	env := Envelope{Gate: "covered", Metrics: []Metric{Quantity("statement_coverage", 30.0, "percent")}}
+	acceptable, thresholds, detail := judge(env, manifest)
+	if acceptable {
+		t.Fatal("a measurement below its floor passed")
+	}
+	if !strings.Contains(detail, "at_least") {
+		t.Errorf("detail = %q, want it to carry the direction", detail)
+	}
+	if thresholds["statement_coverage"] != 50.0 {
+		t.Errorf("thresholds = %v, want the floor that applied", thresholds)
+	}
+
+	// At the floor: passes.
+	env.Metrics = []Metric{Quantity("statement_coverage", 50.0, "percent")}
+	acceptable, _, _ = judge(env, manifest)
+	if !acceptable {
+		t.Fatal("a measurement exactly at its floor was refused")
+	}
+
+	// Above the floor: passes.
+	env.Metrics = []Metric{Quantity("statement_coverage", 80.0, "percent")}
+	acceptable, _, _ = judge(env, manifest)
+	if !acceptable {
+		t.Fatal("a measurement above its floor was refused")
+	}
+}
+
 // The wire form: one JSON object on stdout, whole, with both required fields.
 // The SDK refuses anything else, and a missing "acceptable" would be read as a
 // refusal nobody made.
 func TestJudgeStdin_WritesExactlyOneVerdictObject(t *testing.T) {
+	dir := writeManifest(t, testedManifest)
 	env := Envelope{Gate: "tested", Metrics: []Metric{Count("failed_tests", 3), Count("failed_packages", 1)}}
 	var out bytes.Buffer
-	if err := JudgeStdin("tested", bytes.NewReader(marshal(t, env)), &out); err != nil {
+	if err := JudgeStdin(dir, "tested", bytes.NewReader(marshal(t, env)), &out); err != nil {
 		t.Fatalf("JudgeStdin: %v", err)
 	}
 
@@ -178,9 +231,10 @@ func TestJudgeStdin_WritesExactlyOneVerdictObject(t *testing.T) {
 // applied. Omitting either would leave the SDK reading absence — and absence of
 // "acceptable" is a refusal nobody made.
 func TestJudgeStdin_WritesBothRequiredFieldsWhenThereIsNothingToSay(t *testing.T) {
+	dir := writeManifest(t, map[string]Threshold{})
 	env := Envelope{Gate: "covered", Metrics: []Metric{Quantity("statement_coverage", 12.5, "percent")}}
 	var out bytes.Buffer
-	if err := JudgeStdin("covered", bytes.NewReader(marshal(t, env)), &out); err != nil {
+	if err := JudgeStdin(dir, "covered", bytes.NewReader(marshal(t, env)), &out); err != nil {
 		t.Fatalf("JudgeStdin: %v", err)
 	}
 	var fields map[string]json.RawMessage
@@ -201,6 +255,7 @@ func TestJudgeStdin_WritesBothRequiredFieldsWhenThereIsNothingToSay(t *testing.T
 // none: half an object beside an error message is a second channel, and the
 // two could disagree.
 func TestJudgeStdin_WritesNothingWhenItCannotAnswer(t *testing.T) {
+	dir := writeManifest(t, testedManifest)
 	for _, c := range []struct {
 		name     string
 		gate     string
@@ -234,7 +289,7 @@ func TestJudgeStdin_WritesNothingWhenItCannotAnswer(t *testing.T) {
 	}} {
 		t.Run(c.name, func(t *testing.T) {
 			var out bytes.Buffer
-			err := JudgeStdin(c.gate, bytes.NewReader(c.envelope), &out)
+			err := JudgeStdin(dir, c.gate, bytes.NewReader(c.envelope), &out)
 			if err == nil {
 				t.Fatalf("JudgeStdin answered a request it could not answer: %q", out.String())
 			}
@@ -251,8 +306,9 @@ func TestJudgeStdin_WritesNothingWhenItCannotAnswer(t *testing.T) {
 // An unreadable stdin is not a refusal either, and it must not reach stdout as
 // one.
 func TestJudgeStdin_AnUnreadableEnvelopeIsAnErrorAndNotAVerdict(t *testing.T) {
+	dir := writeManifest(t, testedManifest)
 	var out bytes.Buffer
-	err := JudgeStdin("tested", failingReader{}, &out)
+	err := JudgeStdin(dir, "tested", failingReader{}, &out)
 	if err == nil {
 		t.Fatal("JudgeStdin reached a verdict from an envelope it could not read")
 	}
@@ -269,11 +325,12 @@ func (failingReader) Read([]byte) (int, error) { return 0, errors.New("the pipe 
 // A project that answered "acceptable" to a runner and printed a failure to a
 // person would have two thresholds wearing one name.
 func TestJudgeStdin_AgreesWithWhatAPersonIsShown(t *testing.T) {
+	dir := writeManifest(t, testedManifest)
 	env := Envelope{Gate: "tested", Metrics: []Metric{Count("failed_tests", 2), Count("failed_packages", 1)}}
-	acceptable, _, detail := judge(env)
+	acceptable, _, detail := judge(env, testedManifest)
 
 	var out bytes.Buffer
-	if err := JudgeStdin("tested", bytes.NewReader(marshal(t, env)), &out); err != nil {
+	if err := JudgeStdin(dir, "tested", bytes.NewReader(marshal(t, env)), &out); err != nil {
 		t.Fatalf("JudgeStdin: %v", err)
 	}
 	var wire struct {
@@ -346,7 +403,7 @@ func TestJudge_NamesEveryMetricOverItsCapNotJustTheFirst(t *testing.T) {
 		Count("failed_tests", 3),
 		Count("failed_packages", 2),
 	}}
-	acceptable, _, detail := judge(env)
+	acceptable, _, detail := judge(env, testedManifest)
 	if acceptable {
 		t.Fatal("two measurements over their caps passed")
 	}
@@ -370,10 +427,11 @@ func TestJudge_NamesEveryMetricOverItsCapNotJustTheFirst(t *testing.T) {
 // MeasureGate is deliberately not in this set. It is reached only after a
 // parser has already accepted the name, so it never answers a person.
 func TestUnknownGateIsRefusedTheSameWayByEveryEntryPoint(t *testing.T) {
+	dir := writeManifest(t, testedManifest)
 	_, _, gateArgsErr := ParseGateArgs([]string{"lint"})
 	_, _, runArgsErr := ParseRunArgs([]string{"lint"})
 	var out bytes.Buffer
-	judgeErr := JudgeStdin("lint", bytes.NewReader([]byte(`{"gate":"lint","metrics":[]}`)), &out)
+	judgeErr := JudgeStdin(dir, "lint", bytes.NewReader([]byte(`{"gate":"lint","metrics":[]}`)), &out)
 	measureErr := RunOneGate("", "", "lint")
 
 	if out.Len() != 0 {
@@ -401,5 +459,154 @@ func TestUnknownGateIsRefusedTheSameWayByEveryEntryPoint(t *testing.T) {
 		if !strings.Contains(gateArgsErr.Error(), want) {
 			t.Errorf("the refusal is %q, want it to carry %s", gateArgsErr, want)
 		}
+	}
+}
+
+// CappedMetrics reads the manifest — not the judging path, just the usage text.
+// It must not crash on a missing root or a missing file, and must sort the names
+// it returns.
+func TestCappedMetrics(t *testing.T) {
+	// Empty repoRoot: usage text before the repo is known.
+	if got := CappedMetrics(""); got != nil {
+		t.Errorf("CappedMetrics(\"\") = %v, want nil", got)
+	}
+	// No manifest file: returns nil rather than crashing.
+	if got := CappedMetrics(t.TempDir()); got != nil {
+		t.Errorf("CappedMetrics(no manifest) = %v, want nil", got)
+	}
+	// Valid manifest: returns sorted names.
+	dir := writeManifest(t, map[string]Threshold{
+		"vet_findings":    {Direction: AtMost, Cap: 0},
+		"failed_tests":    {Direction: AtMost, Cap: 0},
+		"failed_packages": {Direction: AtMost, Cap: 0},
+	})
+	got := CappedMetrics(dir)
+	want := []string{"failed_packages", "failed_tests", "vet_findings"}
+	if len(got) != len(want) {
+		t.Fatalf("CappedMetrics = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("CappedMetrics[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// JudgeStdin with a missing manifest must return an error and write nothing to
+// stdout. Without this, removing the loadManifest call would silently pass
+// everything — the zero-threshold path is "nothing judged: acceptable".
+func TestJudgeStdin_MissingManifestIsAnErrorAndNotAVerdict(t *testing.T) {
+	dir := t.TempDir() // no thresholds.json
+	env := Envelope{Gate: "tested", Metrics: []Metric{Count("failed_tests", 3)}}
+	var out bytes.Buffer
+	err := JudgeStdin(dir, "tested", bytes.NewReader(marshal(t, env)), &out)
+	if err == nil {
+		t.Fatal("JudgeStdin answered when the manifest was missing")
+	}
+	if out.Len() != 0 {
+		t.Errorf("wrote %q on an error path; a caller must read one verdict or none", out.String())
+	}
+}
+
+// renderVerdict must show the direction and the correct mark for at_least
+// metrics. A passing floor shows ✓; a failing one shows ✗. Without this,
+// the at_least rendering branches in renderVerdict are untested.
+func TestRenderVerdict_AtLeastDirectionShowsCorrectMark(t *testing.T) {
+	manifest := map[string]Threshold{
+		"statement_coverage": {Direction: AtLeast, Cap: 50.0},
+	}
+	// Above the floor: passing mark.
+	env := Envelope{Gate: "covered", Metrics: []Metric{Quantity("statement_coverage", 80.0, "percent")}}
+	out := renderVerdict(env, manifest)
+	if !strings.Contains(out, "✓") {
+		t.Errorf("a metric above its floor should show ✓:\n%s", out)
+	}
+	if !strings.Contains(out, "at_least") {
+		t.Errorf("the rendered verdict should show the direction:\n%s", out)
+	}
+	// Below the floor: failing mark.
+	env.Metrics = []Metric{Quantity("statement_coverage", 30.0, "percent")}
+	out = renderVerdict(env, manifest)
+	if !strings.Contains(out, "✗") {
+		t.Errorf("a metric below its floor should show ✗:\n%s", out)
+	}
+}
+
+// renderVerdict must show ✓ for a passing at_most metric — the marks are
+// direction-specific, and the existing tests never assert them.
+func TestRenderVerdict_AtMostDirectionShowsCorrectMark(t *testing.T) {
+	out := renderVerdict(
+		Envelope{Gate: "tested", Metrics: []Metric{Count("failed_tests", 0)}},
+		testedManifest,
+	)
+	if !strings.Contains(out, "✓") {
+		t.Errorf("a metric at its at_most cap should show ✓:\n%s", out)
+	}
+	if !strings.Contains(out, "at_most") {
+		t.Errorf("the rendered verdict should show the direction:\n%s", out)
+	}
+	// Over the cap: ✗.
+	out = renderVerdict(
+		Envelope{Gate: "tested", Metrics: []Metric{Count("failed_tests", 5)}},
+		testedManifest,
+	)
+	if !strings.Contains(out, "✗") {
+		t.Errorf("a metric over its at_most cap should show ✗:\n%s", out)
+	}
+}
+
+// --- Manifest loading tests ---
+
+func TestLoadManifest_Valid(t *testing.T) {
+	dir := writeManifest(t, map[string]Threshold{
+		"failed_tests":       {Direction: AtMost, Cap: 0},
+		"statement_coverage": {Direction: AtLeast, Cap: 50.0},
+	})
+	manifest, err := loadManifest(dir)
+	if err != nil {
+		t.Fatalf("loadManifest: %v", err)
+	}
+	if len(manifest) != 2 {
+		t.Fatalf("len = %d, want 2", len(manifest))
+	}
+	if manifest["failed_tests"].Direction != AtMost || manifest["failed_tests"].Cap != 0 {
+		t.Errorf("failed_tests = %+v", manifest["failed_tests"])
+	}
+	if manifest["statement_coverage"].Direction != AtLeast || manifest["statement_coverage"].Cap != 50.0 {
+		t.Errorf("statement_coverage = %+v", manifest["statement_coverage"])
+	}
+}
+
+func TestLoadManifest_MissingFile(t *testing.T) {
+	dir := t.TempDir()
+	_, err := loadManifest(dir)
+	if err == nil {
+		t.Fatal("loadManifest succeeded without a manifest file")
+	}
+}
+
+func TestLoadManifest_UnknownDirection(t *testing.T) {
+	dir := t.TempDir()
+	data := []byte(`{"x": {"direction": "around", "cap": 5}}`)
+	if err := os.WriteFile(filepath.Join(dir, ManifestFile), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadManifest(dir)
+	if err == nil {
+		t.Fatal("loadManifest accepted an unknown direction")
+	}
+	if !strings.Contains(err.Error(), "around") {
+		t.Errorf("err = %v, want it to name the bad direction", err)
+	}
+}
+
+func TestLoadManifest_MalformedJSON(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ManifestFile), []byte("{not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadManifest(dir)
+	if err == nil {
+		t.Fatal("loadManifest accepted malformed JSON")
 	}
 }

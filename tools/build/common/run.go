@@ -37,22 +37,47 @@ import (
 	"strings"
 )
 
-// caps are the thresholds this project's measurements are judged against: the
-// most of each that may exist for a change to be sound. A metric with no entry
-// is reported and not judged.
-//
-// THIS TABLE IS A PLACEHOLDER, deliberately kept small. The real thing is a
-// manifest declaring each metric's type, its direction, and the baseline it
-// ratchets against — https://github.com/promise-language/flow/issues/38. It
-// lives here rather than in a file of its own because inventing a manifest
-// format now would be inventing one that has to be migrated; what matters
-// today is that the thresholds are not inside any gate.
-var caps = map[string]float64{
-	"unformatted_files":    0,
-	"unbuildable_packages": 0,
-	"vet_findings":         0,
-	"failed_tests":         0,
-	"failed_packages":      0,
+// Direction is the sense in which a measurement is compared to its threshold.
+// The set is closed: unknown values are refused at load time.
+type Direction string
+
+const (
+	AtMost  Direction = "at_most"  // value must not exceed cap (counts of bad things)
+	AtLeast Direction = "at_least" // value must not fall below cap (floors like coverage)
+)
+
+// Threshold is one entry in the thresholds manifest.
+type Threshold struct {
+	Direction Direction `json:"direction"`
+	Cap       float64   `json:"cap"`
+}
+
+// ManifestFile is the name of the thresholds manifest, versioned with the tree
+// it judges. A project with a judge must have one.
+const ManifestFile = "thresholds.json"
+
+// loadManifest reads the thresholds manifest from a repo root. An absent file
+// is an error — a project with a judge must have a manifest. An unknown
+// direction value is an error — the set is closed.
+func loadManifest(repoRoot string) (map[string]Threshold, error) {
+	data, err := os.ReadFile(filepath.Join(repoRoot, ManifestFile))
+	if err != nil {
+		return nil, fmt.Errorf("loading thresholds manifest: %w", err)
+	}
+	var manifest map[string]Threshold
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("parsing thresholds manifest: %w", err)
+	}
+	for name, t := range manifest {
+		switch t.Direction {
+		case AtMost, AtLeast:
+			// known
+		default:
+			return nil, fmt.Errorf("thresholds manifest: metric %q has unknown direction %q (must be %q or %q)",
+				name, t.Direction, AtMost, AtLeast)
+		}
+	}
+	return manifest, nil
 }
 
 // RunOneGate measures one gate the way a runner would — by executing the gate
@@ -88,8 +113,12 @@ func RunOneGate(repoRoot, gateBin, name string) error {
 			name, firstLine(string(out)))
 	}
 
-	fmt.Print(renderVerdict(env))
-	acceptable, _, detail := judge(env)
+	manifest, err := loadManifest(repoRoot)
+	if err != nil {
+		return err
+	}
+	fmt.Print(renderVerdict(env, manifest))
+	acceptable, _, detail := judge(env, manifest)
 	if !acceptable {
 		return fmt.Errorf("%s: %s", name, detail)
 	}
@@ -109,17 +138,24 @@ func RunOneGate(repoRoot, gateBin, name string) error {
 //
 // A metric nothing caps cannot fail, and an incomplete run cannot pass: honest
 // numbers that understate what was checked must not be read as a good result.
-func judge(env Envelope) (acceptable bool, thresholds map[string]float64, detail string) {
+func judge(env Envelope, manifest map[string]Threshold) (acceptable bool, thresholds map[string]float64, detail string) {
 	thresholds = map[string]float64{}
 	var exceeded []string
 	for _, m := range env.Metrics {
-		capValue, capped := caps[m.Name]
+		t, capped := manifest[m.Name]
 		if !capped {
 			continue
 		}
-		thresholds[m.Name] = capValue
-		if m.Number() > capValue {
-			exceeded = append(exceeded, fmt.Sprintf("%s is %s, cap %s", m.Name, m.String(), number(capValue)))
+		thresholds[m.Name] = t.Cap
+		var over bool
+		switch t.Direction {
+		case AtMost:
+			over = m.Number() > t.Cap
+		case AtLeast:
+			over = m.Number() < t.Cap
+		}
+		if over {
+			exceeded = append(exceeded, fmt.Sprintf("%s is %s, %s %s", m.Name, m.String(), t.Direction, number(t.Cap)))
 		}
 	}
 	switch {
@@ -148,7 +184,7 @@ func judge(env Envelope) (acceptable bool, thresholds map[string]float64, detail
 // Nothing reaches out on any error path. A caller reads one object or none —
 // a half-written verdict beside an error message is a second channel, and the
 // two could disagree.
-func JudgeStdin(name string, in io.Reader, out io.Writer) error {
+func JudgeStdin(repoRoot, name string, in io.Reader, out io.Writer) error {
 	if !KnownGate(name) {
 		return unknownGate(name)
 	}
@@ -166,7 +202,11 @@ func JudgeStdin(name string, in io.Reader, out io.Writer) error {
 	if env.Gate != name {
 		return fmt.Errorf("asked to judge %q against the terms for %q; a measurement is judged against its own gate's caps", env.Gate, name)
 	}
-	acceptable, thresholds, detail := judge(env)
+	manifest, err := loadManifest(repoRoot)
+	if err != nil {
+		return err
+	}
+	acceptable, thresholds, detail := judge(env, manifest)
 	// Marshalled whole before anything is written, so a failure here leaves
 	// stdout untouched rather than half a verdict.
 	body, err := json.Marshal(verdictWire{Acceptable: acceptable, Thresholds: thresholds, Detail: detail})
@@ -220,7 +260,7 @@ func ParseRunArgs(args []string) (name string, verdict bool, err error) {
 }
 
 // renderVerdict prints each measurement beside the term it was judged on.
-func renderVerdict(env Envelope) string {
+func renderVerdict(env Envelope, manifest map[string]Threshold) string {
 	var sb strings.Builder
 	width := 0
 	for _, m := range env.Metrics {
@@ -229,16 +269,23 @@ func renderVerdict(env Envelope) string {
 		}
 	}
 	for _, m := range env.Metrics {
-		capValue, capped := caps[m.Name]
+		t, capped := manifest[m.Name]
 		judged, mark := "not judged", " "
 		if capped {
-			judged = "cap " + number(capValue)
+			judged = string(t.Direction) + " " + number(t.Cap)
 			mark = "✗"
-			if m.Number() <= capValue {
-				mark = "✓"
+			switch t.Direction {
+			case AtMost:
+				if m.Number() <= t.Cap {
+					mark = "✓"
+				}
+			case AtLeast:
+				if m.Number() >= t.Cap {
+					mark = "✓"
+				}
 			}
 		}
-		fmt.Fprintf(&sb, "  %-*s  %8s  %-12s %s\n",
+		fmt.Fprintf(&sb, "  %-*s  %8s  %-16s %s\n",
 			width, m.Name, m.String()+unitSuffix(m.Unit), judged, mark)
 	}
 	if env.Incomplete != "" {
@@ -271,10 +318,19 @@ func GateBinary(repoRoot string) string {
 	return filepath.Join(repoRoot, "bin", "gate")
 }
 
-// CappedMetrics lists the metrics this layer judges, for usage text.
-func CappedMetrics() []string {
-	names := make([]string, 0, len(caps))
-	for n := range caps {
+// CappedMetrics lists the metrics this layer judges, for usage text. If the
+// manifest cannot be loaded (empty repoRoot), it returns an empty list — this
+// is usage text only, not a judging path.
+func CappedMetrics(repoRoot string) []string {
+	if repoRoot == "" {
+		return nil
+	}
+	manifest, err := loadManifest(repoRoot)
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(manifest))
+	for n := range manifest {
 		names = append(names, n)
 	}
 	sort.Strings(names)

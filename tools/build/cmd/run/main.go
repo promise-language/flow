@@ -37,7 +37,12 @@ func usage() string {
 	for _, n := range common.GateNames() {
 		fmt.Fprintf(&sb, "  %-12s %s\n", n, common.GateSummary(n))
 	}
-	fmt.Fprintf(&sb, "\nJudged against a cap: %s\n", strings.Join(common.CappedMetrics(), ", "))
+	capped := common.CappedMetrics(repoRoot)
+	if len(capped) > 0 {
+		fmt.Fprintf(&sb, "\nJudged against a cap: %s\n", strings.Join(capped, ", "))
+	} else {
+		fmt.Fprintf(&sb, "\nThresholds defined in %s\n", common.ManifestFile)
+	}
 	sb.WriteString("Anything else is reported and not judged.\n")
 	return sb.String()
 }
@@ -61,7 +66,7 @@ func main() {
 	// CheckStale has already run above, so stale tooling exits before it can
 	// print a verdict rather than answering with terms nobody currently holds.
 	if verdict {
-		if err := common.JudgeStdin(name, os.Stdin, os.Stdout); err != nil {
+		if err := common.JudgeStdin(repoRoot, name, os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "run: %v\n", err)
 			os.Exit(1)
 		}

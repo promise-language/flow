@@ -1,0 +1,7 @@
+{
+  "unformatted_files":    {"direction": "at_most", "cap": 0},
+  "unbuildable_packages": {"direction": "at_most", "cap": 0},
+  "vet_findings":         {"direction": "at_most", "cap": 0},
+  "failed_tests":         {"direction": "at_most", "cap": 0},
+  "failed_packages":      {"direction": "at_most", "cap": 0}
+}
