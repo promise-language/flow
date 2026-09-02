@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -773,6 +774,78 @@ func TestParseStream_UnrelatedUserEventsIgnored(t *testing.T) {
 	}
 	if resp.LastText != "Working." {
 		t.Errorf("LastText = %q, want the assistant text", resp.LastText)
+	}
+}
+
+// A turn that fans out to several subagents keeps the LAST one's output, by the
+// same rule that governs assistant text. Nothing else is available to choose
+// between them: the parser cannot know which subagent was asked for the
+// deliverable, and the turn's own ordering is the only evidence there is.
+func TestRun_LastDelegationWinsAmongSeveral(t *testing.T) {
+	stream := `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"Task","input":{}},{"type":"tool_use","id":"tu2","name":"Task","input":{}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"## Research\n\nwhat the first subagent found"}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu2","content":"## Plan\n\nwhat the second subagent wrote"}]}}
+{"type":"result","session_id":"s","result":"","total_cost_usd":0.1,"duration_ms":10}
+`
+	c := clientWith(&fakeCmd{stdoutStream: stream})
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(resp.LastText, "what the second subagent wrote") {
+		t.Errorf("LastText = %q, want the last delegation's output", resp.LastText)
+	}
+}
+
+// A subagent that returned nothing said nothing, and blanking the turn's text
+// on its way past would be worse than ignoring it: the text it would overwrite
+// is the parent's own, which is at least something the turn produced. The same
+// guard is what keeps an empty result from turning a real answer into the
+// "agent returned an empty plan" refusal one layer up.
+func TestRun_EmptyDelegationResultDoesNotClobberTheTurnsText(t *testing.T) {
+	stream := `{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"## Plan\n\nthe parent wrote this, then checked it."},{"type":"tool_use","id":"tu1","name":"Task","input":{}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"   \n  "}]}}
+{"type":"result","session_id":"s","result":"","total_cost_usd":0.1,"duration_ms":10}
+`
+	c := clientWith(&fakeCmd{stdoutStream: stream})
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(resp.LastText, "the parent wrote this") {
+		t.Errorf("LastText = %q, want the parent's text — an empty delegation result carries nothing", resp.LastText)
+	}
+}
+
+// The shapes a tool_result's content arrives in. Both recognised ones are read;
+// everything else yields "" and is dropped, which is the whole point — the
+// alternative to recognising a shape is guessing at it, and a guess here puts
+// something arbitrary under the artifact's name.
+func TestToolResultText_ContentShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"bare string", `"the deliverable"`, "the deliverable"},
+		{"one text block", `[{"type":"text","text":"the deliverable"}]`, "the deliverable"},
+		{"text blocks joined", `[{"type":"text","text":"first"},{"type":"text","text":"second"}]`, "first\nsecond"},
+		{"non-text blocks skipped", `[{"type":"image","source":"..."},{"type":"text","text":"the deliverable"}]`, "the deliverable"},
+		{"empty block array", `[]`, ""},
+		{"absent", ``, ""},
+		{"null", `null`, ""},
+		// An object and a number are shapes this parser does not know. Rendering
+		// them as their raw JSON would be a deliverable made of punctuation.
+		{"object", `{"result":"the deliverable"}`, ""},
+		{"number", `17`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := toolResultText(json.RawMessage(tc.raw)); got != tc.want {
+				t.Errorf("toolResultText(%s) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
 	}
 }
 
