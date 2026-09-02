@@ -518,7 +518,7 @@ func (b *Backend) Park(ctx context.Context, claim flow.Claim, req flow.ParkReque
 		parkBody, _ = json.Marshal(req)
 		body = "<!-- flow:park -->\n```json\n" + string(parkBody) + "\n```"
 		if _, err := b.out.CreateComment(ctx, flow.ActParkRecord, issueNum,
-			flow.Text{Origin: flow.OriginAgent, Body: body}); err != nil {
+			flow.Text{Origin: flow.OriginFlow, Body: body}); err != nil {
 			return err
 		}
 	}
