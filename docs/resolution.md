@@ -15,7 +15,7 @@ Everything in *this* document is true of both. A statement that is true of only 
 
 An **item** is a unit of work owned by a backend. A **flow** is an ordered list of steps that resolves items of a given type.
 
-A **step** produces exactly one result: an artifact, or a signal. A step that produces nothing has not run. The result is the step's identity — it is what budget is metered against, what a park names, and what `status` reports.
+A **step** produces exactly one result: an artifact, or a signal. The distinction between the two — what each is, who writes it, and what it carries — is defined in [artifacts-and-signals.md](artifacts-and-signals.md). A step that produces nothing has not run. The result is the step's identity — it is what budget is metered against, what a park names, and what `status` reports.
 
 The lifecycle is: **claim → seed → advance one step at a time → finalize**. An item enters at claim and leaves at finalize; everything between is a sequence of single-step advances.
 
