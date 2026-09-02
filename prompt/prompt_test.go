@@ -30,6 +30,22 @@ func TestRender_FillsPartials(t *testing.T) {
 	if !strings.Contains(c.RebaseResolution, "git rebase --continue") {
 		t.Error("RebaseResolution missing the continue step")
 	}
+	for _, want := range []string{"duplicate fix", "git log --oneline", "DUPLICATE-WORK CANDIDATES", "mainline", "Absent"} {
+		if !strings.Contains(c.RebaseResolution, want) {
+			t.Errorf("RebaseResolution missing %q", want)
+		}
+	}
+	// The main rule ("integrate BOTH sides") must survive alongside the exception.
+	if !strings.Contains(c.RebaseResolution, "BOTH sides") {
+		t.Error("RebaseResolution lost the main integrate-both-sides rule")
+	}
+	// The exception must appear after the main rule it qualifies — an agent
+	// reading the exception before the rule has no context for it.
+	mainIdx := strings.Index(c.RebaseResolution, "BOTH sides")
+	exIdx := strings.Index(c.RebaseResolution, "duplicate fix")
+	if mainIdx >= exIdx {
+		t.Errorf("duplicate-fix exception (at %d) must appear after the BOTH-sides rule (at %d)", exIdx, mainIdx)
+	}
 	if !strings.Contains(c.DeferCommit, "later step") {
 		t.Errorf("DeferCommit missing later-step note: %q", c.DeferCommit)
 	}
