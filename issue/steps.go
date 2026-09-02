@@ -301,6 +301,13 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 		if verr == nil {
 			break
 		}
+		// A failure observed on an unfit machine does not reach an agent:
+		// re-prompting with "No space left on device" burns a turn on a
+		// condition no edit can change. The orchestrator's ErrUnfit branch
+		// reports blocked.
+		if fitErr := flow.CheckFit(ctx.Context(), wt); fitErr != nil {
+			return fitErr
+		}
 		if attempt >= rounds {
 			// An error, not a park. A park here gated nothing — no preflight
 			// refuses a ParkBlocked item — so an unattended `resolve` would
@@ -415,6 +422,11 @@ func (b *builder) recordStepWork(ctx flow.StepCtx, wt flow.Worktree, label, msg 
 func (b *builder) commitWithRepair(ctx flow.StepCtx, wt flow.Worktree, msg string) error {
 	firstStageErr := wt.Stage(ctx.Context())
 	if firstStageErr != nil {
+		// A staging failure on an unfit machine is not a refusal — it is
+		// ENOSPC or similar. Do not spend an agent turn on it.
+		if fitErr := flow.CheckFit(ctx.Context(), wt); fitErr != nil {
+			return fitErr
+		}
 		ctx.Notify("", fmt.Sprintf("staging refused: %s", firstStageErr))
 
 		pc := PromptContext{StageRefusal: firstStageErr.Error()}

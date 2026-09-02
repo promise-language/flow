@@ -504,6 +504,23 @@ var _ flow.Discoverer = (*Backend)(nil)
 var _ flow.TagFilterer = (*Backend)(nil)
 var _ flow.Finalizer = (*Backend)(nil)
 var _ flow.QuestionAnswerer = (*Backend)(nil)
+var _ flow.FitnessChecker = (*Backend)(nil)
+
+// CheckFit runs the fit gate in the repo root (before any worktree exists)
+// and returns the verdict. Reuses the same runGate / askJudge functions the
+// per-claim worktree delegates to.
+func (b *Backend) CheckFit(ctx context.Context) (flow.GateVerdict, error) {
+	argv := append(append([]string{}, gateEntryPoint...), string(flow.GateFit), envelopeFlag)
+	run, err := runGate(ctx, b.cfg.WorktreeDir, flow.GateFit, argv, b.cfg.GateTimeout)
+	if err != nil {
+		return flow.GateVerdict{}, err
+	}
+	if run.Outcome != flow.OutcomeMeasured {
+		return flow.GateVerdict{}, fmt.Errorf("fit gate outcome %s: %s", run.Outcome, run.Detail)
+	}
+	judgeArgv := append(append([]string{}, judgeEntryPoint...), string(flow.GateFit), verdictFlag)
+	return askJudge(ctx, b.cfg.WorktreeDir, run, judgeArgv, b.cfg.GateTimeout)
+}
 
 // suppressWarnings keeps the linter quiet about helpers used only across
 // other sub-files.

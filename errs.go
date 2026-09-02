@@ -56,6 +56,18 @@ var ErrTransient = errors.New("flow: transient infrastructure failure")
 // as it is (retry and pay).
 var ErrRefused = errors.New("flow: deterministic refusal")
 
+// ErrUnfit — handler-returned sentinel for a machine that is not fit to
+// perform work. The orchestrator translates this to:
+//
+//	InvocationResult{Status: "blocked", ...}
+//
+// and SKIPS the BumpInvocations call: a full disk is a condition, not a
+// failure, and a condition that ends on its own must not consume budget.
+// No park is written — a park names a step and persists until cleared, but
+// a machine condition travels with nobody and ends the moment the machine
+// recovers. The claim is kept (the machine is unfit, not the item).
+var ErrUnfit = errors.New("flow: machine unfit")
+
 // ErrNoDisclosureGuard — no DisclosureGuard was injected, so nothing is
 // published. docs/disclosure.md: "an interface that defaults to allow is an
 // interface whose whole purpose is optional." Reads are unaffected; the first

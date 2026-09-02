@@ -161,8 +161,9 @@ func (c *Client) Run(ctx context.Context, req flow.AgentRequest) (*flow.AgentRes
 	if parseErr != nil {
 		return &flow.AgentResponse{
 			Failure: &flow.AgentFailure{
-				Kind:    "no-result",
-				Message: combineDiagnostic(parseErr, waitErr, stderrBytes),
+				Kind:      "no-result",
+				Message:   combineDiagnostic(parseErr, waitErr, stderrBytes),
+				Transient: true, // the agent is not broken; something on the host interfered
 			},
 		}, nil
 	}
@@ -170,8 +171,9 @@ func (c *Client) Run(ctx context.Context, req flow.AgentRequest) (*flow.AgentRes
 		// No usable output and the process errored — treat as exit-error.
 		return &flow.AgentResponse{
 			Failure: &flow.AgentFailure{
-				Kind:    "exit-error",
-				Message: combineDiagnostic(nil, waitErr, stderrBytes),
+				Kind:      "exit-error",
+				Message:   combineDiagnostic(nil, waitErr, stderrBytes),
+				Transient: true, // the process crashed before producing output — infrastructure failure
 			},
 		}, nil
 	}

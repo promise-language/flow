@@ -302,6 +302,16 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		}))
 	}
 
+	// Machine unfit (handler returned flow.ErrUnfit). The machine is not
+	// fit to perform work — e.g. disk full. No park (a machine condition
+	// has no step and ends on its own), no BumpInvocations (a condition is
+	// not a failure), status blocked. The claim is kept.
+	if handlerErr != nil && errors.Is(handlerErr, flow.ErrUnfit) {
+		result.Status = string(flow.StatusBlocked)
+		result.Reason = handlerErr.Error()
+		return sctx.stampResult(result, nil)
+	}
+
 	// Transient infra failure (handler returned flow.ErrTransient OR the
 	// metered agent observed AgentResponse.Failure.Transient and surfaced
 	// it through the wrapped error). Park with ParkInfraTransient and
@@ -326,6 +336,19 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 			Step:   li.Result(),
 			Reason: handlerErr.Error(),
 		}))
+	}
+
+	// Post-handler fitness catch-all: any unclassified handler failure on an
+	// unfit machine is reported as blocked, not charged. This catches
+	// environment failures (ENOSPC, etc.) from ANY handler in ANY flow,
+	// without each handler having to classify them. Runs after the sentinel
+	// branches (already classified) and before write-contract / bumpInvocations.
+	if handlerErr != nil && sctx.worktree != nil {
+		if fitErr := flow.CheckFit(ctx, sctx.worktree); fitErr != nil {
+			result.Status = string(flow.StatusBlocked)
+			result.Reason = fitErr.Error()
+			return sctx.stampResult(result, nil)
+		}
 	}
 
 	// Write-contract check. Runs after the transient/refused early returns

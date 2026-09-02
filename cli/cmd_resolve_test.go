@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1155,5 +1156,349 @@ func TestCmdResolve_NonBudgetParkOmitsAxes(t *testing.T) {
 	}
 	if strings.Contains(errBuf.String(), "axes:") {
 		t.Errorf("non-budget park must not emit axes line; got %q", errBuf.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Pre-claim fitness gate
+// ---------------------------------------------------------------------------
+
+// unfitBackend wraps a fake backend and implements flow.FitnessChecker with
+// an unconditionally-unfit verdict.
+type unfitBackend struct {
+	*fake.Backend
+}
+
+func (b *unfitBackend) CheckFit(ctx context.Context) (flow.GateVerdict, error) {
+	return flow.GateVerdict{
+		Acceptable: false,
+		Detail:     "12 MB free, floor 2 GB",
+		Thresholds: []byte("{}"),
+	}, nil
+}
+
+// TestResolve_UnfitMachineExitsBeforeClaiming verifies that when the backend
+// reports the machine as permanently unfit, resolve exhausts the fitness wait
+// and exits 1 without claiming the item.
+func TestResolve_UnfitMachineExitsBeforeClaiming(t *testing.T) {
+	old := fitnessWaitInterval
+	fitnessWaitInterval = time.Millisecond
+	defer func() { fitnessWaitInterval = old }()
+
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be := &unfitBackend{Backend: inner}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), []string{"1"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (unfit machine); err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "machine unfit") {
+		t.Errorf("expected 'machine unfit' in stderr; got %q", errBuf.String())
+	}
+	// The item must NOT be claimed.
+	claim, err := be.LookupActiveClaim(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("LookupActiveClaim: %v", err)
+	}
+	if claim != nil {
+		t.Errorf("item should not be claimed after unfit verdict; got %+v", claim)
+	}
+}
+
+// fitBackend wraps a fake backend and implements flow.FitnessChecker with an
+// unconditionally-fit verdict.
+type fitBackend struct {
+	*fake.Backend
+}
+
+func (b *fitBackend) CheckFit(ctx context.Context) (flow.GateVerdict, error) {
+	return flow.GateVerdict{Acceptable: true}, nil
+}
+
+// TestResolve_FitMachineProceeds verifies that a fit verdict lets resolve
+// proceed normally (item gets claimed and driven through the step).
+func TestResolve_FitMachineProceeds(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be := &fitBackend{Backend: inner}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	// Item must be claimed.
+	claim, err := be.LookupActiveClaim(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("LookupActiveClaim: %v", err)
+	}
+	if claim == nil {
+		t.Error("item should be claimed after fit verdict")
+	}
+}
+
+// fitErrorBackend wraps a fake backend and implements flow.FitnessChecker
+// that always returns an error — exercises the fail-open path.
+type fitErrorBackend struct {
+	*fake.Backend
+}
+
+func (b *fitErrorBackend) CheckFit(ctx context.Context) (flow.GateVerdict, error) {
+	return flow.GateVerdict{}, errors.New("gate broken")
+}
+
+// TestResolve_FitnessCheckErrorProceeds verifies that when CheckFit returns
+// an error, resolve proceeds (fail-open) rather than blocking.
+func TestResolve_FitnessCheckErrorProceeds(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be := &fitErrorBackend{Backend: inner}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (fail-open on gate error); err=%q", code, errBuf.String())
+	}
+	// Item must be claimed — the error did not block.
+	claim, err := be.LookupActiveClaim(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("LookupActiveClaim: %v", err)
+	}
+	if claim == nil {
+		t.Error("item should be claimed when CheckFit returns an error (fail-open)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Mid-step fitness wait: standalone wait-and-retry on StatusBlocked
+// ---------------------------------------------------------------------------
+
+// transientUnfitBackend returns an unfit verdict for the first N CheckFit
+// calls, then switches to fit. It also allows the step handler to return
+// ErrUnfit on the first run by controlling the fake's gate verdict.
+type transientUnfitBackend struct {
+	*fake.Backend
+	mu          sync.Mutex
+	checkCalls  int
+	unfitRounds int // how many CheckFit calls return unfit before switching
+}
+
+func (b *transientUnfitBackend) CheckFit(ctx context.Context) (flow.GateVerdict, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.checkCalls++
+	if b.checkCalls <= b.unfitRounds {
+		return flow.GateVerdict{
+			Acceptable: false,
+			Detail:     "12 MB free, floor 2 GB",
+			Thresholds: []byte("{}"),
+		}, nil
+	}
+	return flow.GateVerdict{Acceptable: true}, nil
+}
+
+// TestResolve_FitnessWaitRetriesOnRecovery verifies that when a step returns
+// ErrUnfit and the machine subsequently recovers, cmdResolve waits and retries
+// rather than exiting immediately.
+func TestResolve_FitnessWaitRetriesOnRecovery(t *testing.T) {
+	old := fitnessWaitInterval
+	fitnessWaitInterval = time.Millisecond
+	defer func() { fitnessWaitInterval = old }()
+
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+
+	stepCalls := 0
+	// The backend starts fit (unfitRounds: 0) so the pre-claim check passes.
+	// After the step returns ErrUnfit, the mid-step CheckFit also returns fit,
+	// so cmdResolve retries immediately.
+	be := &transientUnfitBackend{Backend: inner, unfitRounds: 0}
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+		stepCalls++
+		if stepCalls == 1 {
+			return fmt.Errorf("12 MB free, floor 2 GB: %w", flow.ErrUnfit)
+		}
+		return ctx.ResolveMarkdown("the plan")
+	})
+
+	code := app.cmdResolve(context.Background(), []string{"1"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (should recover after fitness retry); err=%q", code, errBuf.String())
+	}
+	if stepCalls < 2 {
+		t.Errorf("step handler called %d time(s), want >= 2 (first unfit, then recovered)", stepCalls)
+	}
+	if !strings.Contains(errBuf.String(), "machine fit again") {
+		t.Errorf("expected 'machine fit again' in stderr; got %q", errBuf.String())
+	}
+}
+
+// TestResolve_FitnessWaitHoldsWhileUnfit verifies that when the machine stays
+// unfit for several rounds and then recovers, cmdResolve waits and re-measures
+// each round before retrying the step.
+func TestResolve_FitnessWaitHoldsWhileUnfit(t *testing.T) {
+	old := fitnessWaitInterval
+	fitnessWaitInterval = time.Millisecond
+	defer func() { fitnessWaitInterval = old }()
+
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+
+	stepCalls := 0
+	// Pre-claim CheckFit (call 1) is fit (unfitRounds=0 → always fit at that
+	// stage). Then the step returns ErrUnfit. The mid-step re-check (calls
+	// 2..4) returns unfit for 3 rounds, then fit on call 5.
+	be := &transientUnfitBackend{Backend: inner, unfitRounds: 0}
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+		stepCalls++
+		if stepCalls == 1 {
+			// After the step fails, make the next 3 CheckFit calls unfit.
+			be.mu.Lock()
+			be.checkCalls = 0
+			be.unfitRounds = 3
+			be.mu.Unlock()
+			return fmt.Errorf("12 MB free, floor 2 GB: %w", flow.ErrUnfit)
+		}
+		return ctx.ResolveMarkdown("the plan")
+	})
+
+	code := app.cmdResolve(context.Background(), []string{"1"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (should recover after wait); err=%q", code, errBuf.String())
+	}
+	if stepCalls < 2 {
+		t.Errorf("step handler called %d time(s), want >= 2", stepCalls)
+	}
+	if !strings.Contains(errBuf.String(), "waiting…") {
+		t.Errorf("expected 'waiting…' in stderr during wait rounds; got %q", errBuf.String())
+	}
+}
+
+// TestResolve_FitnessWaitExhaustedExits verifies that exhausting the fitness
+// wait bound exits 1 rather than looping forever.
+func TestResolve_FitnessWaitExhaustedExits(t *testing.T) {
+	old := fitnessWaitInterval
+	fitnessWaitInterval = time.Millisecond
+	defer func() { fitnessWaitInterval = old }()
+
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+
+	// Pre-claim: fit (unfitRounds=0). Mid-step: permanently unfit.
+	be := &transientUnfitBackend{Backend: inner, unfitRounds: 0}
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+		be.mu.Lock()
+		be.checkCalls = 0
+		be.unfitRounds = maxFitnessWaits + 10
+		be.mu.Unlock()
+		return fmt.Errorf("disk full: %w", flow.ErrUnfit)
+	})
+
+	code := app.cmdResolve(context.Background(), []string{"1"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (fitness wait exhausted); err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "is blocked") {
+		t.Errorf("expected 'is blocked' in stderr when wait exhausted; got %q", errBuf.String())
+	}
+}
+
+// TestResolve_FitnessWaitInterruptedExits verifies that cancelling the context
+// during a fitness wait exits cleanly.
+func TestResolve_FitnessWaitInterruptedExits(t *testing.T) {
+	old := fitnessWaitInterval
+	fitnessWaitInterval = time.Hour // long enough to guarantee the cancel fires first
+	defer func() { fitnessWaitInterval = old }()
+
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+
+	// Pre-claim: fit (unfitRounds=0). Mid-step: permanently unfit.
+	be := &transientUnfitBackend{Backend: inner, unfitRounds: 0}
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+		be.mu.Lock()
+		be.checkCalls = 0
+		be.unfitRounds = 999
+		be.mu.Unlock()
+		return fmt.Errorf("disk full: %w", flow.ErrUnfit)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel after a short delay — long enough for one RunOne + CheckFit cycle.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	code := app.cmdResolve(ctx, []string{"1"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (interrupted); err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "interrupted") {
+		t.Errorf("expected 'interrupted' in stderr; got %q", errBuf.String())
+	}
+}
+
+// TestResolve_NonFitnessBlockExitsImmediately verifies that a StatusBlocked
+// result whose reason does NOT contain ErrUnfit exits immediately — it must
+// not enter the fitness wait loop. If the strings.Contains guard were removed,
+// every block (e.g. ErrBlocked from a preflight) would be retried.
+func TestResolve_NonFitnessBlockExitsImmediately(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be := &fitBackend{Backend: inner}
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+		return ctx.ResolveMarkdown("the plan")
+	})
+
+	// A preflight that always returns ErrBlocked — produces StatusBlocked
+	// with a reason that has nothing to do with fitness.
+	app.Preflight = func(_ context.Context, _ *flow.ItemState) error {
+		return fmt.Errorf("answer needed on %q: %w", "plan", flow.ErrBlocked)
+	}
+
+	code := app.cmdResolve(context.Background(), []string{"1"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (non-fitness block must exit); err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "is blocked") {
+		t.Errorf("expected 'is blocked' in stderr; got %q", errBuf.String())
+	}
+	// Must NOT contain any fitness wait output — the loop must not fire.
+	if strings.Contains(errBuf.String(), "waiting…") || strings.Contains(errBuf.String(), "machine unfit") {
+		t.Errorf("non-fitness block must not trigger fitness wait; got %q", errBuf.String())
+	}
+}
+
+// TestResolve_PreClaimTransientUnfitnessProceeds verifies that when the machine
+// is temporarily unfit at pre-claim time but recovers, the item gets claimed.
+func TestResolve_PreClaimTransientUnfitnessProceeds(t *testing.T) {
+	old := fitnessWaitInterval
+	fitnessWaitInterval = time.Millisecond
+	defer func() { fitnessWaitInterval = old }()
+
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	// Unfit for 3 rounds, then fit.
+	be := &transientUnfitBackend{Backend: inner, unfitRounds: 3}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), []string{"1"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (should proceed after transient unfitness); err=%q", code, errBuf.String())
+	}
+	// Should have waited through the unfit rounds.
+	if !strings.Contains(errBuf.String(), "waiting…") {
+		t.Errorf("expected 'waiting…' in stderr during pre-claim wait; got %q", errBuf.String())
+	}
+	// Item must be claimed.
+	claim, err := be.LookupActiveClaim(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("LookupActiveClaim: %v", err)
+	}
+	if claim == nil {
+		t.Error("item should be claimed after transient unfitness clears")
 	}
 }

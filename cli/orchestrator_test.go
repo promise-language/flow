@@ -2240,3 +2240,110 @@ func TestRunOne_TimeoutParkReasonUsesResultID(t *testing.T) {
 		t.Errorf("Park.Reason = %q, must not contain the label %q", res.Park.Reason, "write plan")
 	}
 }
+
+// ErrUnfit sentinel: handler returns a wrapped ErrUnfit. The orchestrator must
+// report blocked (not parked, not failed), write no park, and not consume any
+// invocation budget.
+func TestRunOne_ErrUnfitBlocksWithoutParkOrBudget(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("broken", "plan", func(ctx flow.StepCtx) error {
+			return fmt.Errorf("12 MB free, floor 2 GB: %w", flow.ErrUnfit)
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "blocked" {
+		t.Fatalf("status = %q, want blocked", res.Status)
+	}
+	if res.Park != nil {
+		t.Fatalf("Park = %+v, want nil (ErrUnfit must not park)", res.Park)
+	}
+	if !strings.Contains(res.Reason, "12 MB free") {
+		t.Errorf("Reason = %q, want it to contain the handler's message", res.Reason)
+	}
+	state, _ := be.LoadState(context.Background(), claim)
+	if rec := state.Artifact("plan"); rec.Invocations != 0 {
+		t.Errorf("Invocations = %d, want 0 (ErrUnfit must not burn budget)", rec.Invocations)
+	}
+}
+
+// Post-handler catch-all: a plain error on an unfit machine (gate verdict
+// unacceptable) is reported as blocked — not failed — and budget is not
+// consumed. The handler acquires a worktree so the catch-all fires.
+func TestRunOne_PlainErrorOnUnfitMachineReportsBlocked(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("broken", "plan", func(ctx flow.StepCtx) error {
+			ctx.Worktree() // acquire worktree so post-handler fitness check runs
+			return errors.New("no space left on device")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	be.SetGateVerdict(false)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "blocked" {
+		t.Fatalf("status = %q, want blocked", res.Status)
+	}
+	if res.Park != nil {
+		t.Fatalf("Park = %+v, want nil (unfit catch-all must not park)", res.Park)
+	}
+	state, _ := be.LoadState(context.Background(), claim)
+	if rec := state.Artifact("plan"); rec.Invocations != 0 {
+		t.Errorf("Invocations = %d, want 0 (unfit catch-all must not burn budget)", rec.Invocations)
+	}
+}
+
+// Counterpart to the unfit catch-all: a plain error on a fit machine follows
+// the normal failure path — status failed, budget consumed.
+func TestRunOne_PlainErrorOnFitMachineStillFails(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("broken", "plan", func(ctx flow.StepCtx) error {
+			ctx.Worktree() // acquire worktree so post-handler fitness check runs
+			return errors.New("something went wrong")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "failed" {
+		t.Fatalf("status = %q, want failed", res.Status)
+	}
+	state, _ := be.LoadState(context.Background(), claim)
+	if rec := state.Artifact("plan"); rec.Invocations != 1 {
+		t.Errorf("Invocations = %d, want 1 (plain error on fit machine must consume budget)", rec.Invocations)
+	}
+}
+
+// Post-handler catch-all requires a worktree: a plain error on an unfit
+// machine WITHOUT a worktree follows the normal failure path (failed, budget
+// consumed) because there is nowhere to run the fit gate.
+func TestRunOne_PlainErrorNoWorktreeOnUnfitMachineStillFails(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("broken", "plan", func(ctx flow.StepCtx) error {
+			// Do NOT call ctx.Worktree() — the catch-all checks sctx.worktree != nil.
+			return errors.New("no space left on device")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	be.SetGateVerdict(false)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "failed" {
+		t.Fatalf("status = %q, want failed (no worktree → catch-all does not fire)", res.Status)
+	}
+	state, _ := be.LoadState(context.Background(), claim)
+	if rec := state.Artifact("plan"); rec.Invocations != 1 {
+		t.Errorf("Invocations = %d, want 1 (no catch-all → budget consumed)", rec.Invocations)
+	}
+}

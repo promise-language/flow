@@ -868,3 +868,70 @@ func TestRun_ResultEventStillWinsOverAPlan(t *testing.T) {
 		t.Errorf("PlanText = %q, want it captured alongside", resp.PlanText)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Transient field on AgentFailure
+// ---------------------------------------------------------------------------
+
+// TestRun_NoResultFailureIsTransient verifies that when the process emits no
+// result event, the failure is marked transient (infrastructure, not agent).
+func TestRun_NoResultFailureIsTransient(t *testing.T) {
+	stream := `{"type":"assistant","message":{"id":"m","content":[{"type":"text","text":"garbage"}]}}
+`
+	fc := &fakeCmd{stdoutStream: stream, stderrStream: "oops", waitErr: errors.New("exit 1")}
+	c := clientWith(fc)
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run err = %v, want nil", err)
+	}
+	if resp.Failure == nil || resp.Failure.Kind != "no-result" {
+		t.Fatalf("Failure = %+v, want kind=no-result", resp.Failure)
+	}
+	if !resp.Failure.Transient {
+		t.Errorf("Failure.Transient = false, want true for no-result failures")
+	}
+}
+
+// TestRun_ExitErrorFailureIsTransient verifies that when the process exits
+// with an error and produces no usable output (no SessionID, no LastText),
+// the failure is marked transient.
+func TestRun_ExitErrorFailureIsTransient(t *testing.T) {
+	// The stream must parse without error (a result event is present) but
+	// carry no usable output: empty session_id and empty result text.
+	stream := `{"type":"result","subtype":"error","is_error":true,"session_id":"","result":"","total_cost_usd":0,"duration_ms":0}
+`
+	fc := &fakeCmd{stdoutStream: stream, stderrStream: "segfault", waitErr: errors.New("exit 139")}
+	c := clientWith(fc)
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run err = %v, want nil", err)
+	}
+	if resp.Failure == nil || resp.Failure.Kind != "exit-error" {
+		t.Fatalf("Failure = %+v, want kind=exit-error", resp.Failure)
+	}
+	if !resp.Failure.Transient {
+		t.Errorf("Failure.Transient = false, want true for exit-error failures")
+	}
+}
+
+// TestRun_CancelledFailureIsNotTransient verifies that a context cancellation
+// produces a non-transient failure (the caller cancelled, not infrastructure).
+func TestRun_CancelledFailureIsNotTransient(t *testing.T) {
+	fc := &fakeCmd{stdoutStream: successStream}
+	c := clientWith(fc)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before Run
+
+	resp, err := c.Run(ctx, flow.AgentRequest{Prompt: "x"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.Failure == nil || resp.Failure.Kind != "cancelled" {
+		t.Fatalf("Failure = %+v, want kind=cancelled", resp.Failure)
+	}
+	if resp.Failure.Transient {
+		t.Errorf("Failure.Transient = true, want false for cancelled failures")
+	}
+}
