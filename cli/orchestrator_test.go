@@ -2321,3 +2321,29 @@ func TestRunOne_PlainErrorOnFitMachineStillFails(t *testing.T) {
 		t.Errorf("Invocations = %d, want 1 (plain error on fit machine must consume budget)", rec.Invocations)
 	}
 }
+
+// Post-handler catch-all requires a worktree: a plain error on an unfit
+// machine WITHOUT a worktree follows the normal failure path (failed, budget
+// consumed) because there is nowhere to run the fit gate.
+func TestRunOne_PlainErrorNoWorktreeOnUnfitMachineStillFails(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("broken", "plan", func(ctx flow.StepCtx) error {
+			// Do NOT call ctx.Worktree() — the catch-all checks sctx.worktree != nil.
+			return errors.New("no space left on device")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	be.SetGateVerdict(false)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "failed" {
+		t.Fatalf("status = %q, want failed (no worktree → catch-all does not fire)", res.Status)
+	}
+	state, _ := be.LoadState(context.Background(), claim)
+	if rec := state.Artifact("plan"); rec.Invocations != 1 {
+		t.Errorf("Invocations = %d, want 1 (no catch-all → budget consumed)", rec.Invocations)
+	}
+}
