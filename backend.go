@@ -270,7 +270,7 @@ func (d DiscoveryItem) ItemRef() ItemRef {
 // let a bare `resolve` pick an arbitrary open issue and begin work on it.
 // This invariant is stated here and covered by a test.
 type Discoverer interface {
-	Discover(ctx context.Context, scope DiscoveryScope, binaryName string) ([]DiscoveryItem, error)
+	Discover(ctx context.Context, scope DiscoveryScope, binaryName string, acceptsType func(ItemType) bool) ([]DiscoveryItem, error)
 }
 
 // TagFilterer is an optional Backend capability: list eligible items

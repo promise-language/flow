@@ -17,7 +17,7 @@ import (
 // The method fetches issues in bulk and derives each item's availability
 // state, tags, and holder from the issue's labels and assignees — no per-item
 // round-trip.
-func (b *Backend) Discover(ctx context.Context, scope flow.DiscoveryScope, binaryName string) ([]flow.DiscoveryItem, error) {
+func (b *Backend) Discover(ctx context.Context, scope flow.DiscoveryScope, binaryName string, acceptsType func(flow.ItemType) bool) ([]flow.DiscoveryItem, error) {
 	login, err := b.out.GetAuthenticatedUser(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolve login: %w", err)
@@ -34,7 +34,8 @@ func (b *Backend) Discover(ctx context.Context, scope flow.DiscoveryScope, binar
 			continue // the Issues API includes PRs; skip them
 		}
 		lblNames := labelNamesOf(iss.Labels)
-		avail := b.deriveAvailability(lblNames, iss.Assignees, binaryName, login, iss.GetState())
+		itemType := itemTypeFromLabels(b.labels, lblNames, b.cfg.DefaultType)
+		avail := b.deriveAvailability(lblNames, iss.Assignees, binaryName, login, iss.GetState(), acceptsType, itemType)
 		if !avail.InScope(scope) {
 			continue
 		}
@@ -108,14 +109,16 @@ func (b *Backend) deriveAvailability(
 	binaryName string,
 	myLogin string,
 	issueState string,
+	acceptsType func(flow.ItemType) bool,
+	itemType flow.ItemType,
 ) flow.Availability {
 	if issueState == "closed" {
 		return flow.AvailClosed
 	}
 
-	// Level 3: processable — this binary's label is present.
-	binaryLabel := b.labels.Binary(binaryName)
-	if !hasLabel(lblNames, binaryLabel) {
+	// Level 3: processable — type acceptance, matching the normative
+	// definition of unhandled: "no flow in this binary accepts the type."
+	if !acceptsType(itemType) {
 		return flow.AvailUnhandled
 	}
 
@@ -136,14 +139,15 @@ func (b *Backend) deriveAvailability(
 		return flow.AvailHeld
 	}
 
-	// Level 6: auto — assigned to me AND has the binary label.
-	// The ListEligible query is: label:flow:<binary> assignee:@me — the
-	// owner label is not part of that query, so auto must not require it.
-	// An issue assigned via the GitHub UI (no claim, no owner label) is
-	// still auto-selectable by resolve.
-	for _, u := range assignees {
-		if u.GetLogin() == myLogin {
-			return flow.AvailAuto
+	// Level 6: auto — opted in (binary label present) AND assigned to me.
+	// The binary label is applied during seeding. Unseeded items whose type
+	// IS accepted fall to available, not auto.
+	binaryLabel := b.labels.Binary(binaryName)
+	if hasLabel(lblNames, binaryLabel) {
+		for _, u := range assignees {
+			if u.GetLogin() == myLogin {
+				return flow.AvailAuto
+			}
 		}
 	}
 
