@@ -19,6 +19,7 @@ type step struct {
 	handler  StepHandler
 	required bool
 	budget   StepBudget // before resolveBudget merge with defaults
+	writes   WriteContract
 }
 
 // resultName returns the result identifier (artifact id OR signal id) as a
@@ -28,6 +29,14 @@ func (s *step) resultName() string {
 		return string(s.artifact)
 	}
 	return string(s.signal)
+}
+
+// WriteContract declares what a step is permitted to change in the worktree.
+// The zero value means "writes nothing" — the strictest contract.
+type WriteContract struct {
+	MayBranch   bool // may switch or create branches
+	MayCommit   bool // may move HEAD (new commits)
+	MayEditTree bool // may leave tracked files dirty
 }
 
 // StepHandler is the function dispatched by the SDK for AddStep/AddSignalStep
@@ -47,4 +56,8 @@ type StepConfig struct {
 	// MaxCostUSD, Timeout}. Each zero-valued axis inherits DefaultStepBudget
 	// (see resolveBudget), so set only the axes that differ from the default.
 	Budget StepBudget
+	// Writes declares what the step is permitted to change in the worktree.
+	// The zero value means "writes nothing" — the strictest contract. See
+	// WriteContract.
+	Writes WriteContract
 }

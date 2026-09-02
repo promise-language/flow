@@ -39,6 +39,12 @@ const (
 	// park with ParkBudgetExhausted, which describes the clock rather than
 	// the refusal.
 	ParkRefused ParkKind = "refused"
+	// ParkWriteContract — the step modified the worktree outside its declared
+	// contract: it switched branches, committed, or dirtied tracked files
+	// when its WriteContract forbade it. The changes are NOT reverted — they
+	// may be wanted — and the step is NOT retried (same prompt, same result).
+	// A human inspects the evidence and either widens the contract or reverts.
+	ParkWriteContract ParkKind = "write-contract"
 )
 
 // AllParkKinds returns every ParkKind, in declaration order. Downstream
@@ -47,7 +53,7 @@ func AllParkKinds() []ParkKind {
 	return []ParkKind{
 		ParkBlocked, ParkQuestion, ParkBudgetExhausted,
 		ParkStepDidNotResolve, ParkInfraTransient,
-		ParkRemoteUnreachable, ParkRefused,
+		ParkRemoteUnreachable, ParkRefused, ParkWriteContract,
 	}
 }
 

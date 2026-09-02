@@ -64,6 +64,7 @@ func (stubWorktreeBase) RunGate(context.Context, GateName) (GateRun, error)   { 
 func (stubWorktreeBase) Judge(context.Context, GateRun) (GateVerdict, error) {
 	return GateVerdict{}, nil
 }
+func (stubWorktreeBase) IsDirty(context.Context) (bool, error)        { return false, nil }
 func (stubWorktreeBase) CapturePatch(context.Context) ([]byte, error) { return nil, nil }
 func (stubWorktreeBase) Request() RequestManager                      { return nil }
 

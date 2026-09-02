@@ -479,6 +479,10 @@ func parkLabel(l labels, req *flow.ParkRequest) string {
 		// A deterministic refusal is blocked until the environment changes;
 		// the generic "blocked" label is correct — no budget grant clears it.
 		return l.Blocked()
+	case flow.ParkWriteContract:
+		// A write-contract violation needs human attention, not a budget
+		// grant — the generic "blocked" label is correct.
+		return l.Blocked()
 	default:
 		return l.Blocked()
 	}

@@ -16,6 +16,320 @@ import (
 	"github.com/promise-language/flow/pkg/clistate"
 )
 
+// ---------------------------------------------------------------------------
+// Write-contract gate tests
+// ---------------------------------------------------------------------------
+
+func TestWriteContract_BranchViolation(t *testing.T) {
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) error {
+			wt, err := ctx.Worktree()
+			if err != nil {
+				return err
+			}
+			// Switch branch — violates MayBranch=false.
+			if _, err := wt.Branch(ctx.Context(), "rogue-branch", ""); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("done")
+		}, flow.StepConfig{Writes: flow.WriteContract{}}) // zero = writes nothing
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusParked) {
+		t.Fatalf("status = %q, want parked", res.Status)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkWriteContract {
+		t.Fatalf("park = %+v, want ParkWriteContract", res.Park)
+	}
+	if !strings.Contains(res.Park.Reason, "branch moved") {
+		t.Errorf("reason = %q, want contains 'branch moved'", res.Park.Reason)
+	}
+}
+
+func TestWriteContract_CommitViolation(t *testing.T) {
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) error {
+			wt, err := ctx.Worktree()
+			if err != nil {
+				return err
+			}
+			// Commit — violates MayCommit=false.
+			if err := wt.Commit(ctx.Context(), "rogue commit"); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("done")
+		}, flow.StepConfig{Writes: flow.WriteContract{}})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusParked) {
+		t.Fatalf("status = %q, want parked", res.Status)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkWriteContract {
+		t.Fatalf("park = %+v, want ParkWriteContract", res.Park)
+	}
+	if !strings.Contains(res.Park.Reason, "commit moved") {
+		t.Errorf("reason = %q, want contains 'commit moved'", res.Park.Reason)
+	}
+}
+
+func TestWriteContract_DirtyTreeViolation(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) error {
+			// Acquire the worktree to trigger snapshot capture.
+			if _, err := ctx.Worktree(); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("done")
+		}, flow.StepConfig{Writes: flow.WriteContract{}})
+	}, &stubAgent{name: "stub"})
+
+	// Dirty the worktree BEFORE dispatch so IsDirty returns true after the
+	// handler. We need to set it after the worktree is created but before
+	// the check runs. The fake's Worktree() creates the fakeWorktree lazily;
+	// we pre-create it by fetching once, then set dirty.
+	wt, _ := be.Worktree(context.Background(), claim)
+	_ = wt
+	be.SetDirty(true)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusParked) {
+		t.Fatalf("status = %q, want parked", res.Status)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkWriteContract {
+		t.Fatalf("park = %+v, want ParkWriteContract", res.Park)
+	}
+	if !strings.Contains(res.Park.Reason, "uncommitted changes") {
+		t.Errorf("reason = %q, want contains 'uncommitted changes'", res.Park.Reason)
+	}
+}
+
+func TestWriteContract_AllowedCommit(t *testing.T) {
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("impl", "plan", func(ctx flow.StepCtx) error {
+			wt, err := ctx.Worktree()
+			if err != nil {
+				return err
+			}
+			if err := wt.Commit(ctx.Context(), "allowed commit"); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("done")
+		}, flow.StepConfig{Writes: flow.WriteContract{MayCommit: true}})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusDone) {
+		t.Fatalf("status = %q, want done", res.Status)
+	}
+}
+
+func TestWriteContract_NoWorktreeAcquired(t *testing.T) {
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) error {
+			// Handler never calls ctx.Worktree() — no check should run.
+			return ctx.ResolveMarkdown("done")
+		}, flow.StepConfig{Writes: flow.WriteContract{}})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusDone) {
+		t.Fatalf("status = %q, want done", res.Status)
+	}
+}
+
+func TestWriteContract_TransientSkipsCheck(t *testing.T) {
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) error {
+			wt, err := ctx.Worktree()
+			if err != nil {
+				return err
+			}
+			// Switch branch — would be a violation, but handler returns
+			// ErrTransient, which returns early before the check.
+			if _, err := wt.Branch(ctx.Context(), "rogue", ""); err != nil {
+				return err
+			}
+			return flow.ErrTransient
+		}, flow.StepConfig{Writes: flow.WriteContract{}})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusParked) {
+		t.Fatalf("status = %q, want parked", res.Status)
+	}
+	// Should be infra-transient, NOT write-contract.
+	if res.Park == nil || res.Park.Kind != flow.ParkInfraTransient {
+		t.Fatalf("park = %+v, want ParkInfraTransient", res.Park)
+	}
+}
+
+func TestWriteContract_ViolationChargesInvocation(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) error {
+			wt, err := ctx.Worktree()
+			if err != nil {
+				return err
+			}
+			if _, err := wt.Branch(ctx.Context(), "rogue", ""); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("done")
+		}, flow.StepConfig{Writes: flow.WriteContract{}})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusParked) {
+		t.Fatalf("status = %q, want parked", res.Status)
+	}
+
+	// Invocation must have been charged.
+	state, _ := be.LoadState(context.Background(), claim)
+	rec := state.Artifact("plan")
+	if rec.Invocations != 1 {
+		t.Errorf("Invocations = %d, want 1 (violation must charge)", rec.Invocations)
+	}
+}
+
+func TestWriteContract_AllowedBranch(t *testing.T) {
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("branch", "plan", func(ctx flow.StepCtx) error {
+			wt, err := ctx.Worktree()
+			if err != nil {
+				return err
+			}
+			if _, err := wt.Branch(ctx.Context(), "feature-x", ""); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("done")
+		}, flow.StepConfig{Writes: flow.WriteContract{MayBranch: true}})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusDone) {
+		t.Fatalf("status = %q, want done", res.Status)
+	}
+}
+
+func TestWriteContract_AllowedDirtyTree(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("edit", "plan", func(ctx flow.StepCtx) error {
+			if _, err := ctx.Worktree(); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("done")
+		}, flow.StepConfig{Writes: flow.WriteContract{MayEditTree: true}})
+	}, &stubAgent{name: "stub"})
+
+	wt, _ := be.Worktree(context.Background(), claim)
+	_ = wt
+	be.SetDirty(true)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusDone) {
+		t.Fatalf("status = %q, want done", res.Status)
+	}
+}
+
+func TestWriteContract_RefusedSkipsCheck(t *testing.T) {
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) error {
+			wt, err := ctx.Worktree()
+			if err != nil {
+				return err
+			}
+			// Switch branch — would be a violation, but handler returns
+			// ErrRefused, which returns early before the check.
+			if _, err := wt.Branch(ctx.Context(), "rogue", ""); err != nil {
+				return err
+			}
+			return flow.ErrRefused
+		}, flow.StepConfig{Writes: flow.WriteContract{}})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusParked) {
+		t.Fatalf("status = %q, want parked", res.Status)
+	}
+	// Should be refused, NOT write-contract.
+	if res.Park == nil || res.Park.Kind != flow.ParkRefused {
+		t.Fatalf("park = %+v, want ParkRefused", res.Park)
+	}
+}
+
+func TestWriteContract_PartialContract_CommitAllowedBranchNot(t *testing.T) {
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("impl", "plan", func(ctx flow.StepCtx) error {
+			wt, err := ctx.Worktree()
+			if err != nil {
+				return err
+			}
+			// Commit is allowed, but branch switch is not.
+			if err := wt.Commit(ctx.Context(), "ok commit"); err != nil {
+				return err
+			}
+			if _, err := wt.Branch(ctx.Context(), "rogue", ""); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("done")
+		}, flow.StepConfig{Writes: flow.WriteContract{MayCommit: true}}) // MayBranch defaults false
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusParked) {
+		t.Fatalf("status = %q, want parked", res.Status)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkWriteContract {
+		t.Fatalf("park = %+v, want ParkWriteContract", res.Park)
+	}
+	if !strings.Contains(res.Park.Reason, "branch moved") {
+		t.Errorf("reason = %q, want contains 'branch moved'", res.Park.Reason)
+	}
+}
+
+func TestWriteContract_RemedyForParkWriteContract(t *testing.T) {
+	got := remedyFor(flow.ParkWriteContract)
+	if !strings.Contains(got, "declared contract") {
+		t.Errorf("remedyFor(ParkWriteContract) = %q, want contains 'declared contract'", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+
 // stubAgent is a fake flow.Agent that returns canned responses and records
 // the requests it was handed.
 type stubAgent struct {

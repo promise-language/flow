@@ -689,6 +689,17 @@ func (b *Backend) SetNothingToCommit(v bool) {
 	}
 }
 
+// SetDirty makes Worktree.IsDirty report true for all existing worktrees and
+// any subsequently created ones. Use it to simulate a handler that leaves
+// tracked files modified.
+func (b *Backend) SetDirty(v bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, wt := range b.worktrees {
+		wt.dirty = v
+	}
+}
+
 func refID(ref flow.ItemRef) (string, error) {
 	var id string
 	if err := json.Unmarshal(ref.Ref, &id); err != nil {
@@ -711,6 +722,7 @@ type fakeWorktree struct {
 	verifyOK        bool
 	supportsRequest bool
 	branch          string
+	dirty           bool
 }
 
 func (w *fakeWorktree) Branch(ctx context.Context, name, base string) (bool, error) {
@@ -734,6 +746,10 @@ func (w *fakeWorktree) CurrentBranch(ctx context.Context) (string, error) {
 		return "main", nil
 	}
 	return w.branch, nil
+}
+
+func (w *fakeWorktree) IsDirty(ctx context.Context) (bool, error) {
+	return w.dirty, nil
 }
 
 // Commit is a no-op when SetNothingToCommit(true) — the real git behavior when

@@ -328,6 +328,26 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		}))
 	}
 
+	// Write-contract check. Runs after the transient/refused early returns
+	// (which skip budget) but BEFORE the normal bumpInvocations. Only when
+	// the handler acquired a worktree (writeSnap != nil). On violation:
+	// charge the invocation (the handler ran), park with ParkWriteContract,
+	// do NOT revert changes.
+	if sctx.writeSnap != nil {
+		if reason := checkWriteContract(ctx, sctx.worktree, sctx.writeSnap, li.Writes); reason != "" {
+			if li.Kind == flow.LifecycleArtifact {
+				if err := bumpInvocations(ctx, app, claim, state, li.ArtifactId, budgetKey); err != nil {
+					return flow.InvocationResult{}, fmt.Errorf("bump invocations: %w", err)
+				}
+			}
+			return sctx.stampResult(parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
+				Kind:   flow.ParkWriteContract,
+				Step:   li.Result(),
+				Reason: reason,
+			}))
+		}
+	}
+
 	// Non-transient: the invocation produced a result (success, skip,
 	// park, or a real failure). Count it.
 	if li.Kind == flow.LifecycleArtifact {
@@ -503,6 +523,34 @@ func bumpInvocations(ctx context.Context, app *App, claim flow.Claim, state *flo
 	return nil
 }
 
+// checkWriteContract compares the current worktree state against the
+// pre-handler snapshot and the step's WriteContract. Returns an empty string
+// when the contract holds, or a violation reason string.
+//
+// Uses the parent ctx (not stepCtx) for the post-handler reads, since the
+// step's deadline may have been consumed.
+func checkWriteContract(ctx context.Context, wt flow.Worktree, snap *writeSnapshot, wc flow.WriteContract) string {
+	if !wc.MayBranch {
+		branch, err := wt.CurrentBranch(ctx)
+		if err == nil && branch != snap.branch {
+			return fmt.Sprintf("branch moved: was %q, now %q", snap.branch, branch)
+		}
+	}
+	if !wc.MayCommit {
+		sha, err := wt.RevParse(ctx, "HEAD")
+		if err == nil && sha != snap.commitSHA {
+			return fmt.Sprintf("commit moved: was %.12s, now %.12s", snap.commitSHA, sha)
+		}
+	}
+	if !wc.MayEditTree {
+		dirty, err := wt.IsDirty(ctx)
+		if err == nil && dirty {
+			return "tree has uncommitted changes to tracked files"
+		}
+	}
+	return ""
+}
+
 func parkAndReturn(
 	ctx context.Context,
 	app *App,
@@ -561,6 +609,14 @@ func invocationID() string {
 	return fmt.Sprintf("inv-%d", time.Now().UnixNano())
 }
 
+// writeSnapshot records the worktree state at the moment the handler first
+// acquires it, before the handler runs. checkWriteContract compares against
+// it afterwards.
+type writeSnapshot struct {
+	branch    string
+	commitSHA string
+}
+
 // stepCtx is the concrete StepCtx the orchestrator hands to handlers. Tracks
 // whether the handler called the matching Resolve* (artifact steps) and
 // memoises the lazily-acquired Worktree.
@@ -585,6 +641,9 @@ type stepCtx struct {
 	// elapsed-vs-cap is the one axis with no counter on the record.
 	startedAt time.Time
 	timeout   time.Duration
+	// writeSnap is the worktree state captured when the handler first acquires
+	// the worktree. nil when no worktree was acquired (no check will run).
+	writeSnap *writeSnapshot
 }
 
 func newStepCtx(ctx context.Context, app *App, claim flow.Claim, f *flow.Flow, li flow.LifecycleItem, state *flow.ItemState, timeout time.Duration) *stepCtx {
@@ -863,7 +922,18 @@ func (s *stepCtx) Worktree() (flow.Worktree, error) {
 		return s.worktree, s.wtErr
 	}
 	s.worktree, s.wtErr = s.app.Backend.Worktree(s.ctx, s.claim)
-	return s.worktree, s.wtErr
+	if s.wtErr != nil {
+		return nil, s.wtErr
+	}
+	// Capture a snapshot for the write-contract check. If either read
+	// fails, leave writeSnap nil — fail-open on infrastructure error,
+	// since the handler hasn't run yet.
+	branch, berr := s.worktree.CurrentBranch(s.ctx)
+	sha, serr := s.worktree.RevParse(s.ctx, "HEAD")
+	if berr == nil && serr == nil {
+		s.writeSnap = &writeSnapshot{branch: branch, commitSHA: sha}
+	}
+	return s.worktree, nil
 }
 
 func (s *stepCtx) RefreshItem() error {

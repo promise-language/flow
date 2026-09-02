@@ -117,6 +117,7 @@ func (w *fakeWorktree) Branch(_ context.Context, name, base string) (bool, error
 	return true, nil
 }
 func (w *fakeWorktree) CurrentBranch(context.Context) (string, error) { return w.branch, nil }
+func (w *fakeWorktree) IsDirty(context.Context) (bool, error)         { return len(w.dirty) > 0, nil }
 func (w *fakeWorktree) Commit(_ context.Context, msg string) error {
 	w.calls = append(w.calls, "commit")
 	if len(w.commitErrs) > 0 {

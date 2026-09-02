@@ -525,6 +525,10 @@ type Worktree interface {
 	Branch(ctx context.Context, name string, base string) (created bool, err error)
 	CurrentBranch(ctx context.Context) (string, error)
 
+	// IsDirty reports whether tracked files have uncommitted changes (staged
+	// or unstaged). Untracked files do NOT count as dirty.
+	IsDirty(ctx context.Context) (bool, error)
+
 	// Stage makes every change in the tree, untracked files included, visible
 	// to the next CapturePatch — without committing it.
 	//
