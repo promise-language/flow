@@ -424,8 +424,8 @@ func TestRunOne_SeedsAndDispatchesFirstStep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
-	if res.Status != "done" || res.Step != "write plan" {
-		t.Errorf("res = %+v, want step=write plan status=done", res)
+	if res.Status != "done" || res.Step != "plan" {
+		t.Errorf("res = %+v, want step=plan status=done", res)
 	}
 
 	state, _ := be.LoadState(context.Background(), claim)
@@ -470,8 +470,8 @@ func TestRunOne_AutoEmitsStepEntry(t *testing.T) {
 	if len(tel.events) != 2 {
 		t.Fatalf("events = %+v, want 2 (auto + handler Notify)", tel.events)
 	}
-	if tel.events[0].Step != "write plan" || tel.events[0].Detail != "" {
-		t.Errorf("auto-emit event[0] = %+v, want {step=write plan, detail=\"\"}", tel.events[0])
+	if tel.events[0].Step != "plan" || tel.events[0].Detail != "" {
+		t.Errorf("auto-emit event[0] = %+v, want {step=plan, detail=\"\"}", tel.events[0])
 	}
 	if tel.events[1].Step != "write plan" || tel.events[1].Detail != "writing" {
 		t.Errorf("handler event[1] = %+v, want {step=write plan, detail=writing}", tel.events[1])
@@ -2180,5 +2180,63 @@ func TestRunOne_BudgetParkDoesNotClearQuestionMarker(t *testing.T) {
 	}
 	if wrapped.wasCleared() {
 		t.Error("ClearQuestionMarker was called for a budget park; should only fire for ParkQuestion")
+	}
+}
+
+// TestRunOne_NotifyDefaultUsesResultID verifies that ctx.Notify("", detail)
+// emits a StepProgress keyed by the result id, not the human label.
+func TestRunOne_NotifyDefaultUsesResultID(t *testing.T) {
+	tel := &recordingTelemetry{}
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		// Label "write plan" differs from artifact id "plan".
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			ctx.Notify("", "drafting") // empty step → default
+			return ctx.ResolveMarkdown("done")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	app.Telemetry = tel
+
+	if _, err := RunOne(context.Background(), app, claim); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	// events: [0] auto-emit, [1] handler Notify("","drafting")
+	var found bool
+	for _, ev := range tel.events {
+		if ev.Detail == "drafting" {
+			if ev.Step != "plan" {
+				t.Errorf("Notify default step = %q, want result id %q", ev.Step, "plan")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no event with detail 'drafting'; events = %+v", tel.events)
+	}
+}
+
+// TestRunOne_TimeoutParkReasonUsesResultID verifies that a timeout park's
+// Reason text names the step by its result id, not the human label.
+func TestRunOne_TimeoutParkReasonUsesResultID(t *testing.T) {
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		// Label "write plan" differs from artifact id "plan".
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			<-ctx.Context().Done()
+			return ctx.Context().Err()
+		}, flow.StepConfig{Budget: flow.StepBudget{Timeout: 50 * time.Millisecond}})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Park == nil {
+		t.Fatal("expected a park result for timeout")
+	}
+	// The reason must contain the result id "plan", not the label "write plan".
+	if !strings.Contains(res.Park.Reason, `"plan"`) {
+		t.Errorf("Park.Reason = %q, want it to name the result id %q", res.Park.Reason, "plan")
+	}
+	if strings.Contains(res.Park.Reason, "write plan") {
+		t.Errorf("Park.Reason = %q, must not contain the label %q", res.Park.Reason, "write plan")
 	}
 }

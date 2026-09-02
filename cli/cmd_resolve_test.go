@@ -533,7 +533,7 @@ func TestCmdResolve_HumanModeWritesNothingToStdout(t *testing.T) {
 		t.Errorf("human mode must write nothing to stdout; got %q", out.String())
 	}
 	// The narration is the human output, and it is on stderr.
-	if !strings.Contains(errBuf.String(), `resolve: write plan → done`) {
+	if !strings.Contains(errBuf.String(), `resolve: plan → done`) {
 		t.Errorf("expected the step outcome narrated on stderr; got %q", errBuf.String())
 	}
 }
@@ -568,15 +568,15 @@ func TestCmdResolve_JSONFlagStreamsResultsAndStillNarrates(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("stdout carried %d results, want 2 (step + finalize); got %q", len(got), out.String())
 	}
-	if got[0].Step != "write plan" || got[0].Status != "done" {
-		t.Errorf("first result = %+v, want step %q status done", got[0], "write plan")
+	if got[0].Step != "plan" || got[0].Status != "done" {
+		t.Errorf("first result = %+v, want step %q status done", got[0], "plan")
 	}
 	if got[1].Step != "" || got[1].Status != "done" {
 		t.Errorf("second result = %+v, want the empty-step finalize, status done", got[1])
 	}
 	// JSON mode does not silence the narration: `resolve > steps.json` must
 	// still show progress on the terminal.
-	if !strings.Contains(errBuf.String(), `resolve: write plan → done`) {
+	if !strings.Contains(errBuf.String(), `resolve: plan → done`) {
 		t.Errorf("JSON mode must still narrate to stderr; got %q", errBuf.String())
 	}
 	if !strings.Contains(errBuf.String(), "finalized ✓") {
@@ -741,7 +741,7 @@ func TestCmdResolve_ModeSplitHoldsOnEveryTerminalOutcome(t *testing.T) {
 				t.Errorf("human mode must write nothing to stdout on a %s run; got %q", c.name, out.String())
 			}
 			// The outcome is still reported — on stderr, as prose.
-			if !strings.Contains(errBuf.String(), "write plan → "+c.wantStatus) {
+			if !strings.Contains(errBuf.String(), "plan → "+c.wantStatus) {
 				t.Errorf("expected the %s outcome narrated on stderr; got %q", c.wantStatus, errBuf.String())
 			}
 		})
