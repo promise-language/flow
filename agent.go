@@ -46,11 +46,16 @@ type AgentRequest struct {
 // AgentResponse is the aggregated result of one Agent.Run call. Failure==nil
 // indicates success; if non-nil, Failure.Kind describes the failure category.
 type AgentResponse struct {
-	// LastText is the LAST assistant text block of the turn — not every text
-	// block joined. A turn that ends on a tool call emits a preamble before
-	// each one ("Let me check the tests first"), and concatenating those
-	// produced an artifact made entirely of narration that no emptiness check
-	// could catch.
+	// LastText is the last text the turn produced — not every text block
+	// joined. A turn that ends on a tool call emits a preamble before each one
+	// ("Let me check the tests first"), and concatenating those produced an
+	// artifact made entirely of narration that no emptiness check could catch.
+	//
+	// Usually that is the last assistant text block. It is a delegated
+	// subagent's output when the turn handed the work to one and said nothing
+	// of its own afterwards: the deliverable is produced inside the subagent
+	// and never becomes a message of the parent's, so the last thing the parent
+	// SAID is the sentence announcing the delegation.
 	LastText string
 
 	// PlanText is what the agent submitted through the harness's plan-

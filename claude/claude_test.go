@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -592,6 +593,259 @@ func TestParseStream_BlankLinesSkipped(t *testing.T) {
 	}
 	if resp.LastText != "ok" {
 		t.Errorf("LastText = %q, want ok", resp.LastText)
+	}
+}
+
+// delegationStream is the shape a turn that hands its work to a subagent
+// actually has: one line of narration announcing the delegation, the Task
+// tool_use, the subagent's deliverable coming back as a top-level user event
+// carrying a tool_result, and a result event with an EMPTY result because the
+// parent never spoke again.
+const delegationStream = `{"type":"system","session_id":"sess-d"}
+{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Now let me write the final plan."},{"type":"tool_use","id":"toolu_01","name":"Task","input":{"prompt":"design it"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":[{"type":"text","text":"## Plan\n\nCapture the subagent's deliverable, not the preamble."}]}]}}
+{"type":"result","session_id":"sess-d","result":"","total_cost_usd":2.32,"duration_ms":9000}
+`
+
+// The reported bug, as a test: the plan was produced inside the subagent, was
+// charged for, and was discarded — leaving the delegation preamble as the
+// turn's answer.
+func TestRun_DelegatedDeliverableIsTheTurnsText(t *testing.T) {
+	c := clientWith(&fakeCmd{stdoutStream: delegationStream})
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "plan it"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(resp.LastText, "Capture the subagent's deliverable") {
+		t.Errorf("LastText = %q, want the subagent's plan", resp.LastText)
+	}
+	if strings.Contains(resp.LastText, "Now let me write the final plan") {
+		t.Errorf("LastText carries the delegation preamble: %q", resp.LastText)
+	}
+	if resp.PlanSubmitted {
+		t.Error("PlanSubmitted = true with no ExitPlanMode call")
+	}
+}
+
+// Both names the CLI gives the delegation tool are in the field, and content
+// arrives as a bare string as well as an array of blocks. Every combination
+// must reach the same place.
+func TestRun_DelegationToolNamesAndContentShapes(t *testing.T) {
+	blocks := `[{"type":"text","text":"## Plan\n\nThe deliverable."}]`
+	bare := `"## Plan\n\nThe deliverable."`
+	for _, tc := range []struct {
+		name    string
+		tool    string
+		content string
+	}{
+		{"Task/blocks", "Task", blocks},
+		{"Task/bare-string", "Task", bare},
+		{"Agent/blocks", "Agent", blocks},
+		{"Agent/bare-string", "Agent", bare},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := `{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Delegating now."},{"type":"tool_use","id":"tu9","name":"` + tc.tool + `","input":{}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu9","content":` + tc.content + `}]}}
+{"type":"result","session_id":"s","result":"","total_cost_usd":0.1,"duration_ms":10}
+`
+			c := clientWith(&fakeCmd{stdoutStream: stream})
+			resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if !strings.Contains(resp.LastText, "The deliverable.") {
+				t.Errorf("LastText = %q, want the subagent's output", resp.LastText)
+			}
+		})
+	}
+}
+
+// An errored subagent produced no deliverable. Its tool_result is diagnostic
+// text, and publishing that under the plan's name is the same defect wearing a
+// different coat — so it is ignored, and the narration it leaves behind is
+// what stepPlan's structural floor then refuses.
+func TestRun_ErroredDelegationResultIsIgnored(t *testing.T) {
+	stream := `{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Delegating now."},{"type":"tool_use","id":"tu9","name":"Task","input":{}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu9","is_error":true,"content":"Error: subagent exceeded its turn limit"}]}}
+{"type":"result","session_id":"s","result":"","total_cost_usd":0.1,"duration_ms":10}
+`
+	c := clientWith(&fakeCmd{stdoutStream: stream})
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.LastText != "Delegating now." {
+		t.Errorf("LastText = %q, want the narration — an errored delegation carries no deliverable", resp.LastText)
+	}
+}
+
+// A tool_result belongs to the turn only when the turn delegated. Every other
+// tool's output is the tool's, not the agent's: a Read's file contents must
+// never become the answer.
+func TestRun_NonDelegationToolResultIsIgnored(t *testing.T) {
+	stream := `{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Reading the file."},{"type":"tool_use","id":"tu1","name":"Read","input":{}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"the entire contents of some file"}]}}
+{"type":"result","session_id":"s","result":"","total_cost_usd":0.1,"duration_ms":10}
+`
+	c := clientWith(&fakeCmd{stdoutStream: stream})
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.LastText != "Reading the file." {
+		t.Errorf("LastText = %q, want the assistant text — a Read result is not the turn's answer", resp.LastText)
+	}
+}
+
+// "Last text the turn produced" is exactly that: a parent that speaks after
+// its subagent returns has the final word, unchanged from before.
+func TestRun_ParentTextAfterDelegationWins(t *testing.T) {
+	stream := `{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Delegating now."},{"type":"tool_use","id":"tu9","name":"Task","input":{}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu9","content":"## Draft\n\nthe subagent's draft"}]}}
+{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"## Plan\n\nthe parent's own final answer"}]}}
+{"type":"result","session_id":"s","result":"","total_cost_usd":0.1,"duration_ms":10}
+`
+	c := clientWith(&fakeCmd{stdoutStream: stream})
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(resp.LastText, "the parent's own final answer") {
+		t.Errorf("LastText = %q, want the parent's later text", resp.LastText)
+	}
+}
+
+// Precedence is unchanged: a real final message still outranks anything the
+// stream carried on the way there.
+func TestRun_ResultEventStillWinsOverADelegatedResult(t *testing.T) {
+	stream := `{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Delegating now."},{"type":"tool_use","id":"tu9","name":"Task","input":{}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu9","content":"## Draft\n\nthe subagent's draft"}]}}
+{"type":"result","session_id":"s","result":"the final answer","total_cost_usd":0.1,"duration_ms":10}
+`
+	c := clientWith(&fakeCmd{stdoutStream: stream})
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.LastText != "the final answer" {
+		t.Errorf("LastText = %q, want the result event's text", resp.LastText)
+	}
+}
+
+// A submitted plan still outranks a delegated result: a turn that delegated
+// and THEN submitted through the plan tool has said which one is the plan.
+func TestRun_SubmittedPlanStillWinsOverADelegatedResult(t *testing.T) {
+	stream := `{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Delegating now."},{"type":"tool_use","id":"tu9","name":"Task","input":{}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu9","content":"## Draft\n\nthe subagent's draft"}]}}
+{"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"tu10","name":"ExitPlanMode","input":{"plan":"## Plan\n\nthe submitted plan"}}]}}
+{"type":"result","session_id":"s","result":"","total_cost_usd":0.1,"duration_ms":10}
+`
+	c := clientWith(&fakeCmd{stdoutStream: stream})
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(resp.LastText, "the submitted plan") {
+		t.Errorf("LastText = %q, want the submitted plan", resp.LastText)
+	}
+}
+
+// Two user events carry nothing for this parser: a tool_result keyed to a call
+// this turn never made, and the prompt echo, whose content is a bare string
+// where a block array would be. Neither may error, and neither may become the
+// turn's text.
+func TestParseStream_UnrelatedUserEventsIgnored(t *testing.T) {
+	stream := strings.NewReader(
+		`{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Working."}]}}` + "\n" +
+			`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"unknown-id","content":"stray output"}]}}` + "\n" +
+			`{"type":"user","message":{"role":"user","content":"the echoed prompt"}}` + "\n" +
+			`{"type":"result","session_id":"s","result":"","total_cost_usd":0.1,"duration_ms":10}` + "\n",
+	)
+
+	resp, err := parseStream(stream)
+	if err != nil {
+		t.Fatalf("parseStream: %v", err)
+	}
+	if resp.LastText != "Working." {
+		t.Errorf("LastText = %q, want the assistant text", resp.LastText)
+	}
+}
+
+// A turn that fans out to several subagents keeps the LAST one's output, by the
+// same rule that governs assistant text. Nothing else is available to choose
+// between them: the parser cannot know which subagent was asked for the
+// deliverable, and the turn's own ordering is the only evidence there is.
+func TestRun_LastDelegationWinsAmongSeveral(t *testing.T) {
+	stream := `{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"tu1","name":"Task","input":{}},{"type":"tool_use","id":"tu2","name":"Task","input":{}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"## Research\n\nwhat the first subagent found"}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu2","content":"## Plan\n\nwhat the second subagent wrote"}]}}
+{"type":"result","session_id":"s","result":"","total_cost_usd":0.1,"duration_ms":10}
+`
+	c := clientWith(&fakeCmd{stdoutStream: stream})
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(resp.LastText, "what the second subagent wrote") {
+		t.Errorf("LastText = %q, want the last delegation's output", resp.LastText)
+	}
+}
+
+// A subagent that returned nothing said nothing, and blanking the turn's text
+// on its way past would be worse than ignoring it: the text it would overwrite
+// is the parent's own, which is at least something the turn produced. The same
+// guard is what keeps an empty result from turning a real answer into the
+// "agent returned an empty plan" refusal one layer up.
+func TestRun_EmptyDelegationResultDoesNotClobberTheTurnsText(t *testing.T) {
+	stream := `{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"## Plan\n\nthe parent wrote this, then checked it."},{"type":"tool_use","id":"tu1","name":"Task","input":{}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"   \n  "}]}}
+{"type":"result","session_id":"s","result":"","total_cost_usd":0.1,"duration_ms":10}
+`
+	c := clientWith(&fakeCmd{stdoutStream: stream})
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(resp.LastText, "the parent wrote this") {
+		t.Errorf("LastText = %q, want the parent's text — an empty delegation result carries nothing", resp.LastText)
+	}
+}
+
+// The shapes a tool_result's content arrives in. Both recognised ones are read;
+// everything else yields "" and is dropped, which is the whole point — the
+// alternative to recognising a shape is guessing at it, and a guess here puts
+// something arbitrary under the artifact's name.
+func TestToolResultText_ContentShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"bare string", `"the deliverable"`, "the deliverable"},
+		{"one text block", `[{"type":"text","text":"the deliverable"}]`, "the deliverable"},
+		{"text blocks joined", `[{"type":"text","text":"first"},{"type":"text","text":"second"}]`, "first\nsecond"},
+		{"non-text blocks skipped", `[{"type":"image","source":"..."},{"type":"text","text":"the deliverable"}]`, "the deliverable"},
+		{"empty block array", `[]`, ""},
+		{"absent", ``, ""},
+		{"null", `null`, ""},
+		// An object and a number are shapes this parser does not know. Rendering
+		// them as their raw JSON would be a deliverable made of punctuation.
+		{"object", `{"result":"the deliverable"}`, ""},
+		{"number", `17`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := toolResultText(json.RawMessage(tc.raw)); got != tc.want {
+				t.Errorf("toolResultText(%s) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
 	}
 }
 
