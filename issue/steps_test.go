@@ -2511,3 +2511,139 @@ func TestPlanStepChecksTheSubmittedPlanNotTheNarration(t *testing.T) {
 		t.Errorf("resolved %q, want the submitted plan", ctx.resolved.Markdown)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Sub-phase progress notifications (#23).
+// ---------------------------------------------------------------------------
+
+// The plan step's single sub-phase is the agent turn.
+func TestStepPlan_NotifiesAwaitingTheAgent(t *testing.T) {
+	agent := &scriptedAgent{
+		replies: []string{"## Plan\n\nDo the thing."},
+	}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	if err := testBuilder(t).stepPlan(ctx); err != nil {
+		t.Fatalf("stepPlan: %v", err)
+	}
+	found := false
+	for _, n := range ctx.notices {
+		if n == "awaiting the agent" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("notices = %v, want one containing %q", ctx.notices, "awaiting the agent")
+	}
+}
+
+// A healthy implement round 1 that passes verify on the first attempt must
+// produce, in order: "implement round 1", "awaiting the agent", "running the
+// verify gate", "staging and committing".
+func TestStepImplement_HappyPathNotifications(t *testing.T) {
+	wt := resumedWorktree()
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	if err := testBuilder(t).stepImplement(ctx); err != nil {
+		t.Fatalf("stepImplement: %v", err)
+	}
+	want := []string{
+		"implement round 1",
+		"awaiting the agent",
+		"running the verify gate",
+		"staging and committing",
+	}
+	if len(ctx.notices) < len(want) {
+		t.Fatalf("notices = %v, want at least %v", ctx.notices, want)
+	}
+	idx := 0
+	for _, n := range ctx.notices {
+		if idx < len(want) && n == want[idx] {
+			idx++
+		}
+	}
+	if idx != len(want) {
+		t.Errorf("notices = %v, want %v in order", ctx.notices, want)
+	}
+}
+
+// A fix loop that fails once and passes on round 2 repeats the round and agent
+// notifications for both rounds, but "staging and committing" appears only
+// after the passing round.
+func TestStepImplement_FixLoopNotifications(t *testing.T) {
+	wt := resumedWorktree()
+	wt.verifyErr = errors.New("verify failed:\nFAIL pkg/x")
+	wt.verifyAfter = 1 // fails once, passes on round 2
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	if err := testBuilder(t).stepImplement(ctx); err != nil {
+		t.Fatalf("stepImplement: %v", err)
+	}
+	want := []string{
+		"implement round 1",
+		"awaiting the agent",
+		"running the verify gate",
+		// round 1 fails — no "staging and committing"
+		"implement round 2",
+		"awaiting the agent",
+		"running the verify gate",
+		// round 2 passes
+		"staging and committing",
+	}
+	idx := 0
+	for _, n := range ctx.notices {
+		if idx < len(want) && n == want[idx] {
+			idx++
+		}
+	}
+	if idx != len(want) {
+		t.Errorf("notices = %v, want %v in order", ctx.notices, want)
+	}
+}
+
+// The PR step notifies before recording post-implement changes and before
+// pushing/opening.
+func TestStepOpenPR_SubPhaseNotifications(t *testing.T) {
+	wt := resumedWorktree()
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	if err := testBuilder(t).stepOpenPR(ctx); err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	want := []string{
+		"recording post-implement changes",
+		"pushing and opening pull request",
+	}
+	idx := 0
+	for _, n := range ctx.notices {
+		if idx < len(want) && n == want[idx] {
+			idx++
+		}
+	}
+	if idx != len(want) {
+		t.Errorf("notices = %v, want %v in order", ctx.notices, want)
+	}
+}
+
+// The producing markdown step (used by review and coverage) notifies "awaiting
+// the agent" via runAgent.
+func TestProducingMarkdownStep_NotifiesAwaitingTheAgent(t *testing.T) {
+	wt := resumedWorktree()
+	agent := &scriptedAgent{replies: []string{"looks good"}}
+	ctx := ctxWithPlan(wt, agent)
+
+	if err := testBuilder(t).stepReview(ctx); err != nil {
+		t.Fatalf("stepReview: %v", err)
+	}
+	found := false
+	for _, n := range ctx.notices {
+		if n == "awaiting the agent" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("notices = %v, want one containing %q", ctx.notices, "awaiting the agent")
+	}
+}
