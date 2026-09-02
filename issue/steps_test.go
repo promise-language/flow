@@ -2626,6 +2626,40 @@ func TestStepOpenPR_SubPhaseNotifications(t *testing.T) {
 	}
 }
 
+// When every verify attempt fails the step returns an error before reaching
+// the commit phase. "staging and committing" must be absent — the operator
+// should see gate retries but never a commit notification.
+func TestStepImplement_ExhaustedRoundsOmitStagingNotification(t *testing.T) {
+	wt := resumedWorktree()
+	wt.verifyErr = errors.New("verify failed:\nstill broken")
+	wt.verifyAfter = 99 // never clears
+	b := testBuilder(t)
+	b.cfg.MaxFixRounds = 1
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	err := b.stepImplement(ctx)
+	if err == nil {
+		t.Fatal("stepImplement succeeded, want an error after exhausting rounds")
+	}
+	for _, n := range ctx.notices {
+		if n == "staging and committing" {
+			t.Fatal("notices contain \"staging and committing\", but the step failed before the commit phase")
+		}
+	}
+	// The gate notification must still appear for each attempt.
+	gateCount := 0
+	for _, n := range ctx.notices {
+		if n == "running the verify gate" {
+			gateCount++
+		}
+	}
+	// opening turn + 1 fix round = 2 verify attempts
+	if gateCount != 2 {
+		t.Errorf("gate notifications = %d, want 2 (opening turn + 1 fix round); notices = %v",
+			gateCount, ctx.notices)
+	}
+}
+
 // The producing markdown step (used by review and coverage) notifies "awaiting
 // the agent" via runAgent.
 func TestProducingMarkdownStep_NotifiesAwaitingTheAgent(t *testing.T) {
