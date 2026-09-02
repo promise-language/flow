@@ -874,6 +874,9 @@ func driveAResolution(t *testing.T, b *Backend) (prURL string) {
 	}); err != nil {
 		t.Fatalf("Park: %v", err)
 	}
+	if err := b.PostAnswer(ctx, claim.ItemRef, "use main"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
 	w := &worktree{b: b, claim: claim, issueNum: 42}
 	prURL, err = w.Open(ctx, "main", "a pull request title", "a pull request body")
 	if err != nil {

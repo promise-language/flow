@@ -164,6 +164,8 @@ func RunWithArgs(app App, args []string) int {
 		return app.cmdGrant(ctx, rest)
 	case "run-step":
 		return app.cmdRun(ctx, rest)
+	case "answer":
+		return app.cmdAnswer(ctx, rest)
 	case "resolve":
 		return app.cmdResolve(ctx, rest)
 	default:
@@ -328,6 +330,7 @@ func usage(bin string) string {
 usage:
   %[1]s doctor                       verify backend prereqs
   %[1]s list [--scope SCOPE] [--tag T] list items this flow can process
+  %[1]s answer <item-id> <text>       answer a question a step is parked on
   %[1]s claim <item-id>              acquire a claim on an item
   %[1]s run-step                     advance ONE lifecycle item (one prompt → one artifact)
   %[1]s resolve [<item-id>]          run ALL steps until finalized or parked.
@@ -343,7 +346,7 @@ usage:
   %[1]s release                      drop the claim
   %[1]s reseed [--force]              clear seed state (artifacts, budgets, park) on the active claim
 
-status, list, grant, run-step, and resolve print human-readable text on a terminal and
+answer, status, list, grant, run-step, and resolve print human-readable text on a terminal and
 JSON when piped or redirected; --json / --human (or FLOW_OUTPUT=json|human)
 force one. resolve's human text is its progress narration on stderr, which it
 prints in both modes — in human mode it writes nothing to stdout at all.`, bin)

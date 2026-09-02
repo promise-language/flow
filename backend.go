@@ -92,6 +92,18 @@ type StateInspector interface {
 	LoadStateByRef(ctx context.Context, ref ItemRef) (*ItemState, error)
 }
 
+// QuestionAnswerer is an optional Backend capability: post a human answer
+// on an item and clear the outstanding-question marker, without a claim.
+type QuestionAnswerer interface {
+	// PostAnswer posts a plain comment carrying the human's answer and clears
+	// the outstanding-question marker (best-effort label removal).
+	PostAnswer(ctx context.Context, ref ItemRef, text string) error
+
+	// ClearQuestionMarker clears the outstanding-question marker without
+	// posting a comment. Used when an out-of-band answer is observed.
+	ClearQuestionMarker(ctx context.Context, ref ItemRef)
+}
+
 // WorkInProgress is an optional Backend capability: somewhere for a step to
 // leave what it worked out when it stops without completing, so the next
 // dispatch continues rather than restarts.

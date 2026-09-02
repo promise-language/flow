@@ -376,6 +376,36 @@ func (b *Backend) removeParkLabel(ctx context.Context, claim flow.Claim, label s
 	_ = b.out.RemoveLabel(ctx, issueNum, label)
 }
 
+// PostAnswer posts a human answer as an ordinary issue comment and clears the
+// flow:needs-answer label (best-effort). The comment carries no flow marker,
+// so ReadAnswers — which skips machine-written comments — picks it up as a
+// human reply. No claim is required.
+func (b *Backend) PostAnswer(ctx context.Context, ref flow.ItemRef, text string) error {
+	issueNum, err := b.issueNumber(ref)
+	if err != nil {
+		return err
+	}
+	if _, err := b.out.CreateComment(ctx, flow.ActAnswer, issueNum,
+		flow.Text{Origin: flow.OriginOperator, Body: text}); err != nil {
+		return fmt.Errorf("post answer comment: %w", err)
+	}
+	// Best-effort: a stale label is cosmetic.
+	_ = b.out.RemoveLabel(ctx, issueNum, b.labels.NeedsAnswer())
+	return nil
+}
+
+// ClearQuestionMarker removes the flow:needs-answer label without posting a
+// comment. Used when the orchestrator observes an out-of-band answer (a
+// comment posted directly on the issue). Best-effort: failing silently is
+// correct — see removeParkLabel's rationale.
+func (b *Backend) ClearQuestionMarker(ctx context.Context, ref flow.ItemRef) {
+	issueNum, err := b.issueNumber(ref)
+	if err != nil {
+		return
+	}
+	_ = b.out.RemoveLabel(ctx, issueNum, b.labels.NeedsAnswer())
+}
+
 // mutateArtifact applies a mutation to one artifact entry of the state doc.
 // Centralizes the load-modify-store cycle used by the per-axis bumpers.
 func (b *Backend) mutateArtifact(ctx context.Context, claim flow.Claim, key string, mutate func(*stateArtifactDoc)) error {

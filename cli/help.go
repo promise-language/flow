@@ -81,6 +81,20 @@ Without --force, prints what would be discarded and refuses.
 			"(--json, FLOW_OUTPUT=json, or a piped/redirected stdout) each step's\n" +
 			"InvocationResult is also streamed to stdout, one compact object per\n" +
 			"line; in human mode stdout stays empty."},
+	"answer": {name: "answer", syntax: "<item-id> <text> [--question ID]",
+		summary: "answer a question a step is parked on",
+		detail: `Posts a human answer on the item and clears the outstanding-question
+marker. Requires no claim — addresses the item by id, like status.
+
+  <item-id>       the item carrying the question
+  <text>          the answer text
+
+When the item has more than one outstanding question, --question names the
+one being answered. When there is exactly one, it is inferred.
+
+  --question ID   which question to answer (required when multiple are pending)
+
+Answering does not resume the item. Use resolve or run-step to continue.`},
 	"grant": {name: "grant", syntax: "[<step-id>] [--all] [--invocations N] [--prompts N] [--cost USD] [--timeout SECONDS] [--dry-run]", summary: "top up a step's budget",
 		detail: `With no arguments: reads why the item parked and tops up the axis that
 parked it, plus any other axis already at its cap — a step out of both time

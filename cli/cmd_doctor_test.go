@@ -72,7 +72,7 @@ func newDummyFlow(name string) *flow.Flow {
 func TestCmdDoctor_ReportsStateInspectorUnavailable(t *testing.T) {
 	be := fake.New()
 	app := App{
-		Backend:   be,
+		Backend:   bareBackend{be},
 		Agent:     &stubAgent{name: "stub"},
 		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flows:     []*flow.Flow{newDummyFlow("x")},
