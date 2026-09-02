@@ -1909,3 +1909,228 @@ func TestBackend_Claim_CleanTreeSucceeds(t *testing.T) {
 		t.Errorf("claim.Owner = %q, want alice", claim.Owner)
 	}
 }
+
+// A disclosure refusal on the park reason must not abort the park: the park is
+// recorded with a substitute reason naming the refusal, not the matched text.
+//
+// The fixtures here say "/home/someone/..." rather than a realistic name, and
+// that is deliberate. The refusals below are scripted (the guardFunc stub), so a
+// fixture only has to READ as a home path — while a realistic name would be
+// refused by the real disclosure rules when this branch is pushed, making the
+// very tests that prove such text is never published impossible to commit.
+// "someone" is one of the placeholders those rules exempt (user, username, you,
+// me, someone, runner, dev, u). See findHomePath in the workspace disclosure
+// rules. Note "alice" survives below as a claim OWNER — that is a login, not a
+// home path, and the rule does not match it.
+func TestBackend_ParkRecordsOnDisclosureRefusal(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	// Guard that refuses the first ActParkRecord attempt (agent prose) but
+	// allows the retry (the substituted, disclosure-safe body).
+	attempts := 0
+	b.out.guard = guardFunc(func(_ context.Context, d flow.Disclosure) error {
+		if d.Act == flow.ActParkRecord {
+			attempts++
+			if attempts == 1 {
+				return errors.New("an absolute home path names the machine's user — found \"/home/someone\"")
+			}
+		}
+		return nil
+	})
+
+	ctx := t.Context()
+	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", nil)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if err := b.SeedState(ctx, claim, []flow.ArtifactSpec{
+		{Id: "review", Type: flow.ArtifactMarkdown, Required: true,
+			Budget: flow.StepBudget{MaxInvocations: 3, MaxCostUSD: 10}},
+	}); err != nil {
+		t.Fatalf("SeedState: %v", err)
+	}
+
+	parkReq := flow.ParkRequest{
+		Kind:   flow.ParkBlocked,
+		Step:   "review",
+		Reason: "blocked on /home/someone/prog/project — needs manual input",
+	}
+	if err := b.Park(ctx, claim, parkReq); err != nil {
+		t.Fatalf("Park returned error: %v", err)
+	}
+
+	state, err := b.LoadState(ctx, claim)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if !state.Parked() {
+		t.Fatal("item is not parked after Park")
+	}
+	if state.Park.Kind != flow.ParkBlocked {
+		t.Errorf("park.Kind = %v, want %v", state.Park.Kind, flow.ParkBlocked)
+	}
+	if state.Park.Step != "review" {
+		t.Errorf("park.Step = %q, want %q", state.Park.Step, "review")
+	}
+	wantReason := "park reason withheld by disclosure guard (park-record)"
+	if state.Park.Reason != wantReason {
+		t.Errorf("park.Reason = %q, want %q", state.Park.Reason, wantReason)
+	}
+
+	// The park label must be present.
+	parkLabelName := b.labels.Blocked()
+	if !hasLabel(mock.labelNames(), parkLabelName) {
+		t.Errorf("labels = %v, want %q", mock.labelNames(), parkLabelName)
+	}
+
+	// The mock must have received a comment (the retried one).
+	mock.mu.Lock()
+	nComments := len(mock.comments)
+	mock.mu.Unlock()
+	if nComments == 0 {
+		t.Error("no comment was created; the retried park comment should have been posted")
+	}
+}
+
+// The retried park comment must be stated OriginFlow, not OriginAgent: the
+// substitute text is the SDK's, not the agent's, and a guard that refuses
+// agent prose but allows flow prose must see the right origin. Details must
+// be cleared so the sensitive content does not survive in a second field.
+func TestBackend_ParkRetryOriginAndDetailsClear(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	var retryOrigin flow.Origin
+	attempts := 0
+	b.out.guard = guardFunc(func(_ context.Context, d flow.Disclosure) error {
+		if d.Act == flow.ActParkRecord {
+			attempts++
+			if attempts == 1 {
+				return errors.New("path found")
+			}
+			// Capture the origin of the retried disclosure.
+			retryOrigin = d.Text[0].Origin
+		}
+		return nil
+	})
+
+	ctx := t.Context()
+	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", nil)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if err := b.SeedState(ctx, claim, []flow.ArtifactSpec{
+		{Id: "review", Type: flow.ArtifactMarkdown, Required: true,
+			Budget: flow.StepBudget{MaxInvocations: 3, MaxCostUSD: 10}},
+	}); err != nil {
+		t.Fatalf("SeedState: %v", err)
+	}
+
+	parkReq := flow.ParkRequest{
+		Kind:    flow.ParkBlocked,
+		Step:    "review",
+		Reason:  "blocked on /home/someone/prog/project",
+		Details: "sensitive detail with /home/someone",
+	}
+	if err := b.Park(ctx, claim, parkReq); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+	if retryOrigin != flow.OriginFlow {
+		t.Errorf("retry origin = %q, want %q", retryOrigin, flow.OriginFlow)
+	}
+
+	state, err := b.LoadState(ctx, claim)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if state.Park.Details != "" {
+		t.Errorf("park.Details = %q, want empty (should be cleared on refusal)", state.Park.Details)
+	}
+}
+
+// When the retry comment itself fails, the error must propagate — a double
+// refusal (or any failure of the second CreateComment) is not swallowed.
+func TestBackend_ParkRetryFailurePropagates(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	// Guard that refuses every ActParkRecord, including the retry.
+	b.out.guard = guardFunc(func(_ context.Context, d flow.Disclosure) error {
+		if d.Act == flow.ActParkRecord {
+			return errors.New("refused unconditionally")
+		}
+		return nil
+	})
+
+	ctx := t.Context()
+	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", nil)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if err := b.SeedState(ctx, claim, []flow.ArtifactSpec{
+		{Id: "review", Type: flow.ArtifactMarkdown, Required: true,
+			Budget: flow.StepBudget{MaxInvocations: 3, MaxCostUSD: 10}},
+	}); err != nil {
+		t.Fatalf("SeedState: %v", err)
+	}
+
+	parkReq := flow.ParkRequest{
+		Kind:   flow.ParkBlocked,
+		Step:   "review",
+		Reason: "some reason",
+	}
+	err = b.Park(ctx, claim, parkReq)
+	if err == nil {
+		t.Fatal("Park should have failed when the retry is also refused")
+	}
+	var refused flow.ErrDisclosureRefused
+	if !errors.As(err, &refused) {
+		t.Errorf("error should be ErrDisclosureRefused, got: %v", err)
+	}
+}
+
+// A non-disclosure error from CreateComment must still propagate — the new
+// fallback only catches ErrDisclosureRefused.
+func TestBackend_ParkNonDisclosureErrorStillFails(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	ctx := t.Context()
+	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", nil)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if err := b.SeedState(ctx, claim, []flow.ArtifactSpec{
+		{Id: "review", Type: flow.ArtifactMarkdown, Required: true,
+			Budget: flow.StepBudget{MaxInvocations: 3, MaxCostUSD: 10}},
+	}); err != nil {
+		t.Fatalf("SeedState: %v", err)
+	}
+
+	// Shut down the server so the HTTP call fails with a network error,
+	// not a disclosure refusal.
+	srv.Close()
+
+	parkReq := flow.ParkRequest{
+		Kind:   flow.ParkBlocked,
+		Step:   "review",
+		Reason: "some reason",
+	}
+	err = b.Park(ctx, claim, parkReq)
+	if err == nil {
+		t.Fatal("Park should have failed with a network error")
+	}
+	var refused flow.ErrDisclosureRefused
+	if errors.As(err, &refused) {
+		t.Errorf("error is ErrDisclosureRefused, want a non-disclosure error: %v", err)
+	}
+}
