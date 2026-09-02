@@ -507,7 +507,20 @@ func (b *Backend) Park(ctx context.Context, claim flow.Claim, req flow.ParkReque
 	// handler's or an agent's, so the assembled record is stated `agent`.
 	if _, err := b.out.CreateComment(ctx, flow.ActParkRecord, issueNum,
 		flow.Text{Origin: flow.OriginAgent, Body: body}); err != nil {
-		return err
+		var refused flow.ErrDisclosureRefused
+		if !errors.As(err, &refused) {
+			return err
+		}
+		// The park is a fact; only its reason is unpublishable.
+		// Substitute a disclosure-safe reason and retry.
+		req.Reason = fmt.Sprintf("park reason withheld by disclosure guard (%s)", refused.Act)
+		req.Details = ""
+		parkBody, _ = json.Marshal(req)
+		body = "<!-- flow:park -->\n```json\n" + string(parkBody) + "\n```"
+		if _, err := b.out.CreateComment(ctx, flow.ActParkRecord, issueNum,
+			flow.Text{Origin: flow.OriginAgent, Body: body}); err != nil {
+			return err
+		}
 	}
 	// Record it in the state doc. An item can be parked before it is seeded
 	// (a preflight refusal, say), and there is no state comment to write to
