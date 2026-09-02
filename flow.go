@@ -78,6 +78,7 @@ func (f *Flow) AddStep(name string, result ArtifactId, do StepHandler, cfg StepC
 		handler:  do,
 		required: !cfg.Optional, // Required by default; StepConfig.Optional opts out
 		budget:   cfg.Budget,
+		writes:   cfg.Writes,
 	}, string(result))
 }
 
@@ -107,6 +108,7 @@ func (f *Flow) AddSignalStep(name string, signal SignalId, do StepHandler, cfg S
 		handler:  do,
 		required: !cfg.Optional,
 		budget:   cfg.Budget,
+		writes:   cfg.Writes,
 	}, string(signal))
 }
 
@@ -235,8 +237,9 @@ type LifecycleItem struct {
 	ArtifactId ArtifactId // set when Kind==LifecycleArtifact
 	SignalId   SignalId   // set when Kind==LifecycleSignal or LifecycleAwait
 	Required   bool
-	Handler    StepHandler // nil when Kind==LifecycleAwait
-	Budget     StepBudget  // resolved (merged with defaults)
+	Handler    StepHandler   // nil when Kind==LifecycleAwait
+	Budget     StepBudget    // resolved (merged with defaults)
+	Writes     WriteContract // what the step may change in the worktree
 }
 
 // Result returns the result identifier as a string — either the ArtifactId or
@@ -289,6 +292,7 @@ func toLifecycleItem(st *step) LifecycleItem {
 		Required: st.required,
 		Handler:  st.handler,
 		Budget:   resolveBudget(st.budget),
+		Writes:   st.writes,
 	}
 	switch st.kind {
 	case stepArtifact:

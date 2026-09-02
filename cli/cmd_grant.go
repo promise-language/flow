@@ -759,6 +759,8 @@ func remedyFor(kind flow.ParkKind) string {
 		return "The handler returned without resolving its artifact — a code fix, not a budget one."
 	case flow.ParkRefused:
 		return "Nothing to grant — the failure is deterministic and consumed no budget. Fix the environment or precondition, then re-run."
+	case flow.ParkWriteContract:
+		return "The step modified the worktree outside its declared contract. Inspect the changes; if they are wanted, widen the step's contract — if not, revert and re-run."
 	}
 	return "Clear the blocker on the item, then re-run the step."
 }

@@ -65,6 +65,10 @@ func (w *worktree) CurrentBranch(ctx context.Context) (string, error) {
 	return w.b.git.CurrentBranch(ctx)
 }
 
+func (w *worktree) IsDirty(ctx context.Context) (bool, error) {
+	return w.b.git.IsDirty(ctx)
+}
+
 func (w *worktree) Commit(ctx context.Context, msg string) error {
 	return w.b.git.Commit(ctx, msg)
 }

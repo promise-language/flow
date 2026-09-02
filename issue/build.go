@@ -125,7 +125,8 @@ func (b *builder) contributorFlow(cfg Config) *flow.Flow {
 	// a run that parked, was blocked or failed never reaches a step registered
 	// after the request. The ordering is the condition.
 	f.AddStep("close branch", flow.ArtifactId(StepCloseBranch), b.stepCloseBranch,
-		flow.StepConfig{Budget: cfg.budgetFor(StepCloseBranch)})
+		flow.StepConfig{Budget: cfg.budgetFor(StepCloseBranch),
+			Writes: flow.WriteContract{MayBranch: true}})
 	return f
 }
 
@@ -136,13 +137,17 @@ func (b *builder) addContributorSteps(f *flow.Flow, cfg Config) {
 	f.AddStep("write plan", flow.ArtifactId(StepPlan), b.stepPlan,
 		flow.StepConfig{Budget: cfg.budgetFor(StepPlan)})
 	f.AddStep("open branch", flow.ArtifactId(StepBranch), b.stepOpenBranch,
-		flow.StepConfig{Budget: cfg.budgetFor(StepBranch)})
+		flow.StepConfig{Budget: cfg.budgetFor(StepBranch),
+			Writes: flow.WriteContract{MayBranch: true, MayCommit: true}})
 	f.AddStep("implement the change", flow.ArtifactId(StepImplement), b.stepImplement,
-		flow.StepConfig{Budget: cfg.budgetFor(StepImplement)})
+		flow.StepConfig{Budget: cfg.budgetFor(StepImplement),
+			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true}})
 	f.AddStep("review the work", flow.ArtifactId(StepReview), b.stepReview,
-		flow.StepConfig{Budget: cfg.budgetFor(StepReview)})
+		flow.StepConfig{Budget: cfg.budgetFor(StepReview),
+			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true}})
 	f.AddStep("analyze coverage", flow.ArtifactId(StepCoverage), b.stepCoverage,
-		flow.StepConfig{Budget: cfg.budgetFor(StepCoverage)})
+		flow.StepConfig{Budget: cfg.budgetFor(StepCoverage),
+			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true}})
 	f.AddSignalStep("create pull request", flow.SignalId(StepOpenPR), b.stepOpenPR,
 		flow.StepConfig{Budget: cfg.budgetFor(StepOpenPR)})
 }
@@ -151,7 +156,8 @@ func (b *builder) addContributorSteps(f *flow.Flow, cfg Config) {
 // result, merge, record the merge commit.
 func (b *builder) addIntegrationSteps(f *flow.Flow, cfg Config) {
 	f.AddStep("verify merge result", flow.ArtifactId(StepVerifyMerge), b.stepVerifyMerge,
-		flow.StepConfig{Budget: cfg.budgetFor(StepVerifyMerge)})
+		flow.StepConfig{Budget: cfg.budgetFor(StepVerifyMerge),
+			Writes: flow.WriteContract{MayBranch: true, MayCommit: true}})
 	f.AddSignalStep("merge pull request", flow.SignalId(StepMerge), b.stepMerge,
 		flow.StepConfig{Budget: cfg.budgetFor(StepMerge)})
 	f.AddStep("record merge commit", flow.ArtifactId(StepRecordMerge), b.stepRecordMerge,
@@ -165,7 +171,8 @@ func (b *builder) carryThroughFlow(cfg Config) *flow.Flow {
 	b.addContributorSteps(f, cfg)
 	b.addIntegrationSteps(f, cfg)
 	f.AddStep("close branch", flow.ArtifactId(StepCloseBranch), b.stepCloseBranch,
-		flow.StepConfig{Budget: cfg.budgetFor(StepCloseBranch)})
+		flow.StepConfig{Budget: cfg.budgetFor(StepCloseBranch),
+			Writes: flow.WriteContract{MayBranch: true}})
 	return f
 }
 
