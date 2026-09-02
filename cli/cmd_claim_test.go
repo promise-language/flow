@@ -113,6 +113,9 @@ func TestCmdClaim_ForceAfterPositional(t *testing.T) {
 	if !slices.Contains(wrapped.lastOverrides, flow.OverrideAlreadyHeld) {
 		t.Errorf("Backend.Claim received overrides=%v, want OverrideAlreadyHeld", wrapped.lastOverrides)
 	}
+	if !slices.Contains(wrapped.lastOverrides, flow.OverrideStaleBase) {
+		t.Errorf("Backend.Claim received overrides=%v, want OverrideStaleBase", wrapped.lastOverrides)
+	}
 }
 
 // --force-unadmitted must pass OverrideUnadmitted to Backend.Claim.

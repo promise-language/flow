@@ -76,6 +76,74 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, ove
 		}
 	}
 
+	// Worktree preconditions — arena-scoped, not item-scoped.
+	// Run before Phase 1: nothing is written to the item on refusal.
+
+	if !slices.Contains(overrides, flow.OverrideStaleBase) {
+		// 1. Fetch — every check below is worthless against stale refs.
+		if err := b.git.Fetch(ctx, "origin"); err != nil {
+			return flow.Claim{}, flow.ErrClaimRefused{
+				Code: "fetch-failed", ItemScoped: false,
+				Reason: "git fetch origin failed",
+				Detail: err.Error(),
+				Check:  "fetch",
+			}
+		}
+
+		// 2. HEAD must be on the base branch.
+		base, err := b.DefaultBranch(ctx)
+		if err != nil {
+			return flow.Claim{}, fmt.Errorf("resolve default branch: %w", err)
+		}
+		current, err := b.git.CurrentBranch(ctx)
+		if err != nil {
+			return flow.Claim{}, fmt.Errorf("current branch: %w", err)
+		}
+		if current != base {
+			return flow.Claim{}, flow.ErrClaimRefused{
+				Code: "not-on-base", ItemScoped: false,
+				Reason: fmt.Sprintf("HEAD is on %q, want %q — run: git checkout %s",
+					current, base, base),
+				Check: "base-branch",
+			}
+		}
+
+		// 3. Local base must be at origin's tip.
+		localSHA, err := b.git.RevParse(ctx, base)
+		if err != nil {
+			return flow.Claim{}, fmt.Errorf("rev-parse %s: %w", base, err)
+		}
+		remoteSHA, err := b.git.RevParse(ctx, "origin/"+base)
+		if err != nil {
+			return flow.Claim{}, fmt.Errorf("rev-parse origin/%s: %w", base, err)
+		}
+		if localSHA != remoteSHA {
+			return flow.Claim{}, flow.ErrClaimRefused{
+				Code: "base-stale", ItemScoped: false,
+				Reason: fmt.Sprintf("%s (%s) differs from origin/%s (%s) — run: git pull --ff-only",
+					base, localSHA[:8], base, remoteSHA[:8]),
+				Check: "base-branch",
+			}
+		}
+	}
+
+	if !slices.Contains(overrides, flow.OverrideDirtyTree) {
+		// 4. Tree must be clean, including untracked files.
+		porcelain, err := b.git.StatusPorcelain(ctx)
+		if err != nil {
+			return flow.Claim{}, fmt.Errorf("check dirty tree: %w", err)
+		}
+		if porcelain != "" {
+			return flow.Claim{}, flow.ErrClaimRefused{
+				Code: "dirty-tree", ItemScoped: false,
+				Reason:   "worktree has uncommitted or untracked changes",
+				Detail:   porcelain,
+				Check:    "clean-tree",
+				Override: "force",
+			}
+		}
+	}
+
 	// Phase 1: post a random claim label.
 	token := randomClaimToken()
 	claimLabel := b.labels.ClaimToken(token)

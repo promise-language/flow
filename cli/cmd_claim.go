@@ -11,7 +11,7 @@ import (
 
 func (app *App) cmdClaim(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("claim")
-	force := fs.Bool("force", false, "claim even if the arena worktree has unsaved work (override the clean-tree check)")
+	force := fs.Bool("force", false, "override worktree preconditions: clean-tree, base-branch, and already-held checks")
 	forceUnadmitted := fs.Bool("force-unadmitted", false, "override the arena admission check (audited)")
 	if !app.parseArgs(fs, args) {
 		return 2
@@ -32,7 +32,7 @@ func (app *App) cmdClaim(ctx context.Context, args []string) int {
 
 	var overrides []flow.ClaimOverride
 	if *force {
-		overrides = append(overrides, flow.OverrideDirtyTree, flow.OverrideAlreadyHeld)
+		overrides = append(overrides, flow.OverrideDirtyTree, flow.OverrideAlreadyHeld, flow.OverrideStaleBase)
 	}
 	if *forceUnadmitted {
 		overrides = append(overrides, flow.OverrideUnadmitted)

@@ -176,6 +176,7 @@ const (
 	OverrideDirtyTree   ClaimOverride = "dirty-tree"
 	OverrideAlreadyHeld ClaimOverride = "already-held"
 	OverrideUnadmitted  ClaimOverride = "unadmitted"
+	OverrideStaleBase   ClaimOverride = "stale-base"
 )
 
 // ClaimRefusalCode is the backend's own refusal vocabulary, carried through
