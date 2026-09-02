@@ -228,8 +228,16 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 	// Emptiness, not just absence: a resolved artifact whose body did not load
 	// reads as present, and implementing against a blank plan is worse than
 	// refusing — the agent writes something plausible and nothing reports why.
-	if plan, ok := pc.PriorMarkdown(StepPlan); !ok || strings.TrimSpace(plan) == "" {
-		return fmt.Errorf("plan artifact missing, unresolved, or empty — refusing to implement without a plan")
+	//
+	// And structure, not just emptiness, by the same reasoning one step further:
+	// a single sentence of narration is not empty either, and dispatching
+	// against it costs an invocation to produce work anchored to nothing. The
+	// predicate is stepPlan's, deliberately — one floor, applied at both ends.
+	// Not redundant with it: this catches an artifact resolved by an older
+	// binary, by a hand edit, or by any future path that does not run stepPlan.
+	if plan, ok := pc.PriorMarkdown(StepPlan); !ok || strings.TrimSpace(plan) == "" || !looksLikePlan(plan) {
+		return fmt.Errorf("plan artifact missing, unresolved, empty, or is not a plan — " +
+			"refusing to implement without a plan")
 	}
 	// The commit the branch was cut from, as the branch step recorded it. Same
 	// shape as the plan refusal above, and for the same reason: without it the

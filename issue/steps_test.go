@@ -415,14 +415,15 @@ func testBuilder(t *testing.T) *builder {
 }
 
 // ctxWithPlan is an item whose upstream mechanical and prose results are in
-// place: the plan, and the commit the branch was cut from.
+// place: the plan, and the commit the branch was cut from. The plan is plan-
+// SHAPED, not just non-empty, because implement now refuses narration.
 func ctxWithPlan(wt *fakeWorktree, agent flow.Agent) *fakeCtx {
 	return &fakeCtx{
 		item:  flow.Item{ID: "42", Type: "task", Title: "widget is broken"},
 		wt:    wt,
 		agent: agent,
 		arts: map[flow.ArtifactId]flow.ArtifactRecord{
-			"plan":   {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "the plan"},
+			"plan":   {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: planned("the plan")},
 			"branch": {Resolved: true, Type: flow.ArtifactCommitHash, CommitHash: "base"},
 		},
 	}
@@ -572,19 +573,56 @@ func TestStepImplement_AcceptsWorkCommittedByAnEarlierRun(t *testing.T) {
 func TestStepImplement_RefusesWithoutAPlan(t *testing.T) {
 	// A resolved artifact whose body did not load reads as present. Implementing
 	// against a blank plan produces something plausible and reports nothing.
+	//
+	// "narration" is the case emptiness cannot reach: an artifact resolved from
+	// the sentence an agent said on its way to delegating its planning. It is
+	// not empty, and implementing against it spends the step's budget on work
+	// anchored to nothing. stepPlan refuses to WRITE one; this refuses to read
+	// one, which is what catches an artifact resolved by an older binary, by a
+	// hand edit, or by any path that does not run stepPlan.
 	for name, plan := range map[string]flow.ArtifactRecord{
 		"missing":    {},
 		"unresolved": {Type: flow.ArtifactMarkdown},
 		"empty body": {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "  "},
+		"narration": {Resolved: true, Type: flow.ArtifactMarkdown,
+			Markdown: "Now let me write the final plan."},
 	} {
 		t.Run(name, func(t *testing.T) {
-			ctx := ctxWithPlan(resumedWorktree(), &scriptedAgent{})
+			agent := &scriptedAgent{}
+			ctx := ctxWithPlan(resumedWorktree(), agent)
 			ctx.arts["plan"] = plan
 			err := testBuilder(t).stepImplement(ctx)
 			if err == nil || !strings.Contains(err.Error(), "plan") {
 				t.Errorf("err = %v, want a refusal naming the plan", err)
 			}
+			// The whole value of refusing here is that it happens BEFORE the
+			// dispatch. A refusal that still spent an invocation would have
+			// saved nothing.
+			if agent.calls != 0 {
+				t.Errorf("agent ran %d times, want 0 — the guard runs before the dispatch", agent.calls)
+			}
+			if ctx.didResolve {
+				t.Error("implemented against something that is not a plan")
+			}
 		})
+	}
+}
+
+// The other side of the same guard: a plan-shaped artifact passes it, so the
+// refusal above is about the artifact and not about the step. Proven by the run
+// reaching the agent — the failure that follows is the scripted agent's, well
+// past the guard.
+func TestStepImplement_AHeadedPlanPassesTheGuard(t *testing.T) {
+	agent := &scriptedAgent{}
+	ctx := ctxWithPlan(resumedWorktree(), agent)
+	ctx.arts["plan"] = flow.ArtifactRecord{
+		Resolved: true, Type: flow.ArtifactMarkdown,
+		Markdown: "## Plan\n\nChange the thing.",
+	}
+
+	_ = testBuilder(t).stepImplement(ctx)
+	if agent.calls == 0 {
+		t.Error("agent never ran — a headed plan must pass the guard")
 	}
 }
 

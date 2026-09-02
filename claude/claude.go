@@ -188,6 +188,11 @@ func parseStream(r io.Reader) (*flow.AgentResponse, error) {
 
 	resp := &flow.AgentResponse{}
 	toolSeen := map[string]struct{}{}
+	// delegated holds the tool_use ids of the delegation calls this turn made,
+	// so a later tool_result can be recognised as a subagent's output rather
+	// than some other tool's. Local to the parse: nothing outside needs it, and
+	// ToolsUsed already reports that a delegation happened.
+	delegated := map[string]struct{}{}
 	var (
 		lastText     string
 		resultEvent  bool
@@ -221,10 +226,13 @@ func parseStream(r io.Reader) (*flow.AgentResponse, error) {
 			for _, block := range ev.Message.Content {
 				switch block.Type {
 				case "text":
-					// The LAST block, not the accumulation. Every tool call is
-					// preceded by a one-line preamble; joining them yields
-					// narration that reads like content and passes any
-					// emptiness check.
+					// The LAST text the turn produced, not the accumulation.
+					// Every tool call is preceded by a one-line preamble;
+					// joining them yields narration that reads like content and
+					// passes any emptiness check. A delegated subagent's output
+					// is written to the same variable by the "user" arm below,
+					// because it too is text this turn produced — the stream is
+					// already in order, so "last" falls out of assignment.
 					if strings.TrimSpace(block.Text) != "" {
 						lastText = block.Text
 					}
@@ -232,6 +240,9 @@ func parseStream(r io.Reader) (*flow.AgentResponse, error) {
 					if _, dup := toolSeen[block.Name]; !dup && block.Name != "" {
 						toolSeen[block.Name] = struct{}{}
 						resp.ToolsUsed = append(resp.ToolsUsed, block.Name)
+					}
+					if delegationTools[block.Name] && block.ID != "" {
+						delegated[block.ID] = struct{}{}
 					}
 					if block.Name == exitPlanTool {
 						// Recorded even when the input will not decode, so a
@@ -245,6 +256,28 @@ func parseStream(r io.Reader) (*flow.AgentResponse, error) {
 							resp.PlanText = in.Plan
 						}
 					}
+				}
+			}
+		case "user":
+			// The only user events worth reading are the tool_results of this
+			// turn's own delegations: a subagent's plan, review or answer is
+			// text the turn produced, and it arrives here or nowhere. Every
+			// other tool_result is the tool's output, not the turn's — a Read's
+			// file contents must never become the answer — and the prompt echo
+			// is not a result at all.
+			var ev userEvent
+			if err := json.Unmarshal(line, &ev); err != nil {
+				continue
+			}
+			for _, block := range ev.Message.Content {
+				if block.Type != "tool_result" || block.IsError {
+					continue
+				}
+				if _, ok := delegated[block.ToolUseID]; !ok {
+					continue
+				}
+				if text := toolResultText(block.Content); strings.TrimSpace(text) != "" {
+					lastText = text
 				}
 			}
 		case "result":
@@ -307,6 +340,33 @@ func parseStream(r io.Reader) (*flow.AgentResponse, error) {
 	return resp, nil
 }
 
+// toolResultText renders a tool_result's content as the text it carries. The
+// CLI writes that content two ways — a bare JSON string for short results, an
+// array of text blocks for structured ones — and both shapes appear in real
+// transcripts, so both are read. Anything else yields "" and is ignored: a
+// shape this parser does not recognise is not the turn's deliverable, and
+// guessing at one would put something arbitrary under the artifact's name.
+func toolResultText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var blocks []contentBlock
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return ""
+	}
+	var parts []string
+	for _, b := range blocks {
+		if b.Type == "text" && b.Text != "" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
 func combineDiagnostic(parseErr, waitErr error, stderr []byte) string {
 	parts := []string{}
 	if parseErr != nil {
@@ -358,10 +418,20 @@ type contentBlock struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
 	Name string `json:"name,omitempty"` // for tool_use
+	ID   string `json:"id,omitempty"`   // for tool_use
 	// Input is a tool_use call's arguments. Kept as RawMessage because only
 	// the tools whose input IS the deliverable are decoded (see exitPlanTool);
 	// every other tool's arguments are none of this parser's business.
 	Input json.RawMessage `json:"input,omitempty"`
+
+	// tool_result fields. ToolUseID keys the result back to the call that
+	// produced it, which is the only way to tell a delegated subagent's output
+	// from any other tool's. Content is RawMessage because the CLI writes it
+	// two ways — a bare JSON string, or an array of text blocks — and both
+	// shapes appear in real transcripts (see toolResultText).
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
 }
 
 // exitPlanTool is the tool a plan-mode turn ends on. Its input carries the
@@ -369,6 +439,17 @@ type contentBlock struct {
 // reads only block.Name discards the entire deliverable and leaves the
 // tool-call preambles behind as if they were the answer.
 const exitPlanTool = "ExitPlanMode"
+
+// delegationTools are the names the CLI gives the tool that runs a subagent.
+// A turn that delegates emits one line of narration announcing the delegation
+// and then nothing: the deliverable is produced inside the subagent and comes
+// back as a tool_result, never as a parent assistant message. Reading only
+// assistant events therefore ends the turn holding the preamble.
+//
+// Two names, because it differs across releases and both are in the field. An
+// unrecognised name is not silently wrong: stepPlan's structural floor still
+// refuses the narration that a missed delegation leaves behind.
+var delegationTools = map[string]bool{"Task": true, "Agent": true}
 
 // subtypeMaxBudget is the result-event subtype the CLI reports when
 // --max-budget-usd stopped the run.
