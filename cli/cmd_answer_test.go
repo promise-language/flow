@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -256,3 +257,41 @@ func (b noInspectorBackend) PostAnswer(ctx context.Context, ref flow.ItemRef, te
 }
 
 func (b noInspectorBackend) ClearQuestionMarker(ctx context.Context, ref flow.ItemRef) {}
+
+// TestCmdAnswer_PostAnswerError verifies that when PostAnswer returns an error,
+// cmdAnswer exits 1 and reports the error on stderr.
+func TestCmdAnswer_PostAnswerError(t *testing.T) {
+	app, _, _, _, itemID := answerTestSetup(t)
+
+	// Replace backend with one whose PostAnswer always fails.
+	app.Backend = failingAnswerBackend{app.Backend}
+
+	var errBuf bytes.Buffer
+	app.Out = newDiscardWriter()
+	app.Err = &errBuf
+
+	code := app.cmdAnswer(context.Background(), []string{itemID, "yes"})
+	if code != 1 {
+		t.Fatalf("cmdAnswer = %d, want 1", code)
+	}
+	if !strings.Contains(errBuf.String(), "backend broke") {
+		t.Errorf("stderr = %q, want mention of 'backend broke'", errBuf.String())
+	}
+}
+
+// failingAnswerBackend wraps a Backend and provides a PostAnswer that always
+// errors. It must also implement StateInspector so the command reaches the
+// PostAnswer call.
+type failingAnswerBackend struct {
+	flow.Backend
+}
+
+func (b failingAnswerBackend) PostAnswer(_ context.Context, _ flow.ItemRef, _ string) error {
+	return fmt.Errorf("backend broke")
+}
+
+func (b failingAnswerBackend) ClearQuestionMarker(_ context.Context, _ flow.ItemRef) {}
+
+func (b failingAnswerBackend) LoadStateByRef(ctx context.Context, ref flow.ItemRef) (*flow.ItemState, error) {
+	return b.Backend.(flow.StateInspector).LoadStateByRef(ctx, ref)
+}

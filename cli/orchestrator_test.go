@@ -1821,3 +1821,50 @@ func TestRunOne_GatePathClearsQuestionMarker(t *testing.T) {
 		t.Error("ClearQuestionMarker was not called; gate-path label clearing did not fire")
 	}
 }
+
+// TestRunOne_BudgetParkDoesNotClearQuestionMarker verifies that the gate-path
+// label clearing only fires for ParkQuestion, not for other park kinds like
+// ParkBudgetExhausted. Regression guard for the condition in orchestrator.go.
+func TestRunOne_BudgetParkDoesNotClearQuestionMarker(t *testing.T) {
+	invocations := 0
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			invocations++
+			if invocations == 1 {
+				// First dispatch: exhaust budget so the item parks.
+				return flow.ErrBudgetExhausted{Axis: flow.AxisInvocations}
+			}
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{Budget: flow.DefaultStepBudget()})
+	}, &stubAgent{name: "stub"})
+
+	// First dispatch seeds the artifact and parks on budget.
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne (park): %v", err)
+	}
+	if res.Status != "parked" {
+		t.Fatalf("first dispatch status = %q, want parked", res.Status)
+	}
+
+	// Grant budget so the step can proceed on the next dispatch.
+	if err := be.Grant(context.Background(), claim, "plan", flow.Grant{
+		Invocations: 5,
+	}); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+
+	wrapped := &clearMarkerBackend{Backend: be}
+	app.Backend = wrapped
+
+	res, err = RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne (resume): %v", err)
+	}
+	if res.Status != string(flow.StatusDone) {
+		t.Fatalf("status = %q, want done", res.Status)
+	}
+	if wrapped.wasCleared() {
+		t.Error("ClearQuestionMarker was called for a budget park; should only fire for ParkQuestion")
+	}
+}
