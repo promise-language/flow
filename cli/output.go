@@ -126,6 +126,7 @@ const (
 	stateStale    = "stale"
 	statePending  = "pending"
 	stateSkipped  = "skipped"
+	stateRunning  = "running"
 )
 
 // Flow states, as reported in the status payload's flow_state.
@@ -153,6 +154,7 @@ type statusPayload struct {
 	// no title reports "" rather than dropping the field.
 	Title     string            `json:"title"`
 	Owner     string            `json:"owner"`
+	Overrides []string          `json:"overrides,omitempty"`
 	Flow      string            `json:"flow"`
 	FlowState string            `json:"flow_state"`
 	Finalized bool              `json:"finalized"`
@@ -187,7 +189,9 @@ type stepPayload struct {
 	Required bool   `json:"required"`
 	// Budget is null on signal and await steps: they own no budget record, so
 	// null is the machine-readable "not a grant target".
-	Budget *budgetPayload `json:"budget"`
+	Budget     *budgetPayload `json:"budget"`
+	RunningPID int            `json:"running_pid,omitempty"`
+	RunningExe string         `json:"running_exe,omitempty"`
 }
 
 type budgetPayload struct {

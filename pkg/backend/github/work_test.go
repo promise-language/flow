@@ -62,7 +62,7 @@ func TestWorkInProgress_ReleaseLeavesNoRecords(t *testing.T) {
 	b := newMockedBackend(t, mock, srv)
 	ctx := t.Context()
 
-	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
+	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}

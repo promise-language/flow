@@ -332,7 +332,7 @@ func TestNoGuardStopsTheResolutionAtItsFirstWrite(t *testing.T) {
 	b, mock, tape := newSeamBackend(t)
 	b.out.guard = nil
 
-	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", false)
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", nil)
 	if !errors.Is(err, flow.ErrNoDisclosureGuard) {
 		t.Errorf("Claim with no guard: err = %v, want ErrNoDisclosureGuard", err)
 	}
@@ -663,7 +663,7 @@ func TestGuardSeesTheAssembledCommentAndNotTheArtifact(t *testing.T) {
 	b.cfg.MaxCommentBytes = 512
 	ctx := t.Context()
 
-	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
+	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -719,7 +719,7 @@ func TestGuardSeesConstructedLabelNames(t *testing.T) {
 	b, _, _ := newSeamBackend(t)
 	ctx := t.Context()
 
-	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
+	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -755,7 +755,7 @@ func TestRefusedWriteFailsTheBackendCall(t *testing.T) {
 	ctx := t.Context()
 
 	b.out.guard = refusing()
-	_, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
+	_, err := b.Claim(ctx, b.refFromIssue(42), "alice", nil)
 	if !errors.Is(err, errGuardRefused) {
 		t.Errorf("Claim under a refusing guard: err = %v, want the refusal", err)
 	}
@@ -849,7 +849,7 @@ func TestDisclosureNamesTheRepositoryItWouldReach(t *testing.T) {
 func driveAResolution(t *testing.T, b *Backend) (prURL string) {
 	t.Helper()
 	ctx := t.Context()
-	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
+	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -1112,7 +1112,7 @@ func TestArtifactPathCarriesTheAgentFilename(t *testing.T) {
 	ctx := t.Context()
 	guard := &recordingGuard{}
 
-	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", false)
+	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}

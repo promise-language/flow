@@ -19,7 +19,17 @@ import (
 const dispatchedByRunnerEnv = "FLOW_DISPATCHED_BY_RUNNER"
 
 func (app *App) cmdRun(ctx context.Context, args []string) int {
-	if !app.rejectArgs("run-step", args) {
+	fs := app.newFlagSet("run-step")
+	of := addOutputFlags(fs)
+	if !app.parseArgs(fs, args) {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		app.usageError("run-step: unexpected argument %q (this command takes no arguments)", fs.Arg(0))
+		return 2
+	}
+	mode, ok := of.mode(app, "run-step")
+	if !ok {
 		return 2
 	}
 	claim, err := app.Backend.LookupActiveClaim(ctx, app.Owner)
@@ -52,10 +62,19 @@ func (app *App) cmdRun(ctx context.Context, args []string) int {
 		return 1
 	}
 
-	enc := json.NewEncoder(app.Out)
-	if err := enc.Encode(res); err != nil {
-		fmt.Fprintln(app.Err, "run-step: encode result:", err)
-		return 1
+	switch mode {
+	case OutputJSON:
+		enc := json.NewEncoder(app.Out)
+		if err := enc.Encode(res); err != nil {
+			fmt.Fprintln(app.Err, "run-step: encode result:", err)
+			return 1
+		}
+	default:
+		line := fmt.Sprintf("%s → %s", res.Step, res.Status)
+		if res.Reason != "" {
+			line += " — " + res.Reason
+		}
+		fmt.Fprintln(app.Out, line)
 	}
 	switch res.Status {
 	// "blocked" is a stop that needs a human, not a failure of the run — but

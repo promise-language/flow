@@ -5,24 +5,30 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/promise-language/flow"
 	"github.com/promise-language/flow/pkg/backend/fake"
+	"github.com/promise-language/flow/pkg/clistate"
 )
 
-// stubAgent is a fake flow.Agent that returns canned responses.
+// stubAgent is a fake flow.Agent that returns canned responses and records
+// the requests it was handed.
 type stubAgent struct {
 	name      string
 	responses []flow.AgentResponse
 	calls     int
+	reqs      []flow.AgentRequest
 }
 
 func (a *stubAgent) Name() string { return a.name }
 
 func (a *stubAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.AgentResponse, error) {
+	a.reqs = append(a.reqs, req)
 	if a.calls >= len(a.responses) {
 		return &flow.AgentResponse{LastText: "default"}, nil
 	}
@@ -72,7 +78,7 @@ func testAppItem(t *testing.T, item flow.Item, types []flow.ItemType, configure 
 
 	ctx := context.Background()
 	ref := flow.ItemRef{BackendName: "fake", Display: item.ID, Ref: json.RawMessage(`"` + item.ID + `"`)}
-	claim, err := be.Claim(ctx, ref, "alice", false)
+	claim, err := be.Claim(ctx, ref, "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -169,6 +175,58 @@ func TestRunOne_AutoEmitSkipsWhenTelemetryNil(t *testing.T) {
 	}
 	if res.Status != "done" {
 		t.Errorf("status = %q, want done", res.Status)
+	}
+}
+
+// RunOne must write a running record before dispatch and clear it after.
+// The handler observes the record mid-flight; after RunOne returns it must
+// be gone.
+func TestRunOne_WritesAndClearsRunningRecord(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+
+	var mu sync.Mutex
+	var midFlightRec *clistate.RunningRecord
+
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			// Read the running record from inside the handler.
+			rec, err := clistate.LoadRunning()
+			mu.Lock()
+			midFlightRec = rec
+			mu.Unlock()
+			if err != nil {
+				return fmt.Errorf("LoadRunning inside handler: %w", err)
+			}
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	if _, err := RunOne(context.Background(), app, claim); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+
+	// Mid-flight: the record must have been present and named the step.
+	mu.Lock()
+	rec := midFlightRec
+	mu.Unlock()
+	if rec == nil {
+		t.Fatal("running record was nil inside the handler — SaveRunning did not write before dispatch")
+	}
+	if rec.Step != "plan" {
+		t.Errorf("running record step = %q, want %q", rec.Step, "plan")
+	}
+	if rec.PID == 0 {
+		t.Error("running record PID = 0, want the current process PID")
+	}
+
+	// After RunOne: the record must be cleared.
+	after, err := clistate.LoadRunning()
+	if err != nil {
+		t.Fatalf("LoadRunning after RunOne: %v", err)
+	}
+	if after != nil {
+		t.Errorf("running record still present after RunOne: %+v", after)
 	}
 }
 
@@ -390,6 +448,282 @@ func TestRunOne_RespectsPromptsBudget(t *testing.T) {
 	}
 	if a.calls != 1 {
 		t.Errorf("agent calls = %d, want 1 (second blocked by budget)", a.calls)
+	}
+}
+
+// Each turn is handed the headroom LEFT in the grant, not the grant itself:
+// passing the whole cap to a second prompt would let the step spend the grant
+// twice over.
+func TestRunOne_AgentRequestCarriesRemainingCostHeadroom(t *testing.T) {
+	a := &stubAgent{
+		name: "stub",
+		responses: []flow.AgentResponse{
+			{LastText: "first", CostUSD: 2},
+			{LastText: "second"},
+		},
+	}
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("two prompts", "plan", func(ctx flow.StepCtx) error {
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1"}); err != nil {
+				return err
+			}
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p2"}); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{Budget: flow.StepBudget{MaxCostUSD: 5}})
+	}, a)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "done" {
+		t.Fatalf("status = %q, want done. res=%+v", res.Status, res)
+	}
+	if len(a.reqs) != 2 {
+		t.Fatalf("agent requests = %d, want 2", len(a.reqs))
+	}
+	if a.reqs[0].MaxCostUSD != 5 {
+		t.Errorf("first MaxCostUSD = %v, want 5 (the whole grant)", a.reqs[0].MaxCostUSD)
+	}
+	if a.reqs[1].MaxCostUSD != 3 {
+		t.Errorf("second MaxCostUSD = %v, want 3 (grant minus the $2 already spent)", a.reqs[1].MaxCostUSD)
+	}
+}
+
+// A handler that set its own ceiling asked for a TIGHTER turn than the step's
+// grant allows. The meter narrows to the headroom, it never widens: overwriting
+// a $1 request with the $5 grant would spend four dollars the handler said it
+// did not want spent.
+func TestRunOne_HandlerCostCeilingIsNarrowedNotWidened(t *testing.T) {
+	a := &stubAgent{
+		name: "stub",
+		responses: []flow.AgentResponse{
+			{LastText: "first"},
+			{LastText: "second"},
+		},
+	}
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("two prompts", "plan", func(ctx flow.StepCtx) error {
+			// Tighter than the grant: must survive.
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1", MaxCostUSD: 1}); err != nil {
+				return err
+			}
+			// Looser than the grant: must be cut down to it.
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p2", MaxCostUSD: 9}); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{Budget: flow.StepBudget{MaxCostUSD: 5}})
+	}, a)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "done" {
+		t.Fatalf("status = %q, want done. res=%+v", res.Status, res)
+	}
+	if len(a.reqs) != 2 {
+		t.Fatalf("agent requests = %d, want 2", len(a.reqs))
+	}
+	if a.reqs[0].MaxCostUSD != 1 {
+		t.Errorf("first MaxCostUSD = %v, want 1 (the handler's own tighter ceiling)", a.reqs[0].MaxCostUSD)
+	}
+	if a.reqs[1].MaxCostUSD != 5 {
+		t.Errorf("second MaxCostUSD = %v, want 5 (the grant, which is tighter than the handler's 9)", a.reqs[1].MaxCostUSD)
+	}
+}
+
+// The turn the substrate stopped at the cap IS the step reaching its cost cap:
+// it parks on cost, and the spend it reports is the real one — including the
+// response that crossed the cap.
+func TestRunOne_CostCapFailureParksOnCost(t *testing.T) {
+	a := &stubAgent{
+		name: "stub",
+		responses: []flow.AgentResponse{{
+			LastText: "stopped",
+			CostUSD:  21.868663,
+			Failure:  &flow.AgentFailure{Kind: flow.FailureCostCap, Message: "budget"},
+		}},
+	}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("spendy", "plan", func(ctx flow.StepCtx) error {
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1"}); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("never reached")
+		}, flow.StepConfig{Budget: flow.StepBudget{MaxCostUSD: 20}})
+	}, a)
+
+	ctx := context.Background()
+	res, err := RunOne(ctx, app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "parked" || res.Park == nil {
+		t.Fatalf("res = %+v, want parked", res)
+	}
+	if res.Park.Kind != flow.ParkBudgetExhausted || res.Park.Axis != flow.AxisCost {
+		t.Errorf("Park = %+v, want budget-exhausted on the cost axis", res.Park)
+	}
+	// The stopped turn still bills: a park that forgot the spend would let the
+	// next dispatch re-run the same turn against a meter that never moved.
+	st, err := be.LoadState(ctx, claim)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if got := st.Artifact("plan").CostUSDSpent; got != 21.868663 {
+		t.Errorf("CostUSDSpent = %v, want 21.868663", got)
+	}
+	var cost flow.AxisReport
+	for _, ax := range res.Park.Axes {
+		if ax.Axis == flow.AxisCost {
+			cost = ax
+		}
+	}
+	if cost.Used != 21.868663 || cost.Granted != 20 || !cost.Exhausted {
+		t.Errorf("cost axis report = %+v, want 21.868663/20 exhausted", cost)
+	}
+}
+
+// zeroCostGrantBackend hands back state whose cost axis carries no grant —
+// the shape a backend that does not meter cost produces.
+type zeroCostGrantBackend struct{ *fake.Backend }
+
+func (b zeroCostGrantBackend) LoadState(ctx context.Context, claim flow.Claim) (*flow.ItemState, error) {
+	st, err := b.Backend.LoadState(ctx, claim)
+	if err != nil {
+		return nil, err
+	}
+	for id, rec := range st.Artifacts {
+		rec.GrantedCostUSD = 0
+		st.Artifacts[id] = rec
+	}
+	return st, nil
+}
+
+// With no cost grant the cap was never ours to claim: a cost-cap response is
+// an ordinary agent failure, not a park on an axis this step does not meter.
+func TestRunOne_CostCapWithoutAGrantIsAPlainFailure(t *testing.T) {
+	a := &stubAgent{
+		name: "stub",
+		responses: []flow.AgentResponse{{
+			LastText: "stopped",
+			CostUSD:  21.868663,
+			Failure:  &flow.AgentFailure{Kind: flow.FailureCostCap, Message: "budget"},
+		}},
+	}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("spendy", "plan", func(ctx flow.StepCtx) error {
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1"}); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("never reached")
+		}, flow.StepConfig{})
+	}, a)
+	app.Backend = zeroCostGrantBackend{Backend: be}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "failed" {
+		t.Fatalf("res = %+v, want failed (no cost grant to park against)", res)
+	}
+	if !strings.Contains(res.Reason, flow.FailureCostCap) {
+		t.Errorf("Reason = %q, want it to name the %s failure", res.Reason, flow.FailureCostCap)
+	}
+	// Nothing was capped by us, so nothing was passed down either.
+	if len(a.reqs) != 1 || a.reqs[0].MaxCostUSD != 0 {
+		t.Errorf("reqs = %+v, want one request with MaxCostUSD 0", a.reqs)
+	}
+}
+
+// Without a grant there is no headroom to narrow to, so the handler's own
+// ceiling is the only one there is and must survive untouched. Narrowing
+// unconditionally would compute a NEGATIVE headroom once the step has spent
+// anything (0 - spent), and hand the turn a ceiling tighter than any real
+// budget — or, at zero spend, a 0 that means unbounded.
+func TestRunOne_NoCostGrantLeavesTheHandlerCeilingAlone(t *testing.T) {
+	a := &stubAgent{
+		name: "stub",
+		responses: []flow.AgentResponse{
+			{LastText: "first", CostUSD: 2},
+			{LastText: "second"},
+		},
+	}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("two prompts", "plan", func(ctx flow.StepCtx) error {
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1", MaxCostUSD: 3}); err != nil {
+				return err
+			}
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p2", MaxCostUSD: 3}); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+	}, a)
+	app.Backend = zeroCostGrantBackend{Backend: be}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "done" {
+		t.Fatalf("status = %q, want done. res=%+v", res.Status, res)
+	}
+	if len(a.reqs) != 2 {
+		t.Fatalf("agent requests = %d, want 2", len(a.reqs))
+	}
+	for i, req := range a.reqs {
+		if req.MaxCostUSD != 3 {
+			t.Errorf("req[%d] MaxCostUSD = %v, want 3 (the handler's ceiling, ungranted step)", i, req.MaxCostUSD)
+		}
+	}
+}
+
+// A grant spent to the last cent leaves zero headroom, and zero means
+// UNBOUNDED to the substrate. So the pre-prompt gate has to fire first: the
+// step parks without a second dispatch. A weakened gate would turn the fully
+// spent grant into a turn with no ceiling at all — worse than the overrun the
+// cap exists to stop.
+func TestRunOne_SpentGrantParksInsteadOfDispatchingAnUncappedTurn(t *testing.T) {
+	a := &stubAgent{
+		name: "stub",
+		responses: []flow.AgentResponse{
+			{LastText: "first", CostUSD: 5}, // spends the grant exactly
+			{LastText: "second"},
+		},
+	}
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("two prompts", "plan", func(ctx flow.StepCtx) error {
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1"}); err != nil {
+				return err
+			}
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p2"}); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("never reached")
+		}, flow.StepConfig{Budget: flow.StepBudget{MaxCostUSD: 5}})
+	}, a)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "parked" || res.Park == nil {
+		t.Fatalf("res = %+v, want parked", res)
+	}
+	if res.Park.Axis != flow.AxisCost {
+		t.Errorf("Park = %+v, want axis=cost", res.Park)
+	}
+	if len(a.reqs) != 1 {
+		t.Fatalf("agent requests = %d, want 1 (the second must never be dispatched)", len(a.reqs))
+	}
+	if a.reqs[0].MaxCostUSD != 5 {
+		t.Errorf("first MaxCostUSD = %v, want 5", a.reqs[0].MaxCostUSD)
 	}
 }
 

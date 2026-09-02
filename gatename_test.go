@@ -18,6 +18,10 @@ func TestGateName_ConceptAndInstance(t *testing.T) {
 		{"tested", "tested", "", true},
 		{"tested:wasm", "tested", "wasm", true},
 		{"integration", "integration", "", true},
+		// fit divides into instances exactly as tested does, so a wait on one
+		// condition can re-measure that condition rather than the whole set.
+		{"fit", "fit", "", true},
+		{"fit:disk", "fit", "disk", true},
 		// The instance is the project's and is never validated: only the
 		// project knows how its work divides.
 		{"tested:anything-at-all", "tested", "anything-at-all", true},

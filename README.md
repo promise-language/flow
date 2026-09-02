@@ -155,7 +155,7 @@ import (
 func main() {
     backend, err := ghbackend.NewBackend(ghbackend.Config{
         BinaryName: "issue",
-        VerifyCmd:  []string{"bash", "bin/verify.sh"}, // your project's gate
+        VerifyCmd:  []string{"bin/verify"}, // your project's gate
         // Guard is what lets this publish anything at all. With none, reads
         // work and the first write refuses — see docs/disclosure.md.
         Guard: nil,
@@ -357,8 +357,12 @@ Every step is capped on four axes; exhausting any one parks the item with
 |---|---|---|---|
 | invocations | `3` | `MaxInvocations(n)` | SDK pre-dispatch |
 | prompts / invocation | `1` | `MaxPromptsPerInvocation(n)` | metered `Agent` wrapper |
-| cost (USD) | `$10` | `MaxCostUSD(d)` | pre-dispatch + per `Agent.Run` |
+| cost (USD) | `$10` | `MaxCostUSD(d)` | pre-dispatch + per `Agent.Run` + in-turn via `--max-budget-usd` |
 | timeout | `30m` | `Timeout(d)` | `context.WithTimeout` |
+
+The cost cap is not exact: a substrate learns what a model call cost only once
+that call has returned, so a turn stops at the first call that crosses the
+remaining grant. The overrun is bounded by one model call, not by a whole turn.
 
 ```go
 f.AddStep("implement", "implementation", stepImpl,
@@ -435,7 +439,7 @@ reference `do-task` flow implements.
 
 A flow selected for a `task`/`bug` item produces one artifact per step and
 advances to the first unresolved one. The validation gate is your project's
-verify command (`Worktree.Validate`, e.g. `bin/verify.sh`); a passing
+verify command (`Worktree.Validate`, e.g. `bin/verify`); a passing
 validation is always tied to the **exact tree/commit it ran against** —
 changing the tree or rebasing invalidates it.
 

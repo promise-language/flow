@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/promise-language/flow"
+	"github.com/promise-language/flow/pkg/clistate"
 )
 
 // SelectFlow picks the first flow in app.Flows whose constraints match the
@@ -89,7 +92,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 			if rec.Required && !rec.Resolved {
 				return flow.InvocationResult{
 					Item:   claim.ItemRef.Display,
-					Status: "failed",
+					Status: string(flow.StatusFailed),
 					Reason: fmt.Sprintf("no eligible flow but required artifact %q still pending — refusing premature finalize/release", rec.Id),
 				}, nil
 			}
@@ -103,7 +106,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 			if err := fz.Finalize(ctx, claim); err != nil {
 				return flow.InvocationResult{
 					Item:   claim.ItemRef.Display,
-					Status: "failed",
+					Status: string(flow.StatusFailed),
 					Reason: "finalize: " + err.Error(),
 				}, nil
 			}
@@ -112,7 +115,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		return flow.InvocationResult{
 			Flow:   "",
 			Item:   claim.ItemRef.Display,
-			Status: "done",
+			Status: string(flow.StatusDone),
 			Reason: reason,
 		}, nil
 	}
@@ -126,9 +129,9 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 			// A gate that a human has to clear is reported as "blocked", not
 			// "skipped": a skip claims the next cycle might pass, and this one
 			// will not until somebody acts. See flow.ErrBlocked.
-			status := "skipped"
+			status := string(flow.StatusSkipped)
 			if errors.Is(perr, flow.ErrBlocked) {
-				status = "blocked"
+				status = string(flow.StatusBlocked)
 			}
 			return flow.InvocationResult{
 				Item:   claim.ItemRef.Display,
@@ -191,7 +194,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// Reaching here means the signal isn't set yet — skip without
 	// consuming budget.
 	if li.Kind == flow.LifecycleAwait {
-		result.Status = "skipped"
+		result.Status = string(flow.StatusSkipped)
 		result.Reason = fmt.Sprintf("awaiting signal %q", li.SignalId)
 		return result, nil
 	}
@@ -242,6 +245,19 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	if app.Telemetry != nil {
 		app.Telemetry.StepProgress(stepCtx, claim, li.Name, "")
 	}
+
+	// Record the running step so `status` can report it. The record is
+	// advisory: a failure to write means status will not show "running",
+	// which is a degradation, not a breakage.
+	exe, _ := os.Executable()
+	absExe, _ := filepath.Abs(exe)
+	_ = clistate.SaveRunning(clistate.RunningRecord{
+		Item: claim.ItemRef.Display,
+		Step: li.Result(),
+		PID:  os.Getpid(),
+		Exe:  absExe,
+	})
+	defer clistate.ClearRunning()
 
 	// Dispatch.
 	handlerErr := li.Handler(sctx)
@@ -333,14 +349,14 @@ func translateHandlerError(
 				Reason: fmt.Sprintf("handler returned nil without calling ctx.Resolve* on %q", li.ArtifactId),
 			})
 		}
-		result.Status = "done"
+		result.Status = string(flow.StatusDone)
 		return result, nil
 	}
 
 	// Sentinel translations.
 	var skip flow.ErrSkip
 	if errors.As(handlerErr, &skip) {
-		result.Status = "skipped"
+		result.Status = string(flow.StatusSkipped)
 		result.Reason = skip.Reason
 		return result, nil
 	}
@@ -401,7 +417,7 @@ func translateHandlerError(
 		})
 	}
 
-	result.Status = "failed"
+	result.Status = string(flow.StatusFailed)
 	result.Reason = handlerErr.Error()
 	return result, nil
 }
@@ -485,7 +501,7 @@ func parkAndReturn(
 	if err := app.Backend.Park(ctx, claim, req); err != nil {
 		return flow.InvocationResult{}, fmt.Errorf("backend.Park: %w", err)
 	}
-	result.Status = "parked"
+	result.Status = string(flow.StatusParked)
 	result.Reason = req.Reason
 	cp := req
 	result.Park = &cp
@@ -868,6 +884,17 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 			Cap:  fmt.Sprintf("$%.2f", art.GrantedCostUSD),
 		}
 	}
+	// Hand the turn the headroom left in the grant, so the substrate can stop
+	// it at the cap. Without this the grant only bounds when a step stops
+	// being dispatched: a turn that starts inside the grant can spend
+	// whatever it spends, and the overrun is discovered one whole turn late.
+	// A handler that set its own ceiling asked for a TIGHTER one than the
+	// step's, so narrow to it — overwriting would silently widen the very
+	// bound the handler wrote down.
+	if headroom := art.GrantedCostUSD - art.CostUSDSpent; art.GrantedCostUSD > 0 &&
+		(req.MaxCostUSD <= 0 || headroom < req.MaxCostUSD) {
+		req.MaxCostUSD = headroom
+	}
 	if err := m.backend.BumpPrompts(ctx, m.claim, string(li.ArtifactId)); err != nil {
 		return nil, fmt.Errorf("bump prompts: %w", err)
 	}
@@ -884,6 +911,20 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 		// Update local mirror so subsequent calls see fresh cost.
 		art.CostUSDSpent += resp.CostUSD
 		m.stepCtx.state.Artifacts[li.ArtifactId] = art
+	}
+	// A turn the substrate stopped at the cap we set IS this step reaching
+	// its cost cap, so it parks on cost through the same sentinel the
+	// pre-prompt gate returns — one park path, one axis snapshot, and the
+	// AddCost above has already put the true spend on the mirror the
+	// snapshot reads. Without a cost grant the cap was never ours to claim:
+	// fall through to the ordinary agent failure.
+	if err == nil && resp != nil && resp.Failure != nil &&
+		resp.Failure.Kind == flow.FailureCostCap && art.GrantedCostUSD > 0 {
+		return resp, flow.ErrBudgetExhausted{
+			Step: li.Result(),
+			Axis: flow.AxisCost,
+			Cap:  fmt.Sprintf("$%.2f", art.GrantedCostUSD),
+		}
 	}
 	// Surface AgentResponse.Failure through the error return so the
 	// canonical "if err != nil { return err }" pattern in handlers picks

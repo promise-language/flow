@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -83,7 +84,7 @@ type failingClaimBackend struct {
 	claimErr error
 }
 
-func (b *failingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, force bool) (flow.Claim, error) {
+func (b *failingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
 	return flow.Claim{}, b.claimErr
 }
 
@@ -146,7 +147,7 @@ func TestCmdResolve_ResumesActiveClaim(t *testing.T) {
 	// Pre-claim as app.Owner — cmdResolve must resume this claim via
 	// LookupActiveClaim and never touch ListEligible (which fails here).
 	ref := flow.ItemRef{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)}
-	if _, err := inner.Claim(context.Background(), ref, "alice", false); err != nil {
+	if _, err := inner.Claim(context.Background(), ref, "alice", nil); err != nil {
 		t.Fatalf("pre-claim: %v", err)
 	}
 	be := &failingListBackend{Backend: inner, err: errors.New("ListEligible must not be called on resume path")}
@@ -309,19 +310,20 @@ func (b *conflictThenOkBackend) ListEligible(ctx context.Context) ([]flow.ItemRe
 	return b.refs, nil
 }
 
-func (b *conflictThenOkBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, force bool) (flow.Claim, error) {
+func (b *conflictThenOkBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
 	id := string(ref.Ref)
 	b.claimAttempts = append(b.claimAttempts, id)
 	if b.nonConflict != nil {
 		return flow.Claim{}, b.nonConflict
 	}
 	if b.conflictRefs[id] {
-		// Mirror tracker ErrItemAlreadyLeased wrapped through the runner
-		// 502 + Backend.Claim prefixes — the substring isLeaseItemConflict
-		// matches must survive all wraps.
-		return flow.Claim{}, errors.New(`tracker backend: Claim: runner POST /v1/lease: 502 Bad Gateway: lease: record manual lease on tracker: tracker 409 Conflict: item "x" already leased to arena "other"; incoming arena "self" refused`)
+		return flow.Claim{}, flow.ErrClaimRefused{
+			Code:       "item-already-leased",
+			ItemScoped: true,
+			Reason:     fmt.Sprintf("item %s already leased to arena \"other\"", id),
+		}
 	}
-	return b.Backend.Claim(ctx, ref, owner, force)
+	return b.Backend.Claim(ctx, ref, owner, overrides)
 }
 
 func TestCmdResolve_AutoSelectIteratesOnLeaseConflict(t *testing.T) {
@@ -346,10 +348,10 @@ func TestCmdResolve_AutoSelectIteratesOnLeaseConflict(t *testing.T) {
 	if len(be.claimAttempts) != 3 {
 		t.Errorf("Claim attempts = %v, want 3 (two conflicts + one success)", be.claimAttempts)
 	}
-	if !strings.Contains(errBuf.String(), "1 already leased by another arena") {
+	if !strings.Contains(errBuf.String(), "1 — ") || !strings.Contains(errBuf.String(), "trying next") {
 		t.Errorf("expected ref 1 conflict-skip line; got %q", errBuf.String())
 	}
-	if !strings.Contains(errBuf.String(), "2 already leased by another arena") {
+	if !strings.Contains(errBuf.String(), "2 — ") || !strings.Contains(errBuf.String(), "trying next") {
 		t.Errorf("expected ref 2 conflict-skip line; got %q", errBuf.String())
 	}
 	// Ref 3 must actually be claimed and driven through the step.
@@ -410,22 +412,80 @@ func TestCmdResolve_AutoSelectNonConflictErrorExitsOne(t *testing.T) {
 	}
 }
 
-func TestIsLeaseItemConflict(t *testing.T) {
+func TestAutoSelectRefusalBranching(t *testing.T) {
 	cases := []struct {
-		name string
-		err  error
-		want bool
+		name      string
+		err       error
+		wantRetry bool // true → the loop should try the next ref
 	}{
-		{"nil", nil, false},
-		{"plain conflict (raw ledger format)", errors.New(`item "T0042" already leased to arena "other"; incoming arena "self" refused`), true},
-		{"fully wrapped through runner 502 + tracker backend prefix", errors.New(`tracker backend: Claim: runner POST /v1/lease: 502 Bad Gateway: lease: record manual lease on tracker: tracker 409 Conflict: item "T0042" already leased to arena "other"; incoming arena "self" refused`), true},
+		{"nil error", nil, false},
+		{"item-scoped typed refusal", flow.ErrClaimRefused{Code: "item-already-leased", ItemScoped: true, Reason: "already leased"}, true},
+		{"arena-scoped typed refusal", flow.ErrClaimRefused{Code: "not-admitted", ItemScoped: false, Reason: "arena not admitted"}, false},
 		{"unrelated error", errors.New("dial tcp: connection refused"), false},
-		{"arena bijection (a different conflict — NOT retryable per-ref)", errors.New(`arena "self" already leases item "T0099"`), false},
+		{"wrapped item-scoped refusal", fmt.Errorf("backend: %w", flow.ErrClaimRefused{Code: "claim-race", ItemScoped: true, Reason: "race"}), true},
+		{"wrapped arena-scoped refusal", fmt.Errorf("backend: %w", flow.ErrClaimRefused{Code: "not-admitted", ItemScoped: false, Reason: "not admitted"}), false},
 	}
 	for _, c := range cases {
-		if got := isLeaseItemConflict(c.err); got != c.want {
-			t.Errorf("isLeaseItemConflict(%q) = %v, want %v", c.err, got, c.want)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			if c.err == nil {
+				return // nil is not a refusal
+			}
+			var refused flow.ErrClaimRefused
+			got := errors.As(c.err, &refused) && refused.ItemScoped
+			if got != c.wantRetry {
+				t.Errorf("retry=%v, want %v for err=%v", got, c.wantRetry, c.err)
+			}
+		})
+	}
+}
+
+// TestCmdResolve_AutoSelectStopsOnArenaScopedRefusal verifies that the
+// auto-select loop exits 1 on an arena-scoped (ItemScoped=false) refusal
+// instead of trying the next ref.
+func TestCmdResolve_AutoSelectStopsOnArenaScopedRefusal(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	inner.AddItem(flow.Item{ID: "2", Type: "task", Title: "2"})
+	refs := []flow.ItemRef{
+		{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
+		{BackendName: "fake", Display: "2", Ref: json.RawMessage(`"2"`)},
+	}
+	be := &arenaScopedRefusalBackend{
+		Backend: inner,
+		refs:    refs,
+	}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (arena-scoped refusal must stop); err=%q", code, errBuf.String())
+	}
+	if be.claimAttempts != 1 {
+		t.Errorf("Claim attempts = %d, want 1 (must NOT iterate past arena-scoped refusal)", be.claimAttempts)
+	}
+	if !strings.Contains(errBuf.String(), "refused") {
+		t.Errorf("expected refusal message; got %q", errBuf.String())
+	}
+}
+
+// arenaScopedRefusalBackend returns an arena-scoped (ItemScoped=false) refusal
+// from every Claim call.
+type arenaScopedRefusalBackend struct {
+	*fake.Backend
+	refs          []flow.ItemRef
+	claimAttempts int
+}
+
+func (b *arenaScopedRefusalBackend) ListEligible(ctx context.Context) ([]flow.ItemRef, error) {
+	return b.refs, nil
+}
+
+func (b *arenaScopedRefusalBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
+	b.claimAttempts++
+	return flow.Claim{}, flow.ErrClaimRefused{
+		Code:   "not-admitted",
+		Reason: "arena not admitted (check \"git-identity\")",
+		Check:  "git-identity",
 	}
 }
 
@@ -823,5 +883,90 @@ func TestCmdResolve_AutoSelectNeverCallsDiscover(t *testing.T) {
 	code := app.cmdResolve(context.Background(), nil)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Explicit-ref refusal: `resolve <id>` with a typed claim refusal must render
+// via formatClaimRefusal and exit 1, not fall into the generic error path.
+// ---------------------------------------------------------------------------
+
+// refusingResolveBackend refuses Claim with a typed ErrClaimRefused and
+// implements RefResolver so the explicit-id path can resolve the ref.
+type refusingResolveBackend struct {
+	*fake.Backend
+	refusal flow.ErrClaimRefused
+}
+
+func (b *refusingResolveBackend) ResolveRef(ctx context.Context, id string) (flow.ItemRef, error) {
+	return flow.ItemRef{BackendName: "fake", Display: id, Ref: json.RawMessage(`"` + id + `"`)}, nil
+}
+
+func (b *refusingResolveBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
+	return flow.Claim{}, b.refusal
+}
+
+func TestCmdResolve_ExplicitIdRefusalRendering(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be := &refusingResolveBackend{
+		Backend: inner,
+		refusal: flow.ErrClaimRefused{
+			Code:     "not-admitted",
+			Reason:   "arena not admitted",
+			Check:    "git-identity",
+			Override: "force-unadmitted",
+		},
+	}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), []string{"1"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
+	}
+	got := errBuf.String()
+	if !strings.Contains(got, "refused") {
+		t.Errorf("expected 'refused' in output; got %q", got)
+	}
+	if !strings.Contains(got, `check "git-identity"`) {
+		t.Errorf("expected check name; got %q", got)
+	}
+	if !strings.Contains(got, "--force-unadmitted") {
+		t.Errorf("expected override hint; got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// --force-unadmitted on resolve
+// ---------------------------------------------------------------------------
+
+// overrideRecordingResolveBackend records which overrides Claim receives,
+// implements RefResolver for the explicit-id path, and delegates to fake.
+type overrideRecordingResolveBackend struct {
+	*fake.Backend
+	lastOverrides []flow.ClaimOverride
+}
+
+func (b *overrideRecordingResolveBackend) ResolveRef(ctx context.Context, id string) (flow.ItemRef, error) {
+	return flow.ItemRef{BackendName: "fake", Display: id, Ref: json.RawMessage(`"` + id + `"`)}, nil
+}
+
+func (b *overrideRecordingResolveBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
+	b.lastOverrides = overrides
+	return b.Backend.Claim(ctx, ref, owner, overrides)
+}
+
+func TestCmdResolve_ForceUnadmittedPassesOverride(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be := &overrideRecordingResolveBackend{Backend: inner}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), []string{"1", "--force-unadmitted"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if len(be.lastOverrides) != 1 || be.lastOverrides[0] != flow.OverrideUnadmitted {
+		t.Errorf("Claim received overrides=%v, want [OverrideUnadmitted]", be.lastOverrides)
 	}
 }

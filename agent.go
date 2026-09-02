@@ -18,6 +18,29 @@ type AgentRequest struct {
 	Model           string
 	Effort          string // low | medium | high | max
 	Worktree        string // cwd for the agent process
+
+	// MaxCostUSD is the ceiling on what THIS turn may spend, in USD. Zero
+	// means unbounded. It is the headroom left in the step's cost grant, so
+	// an impl that can enforce it turns the cost axis from a gate on
+	// starting a turn into the cap docs/resolution.md describes — a step
+	// that reaches it stops there rather than discovering the overrun at the
+	// next dispatch, which is one whole unbounded turn too late.
+	//
+	// The bound is not exact, and no impl should be described as if it were:
+	// a substrate learns what a model call cost only once that call has
+	// returned, so the turn stops at the FIRST call that crosses the cap and
+	// the overrun is bounded by one model call rather than by a whole turn.
+	// That is the difference the axis is for — one call is a quantity an
+	// operator can reason about; one turn is not.
+	//
+	// An impl whose substrate accepts a spend limit MUST pass it through and
+	// report the stop as AgentFailure{Kind: FailureCostCap}, keeping the
+	// turn's cost in AgentResponse.CostUSD so the meter still bills it. A
+	// caller that sets this field itself is asking for a tighter ceiling
+	// than the step's; a metered wrapper must narrow it, never widen it. An
+	// impl that cannot enforce it may ignore the field; the caller's
+	// pre-dispatch and pre-prompt gates still apply.
+	MaxCostUSD float64
 }
 
 // AgentResponse is the aggregated result of one Agent.Run call. Failure==nil
@@ -55,9 +78,15 @@ type AgentResponse struct {
 	Failure         *AgentFailure
 }
 
+// FailureCostCap is the AgentFailure.Kind for a turn the substrate stopped
+// because it reached AgentRequest.MaxCostUSD. One constant because the
+// producer (flow/claude) and the consumer (flow/cli's metered agent, which
+// translates it into a cost park) must agree on the string.
+const FailureCostCap = "cost-cap"
+
 // AgentFailure carries structured failure info inside AgentResponse.
 type AgentFailure struct {
-	Kind string // no-result | killed | cancelled | exit-error | start-error
+	Kind string // no-result | killed | cancelled | exit-error | start-error | cost-cap
 	// Transient signals an infrastructure failure (remote runner died,
 	// network blip, transient 5xx) rather than a real claude-side
 	// failure. When true, the orchestrator parks the step with

@@ -193,6 +193,11 @@ const (
 	// GateIntegration — will the mainline still be green. The composition every
 	// decision to propose or to land rests on.
 	GateIntegration GateName = "integration"
+	// GateFit — the machine is fit to be given work. The only concept whose
+	// subject is not the change: it measures the host, before work is given, and
+	// a machine that cannot build is not a change that may not land. It is
+	// therefore never part of an `integration`. See docs/environment.md.
+	GateFit GateName = "fit"
 )
 
 // AllGateConcepts returns every declared concept, in declaration order.
@@ -201,6 +206,7 @@ const (
 func AllGateConcepts() []GateName {
 	return []GateName{
 		GateFormatted, GateBuilds, GateChecked, GateTested, GateCovered, GateIntegration,
+		GateFit,
 	}
 }
 

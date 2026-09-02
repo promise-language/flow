@@ -281,7 +281,8 @@ type Claim struct {
 	ItemRef     ItemRef         `json:"item"`
 	Owner       string          `json:"owner"`
 	ClaimedAt   time.Time       `json:"claimed_at"`
-	Token       json.RawMessage `json:"token"` // backend-internal credential
+	Token       json.RawMessage `json:"token"`               // backend-internal credential
+	Overrides   []string        `json:"overrides,omitempty"` // opaque strings echoed from the lease response
 }
 
 // ClaimInfo is the read-only view returned by Backend.LookupClaim. Cannot be
@@ -397,10 +398,10 @@ type Backend interface {
 	// ListEligible returns candidate items in the backend's scope.
 	ListEligible(ctx context.Context) ([]ItemRef, error)
 
-	// Claim acquires an exclusive lease on the item. force overrides backend-side
-	// safety refusals (e.g. the tracker backend refuses a claim onto an arena that
-	// still holds unsaved work); backends without such a check ignore it.
-	Claim(ctx context.Context, ref ItemRef, owner string, force bool) (Claim, error)
+	// Claim acquires an exclusive lease on the item. overrides names safety
+	// checks the operator chose to bypass; nil means no overrides. The old
+	// force=true maps to []ClaimOverride{OverrideDirtyTree}.
+	Claim(ctx context.Context, ref ItemRef, owner string, overrides []ClaimOverride) (Claim, error)
 
 	// Release relinquishes the lease.
 	Release(ctx context.Context, claim Claim) error

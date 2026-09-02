@@ -54,7 +54,7 @@ A step that reaches a cap **parks** rather than continuing. Parking is not failu
 
 Budget is granted additively by an operator. A grant clears the park it satisfies, and only that park: granting an axis that is not the exhausted one leaves the item parked, because the next dispatch would re-park immediately.
 
-Infrastructure failures consume no budget. A step that could not run because the environment was unavailable has not spent an attempt.
+Infrastructure failures consume no budget. A step that could not run because the environment was unavailable has not spent an attempt. What counts as one, and how it is told apart from a failure of the work, is [environment.md](environment.md).
 
 **Spending resources must produce progress.** Every invocation either advances the item or leaves behind something the next invocation starts from — the work done, the answer needed, or the reason the attempt could not be recorded. An invocation that consumes budget and leaves the item exactly as it found it has not failed once; it has established that every remaining invocation will fail the same way, because nothing about the next attempt differs from the last.
 
@@ -138,6 +138,8 @@ The non-modification rule is what makes any of it repeatable. A measurement that
 | Whether a machine is fit to be given work | Before work is given |
 
 Every one of them measures something that already exists, and reports on it.
+
+The third row is the only one whose subject is not the work. What makes a machine fit, and what follows from an answer of unfit, is [environment.md](environment.md).
 
 ## Guards
 

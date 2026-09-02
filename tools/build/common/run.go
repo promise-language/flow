@@ -256,8 +256,11 @@ func number(v float64) string {
 }
 
 func unitSuffix(unit string) string {
-	if unit == "percent" {
+	switch unit {
+	case "percent":
 		return "%"
+	case "bytes":
+		return " B"
 	}
 	return ""
 }

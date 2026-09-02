@@ -66,6 +66,13 @@ func Quantity(name string, v float64, unit string) Metric {
 	return Metric{Name: name, Type: MetricFloat, Float: v, Unit: unit}
 }
 
+// Size is a measurement of how much, in whole units of it. Neither of the two
+// above fits: Count takes an int and carries no unit, and Quantity is a float.
+// Bytes are whole, carry a unit, and outrun what an int holds on a 32-bit host.
+func Size(name string, n int64, unit string) Metric {
+	return Metric{Name: name, Type: MetricInt, Int: n, Unit: unit}
+}
+
 // Number is the value as a float, for comparison against a threshold. Widening
 // is safe HERE and nowhere else: the judging layer compares, it does not store,
 // so nothing downstream can mistake the widened form for what was measured.
@@ -188,6 +195,14 @@ var gates = map[string]gateDef{
 	"integration": {
 		summary: "everything that must hold before a change may land",
 		parts:   []string{"formatted", "builds", "checked", "tested"},
+	},
+	// fit is the one gate here whose subject is not the code: it measures the
+	// machine, before work is given to it. It is deliberately NOT a part of
+	// integration — a machine that cannot build is not a change that may not
+	// land. See docs/environment.md.
+	"fit": {
+		summary: "space where this project's work writes",
+		measure: measureFit,
 	},
 }
 
@@ -402,6 +417,105 @@ func measureCovered(repoRoot string) ([]Metric, string, error) {
 	return []Metric{Quantity("statement_coverage", pct, "percent")}, incomplete, nil
 }
 
+// measureFit reports the space available where this project's work writes.
+//
+// It reports bytes and stops. How much is enough is a property of this
+// project's build, held by the judging layer: "is there enough disk" reads like
+// a yes/no question and is not one, and a gate that answered it would be the
+// threshold sitting inside the party under measurement.
+//
+// Two filesystems, because they are two requirements and are often not one
+// device: the worktree is where the change is written, and the build cache is
+// where the toolchain writes what it reuses. Both are reported every run even
+// when they resolve to the same filesystem — an envelope whose shape varied by
+// host is one no threshold can be written against.
+func measureFit(repoRoot string) ([]Metric, string, error) {
+	free, err := freeBytesNear(repoRoot)
+	if err != nil {
+		return nil, "", fmt.Errorf("free space at %s: %w", repoRoot, err)
+	}
+	metrics := []Metric{Size("worktree_free_bytes", free, "bytes")}
+
+	cache, why := buildCache(repoRoot)
+	if why != "" {
+		// Named rather than omitted. One filesystem of two IS a run that
+		// measured less than a full one, and an incomplete run is never a
+		// pass — which is the right answer here: a machine whose toolchain
+		// cannot say where it writes is not one this project's work runs on.
+		return metrics, "the build cache location is unknown, so only the " +
+			"worktree filesystem was measured: " + why, nil
+	}
+	free, err = freeBytesNear(cache)
+	if err != nil {
+		return nil, "", fmt.Errorf("free space at %s: %w", cache, err)
+	}
+	return append(metrics, Size("build_cache_free_bytes", free, "bytes")), "", nil
+}
+
+// buildCache asks the toolchain where it writes what it reuses, and returns
+// either the path or the reason there is none to report. `go env GOCACHE` is
+// the only authoritative answer: recomputing it here would be a second copy of
+// the toolchain's own resolution, wrong on every machine that configured it.
+//
+// The answer is read from stdout ALONE, which is why this does not go through
+// gateOutput. The counting gates read lines, where a warning on stderr is one
+// more line matching nothing; a path read from the combined stream is a path
+// with the warning glued to the front of it. `go env` writes its diagnostics
+// and its toolchain-download notices to stderr and the value to stdout, and the
+// concatenation names nothing — which freeBytesNear then walks up to the
+// process's own directory and reports as the build cache, at full size, with no
+// incomplete to say the number is about somewhere else.
+func buildCache(repoRoot string) (path, why string) {
+	stdout, stderr, err := gateValue(repoRoot, "go", "env", "GOCACHE")
+	cache := strings.TrimSpace(stdout)
+	if err != nil || cache == "" {
+		return "", gocacheReason(stderr, err)
+	}
+	// An answer that is not an absolute path is not a location. freeBytesNear
+	// walks up to the nearest filesystem it can find, and a relative answer
+	// walks up to the process's own directory — a real number about a
+	// filesystem nobody asked about, which is worse than no number at all.
+	if !filepath.IsAbs(cache) {
+		return "", fmt.Sprintf("`go env GOCACHE` answered %q, which is not an absolute path", cache)
+	}
+	return cache, ""
+}
+
+// gocacheReason accounts for a `go env GOCACHE` that did not answer.
+//
+// Never empty, which is the whole of it. An unfit machine is reported with the
+// measurement that established it, and a reason that trails off after a colon
+// leaves an operator to reproduce the condition on the machine that is already
+// the problem. The child's own stderr is preferred because it says what the
+// toolchain objected to; a child that could not be started produced none, and
+// there the error is the entire account.
+func gocacheReason(stderr string, err error) string {
+	if line := firstLine(strings.TrimSpace(stderr)); line != "" {
+		return line
+	}
+	if err != nil {
+		return err.Error()
+	}
+	return "`go env GOCACHE` printed nothing"
+}
+
+// freeBytesNear reports free space for path, or for the nearest ancestor that
+// exists. A build cache that has never been written has no directory yet, and
+// `fit` runs on exactly that machine — the fresh one, before work is given — so
+// a path that is not there yet is the ordinary case rather than an error.
+func freeBytesNear(path string) (int64, error) {
+	for p := filepath.Clean(path); ; {
+		if Exists(p) {
+			return freeBytes(p)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return 0, fmt.Errorf("nothing on the path %s exists", path)
+		}
+		p = parent
+	}
+}
+
 // gateOutput runs a child and returns its combined output as a string.
 //
 // Combined, and captured: the child's stdout must not reach ours, which
@@ -417,6 +531,24 @@ func gateOutput(dir, name string, args ...string) (string, error) {
 	cmd.Stderr = &buf
 	err := cmd.Run()
 	return buf.String(), err
+}
+
+// gateValue runs a child whose output is a VALUE, and keeps its two streams
+// apart.
+//
+// Both are still captured, for gateOutput's reason: our stdout carries the
+// envelope and nothing else. What differs is that the caller can tell the
+// answer from everything said around it — see buildCache, where mixing them
+// turns a warning into part of a path.
+func gateValue(dir, name string, args ...string) (stdout, stderr string, err error) {
+	fmt.Fprintf(os.Stderr, "==> %s %s\n", name, strings.Join(args, " "))
+	var out, errs bytes.Buffer
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Stdout = &out
+	cmd.Stderr = &errs
+	err = cmd.Run()
+	return out.String(), errs.String(), err
 }
 
 func countLines(s string) int {

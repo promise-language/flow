@@ -152,7 +152,7 @@ func RunWithArgs(app App, args []string) int {
 		return app.cmdDoctor(ctx, rest)
 	case "list":
 		return app.cmdList(ctx, rest)
-	case "claim", "lease":
+	case "claim":
 		return app.cmdClaim(ctx, rest)
 	case "release":
 		return app.cmdRelease(ctx, rest)
@@ -164,7 +164,7 @@ func RunWithArgs(app App, args []string) int {
 		return app.cmdGrant(ctx, rest)
 	case "run-step":
 		return app.cmdRun(ctx, rest)
-	case "resolve", "run-all":
+	case "resolve":
 		return app.cmdResolve(ctx, rest)
 	default:
 		return app.usageError("%s: unknown command %q", app.Name, cmd)
@@ -328,9 +328,9 @@ func usage(bin string) string {
 usage:
   %[1]s doctor                       verify backend prereqs
   %[1]s list [--scope SCOPE] [--tag T] list items this flow can process
-  %[1]s claim <item-id>              acquire a claim on an item (alias: lease)
+  %[1]s claim <item-id>              acquire a claim on an item
   %[1]s run-step                     advance ONE lifecycle item (one prompt → one artifact)
-  %[1]s resolve [<item-id>]          run ALL steps until finalized or parked (alias: run-all).
+  %[1]s resolve [<item-id>]          run ALL steps until finalized or parked.
                                      With <item-id>, claims it first; else uses the active claim.
   %[1]s status [<item-id>]           read-only lifecycle checklist. With <item-id>, inspects
                                      that item without claiming it (requires StateInspector).
@@ -343,7 +343,7 @@ usage:
   %[1]s release                      drop the claim
   %[1]s reseed [--force]              clear seed state (artifacts, budgets, park) on the active claim
 
-status, list, grant, and resolve print human-readable text on a terminal and
+status, list, grant, run-step, and resolve print human-readable text on a terminal and
 JSON when piped or redirected; --json / --human (or FLOW_OUTPUT=json|human)
 force one. resolve's human text is its progress narration on stderr, which it
 prints in both modes — in human mode it writes nothing to stdout at all.`, bin)
