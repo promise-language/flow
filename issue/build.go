@@ -149,7 +149,8 @@ func (b *builder) addContributorSteps(f *flow.Flow, cfg Config) {
 		flow.StepConfig{Budget: cfg.budgetFor(StepCoverage),
 			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true}})
 	f.AddSignalStep("create pull request", flow.SignalId(StepOpenPR), b.stepOpenPR,
-		flow.StepConfig{Budget: cfg.budgetFor(StepOpenPR)})
+		flow.StepConfig{Budget: cfg.budgetFor(StepOpenPR),
+			Writes: flow.WriteContract{MayBranch: true, MayCommit: true}})
 }
 
 // addIntegrationSteps registers the three integration steps: verify the merge
