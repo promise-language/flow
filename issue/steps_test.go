@@ -2562,6 +2562,112 @@ func TestCommitRepair_ParkReasonOmitsHookText(t *testing.T) {
 	}
 }
 
+// Stage failure inside the repair loop — not the initial Stage at the top of
+// commitWithRepair, but the re-stage after verify succeeds within a repair
+// round. The error must propagate directly.
+func TestCommitRepair_InLoopStageFailurePropagates(t *testing.T) {
+	wt := resumedWorktree()
+	wt.commitErrs = []error{hookErr} // first commit fails, enters repair loop
+	// Initial Stage succeeds (stageErrs empty → nil). The in-loop Stage after
+	// verify needs to fail. Stage is called: once at the top (succeeds), then
+	// once in the repair loop (must fail). We provide nil for the first, error
+	// for the second.
+	stageInLoop := errors.New("disk full during re-stage")
+	wt.stageErrs = []error{nil, stageInLoop}
+	agent := &scriptedAgent{replies: []string{"done", "fixed"}}
+	ctx := ctxWithPlan(wt, agent)
+
+	err := testBuilder(t).stepImplement(ctx)
+	if err == nil {
+		t.Fatal("want an error from the in-loop stage failure")
+	}
+	if !errors.Is(err, stageInLoop) {
+		t.Errorf("err = %v, want the in-loop stage error propagated", err)
+	}
+	// Must not park — this is infrastructure, not a deterministic refusal.
+	if ctx.park != nil {
+		t.Errorf("parked on a stage error — infrastructure failures must not park: %+v", ctx.park)
+	}
+}
+
+// The WIP stash on exhaustion must preserve both the first and last hook
+// errors when they differ. A format string that drops either loses the
+// diagnostic chain.
+func TestCommitRepair_WIPStashPreservesBothErrors(t *testing.T) {
+	wt := resumedWorktree()
+	firstHook := errors.New("git commit: exit status 1 (pre-commit: absolute path in fixture.go)")
+	lastHook := errors.New("git commit: exit status 1 (pre-commit: secret token in config.go)")
+	totalCommits := maxDisclosureRevisions + 2
+	commitErrs := make([]error, totalCommits)
+	commitErrs[0] = firstHook
+	for i := 1; i < totalCommits; i++ {
+		commitErrs[i] = lastHook
+	}
+	wt.commitErrs = commitErrs
+	replies := make([]string, maxDisclosureRevisions+2)
+	replies[0] = "done"
+	for i := 1; i < len(replies); i++ {
+		replies[i] = "tried"
+	}
+	agent := &scriptedAgent{replies: replies}
+	ctx := ctxWithPlan(wt, agent)
+
+	_ = testBuilder(t).stepImplement(ctx)
+	if len(ctx.wipSaves) == 0 {
+		t.Fatal("no WIP stash")
+	}
+	last := ctx.wipSaves[len(ctx.wipSaves)-1]
+	if !strings.Contains(last, firstHook.Error()) {
+		t.Errorf("WIP stash missing the first hook error: %q", last)
+	}
+	if !strings.Contains(last, lastHook.Error()) {
+		t.Errorf("WIP stash missing the last hook error: %q", last)
+	}
+}
+
+// The prompt must tell the agent that verify re-runs after the repair.
+// This is new guidance — if removed, the agent cannot know its edit will be
+// validated.
+func TestCommitRepair_PromptMentionsVerifyRerun(t *testing.T) {
+	pc := PromptContext{CommitRefusal: "hook says no"}
+	got, err := renderPrompt(Config{}, PromptCommitRepair, pc)
+	if err != nil {
+		t.Fatalf("renderPrompt: %v", err)
+	}
+	if !strings.Contains(got, "verify") {
+		t.Errorf("prompt does not mention verify re-run: %q", got)
+	}
+}
+
+// Notifications inside the repair loop must include the round number so the
+// operator can distinguish retry #1 from retry #3 in the log.
+func TestCommitRepair_NotificationsCarryRoundNumber(t *testing.T) {
+	wt := resumedWorktree()
+	wt.commitErrs = []error{hookErr, hookErr, nil}
+	agent := &scriptedAgent{replies: []string{"done", "first try", "second try"}}
+	ctx := ctxWithPlan(wt, agent)
+
+	if err := testBuilder(t).stepImplement(ctx); err != nil {
+		t.Fatalf("stepImplement: %v", err)
+	}
+	// Find the repair notifications — there should be one per failed round.
+	var roundNotices []string
+	for _, n := range ctx.notices {
+		if strings.Contains(n, "commit refused by pre-commit hook") {
+			roundNotices = append(roundNotices, n)
+		}
+	}
+	if len(roundNotices) < 2 {
+		t.Fatalf("want at least 2 repair notifications, got %d: %v", len(roundNotices), ctx.notices)
+	}
+	if !strings.Contains(roundNotices[0], "round 1") {
+		t.Errorf("first repair notification = %q, want it to say round 1", roundNotices[0])
+	}
+	if !strings.Contains(roundNotices[1], "round 2") {
+		t.Errorf("second repair notification = %q, want it to say round 2", roundNotices[1])
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Stage repair — the same contract as commit repair, applied to git-add.
 // ---------------------------------------------------------------------------
