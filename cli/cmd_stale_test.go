@@ -329,3 +329,108 @@ func TestCmdStale_WarningItemParked(t *testing.T) {
 		t.Errorf("stderr = %q, want contains 'item is parked'", errBuf.String())
 	}
 }
+
+func TestCmdStale_WarningPendingQuestions(t *testing.T) {
+	app, be, claim, _, errBuf := staleTestEnv(t, true)
+
+	ctx := context.Background()
+	_, err := be.AskQuestions(ctx, claim, []flow.AgentQuestion{
+		{Text: "should we proceed?"},
+	})
+	if err != nil {
+		t.Fatalf("AskQuestions: %v", err)
+	}
+
+	code := app.cmdStale(context.Background(), []string{"plan"})
+	if code != 0 {
+		t.Fatalf("cmdStale = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "1 pending question") {
+		t.Errorf("stderr = %q, want contains '1 pending question'", errBuf.String())
+	}
+}
+
+func TestCmdStale_SeededButNotInFlow(t *testing.T) {
+	// A step ID that exists in the item's artifact records but is not part of
+	// the current flow definition — e.g. leftover from a previous flow version.
+	a := &stubAgent{name: "stub"}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+	}, a)
+
+	ctx := context.Background()
+	// Seed an artifact "old-step" that does not correspond to any step in the flow.
+	if err := be.SeedState(ctx, claim, []flow.ArtifactSpec{
+		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
+		{Id: "old-step", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
+	}); err != nil {
+		t.Fatalf("SeedState: %v", err)
+	}
+	if err := be.ResolveArtifact(ctx, claim, "old-step", flow.ArtifactBody{
+		Type: flow.ArtifactMarkdown, Markdown: "stale data",
+	}); err != nil {
+		t.Fatalf("ResolveArtifact: %v", err)
+	}
+
+	var out, errBuf bytes.Buffer
+	app.Out = &out
+	app.Err = &errBuf
+
+	code := app.cmdStale(context.Background(), []string{"old-step"})
+	if code != 0 {
+		t.Fatalf("cmdStale = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "no longer part of flow") {
+		t.Errorf("stderr = %q, want contains 'no longer part of flow'", errBuf.String())
+	}
+	// Should still mark stale despite the warning.
+	state, err := be.LoadState(ctx, claim)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	rec := state.Artifact("old-step")
+	if !rec.Stale {
+		t.Error("expected old-step artifact to be marked stale despite not being in flow")
+	}
+}
+
+func TestCmdStale_JSONOutputIncludesWarnings(t *testing.T) {
+	app, be, claim, out, errBuf := staleTestEnv(t, true)
+
+	ctx := context.Background()
+	// Create a pending question to trigger the warning.
+	_, err := be.AskQuestions(ctx, claim, []flow.AgentQuestion{
+		{Text: "should we proceed?"},
+	})
+	if err != nil {
+		t.Fatalf("AskQuestions: %v", err)
+	}
+
+	code := app.cmdStale(context.Background(), []string{"--json", "plan"})
+	if code != 0 {
+		t.Fatalf("cmdStale = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	var m map[string]any
+	if err := json.Unmarshal(out.Bytes(), &m); err != nil {
+		t.Fatalf("invalid JSON: %v; raw=%q", err, out.String())
+	}
+	ws, ok := m["warnings"]
+	if !ok {
+		t.Fatal("JSON output missing 'warnings' field")
+	}
+	wsList, ok := ws.([]any)
+	if !ok || len(wsList) == 0 {
+		t.Fatalf("warnings = %v, want non-empty list", ws)
+	}
+	found := false
+	for _, w := range wsList {
+		if s, ok := w.(string); ok && strings.Contains(s, "pending question") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warnings = %v, want one containing 'pending question'", wsList)
+	}
+}
