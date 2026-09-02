@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"math"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -155,6 +156,144 @@ func TestParseUsageResponse_EmptyBody(t *testing.T) {
 	_, err := parseUsageResponse([]byte(`{}`))
 	if err == nil {
 		t.Error("expected error for empty response")
+	}
+}
+
+func TestParseUsageResponse_RateLimitsFormat(t *testing.T) {
+	body := `{
+		"rate_limits": [
+			{
+				"window": "5h",
+				"used": 470,
+				"limit": 1000,
+				"resets_at": "2026-09-01T14:24:00Z"
+			},
+			{
+				"window": "7d",
+				"used": 310,
+				"limit": 1000,
+				"resets_at": "2026-09-04T16:00:00Z"
+			}
+		]
+	}`
+	result, err := parseUsageResponse([]byte(body))
+	if err != nil {
+		t.Fatalf("parseUsageResponse: %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 windows; got %d", len(result))
+	}
+	if result[0].Label != "5h" {
+		t.Errorf("window 0 label = %q, want 5h", result[0].Label)
+	}
+	if math.Abs(result[0].Used-0.47) > 0.001 {
+		t.Errorf("window 0 used = %v, want 0.47", result[0].Used)
+	}
+	if result[0].Length != 5*time.Hour {
+		t.Errorf("window 0 length = %v, want 5h", result[0].Length)
+	}
+}
+
+func TestParseUsageResponse_RateLimitsZeroLimit(t *testing.T) {
+	body := `{
+		"rate_limits": [
+			{
+				"window": "5h",
+				"used": 100,
+				"limit": 0,
+				"resets_at": "2026-09-01T14:24:00Z"
+			}
+		]
+	}`
+	result, err := parseUsageResponse([]byte(body))
+	if err != nil {
+		t.Fatalf("parseUsageResponse: %v", err)
+	}
+	// Zero limit means used fraction is unknown (-1).
+	if result[0].Used != -1 {
+		t.Errorf("zero limit should produce Used=-1; got %v", result[0].Used)
+	}
+}
+
+func TestPrintWindow_ZeroLengthWindow(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	win := windowUsage{
+		Label:    "??",
+		Length:   0, // unknown window length
+		Used:     0.50,
+		ResetsAt: now.Add(1 * time.Hour),
+	}
+	var buf bytes.Buffer
+	printWindow(&buf, win, now)
+	got := buf.String()
+
+	if !strings.Contains(got, "--% of window elapsed") {
+		t.Errorf("zero-length window must show '--%%' elapsed; got %q", got)
+	}
+	if !strings.Contains(got, "50% used") {
+		t.Errorf("used fraction should still render; got %q", got)
+	}
+}
+
+func TestDiscoverOAuthToken_ValidCredentials(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+
+	creds := `{
+		"claudeai_oauth": {
+			"token": "test-token-abc123"
+		}
+	}`
+	if err := os.WriteFile(dir+"/credentials.json", []byte(creds), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tok, reason := discoverOAuthToken()
+	if reason != "" {
+		t.Fatalf("expected success; got reason=%q", reason)
+	}
+	if tok != "test-token-abc123" {
+		t.Errorf("token = %q, want test-token-abc123", tok)
+	}
+}
+
+func TestDiscoverOAuthToken_EmptyToken(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+
+	creds := `{
+		"claudeai_oauth": {
+			"token": ""
+		}
+	}`
+	if err := os.WriteFile(dir+"/credentials.json", []byte(creds), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, reason := discoverOAuthToken()
+	if reason == "" {
+		t.Error("expected failure reason for empty token")
+	}
+	if !strings.Contains(reason, "expired") {
+		t.Errorf("reason should mention 'expired'; got %q", reason)
+	}
+}
+
+func TestDiscoverOAuthToken_NoOAuthKey(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+
+	creds := `{"some_other_key": {"value": "x"}}`
+	if err := os.WriteFile(dir+"/credentials.json", []byte(creds), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, reason := discoverOAuthToken()
+	if reason == "" {
+		t.Error("expected failure reason for missing OAuth key")
+	}
+	if !strings.Contains(reason, "no Claude OAuth") {
+		t.Errorf("reason should mention 'no Claude OAuth'; got %q", reason)
 	}
 }
 
