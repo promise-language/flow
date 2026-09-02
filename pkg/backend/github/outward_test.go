@@ -63,19 +63,44 @@ func carries(d flow.Disclosure, fragment string) bool {
 // spawnTape records every process the backend would have started, and answers
 // plausibly enough for the callers that read the output.
 type spawnTape struct {
-	mu    sync.Mutex
-	calls [][]string // name followed by its arguments
+	mu     sync.Mutex
+	calls  [][]string // name followed by its arguments
+	branch string     // current branch; "" means "main" for the first query
 }
 
 func (s *spawnTape) run(_ context.Context, _ string, name string, args ...string) ([]byte, []byte, error) {
 	s.mu.Lock()
 	s.calls = append(s.calls, append([]string{name}, args...))
+
+	// Track branch switches: `git -C <dir> checkout [-b] <name> [<base>]`.
+	if name == "git" && slices.Contains(args, "checkout") {
+		for i, a := range args {
+			if a == "-b" && i+1 < len(args) {
+				s.branch = args[i+1]
+				break
+			}
+			if a == "checkout" && i+1 < len(args) && args[i+1] != "-b" {
+				s.branch = args[i+1]
+				break
+			}
+		}
+	}
+	cur := s.branch
 	s.mu.Unlock()
+
 	switch {
 	case name == "gh":
 		return []byte("https://github.com/o/r/pull/1\n"), nil, nil
+	case slices.Contains(args, "--abbrev-ref") && slices.Contains(args, "HEAD"):
+		if cur != "" {
+			return []byte(cur + "\n"), nil, nil
+		}
+		// Before any checkout: report the base branch so pre-claim
+		// preconditions pass.
+		return []byte("main\n"), nil, nil
 	case slices.Contains(args, "rev-parse"):
-		return []byte("flow/issue-42\n"), nil, nil
+		// All other rev-parse calls (local SHA, origin/main, branch name).
+		return []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"), nil, nil
 	case slices.Contains(args, "log"):
 		return []byte("a commit message\x00"), nil, nil
 	}
@@ -95,6 +120,12 @@ func (s *spawnTape) publishing() [][]string {
 		}
 	}
 	return out
+}
+
+func (s *spawnTape) setBranch(name string) {
+	s.mu.Lock()
+	s.branch = name
+	s.mu.Unlock()
 }
 
 func (s *spawnTape) reset() {
@@ -846,13 +877,17 @@ func TestDisclosureNamesTheRepositoryItWouldReach(t *testing.T) {
 // reached too), ask, park, open and merge — and returns the PR URL. Every
 // declared act comes out of it, which is what makes it worth sharing between
 // the tests that assert about the set rather than about one write.
-func driveAResolution(t *testing.T, b *Backend) (prURL string) {
+func driveAResolution(t *testing.T, b *Backend, tape *spawnTape) (prURL string) {
 	t.Helper()
 	ctx := t.Context()
 	claim, err := b.Claim(ctx, b.refFromIssue(42), "alice", nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
+	// Simulate the branch switch that ensureBranch would do in a real
+	// resolution — the test constructs a worktree directly, and Open checks
+	// that CurrentBranch returns the claim branch.
+	tape.setBranch(b.claimBranch(42))
 	if err := b.SeedState(ctx, claim, []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactFile, Required: true, Budget: flow.DefaultStepBudget()},
 	}); err != nil {
@@ -898,10 +933,10 @@ func driveAResolution(t *testing.T, b *Backend) (prURL string) {
 // fails when a declared act has no call site behind it, which is what a write
 // naming the wrong act looks like from outside.
 func TestEveryActReachesTheGuardWithItsFinalBytes(t *testing.T) {
-	b, _, _ := newSeamBackend(t)
+	b, _, tape := newSeamBackend(t)
 	guard := &recordingGuard{}
 	b.out.guard = guard
-	prURL := driveAResolution(t, b)
+	prURL := driveAResolution(t, b, tape)
 
 	for _, a := range flow.AllDisclosureActs() {
 		if len(guard.of(a)) == 0 {
@@ -944,10 +979,10 @@ func TestEveryActReachesTheGuardWithItsFinalBytes(t *testing.T) {
 // forgotten one would fail this as a refusal rather than as a bad value. Both
 // are the same defect; this names it.
 func TestEveryPublishedStringStatesAnOrigin(t *testing.T) {
-	b, _, _ := newSeamBackend(t)
+	b, _, tape := newSeamBackend(t)
 	guard := &recordingGuard{}
 	b.out.guard = guard
-	driveAResolution(t, b)
+	driveAResolution(t, b, tape)
 
 	seen := guard.all()
 	if len(seen) == 0 {
@@ -984,10 +1019,10 @@ func TestEveryPublishedStringStatesAnOrigin(t *testing.T) {
 // "correcting" the state comment to `flow`, which is what its frame looks like,
 // would pass every test in this file.
 func TestEachWriteStatesWhoStandsBehindIt(t *testing.T) {
-	b, _, _ := newSeamBackend(t)
+	b, _, tape := newSeamBackend(t)
 	guard := &recordingGuard{}
 	b.out.guard = guard
-	prURL := driveAResolution(t, b)
+	prURL := driveAResolution(t, b, tape)
 
 	for _, want := range []struct {
 		act      flow.DisclosureAct

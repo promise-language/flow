@@ -116,6 +116,17 @@ func (g *gitOps) IsDirty(ctx context.Context) (bool, error) {
 	return len(strings.TrimSpace(string(stdout))) > 0, nil
 }
 
+// StatusPorcelain returns the raw `git status --porcelain` output INCLUDING
+// untracked files. An empty return means the tree is clean. The raw output
+// is intended for ErrClaimRefused.Detail — printed verbatim, unmodified.
+func (g *gitOps) StatusPorcelain(ctx context.Context) (string, error) {
+	stdout, _, err := g.run(ctx, "status", "--porcelain", "--untracked-files=normal")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(stdout)), nil
+}
+
 // Checkout switches to branch `name`, optionally creating it off base.
 func (g *gitOps) Checkout(ctx context.Context, name, base string, create bool) error {
 	args := []string{"checkout"}
