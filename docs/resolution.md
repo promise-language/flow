@@ -238,6 +238,16 @@ Ignoring is the worst of the three and reads as the most helpful. The gate measu
 
 **A refusal that survives repair parks, and costs nothing.** Once retrying is known to be pointless — the same tree, committed again, refused identically — the step parks carrying the refusal's own message, rather than spending invocations on a repetition it cannot change.
 
+### Duplicate-fix conflicts during rebase
+
+When a rebase conflict exists because the mainline already landed the same fix our branch carries — two independent spellings of one repair — integrating both sides produces a file that differs from the mainline's version permanently. The same conflict returns on the very next rebase, and the one after that. No retry clears it.
+
+The correct resolution is to accept the mainline's version and drop the branch's redundant change. The rebase commit message must record what was dropped and the upstream commit that supersedes it, so the decision is auditable.
+
+**Evidence test (mid-rebase):** run `git log --oneline -5 HEAD -- <file>`. During a rebase `HEAD` is the mainline side. If an upstream commit in that list applies what our change applies, the conflict is a duplicate fix. If a `DUPLICATE-WORK CANDIDATES` block is present in the rebase output, it lists exactly these files and commits and serves as a shortcut; its absence does not change the rule.
+
+**Default:** absent clear evidence that the conflict is a duplicate fix, integrate both sides — the standard conflict-resolution rule applies. The carve-out is not licence to discard work; it gates on objective evidence that the work already landed.
+
 ## Finalizing
 
 Finalizing marks an item's resolution complete and releases the claim. It is terminal: a finalized item is not reprocessed.

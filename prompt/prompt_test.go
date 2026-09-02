@@ -30,6 +30,11 @@ func TestRender_FillsPartials(t *testing.T) {
 	if !strings.Contains(c.RebaseResolution, "git rebase --continue") {
 		t.Error("RebaseResolution missing the continue step")
 	}
+	for _, want := range []string{"duplicate fix", "git log --oneline", "DUPLICATE-WORK CANDIDATES", "mainline", "Absent"} {
+		if !strings.Contains(c.RebaseResolution, want) {
+			t.Errorf("RebaseResolution missing %q", want)
+		}
+	}
 	if !strings.Contains(c.DeferCommit, "later step") {
 		t.Errorf("DeferCommit missing later-step note: %q", c.DeferCommit)
 	}

@@ -2,6 +2,19 @@
 - Resolve each conflict carefully: read the whole file, integrate BOTH sides (keep the
   intent of your change AND the incoming changes from origin). Do NOT blindly pick one
   side or delete code to make the markers (`<<<<<<<`/`=======`/`>>>>>>>`) go away.
+- **Exception — duplicate fix:** if the conflict exists because the mainline already
+  landed the same fix our branch carries (two independent spellings of one repair),
+  integrating both sides produces permanent divergence that re-conflicts on every
+  subsequent rebase. Take the mainline's version and drop ours. Record what was dropped
+  and the upstream commit that supersedes it in the rebase commit message.
+  **Evidence test (mid-rebase):** run `git log --oneline -5 HEAD -- <file>` — `HEAD`
+  during a rebase is the mainline side. If an upstream commit in that list applies
+  what our change applies, the conflict is a duplicate fix.
+  If a `DUPLICATE-WORK CANDIDATES` block is present in the rebase output, it lists
+  exactly these files and commits — use it as a shortcut. Its absence does not change
+  the rule: the evidence test above is authoritative whether or not the block exists.
+  Absent clear evidence that the conflict is a duplicate fix, keep both sides — the
+  preceding bullet's rule applies.
 - `git add` each resolved file, then `git rebase --continue`. Repeat until the rebase is
   fully applied (it may stop on several commits).
 - Then run `{{.VerifyCmd}}` and make it pass on the merged result — a rebase can introduce
