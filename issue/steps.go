@@ -278,6 +278,7 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 		}
 		session = resp.SessionID
 
+		ctx.Notify("", "running the verify gate")
 		verr := wt.Verify(ctx.Context())
 		if verr == nil {
 			break
@@ -310,6 +311,7 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 	// The same helper every other producing step records through, so implement
 	// also gets the dirty-tree guard: the invariant is the same one step later,
 	// and one copy of it is what keeps the two from drifting.
+	ctx.Notify("", "staging and committing")
 	if err := b.recordStepWork(ctx, wt, "implement", b.commitMessage(ctx)); err != nil {
 		return err
 	}
@@ -553,6 +555,7 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 	//
 	// Its own commit rather than amending implement's: the history should read
 	// "implement" then "what review changed", because that is what happened.
+	ctx.Notify("", "recording post-implement changes")
 	if err := b.recordOutstanding(ctx, wt); err != nil {
 		return err
 	}
@@ -572,6 +575,7 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 	if err != nil {
 		return err
 	}
+	ctx.Notify("", "pushing and opening pull request")
 	_, err = flow.Open(ctx.Context(), wt, base, title, body)
 	return err
 }
@@ -734,6 +738,7 @@ func (b *builder) stepCloseBranch(ctx flow.StepCtx) error {
 // translates it into a backend-posted question comment and a ParkQuestion
 // stamped with the ask time, which is what the answer gate later reads.
 func (b *builder) runAgent(ctx flow.StepCtx, req flow.AgentRequest) (*flow.AgentResponse, error) {
+	ctx.Notify("", "awaiting the agent")
 	resp, err := ctx.Agent().Run(ctx.Context(), req)
 	if err != nil {
 		return nil, err

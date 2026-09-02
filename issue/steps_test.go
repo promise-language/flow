@@ -2511,3 +2511,173 @@ func TestPlanStepChecksTheSubmittedPlanNotTheNarration(t *testing.T) {
 		t.Errorf("resolved %q, want the submitted plan", ctx.resolved.Markdown)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Sub-phase progress notifications (#23).
+// ---------------------------------------------------------------------------
+
+// The plan step's single sub-phase is the agent turn.
+func TestStepPlan_NotifiesAwaitingTheAgent(t *testing.T) {
+	agent := &scriptedAgent{
+		replies: []string{"## Plan\n\nDo the thing."},
+	}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	if err := testBuilder(t).stepPlan(ctx); err != nil {
+		t.Fatalf("stepPlan: %v", err)
+	}
+	found := false
+	for _, n := range ctx.notices {
+		if n == "awaiting the agent" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("notices = %v, want one containing %q", ctx.notices, "awaiting the agent")
+	}
+}
+
+// A healthy implement round 1 that passes verify on the first attempt must
+// produce, in order: "implement round 1", "awaiting the agent", "running the
+// verify gate", "staging and committing".
+func TestStepImplement_HappyPathNotifications(t *testing.T) {
+	wt := resumedWorktree()
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	if err := testBuilder(t).stepImplement(ctx); err != nil {
+		t.Fatalf("stepImplement: %v", err)
+	}
+	want := []string{
+		"implement round 1",
+		"awaiting the agent",
+		"running the verify gate",
+		"staging and committing",
+	}
+	if len(ctx.notices) < len(want) {
+		t.Fatalf("notices = %v, want at least %v", ctx.notices, want)
+	}
+	idx := 0
+	for _, n := range ctx.notices {
+		if idx < len(want) && n == want[idx] {
+			idx++
+		}
+	}
+	if idx != len(want) {
+		t.Errorf("notices = %v, want %v in order", ctx.notices, want)
+	}
+}
+
+// A fix loop that fails once and passes on round 2 repeats the round and agent
+// notifications for both rounds, but "staging and committing" appears only
+// after the passing round.
+func TestStepImplement_FixLoopNotifications(t *testing.T) {
+	wt := resumedWorktree()
+	wt.verifyErr = errors.New("verify failed:\nFAIL pkg/x")
+	wt.verifyAfter = 1 // fails once, passes on round 2
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	if err := testBuilder(t).stepImplement(ctx); err != nil {
+		t.Fatalf("stepImplement: %v", err)
+	}
+	want := []string{
+		"implement round 1",
+		"awaiting the agent",
+		"running the verify gate",
+		// round 1 fails — no "staging and committing"
+		"implement round 2",
+		"awaiting the agent",
+		"running the verify gate",
+		// round 2 passes
+		"staging and committing",
+	}
+	idx := 0
+	for _, n := range ctx.notices {
+		if idx < len(want) && n == want[idx] {
+			idx++
+		}
+	}
+	if idx != len(want) {
+		t.Errorf("notices = %v, want %v in order", ctx.notices, want)
+	}
+}
+
+// The PR step notifies before recording post-implement changes and before
+// pushing/opening.
+func TestStepOpenPR_SubPhaseNotifications(t *testing.T) {
+	wt := resumedWorktree()
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	if err := testBuilder(t).stepOpenPR(ctx); err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	want := []string{
+		"recording post-implement changes",
+		"pushing and opening pull request",
+	}
+	idx := 0
+	for _, n := range ctx.notices {
+		if idx < len(want) && n == want[idx] {
+			idx++
+		}
+	}
+	if idx != len(want) {
+		t.Errorf("notices = %v, want %v in order", ctx.notices, want)
+	}
+}
+
+// When every verify attempt fails the step returns an error before reaching
+// the commit phase. "staging and committing" must be absent — the operator
+// should see gate retries but never a commit notification.
+func TestStepImplement_ExhaustedRoundsOmitStagingNotification(t *testing.T) {
+	wt := resumedWorktree()
+	wt.verifyErr = errors.New("verify failed:\nstill broken")
+	wt.verifyAfter = 99 // never clears
+	b := testBuilder(t)
+	b.cfg.MaxFixRounds = 1
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	err := b.stepImplement(ctx)
+	if err == nil {
+		t.Fatal("stepImplement succeeded, want an error after exhausting rounds")
+	}
+	for _, n := range ctx.notices {
+		if n == "staging and committing" {
+			t.Fatal("notices contain \"staging and committing\", but the step failed before the commit phase")
+		}
+	}
+	// The gate notification must still appear for each attempt.
+	gateCount := 0
+	for _, n := range ctx.notices {
+		if n == "running the verify gate" {
+			gateCount++
+		}
+	}
+	// opening turn + 1 fix round = 2 verify attempts
+	if gateCount != 2 {
+		t.Errorf("gate notifications = %d, want 2 (opening turn + 1 fix round); notices = %v",
+			gateCount, ctx.notices)
+	}
+}
+
+// The producing markdown step (used by review and coverage) notifies "awaiting
+// the agent" via runAgent.
+func TestProducingMarkdownStep_NotifiesAwaitingTheAgent(t *testing.T) {
+	wt := resumedWorktree()
+	agent := &scriptedAgent{replies: []string{"looks good"}}
+	ctx := ctxWithPlan(wt, agent)
+
+	if err := testBuilder(t).stepReview(ctx); err != nil {
+		t.Fatalf("stepReview: %v", err)
+	}
+	found := false
+	for _, n := range ctx.notices {
+		if n == "awaiting the agent" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("notices = %v, want one containing %q", ctx.notices, "awaiting the agent")
+	}
+}
