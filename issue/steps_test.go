@@ -1487,6 +1487,14 @@ func questionRefusal(what string) flow.ErrDisclosureRefused {
 
 // A question carrying a disclosing fragment is revised and re-offered, not
 // killed. The agent keeps the session so the revision costs one prompt.
+//
+// The fixtures below say "/Users/someone/..." rather than a realistic name, and
+// that is deliberate. The refusals these tests drive are scripted (ctx.askErrs),
+// so the fixture only has to READ as a home path — while a realistic name would
+// be refused by the real disclosure rules on push, making the tests that prove
+// such text is never published impossible to commit. "someone" is one of the
+// placeholders those rules exempt (user, username, you, me, someone, runner,
+// dev, u).
 func TestQuestionDisclosureRevisionSucceedsOnFirstRetry(t *testing.T) {
 	const disclosingQuestion = "I need to know about /Users/someone/.cache/flow/something.\n" +
 		"NEEDS-ANSWER: cache or new store?\n```\nboth are plausible\n```"
