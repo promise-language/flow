@@ -194,6 +194,9 @@ func TestCmdStatus_WithoutStateInspector_RefusesById(t *testing.T) {
 		}, flow.StepConfig{Budget: flow.DefaultStepBudget()})
 	}, &stubAgent{name: "stub"})
 
+	// Hide StateInspector so the by-id path refuses.
+	app.Backend = bareBackend{app.Backend}
+
 	out := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}
 	app.Out, app.Err = out, errBuf

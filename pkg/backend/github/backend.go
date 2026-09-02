@@ -503,6 +503,7 @@ var _ flow.StateInspector = (*Backend)(nil)
 var _ flow.Discoverer = (*Backend)(nil)
 var _ flow.TagFilterer = (*Backend)(nil)
 var _ flow.Finalizer = (*Backend)(nil)
+var _ flow.QuestionAnswerer = (*Backend)(nil)
 
 // suppressWarnings keeps the linter quiet about helpers used only across
 // other sub-files.

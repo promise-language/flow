@@ -85,6 +85,12 @@ func testAppItem(t *testing.T, item flow.Item, types []flow.ItemType, configure 
 	return app, be, claim
 }
 
+// bareBackend wraps a Backend via the interface (not a concrete embed), hiding
+// all optional interfaces the concrete type may implement — StateInspector,
+// QuestionAnswerer, etc. Used by tests that need to verify "not supported"
+// paths.
+type bareBackend struct{ flow.Backend }
+
 type discardWriter struct{}
 
 func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
@@ -1754,5 +1760,64 @@ func TestRunOne_ErrTransientStillParksInfraTransient(t *testing.T) {
 	state, _ := be.LoadState(context.Background(), claim)
 	if rec := state.Artifact("plan"); rec.Invocations != 0 {
 		t.Errorf("Invocations = %d, want 0 (ErrTransient must not burn budget)", rec.Invocations)
+	}
+}
+
+// clearMarkerBackend wraps a fake.Backend and records ClearQuestionMarker
+// calls so tests can observe the gate-path label clearing.
+type clearMarkerBackend struct {
+	*fake.Backend
+	cleared []flow.ItemRef
+	mu      sync.Mutex
+}
+
+func (b *clearMarkerBackend) ClearQuestionMarker(ctx context.Context, ref flow.ItemRef) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.cleared = append(b.cleared, ref)
+}
+
+func (b *clearMarkerBackend) wasCleared() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.cleared) > 0
+}
+
+// TestRunOne_GatePathClearsQuestionMarker verifies that when RunOne dispatches
+// an item parked on ParkQuestion and the preflight passes (meaning an answer
+// exists), ClearQuestionMarker is called before handler dispatch.
+func TestRunOne_GatePathClearsQuestionMarker(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	// Park on a question.
+	if err := be.Park(context.Background(), claim, flow.ParkRequest{
+		Kind: flow.ParkQuestion,
+		Step: "plan",
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+
+	// Wrap the backend to track ClearQuestionMarker.
+	wrapped := &clearMarkerBackend{Backend: be}
+	app.Backend = wrapped
+
+	// The preflight passes (no gate installed), simulating a state where an
+	// answer was posted out-of-band. The park record still shows ParkQuestion
+	// because answering does not clear the park record — only step resolution
+	// does.
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	// The step should have dispatched and resolved.
+	if res.Status != string(flow.StatusDone) {
+		t.Fatalf("status = %q, want done", res.Status)
+	}
+	if !wrapped.wasCleared() {
+		t.Error("ClearQuestionMarker was not called; gate-path label clearing did not fire")
 	}
 }

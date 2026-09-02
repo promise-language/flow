@@ -103,6 +103,7 @@ const (
 	ActStateComment    DisclosureAct = "state-comment"
 	ActParkRecord      DisclosureAct = "park-record"
 	ActQuestion        DisclosureAct = "question"
+	ActAnswer          DisclosureAct = "answer"
 	ActLabel           DisclosureAct = "label"
 	ActPullRequest     DisclosureAct = "pull-request"
 	ActMerge           DisclosureAct = "pull-request-merge"
@@ -123,7 +124,7 @@ const (
 // be sure each has a call site behind it.
 func AllDisclosureActs() []DisclosureAct {
 	return []DisclosureAct{
-		ActArtifactComment, ActStateComment, ActParkRecord, ActQuestion, ActLabel,
+		ActArtifactComment, ActStateComment, ActParkRecord, ActQuestion, ActAnswer, ActLabel,
 		ActPullRequest, ActMerge, ActPush, ActAssignee, ActArtifactFile,
 	}
 }

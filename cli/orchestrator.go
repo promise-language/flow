@@ -141,6 +141,18 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		}
 	}
 
+	// The answer gate passed for an item parked on a question — an answer
+	// exists (otherwise the gate would have returned ErrBlocked). Clear the
+	// needs-answer marker now rather than waiting for step resolution, since
+	// the condition it advertises is already false. Best-effort: a stale
+	// label is cosmetic, and failing the dispatch over it would block a step
+	// somebody already answered.
+	if state.Park != nil && state.Park.Kind == flow.ParkQuestion {
+		if qa, ok := app.Backend.(flow.QuestionAnswerer); ok {
+			qa.ClearQuestionMarker(ctx, claim.ItemRef)
+		}
+	}
+
 	// Mandatory seed gate. A flow that declares required artifacts runs steps
 	// ONLY against an item whose finalization checklist has been seeded (the
 	// required-artifact set). An item with no required artifact has not been

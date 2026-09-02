@@ -571,6 +571,66 @@ func (b *Backend) AnswerQuestion(itemID, qID, answer string) error {
 	return fmt.Errorf("fake: question %q not found on item %q", qID, itemID)
 }
 
+// PostAnswer posts a human answer on an item by ref (no claim required). It
+// finds the first unanswered question and fills in UserAnswer, mirroring the
+// AnswerQuestion test helper but addressed by ref.
+func (b *Backend) PostAnswer(ctx context.Context, ref flow.ItemRef, text string) error {
+	itemID, err := refID(ref)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	now := b.clock()
+	for i := range rec.questions {
+		if rec.questions[i].UserAnswer.Answer == "" {
+			rec.questions[i].UserAnswer = flow.UserAnswer{
+				Answer:     text,
+				AnsweredAt: &now,
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("fake: no unanswered question on item %q", itemID)
+}
+
+// ClearQuestionMarker is a no-op — the fake backend has no labels.
+func (b *Backend) ClearQuestionMarker(ctx context.Context, ref flow.ItemRef) {}
+
+// LoadStateByRef loads an item's state by ref without a claim. This makes the
+// fake backend implement flow.StateInspector, which the answer command needs.
+func (b *Backend) LoadStateByRef(ctx context.Context, ref flow.ItemRef) (*flow.ItemState, error) {
+	id, err := refID(ref)
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[id]
+	if rec == nil {
+		return nil, fmt.Errorf("fake: item %q not registered", id)
+	}
+	st := &flow.ItemState{
+		Item:      rec.item,
+		Artifacts: make(map[flow.ArtifactId]flow.ArtifactRecord, len(rec.artifacts)),
+		Signals:   make(map[flow.SignalId]flow.SignalState, len(rec.signals)),
+	}
+	for k, v := range rec.artifacts {
+		st.Artifacts[k] = *v
+	}
+	maps.Copy(st.Signals, rec.signals)
+	st.Questions = append([]flow.Question(nil), rec.questions...)
+	if rec.parkRequest != nil {
+		cp := *rec.parkRequest
+		st.Park = &cp
+	}
+	return st, nil
+}
+
 func (b *Backend) Park(ctx context.Context, claim flow.Claim, req flow.ParkRequest) error {
 	itemID, err := refID(claim.ItemRef)
 	if err != nil {
