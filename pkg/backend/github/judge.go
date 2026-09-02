@@ -21,6 +21,16 @@ import (
 // Appended last, for the same reason --envelope is.
 const verdictFlag = "--verdict"
 
+const (
+	// maxVerdictOutput bounds what the SDK reads from a judge's stdout. A
+	// verdict is one small JSON object; anything approaching 1 MiB is already
+	// malformed.
+	maxVerdictOutput = 1 << 20 // 1 MiB
+
+	// maxJudgeStderr bounds the diagnostic output kept for error messages.
+	maxJudgeStderr = 64 << 10 // 64 KiB
+)
+
 // askJudge hands one measurement to the project's judging entry point and
 // returns what it answered.
 //
@@ -43,7 +53,8 @@ func askJudge(ctx context.Context, dir string, run flow.GateRun, argv []string, 
 	judgeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var stdout, stderr bytes.Buffer
+	out := newBoundedWriter(maxVerdictOutput)
+	errs := newBoundedWriter(maxJudgeStderr)
 	// argv[0] contains a separator, so os/exec performs no PATH lookup and no
 	// shell stands between here and the judge — the same rule the gate's exec
 	// line follows, and for the same reason.
@@ -53,16 +64,15 @@ func askJudge(ctx context.Context, dir string, run flow.GateRun, argv []string, 
 	// measurement it did not produce; that is the whole property this method
 	// exists to preserve.
 	cmd.Stdin = bytes.NewReader(run.Stdout)
-	// Captured, so they can be parsed and reported. Bounding what is read here
-	// is #40.
-	cmd.Stdout = &stdout
+	// Captured and bounded, so they can be parsed and reported without a
+	// chatty judge exhausting the runner.
+	cmd.Stdout = out
 	// The judge's stderr is CAPTURED and not passed through, which is the
 	// opposite of a gate's. A gate's stderr is the minutes of a long run, and
 	// a person watching needs it as it happens; a judge compares numbers it
 	// was given and prints an answer, so anything it writes there is the
-	// reason it could not, and it belongs in the error. Bounding what is read
-	// here is #40 too.
-	cmd.Stderr = &stderr
+	// reason it could not, and it belongs in the error.
+	cmd.Stderr = errs
 	cmd.WaitDelay = gateWaitDelay
 
 	runErr := cmd.Run()
@@ -78,7 +88,7 @@ func askJudge(ctx context.Context, dir string, run flow.GateRun, argv []string, 
 	// made its judging mode exit non-zero on a refusal is doing something
 	// reasonable, and reading that as "the judge failed" would turn a
 	// legitimate refusal into an unanswerable judge.
-	verdict, parseErr := parseVerdict(stdout.Bytes())
+	verdict, parseErr := parseVerdict(out.Bytes())
 	if parseErr == nil {
 		verdict.Run = run
 		return verdict, nil
@@ -88,11 +98,11 @@ func askJudge(ctx context.Context, dir string, run flow.GateRun, argv []string, 
 	// first, because our own kill is what stopped the answer; then a process
 	// that never ran to completion; then what it printed instead.
 	if errors.Is(judgeCtx.Err(), context.DeadlineExceeded) {
-		return flow.GateVerdict{}, fmt.Errorf("judging %s: killed at the declared timeout of %s%s", run.Gate, timeout, stderrDetail(&stderr))
+		return flow.GateVerdict{}, fmt.Errorf("judging %s: killed at the declared timeout of %s%s", run.Gate, timeout, stderrDetail(errs.Bytes()))
 	}
 	var exitErr *exec.ExitError
 	if runErr != nil && !errors.As(runErr, &exitErr) {
-		return flow.GateVerdict{}, fmt.Errorf("judging %s: %s did not answer: %w%s", run.Gate, argv[0], runErr, stderrDetail(&stderr))
+		return flow.GateVerdict{}, fmt.Errorf("judging %s: %s did not answer: %w%s", run.Gate, argv[0], runErr, stderrDetail(errs.Bytes()))
 	}
 	// Silence and truncation are absence — the judge printed no verdict at all
 	// — while anything else is a defect in what it printed. Neither is a
@@ -100,9 +110,9 @@ func askJudge(ctx context.Context, dir string, run flow.GateRun, argv []string, 
 	// whether to look at the judge's output or at why it stopped.
 	if errors.Is(parseErr, io.EOF) || errors.Is(parseErr, io.ErrUnexpectedEOF) {
 		return flow.GateVerdict{}, fmt.Errorf("judging %s: %s exited %d without printing a verdict: %w%s",
-			run.Gate, argv[0], exitCode(cmd), parseErr, stderrDetail(&stderr))
+			run.Gate, argv[0], exitCode(cmd), parseErr, stderrDetail(errs.Bytes()))
 	}
-	return flow.GateVerdict{}, fmt.Errorf("judging %s: %s printed something that is not a verdict: %w%s", run.Gate, argv[0], parseErr, stderrDetail(&stderr))
+	return flow.GateVerdict{}, fmt.Errorf("judging %s: %s printed something that is not a verdict: %w%s", run.Gate, argv[0], parseErr, stderrDetail(errs.Bytes()))
 }
 
 // exitCode is the judge's exit status where the kernel has one, and -1 where
@@ -119,8 +129,8 @@ func exitCode(cmd *exec.Cmd) int {
 // stderrDetail renders what the judge wrote to stderr for inclusion in an
 // error, or nothing if it wrote nothing. It is the only account of why an
 // unanswerable judge could not answer.
-func stderrDetail(stderr *bytes.Buffer) string {
-	s := strings.TrimSpace(stderr.String())
+func stderrDetail(stderr []byte) string {
+	s := strings.TrimSpace(string(stderr))
 	if s == "" {
 		return ""
 	}

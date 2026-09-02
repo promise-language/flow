@@ -14,11 +14,11 @@ package common
 // does not hold — see run.go, and docs/gates-and-commands.md.
 //
 // Nothing in here writes to stdout. Stdout carries the envelope and nothing
-// else, so every child process has its output captured, and progress goes to
-// stderr where a person watching a long run can see it.
+// else, so every child process has its stdout captured. A child's stderr is
+// passed through to the process's own stderr, where a person watching a long
+// run can see progress as it happens.
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -326,16 +326,17 @@ func modules(repoRoot string) []string {
 }
 
 // measureBuilds counts packages that fail to compile. `go build` prefixes each
-// failing package with a "# " header line, so the headers are the count.
+// failing package with a "# " header line on stderr, so the headers are the
+// count.
 func measureBuilds(repoRoot string) ([]Metric, string, error) {
 	n := 0
 	for _, dir := range modules(repoRoot) {
-		out, err := gateOutput(dir, "go", "build", "./...")
-		found := countPrefixed(out, "# ")
+		_, stderr, err := gateValue(dir, "go", "build", "./...")
+		found := countPrefixed(stderr, "# ")
 		if err != nil && found == 0 {
 			// It failed and named no package: the failure is about the
 			// toolchain or the module, not about a package in this tree.
-			return nil, "", fmt.Errorf("go build in %s: %w: %s", dir, err, firstLine(out))
+			return nil, "", fmt.Errorf("go build in %s: %w: %s", dir, err, firstLine(stderr))
 		}
 		n += found
 	}
@@ -343,14 +344,15 @@ func measureBuilds(repoRoot string) ([]Metric, string, error) {
 }
 
 // measureChecked counts go vet diagnostics — the lines naming a file and a
-// position, as distinct from the "# package" headers that group them.
+// position, as distinct from the "# package" headers that group them. The
+// diagnostics are on stderr.
 func measureChecked(repoRoot string) ([]Metric, string, error) {
 	n := 0
 	for _, dir := range modules(repoRoot) {
-		out, err := gateOutput(dir, "go", "vet", "./...")
-		found := countDiagnostics(out)
+		_, stderr, err := gateValue(dir, "go", "vet", "./...")
+		found := countDiagnostics(stderr)
 		if err != nil && found == 0 {
-			return nil, "", fmt.Errorf("go vet in %s: %w: %s", dir, err, firstLine(out))
+			return nil, "", fmt.Errorf("go vet in %s: %w: %s", dir, err, firstLine(stderr))
 		}
 		n += found
 	}
@@ -516,21 +518,24 @@ func freeBytesNear(path string) (int64, error) {
 	}
 }
 
-// gateOutput runs a child and returns its combined output as a string.
-//
-// Combined, and captured: the child's stdout must not reach ours, which
-// carries the envelope and nothing else. Progress goes to stderr so a person
-// watching a long gate can see it is working — silence and a hang look the
-// same from outside.
+// maxToolOutput bounds what a gate runner reads from a child's stdout. 10 MiB
+// is enough for any measurement output and small enough that a chatty child
+// cannot exhaust the process.
+const maxToolOutput = 10 << 20 // 10 MiB
+
+// gateOutput runs a child and returns its stdout as a string. Stderr is
+// passed through to os.Stderr so a person watching a long gate sees the
+// child's progress as it happens — silence and a hang look the same from
+// outside.
 func gateOutput(dir, name string, args ...string) (string, error) {
 	fmt.Fprintf(os.Stderr, "==> %s %s\n", name, strings.Join(args, " "))
-	var buf bytes.Buffer
+	bw := newBoundedWriter(maxToolOutput)
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
+	cmd.Stdout = bw
+	cmd.Stderr = os.Stderr
 	err := cmd.Run()
-	return buf.String(), err
+	return string(bw.Bytes()), err
 }
 
 // gateValue runs a child whose output is a VALUE, and keeps its two streams
@@ -542,13 +547,14 @@ func gateOutput(dir, name string, args ...string) (string, error) {
 // turns a warning into part of a path.
 func gateValue(dir, name string, args ...string) (stdout, stderr string, err error) {
 	fmt.Fprintf(os.Stderr, "==> %s %s\n", name, strings.Join(args, " "))
-	var out, errs bytes.Buffer
+	out := newBoundedWriter(maxToolOutput)
+	errs := newBoundedWriter(maxToolOutput)
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
-	cmd.Stdout = &out
-	cmd.Stderr = &errs
+	cmd.Stdout = out
+	cmd.Stderr = errs
 	err = cmd.Run()
-	return out.String(), errs.String(), err
+	return string(out.Bytes()), string(errs.Bytes()), err
 }
 
 func countLines(s string) int {
