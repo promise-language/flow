@@ -1796,6 +1796,107 @@ func TestBackend_Claim_NoMutationsOnWorktreeRefusal(t *testing.T) {
 	}
 }
 
+// OverrideStaleBase skips fetch+branch+stale checks but the dirty-tree
+// check must still fire. If someone collapses both guards into one
+// override check, this fails.
+func TestBackend_Claim_OverrideStaleBaseStillChecksDirtyTree(t *testing.T) {
+	b, _, rec := newClaimPrecondBackend(t)
+	// Skip the stale-base block entirely via override, but script a dirty tree.
+	rec.handlers["status --porcelain --untracked-files=normal"] = func([]string) ([]byte, error) {
+		return []byte("M uncommitted.go\n"), nil
+	}
+
+	overrides := []flow.ClaimOverride{flow.OverrideStaleBase}
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", overrides)
+	if err == nil {
+		t.Fatal("OverrideStaleBase should not bypass the dirty-tree check")
+	}
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+	}
+	if refused.Code != "dirty-tree" {
+		t.Errorf("Code = %q, want dirty-tree", refused.Code)
+	}
+}
+
+// OverrideDirtyTree skips the clean-tree check but must not skip the
+// stale-base checks.  Complement of the test above.
+func TestBackend_Claim_OverrideDirtyTreeStillChecksStaleBase(t *testing.T) {
+	b, _, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
+	// Make the base stale.
+	rec.handlers["rev-parse origin/main"] = func([]string) ([]byte, error) {
+		return []byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"), nil
+	}
+	// The tree is dirty, but overridden.
+	rec.handlers["status --porcelain --untracked-files=normal"] = func([]string) ([]byte, error) {
+		return []byte("M uncommitted.go\n"), nil
+	}
+
+	overrides := []flow.ClaimOverride{flow.OverrideDirtyTree}
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", overrides)
+	if err == nil {
+		t.Fatal("OverrideDirtyTree should not bypass the stale-base check")
+	}
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+	}
+	if refused.Code != "base-stale" {
+		t.Errorf("Code = %q, want base-stale", refused.Code)
+	}
+}
+
+// The not-on-base refusal must name both branches so the operator knows
+// which branch to switch to.
+func TestBackend_Claim_NotOnBaseReasonNamesBothBranches(t *testing.T) {
+	b, _, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
+	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+		return []byte("feature-x\n"), nil
+	}
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", nil)
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+	}
+	if !strings.Contains(refused.Reason, "feature-x") {
+		t.Errorf("Reason should mention current branch: %q", refused.Reason)
+	}
+	if !strings.Contains(refused.Reason, "main") {
+		t.Errorf("Reason should mention base branch: %q", refused.Reason)
+	}
+}
+
+// The base-stale refusal must include both SHAs and the recovery command.
+func TestBackend_Claim_BaseStaleReasonContainsSHAsAndRecovery(t *testing.T) {
+	b, _, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
+	rec.handlers["rev-parse main"] = func([]string) ([]byte, error) {
+		return []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"), nil
+	}
+	rec.handlers["rev-parse origin/main"] = func([]string) ([]byte, error) {
+		return []byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"), nil
+	}
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), "alice", nil)
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+	}
+	if !strings.Contains(refused.Reason, "aaaaaaaa") {
+		t.Errorf("Reason should contain local SHA prefix: %q", refused.Reason)
+	}
+	if !strings.Contains(refused.Reason, "bbbbbbbb") {
+		t.Errorf("Reason should contain remote SHA prefix: %q", refused.Reason)
+	}
+	if !strings.Contains(refused.Reason, "git pull --ff-only") {
+		t.Errorf("Reason should contain recovery command: %q", refused.Reason)
+	}
+}
+
 func TestBackend_Claim_CleanTreeSucceeds(t *testing.T) {
 	b, _, rec := newClaimPrecondBackend(t)
 	scriptCleanWorktree(rec)
