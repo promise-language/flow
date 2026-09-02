@@ -2728,3 +2728,97 @@ func TestProducingMarkdownStep_NotifiesAwaitingTheAgent(t *testing.T) {
 		t.Errorf("notices = %v, want one containing %q", ctx.notices, "awaiting the agent")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Fitness-check integration: verify loop and commitWithRepair.
+// ---------------------------------------------------------------------------
+
+// A verify failure on an unfit machine returns ErrUnfit and does not re-prompt
+// the agent. The opening turn runs, but the fix loop must not.
+func TestStepImplement_VerifyFailOnUnfitMachineReturnsErrUnfit(t *testing.T) {
+	wt := resumedWorktree()
+	wt.verifyErr = errors.New("no space left on device")
+	wt.verifyAfter = 99 // never clears
+	wt.judgeRefuses = true
+	wt.judgeDetail = "12 MB free on /srv, floor 2 GB"
+	agent := &scriptedAgent{}
+	ctx := ctxWithPlan(wt, agent)
+
+	err := testBuilder(t).stepImplement(ctx)
+	if err == nil {
+		t.Fatal("expected an error from an unfit machine, got nil")
+	}
+	if !errors.Is(err, flow.ErrUnfit) {
+		t.Fatalf("expected ErrUnfit, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "12 MB free") {
+		t.Errorf("error should carry the judge detail; got %v", err)
+	}
+	// Only the opening turn should have run; no fix round.
+	if agent.calls != 1 {
+		t.Errorf("agent.calls = %d, want 1 (opening turn only, no fix rounds)", agent.calls)
+	}
+}
+
+// A verify failure on a fit machine proceeds to a re-prompt (existing behavior).
+func TestStepImplement_VerifyFailOnFitMachineProceeds(t *testing.T) {
+	wt := resumedWorktree()
+	wt.verifyErr = errors.New("test failed")
+	wt.verifyAfter = 1 // fails once, then passes
+	agent := &scriptedAgent{}
+	ctx := ctxWithPlan(wt, agent)
+
+	err := testBuilder(t).stepImplement(ctx)
+	if err != nil {
+		t.Fatalf("stepImplement: %v", err)
+	}
+	// Opening turn + 1 fix round = 2 agent calls.
+	if agent.calls != 2 {
+		t.Errorf("agent.calls = %d, want 2 (opening turn + 1 fix round)", agent.calls)
+	}
+}
+
+// A staging failure on an unfit machine returns ErrUnfit and does not spend an
+// agent turn on repair.
+func TestCommitWithRepair_StageFailOnUnfitReturnsErrUnfit(t *testing.T) {
+	wt := resumedWorktree()
+	wt.stageErrs = []error{errors.New("no space left on device")}
+	wt.judgeRefuses = true
+	wt.judgeDetail = "disk full"
+
+	b := testBuilder(t)
+	agent := &scriptedAgent{}
+	ctx := ctxWithPlan(wt, agent)
+	err := b.commitWithRepair(ctx, wt, "test commit")
+	if err == nil {
+		t.Fatal("expected an error from an unfit machine, got nil")
+	}
+	if !errors.Is(err, flow.ErrUnfit) {
+		t.Fatalf("expected ErrUnfit, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "disk full") {
+		t.Errorf("error should carry the judge detail; got %v", err)
+	}
+	// The agent must not have been called for repair.
+	if agent.calls != 0 {
+		t.Errorf("agent.calls = %d, want 0 (no repair turn on an unfit machine)", agent.calls)
+	}
+}
+
+// A staging failure on a fit machine proceeds to the repair agent turn.
+func TestCommitWithRepair_StageFailOnFitMachineProceeds(t *testing.T) {
+	wt := resumedWorktree()
+	wt.stageErrs = []error{errors.New("guard refused")}
+	// judgeRefuses is false by default → machine is fit
+
+	b := testBuilder(t)
+	agent := &scriptedAgent{}
+	ctx := ctxWithPlan(wt, agent)
+	err := b.commitWithRepair(ctx, wt, "test commit")
+	// The exact outcome depends on whether the second stage succeeds, but the
+	// agent MUST have been called for the repair turn.
+	_ = err
+	if agent.calls < 1 {
+		t.Errorf("agent.calls = %d, want >= 1 (repair turn should run on a fit machine)", agent.calls)
+	}
+}

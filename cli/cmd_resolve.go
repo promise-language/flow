@@ -63,6 +63,16 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		resolveOverrides = append(resolveOverrides, flow.OverrideUnadmitted)
 	}
 
+	// Pre-claim fitness check: an unfit machine should not take an item at
+	// all. Fail-open: err != nil proceeds (cannot check → do not refuse).
+	if fc, ok := app.Backend.(flow.FitnessChecker); ok {
+		verdict, err := fc.CheckFit(ctx)
+		if err == nil && !verdict.Acceptable {
+			fmt.Fprintf(app.Err, "resolve: machine unfit — %s\n", verdict.Detail)
+			return 1
+		}
+	}
+
 	var claim *flow.Claim
 	if fs.NArg() == 1 {
 		ref, err := app.resolveClaimRef(ctx, fs.Arg(0))

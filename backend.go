@@ -44,6 +44,18 @@ type ItemRef struct {
 	Ref         json.RawMessage `json:"ref"`     // backend-internal addressing
 }
 
+// FitnessChecker is an optional Backend capability: run the fit gate before
+// any worktree exists, so an unfit machine never claims an item it cannot
+// work. The gate runs in the repo root (the directory a worktree would later
+// be created in).
+//
+// Backends that can run gates without a claim implement this; backends that
+// cannot (e.g. a backend whose gates require a claim-scoped worktree) omit
+// it, and cmdResolve proceeds (fail-open).
+type FitnessChecker interface {
+	CheckFit(ctx context.Context) (GateVerdict, error)
+}
+
 // RefResolver is an optional Backend capability: turn a user-supplied item id
 // string directly into an ItemRef, without enumerating eligible items.
 //

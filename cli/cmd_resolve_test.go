@@ -1157,3 +1157,110 @@ func TestCmdResolve_NonBudgetParkOmitsAxes(t *testing.T) {
 		t.Errorf("non-budget park must not emit axes line; got %q", errBuf.String())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Pre-claim fitness gate
+// ---------------------------------------------------------------------------
+
+// unfitBackend wraps a fake backend and implements flow.FitnessChecker with
+// an unconditionally-unfit verdict.
+type unfitBackend struct {
+	*fake.Backend
+}
+
+func (b *unfitBackend) CheckFit(ctx context.Context) (flow.GateVerdict, error) {
+	return flow.GateVerdict{
+		Acceptable: false,
+		Detail:     "12 MB free, floor 2 GB",
+		Thresholds: []byte("{}"),
+	}, nil
+}
+
+// TestResolve_UnfitMachineExitsBeforeClaiming verifies that when the backend
+// reports the machine as unfit, resolve exits 1 without claiming the item.
+func TestResolve_UnfitMachineExitsBeforeClaiming(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be := &unfitBackend{Backend: inner}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), []string{"1"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (unfit machine); err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "machine unfit") {
+		t.Errorf("expected 'machine unfit' in stderr; got %q", errBuf.String())
+	}
+	// The item must NOT be claimed.
+	claim, err := be.LookupActiveClaim(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("LookupActiveClaim: %v", err)
+	}
+	if claim != nil {
+		t.Errorf("item should not be claimed after unfit verdict; got %+v", claim)
+	}
+}
+
+// fitBackend wraps a fake backend and implements flow.FitnessChecker with an
+// unconditionally-fit verdict.
+type fitBackend struct {
+	*fake.Backend
+}
+
+func (b *fitBackend) CheckFit(ctx context.Context) (flow.GateVerdict, error) {
+	return flow.GateVerdict{Acceptable: true}, nil
+}
+
+// TestResolve_FitMachineProceeds verifies that a fit verdict lets resolve
+// proceed normally (item gets claimed and driven through the step).
+func TestResolve_FitMachineProceeds(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be := &fitBackend{Backend: inner}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	// Item must be claimed.
+	claim, err := be.LookupActiveClaim(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("LookupActiveClaim: %v", err)
+	}
+	if claim == nil {
+		t.Error("item should be claimed after fit verdict")
+	}
+}
+
+// fitErrorBackend wraps a fake backend and implements flow.FitnessChecker
+// that always returns an error — exercises the fail-open path.
+type fitErrorBackend struct {
+	*fake.Backend
+}
+
+func (b *fitErrorBackend) CheckFit(ctx context.Context) (flow.GateVerdict, error) {
+	return flow.GateVerdict{}, errors.New("gate broken")
+}
+
+// TestResolve_FitnessCheckErrorProceeds verifies that when CheckFit returns
+// an error, resolve proceeds (fail-open) rather than blocking.
+func TestResolve_FitnessCheckErrorProceeds(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be := &fitErrorBackend{Backend: inner}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (fail-open on gate error); err=%q", code, errBuf.String())
+	}
+	// Item must be claimed — the error did not block.
+	claim, err := be.LookupActiveClaim(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("LookupActiveClaim: %v", err)
+	}
+	if claim == nil {
+		t.Error("item should be claimed when CheckFit returns an error (fail-open)")
+	}
+}

@@ -115,6 +115,33 @@ func (b *Backend) SetGateVerdict(acceptable bool) {
 	}
 }
 
+// CheckFit implements flow.FitnessChecker for the fake backend, so tests can
+// exercise the pre-claim fitness path. It uses the same gateOutcome/verdict
+// fields the per-item worktrees consult.
+func (b *Backend) CheckFit(ctx context.Context) (flow.GateVerdict, error) {
+	outcome := b.gateOutcome
+	if outcome == "" {
+		outcome = flow.OutcomeMeasured
+	}
+	if outcome != flow.OutcomeMeasured {
+		return flow.GateVerdict{}, fmt.Errorf("fake: fit gate outcome %s", outcome)
+	}
+	run := flow.GateRun{
+		Gate:     flow.GateFit,
+		Outcome:  outcome,
+		ExitCode: 0,
+		Stdout:   fmt.Appendf(nil, "{%q:%q}\n", "gate", flow.GateFit),
+		Detail:   fmt.Sprintf("fake: gate %q %s", flow.GateFit, outcome),
+	}
+	acceptable := b.verdict == nil || *b.verdict
+	return flow.GateVerdict{
+		Run:        run,
+		Acceptable: acceptable,
+		Thresholds: []byte("{}"),
+		Detail:     fmt.Sprintf("fake: gate %q judged acceptable=%t", flow.GateFit, acceptable),
+	}, nil
+}
+
 // SetSupportsRequest controls whether Worktree.Request() returns a non-nil
 // RequestManager. Default true; set to false to exercise the "backend
 // doesn't support pull requests" path.
