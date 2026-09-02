@@ -1620,6 +1620,162 @@ func TestQuestionNonDisclosureErrorPassesThrough(t *testing.T) {
 	}
 }
 
+// A second refusal revises the revision, not the original. The prompt must
+// carry the LATEST refused text, and the session must chain — round 2 resumes
+// the session that wrote draft two, not the one that wrote draft one.
+func TestQuestionDisclosureSecondRefusalRevisesTheRevision(t *testing.T) {
+	replies := []string{
+		"preamble /Users/someone/.cache/flow\nNEEDS-ANSWER: cache or new store?\n```\nalpha evidence\n```",
+		"preamble /Users/someone/.cache/flow\nNEEDS-ANSWER: cache or new store?\n```\nbeta evidence\n```",
+		"preamble cleaned up\nNEEDS-ANSWER: cache or new store?\n```\ngamma evidence\n```",
+	}
+	agent := &scriptedAgent{replies: replies}
+	ctx := ctxWithPlan(resumedWorktree(), agent)
+	ctx.askErrs = []error{
+		questionRefusal("first refusal"),
+		questionRefusal("second refusal"),
+	}
+
+	err := testBuilder(t).stepReview(ctx)
+	if err == nil {
+		t.Fatal("want the ask sentinel to stop the step")
+	}
+	if agent.calls != 3 {
+		t.Fatalf("agent ran %d times, want 3 (original + two revisions)", agent.calls)
+	}
+	// The second revision must carry the text just refused, not the original.
+	// detectQuestion extracts header+body, so the prompt carries "beta evidence"
+	// (from round 1's body), not "alpha evidence" (from round 0's body).
+	second := agent.reqs[2]
+	if !strings.Contains(second.Prompt, "beta evidence") {
+		t.Errorf("second revision does not carry the text just refused: %q", second.Prompt)
+	}
+	if strings.Contains(second.Prompt, "alpha evidence") {
+		t.Errorf("second revision re-sends the text the first revision already replaced: %q", second.Prompt)
+	}
+	if !strings.Contains(second.Prompt, "second refusal") {
+		t.Errorf("second revision carries the first refusal's reason, not this one's: %q", second.Prompt)
+	}
+	// Session chaining: round 2 resumes the session that wrote round 1.
+	if second.ResumeSessionID != "session-2" {
+		t.Errorf("second revision resumes %q, want the session that wrote the previous draft", second.ResumeSessionID)
+	}
+	// Each refusal stashes a record; the last one is the latest refused text.
+	if len(ctx.wipSaves) < 2 {
+		t.Fatalf("stashed %d times, want at least one per refusal", len(ctx.wipSaves))
+	}
+}
+
+// The stash is what makes the work survive, but it is not what makes the
+// revision possible. A store that cannot write must cost the record and nothing
+// else — the loop must keep going.
+func TestQuestionDisclosureLoopSurvivesWIPSaveFailure(t *testing.T) {
+	const disclosingQuestion = "Look at /Users/someone/.cache/flow.\n" +
+		"NEEDS-ANSWER: which cache path?\n```\nevidence\n```"
+	const cleanQuestion = "Look at the local cache.\n" +
+		"NEEDS-ANSWER: which cache path?\n```\nevidence\n```"
+	agent := &scriptedAgent{replies: []string{disclosingQuestion, cleanQuestion}}
+	ctx := ctxWithPlan(resumedWorktree(), agent)
+	ctx.askErrs = []error{questionRefusal("an absolute home path was found")}
+	ctx.wipSaveErr = errors.New("nowhere to write")
+
+	err := testBuilder(t).stepReview(ctx)
+	if err == nil {
+		t.Fatal("want the ask sentinel to stop the step")
+	}
+	if len(ctx.asked) != 1 {
+		t.Fatalf("asked %d questions, want 1 — the revision must survive the stash failure", len(ctx.asked))
+	}
+	var reported bool
+	for _, n := range ctx.notices {
+		if strings.Contains(n, "could not record") {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Errorf("the failed stash went unreported; notices = %v", ctx.notices)
+	}
+}
+
+// The park reason carries the refused act so a reader knows what kind of thing
+// was refused. The act is the SDK's own vocabulary and is safe to publish.
+func TestQuestionDisclosureParkReasonCarriesTheAct(t *testing.T) {
+	replies := make([]string, maxDisclosureRevisions+1)
+	for i := range replies {
+		replies[i] = fmt.Sprintf("round %d /Users/someone/.cache\nNEEDS-ANSWER: q?\n```\ne\n```", i)
+	}
+	agent := &scriptedAgent{replies: replies}
+	ctx := ctxWithPlan(resumedWorktree(), agent)
+	askErrs := make([]error, maxDisclosureRevisions+1)
+	for i := range askErrs {
+		askErrs[i] = questionRefusal("home path found")
+	}
+	ctx.askErrs = askErrs
+
+	testBuilder(t).stepReview(ctx)
+	if ctx.park == nil {
+		t.Fatal("no park recorded")
+	}
+	if !strings.Contains(ctx.park.Reason, string(flow.ActQuestion)) {
+		t.Errorf("park reason = %q, want it to name the refused act (%s)", ctx.park.Reason, flow.ActQuestion)
+	}
+}
+
+// If the agent substrate dies between the refusal and the revision, the refused
+// text must already be stashed — it is the only place the refused question
+// survives, and losing it means the next run can never see what was asked.
+func TestQuestionRevisionThatCannotRunKeepsTheRefusedWork(t *testing.T) {
+	const disclosingQuestion = "Look at /Users/someone/.cache/flow.\n" +
+		"NEEDS-ANSWER: which cache path?\n```\nevidence\n```"
+	boom := errors.New("agent substrate is down")
+	agent := &scriptedAgent{
+		replies: []string{disclosingQuestion},
+		errs:    []error{nil, boom},
+	}
+	ctx := ctxWithPlan(resumedWorktree(), agent)
+	ctx.askErrs = []error{questionRefusal("an absolute home path was found")}
+
+	err := testBuilder(t).stepReview(ctx)
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the agent's own error", err)
+	}
+	if ctx.park != nil {
+		t.Errorf("parked (%+v) on a substrate error, not a refusal exhaustion", ctx.park)
+	}
+	// The stash must exist BEFORE the revision was attempted.
+	found := false
+	for _, s := range ctx.wipSaves {
+		if strings.Contains(s, "which cache path") && strings.Contains(s, "an absolute home path was found") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("stashed records %v do not carry both the refused text and the guard's reason", ctx.wipSaves)
+	}
+}
+
+// The revision prompt must carry the refused question text, not just the
+// guard's reason. Without the text the agent does not know what to revise.
+func TestQuestionRevisionPromptCarriesTheRefusedText(t *testing.T) {
+	const disclosingQuestion = "Look at /Users/someone/.cache/flow.\n" +
+		"NEEDS-ANSWER: which cache path?\n```\nevidence about the path\n```"
+	const cleanQuestion = "Look at the local cache.\n" +
+		"NEEDS-ANSWER: which cache path?\n```\nevidence about the path\n```"
+	agent := &scriptedAgent{replies: []string{disclosingQuestion, cleanQuestion}}
+	ctx := ctxWithPlan(resumedWorktree(), agent)
+	ctx.askErrs = []error{questionRefusal("an absolute home path was found")}
+
+	testBuilder(t).stepReview(ctx)
+	if agent.calls < 2 {
+		t.Fatalf("agent ran %d times, want at least 2", agent.calls)
+	}
+	rev := agent.reqs[1]
+	// The prompt must carry the refused question text.
+	if !strings.Contains(rev.Prompt, "which cache path") {
+		t.Errorf("revision prompt does not carry the refused question text: %q", rev.Prompt)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // The refused-write door.
 // ---------------------------------------------------------------------------
