@@ -199,7 +199,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		Flow:         f.Name(),
 		InvocationID: invocationID(),
 		Item:         claim.ItemRef.Display,
-		Step:         nextName,
+		Step:         li.Result(),
 	}
 
 	// AwaitSignal items have no handler; signal is checked by DeriveNext.
@@ -255,7 +255,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// without each handler having to call ctx.Notify. Handlers that DO call
 	// ctx.Notify with richer detail will override this baseline.
 	if app.Telemetry != nil {
-		app.Telemetry.StepProgress(stepCtx, claim, li.Name, "")
+		app.Telemetry.StepProgress(stepCtx, claim, li.Result(), "")
 	}
 
 	// Record the running step so `status` can report it. The record is
@@ -298,7 +298,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 			// park that under-reported invocations is exactly what sent the
 			// operator back for a second grant.
 			Axes:   sctx.axisReports(timeout),
-			Reason: fmt.Sprintf("step %q exceeded %s", nextName, timeout),
+			Reason: fmt.Sprintf("step %q exceeded %s", li.Result(), timeout),
 		}))
 	}
 
@@ -910,7 +910,7 @@ func (s *stepCtx) Notify(step, detail string) {
 		return
 	}
 	if step == "" {
-		step = s.li.Name
+		step = s.li.Result()
 	}
 	s.app.Telemetry.StepProgress(s.ctx, s.claim, step, detail)
 }

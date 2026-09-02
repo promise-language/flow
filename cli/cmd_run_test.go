@@ -146,8 +146,8 @@ func TestCmdRun_JSONModeCompactOutput(t *testing.T) {
 			if err := json.Unmarshal(raw, &res); err != nil {
 				t.Fatalf("stdout %q is not an InvocationResult: %v", raw, err)
 			}
-			if res.Step != "write plan" || res.Status != "done" {
-				t.Errorf("result = %+v, want step %q status done", res, "write plan")
+			if res.Step != "plan" || res.Status != "done" {
+				t.Errorf("result = %+v, want step %q status done", res, "plan")
 			}
 		})
 	}
@@ -168,7 +168,7 @@ func TestCmdRun_HumanModeOneLine(t *testing.T) {
 		t.Fatalf("cmdRun = %d, want 0", code)
 	}
 	got := out.String()
-	if !strings.Contains(got, "write plan") || !strings.Contains(got, "done") {
+	if !strings.Contains(got, "plan") || !strings.Contains(got, "done") {
 		t.Errorf("human output %q should contain step name and status", got)
 	}
 	if !strings.Contains(got, "→") {
@@ -265,8 +265,8 @@ func TestCmdRun_PipedStdoutSelectsJSON(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &res); err != nil {
 		t.Fatalf("piped stdout %q is not valid JSON: %v", buf.String(), err)
 	}
-	if res.Step != "write plan" || res.Status != "done" {
-		t.Errorf("result = %+v, want step %q status done", res, "write plan")
+	if res.Step != "plan" || res.Status != "done" {
+		t.Errorf("result = %+v, want step %q status done", res, "plan")
 	}
 }
 
