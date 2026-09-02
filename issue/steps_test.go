@@ -604,6 +604,14 @@ func TestStepImplement_RefusesWithoutAPlan(t *testing.T) {
 			if ctx.didResolve {
 				t.Error("implemented against something that is not a plan")
 			}
+			// An empty artifact and a resolved non-plan send a reader to
+			// different places, so the refusal has to say which it hit and
+			// show what it rejected. Without the quoted line, "not a plan" is
+			// unfalsifiable from the park alone.
+			if name == "narration" &&
+				!strings.Contains(err.Error(), "Now let me write the final plan.") {
+				t.Errorf("err = %v, want the rejected text quoted", err)
+			}
 		})
 	}
 }
