@@ -234,6 +234,9 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			outcome += " " + suffix
 		}
 		fmt.Fprintln(app.Err, outcome)
+		if res.Park != nil && len(res.Park.Axes) > 0 {
+			fmt.Fprintf(app.Err, "  axes: %s\n", flow.FormatAxes(res.Park.Axes))
+		}
 
 		switch flow.InvocationStatus(res.Status) {
 		case flow.StatusFailed:

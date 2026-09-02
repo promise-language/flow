@@ -124,6 +124,19 @@ func (a AxisReport) Format() string {
 	return s
 }
 
+// FormatAxes joins all axis reports with " · " separator. Returns "" when axes
+// is empty.
+func FormatAxes(axes []AxisReport) string {
+	if len(axes) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(axes))
+	for _, a := range axes {
+		parts = append(parts, a.Format())
+	}
+	return strings.Join(parts, " · ")
+}
+
 // durationSeconds renders a float count of seconds as a duration, rounded to
 // the millisecond so wall-clock jitter does not print as noise.
 func durationSeconds(secs float64) time.Duration {

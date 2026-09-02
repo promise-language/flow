@@ -77,6 +77,9 @@ func (app *App) cmdRun(ctx context.Context, args []string) int {
 		if suffix := formatResultSuffix(res); suffix != "" {
 			line += " " + suffix
 		}
+		if res.Park != nil && len(res.Park.Axes) > 0 {
+			line += "\n  axes: " + flow.FormatAxes(res.Park.Axes)
+		}
 		fmt.Fprintln(app.Out, line)
 	}
 	switch res.Status {

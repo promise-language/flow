@@ -1091,3 +1091,69 @@ func TestFinalTotalSuffix_UnresolvedZeroDurationNotLowerBound(t *testing.T) {
 		t.Errorf("unresolved artifact with zero duration must not trigger lower-bound; got %q", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Budget park narration includes axes (#3)
+// ---------------------------------------------------------------------------
+
+func TestCmdResolve_BudgetParkNarratesAxes(t *testing.T) {
+	// Use testApp (which pre-claims) to burn the only invocation, then run
+	// cmdResolve which resumes the claim and immediately parks on budget.
+	handler := func(ctx flow.StepCtx) error {
+		return errors.New("boom")
+	}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", handler, flow.StepConfig{Budget: flow.StepBudget{
+			MaxInvocations:          1,
+			MaxPromptsPerInvocation: 2,
+			MaxCostUSD:              10,
+			Timeout:                 30 * time.Minute,
+		}})
+	}, &stubAgent{name: "stub"})
+	_ = claim
+
+	// Burn the single invocation via RunOne directly.
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "failed" {
+		t.Fatalf("first RunOne = %+v, want failed", res)
+	}
+
+	// Now cmdResolve: the resume path finds the claim, and the next RunOne
+	// parks on budget (invocations exhausted). The park narration must include
+	// the axes line.
+	errBuf := &bytes.Buffer{}
+	app.Out = &bytes.Buffer{}
+	app.Err = errBuf
+	app.Backend = be // ensure it uses the same backend
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	got := errBuf.String()
+	if !strings.Contains(got, "axes:") {
+		t.Errorf("expected axes line in park narration; got %q", got)
+	}
+	if !strings.Contains(got, "inv") {
+		t.Errorf("expected invocations axis in narration; got %q", got)
+	}
+}
+
+func TestCmdResolve_NonBudgetParkOmitsAxes(t *testing.T) {
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+		return nil // returns without resolving → did-not-resolve park
+	})
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "axes:") {
+		t.Errorf("non-budget park must not emit axes line; got %q", errBuf.String())
+	}
+}
