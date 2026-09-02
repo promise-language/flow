@@ -59,8 +59,13 @@ func printWindow(w io.Writer, win windowUsage, now time.Time) {
 		usedPct = fmt.Sprintf("%d%% used", int(math.Round(win.Used*100)))
 	}
 
-	elapsed := clampFraction(1.0 - float64(win.ResetsAt.Sub(now))/float64(win.Length))
-	elapsedPct := fmt.Sprintf("%d%% of window elapsed", int(math.Round(elapsed*100)))
+	var elapsedPct string
+	if win.Length <= 0 {
+		elapsedPct = "--% of window elapsed"
+	} else {
+		elapsed := clampFraction(1.0 - float64(win.ResetsAt.Sub(now))/float64(win.Length))
+		elapsedPct = fmt.Sprintf("%d%% of window elapsed", int(math.Round(elapsed*100)))
+	}
 
 	remaining := win.ResetsAt.Sub(now)
 	if remaining < 0 {
@@ -175,18 +180,7 @@ func discoverAPIBase() (string, string) {
 		}
 	}
 
-	// Fall back to what the Claude CLI defaults to — discovered by inspecting
-	// the installed client. We try to read the binary's own metadata rather
-	// than pinning a URL.
-	if out, err := exec.Command("claude", "--version").Output(); err == nil {
-		_ = out // confirms claude is installed
-		// The default API base is the standard Anthropic endpoint. We only use
-		// this when no config override is set, matching what the installed
-		// client itself would use.
-		return "https://api.anthropic.com", ""
-	}
-
-	return "", "no Claude client found — install claude to report quota"
+	return "", "could not determine API base — run `claude config set apiBaseUrl <url>` to configure"
 }
 
 // fetchUsage makes an authenticated request for subscription usage.
