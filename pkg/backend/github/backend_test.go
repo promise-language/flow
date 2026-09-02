@@ -1625,6 +1625,9 @@ func TestBackend_Claim_RefusesOnFetchFailure(t *testing.T) {
 	if refused.Check != "fetch" {
 		t.Errorf("Check = %q, want fetch", refused.Check)
 	}
+	if refused.Override != "force" {
+		t.Errorf("Override = %q, want force", refused.Override)
+	}
 }
 
 func TestBackend_Claim_RefusesWhenNotOnBase(t *testing.T) {
@@ -1652,6 +1655,9 @@ func TestBackend_Claim_RefusesWhenNotOnBase(t *testing.T) {
 	}
 	if refused.Check != "base-branch" {
 		t.Errorf("Check = %q, want base-branch", refused.Check)
+	}
+	if refused.Override != "force" {
+		t.Errorf("Override = %q, want force", refused.Override)
 	}
 }
 
@@ -1686,6 +1692,9 @@ func TestBackend_Claim_RefusesWhenBaseStale(t *testing.T) {
 	}
 	if refused.Check != "base-branch" {
 		t.Errorf("Check = %q, want base-branch", refused.Check)
+	}
+	if refused.Override != "force" {
+		t.Errorf("Override = %q, want force", refused.Override)
 	}
 }
 

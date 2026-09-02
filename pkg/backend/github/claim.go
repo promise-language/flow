@@ -84,9 +84,10 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, ove
 		if err := b.git.Fetch(ctx, "origin"); err != nil {
 			return flow.Claim{}, flow.ErrClaimRefused{
 				Code: "fetch-failed", ItemScoped: false,
-				Reason: "git fetch origin failed",
-				Detail: err.Error(),
-				Check:  "fetch",
+				Reason:   "git fetch origin failed",
+				Detail:   err.Error(),
+				Check:    "fetch",
+				Override: "force",
 			}
 		}
 
@@ -104,7 +105,8 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, ove
 				Code: "not-on-base", ItemScoped: false,
 				Reason: fmt.Sprintf("HEAD is on %q, want %q — run: git checkout %s",
 					current, base, base),
-				Check: "base-branch",
+				Check:    "base-branch",
+				Override: "force",
 			}
 		}
 
@@ -122,7 +124,8 @@ func (b *Backend) Claim(ctx context.Context, ref flow.ItemRef, owner string, ove
 				Code: "base-stale", ItemScoped: false,
 				Reason: fmt.Sprintf("%s (%s) differs from origin/%s (%s) — run: git pull --ff-only",
 					base, localSHA[:8], base, remoteSHA[:8]),
-				Check: "base-branch",
+				Check:    "base-branch",
+				Override: "force",
 			}
 		}
 	}
