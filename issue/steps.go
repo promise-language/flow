@@ -410,15 +410,17 @@ func (b *builder) recordStepWork(ctx flow.StepCtx, wt flow.Worktree, label, msg 
 	return nil
 }
 
-// commitWithRepair stages, commits, and on a pre-commit hook refusal runs one
-// bounded agent repair turn — constrained to deleting the offending files —
-// then retries. A second refusal wraps flow.ErrRefused so the orchestrator
-// parks the item at zero cost.
+// commitWithRepair stages, commits, and on a pre-commit hook refusal runs a
+// bounded content-aware repair loop. A content refusal (absolute path, secret)
+// asks the agent to edit the offending file in place; a presence refusal
+// (binary blob, build artifact) asks it to delete the file. Each repair round
+// re-runs verify — mandatory for content edits, cheap for deletions — and
+// re-stages before retrying the commit. The loop is bounded by
+// maxDisclosureRevisions.
 //
-// One repair turn, not a loop: the issue says "one bounded agent repair turn,
-// retry the commit once." A fresh session, because the repair is a different
-// task from the producing step — "delete a file the agent may not have
-// created."
+// On exhaustion the handler parks directly with a safe reason that names
+// neither the file nor the fragment the hook quoted. The hook's messages are
+// stashed locally via RecordWorkInProgress so the next run can act on them.
 func (b *builder) commitWithRepair(ctx flow.StepCtx, wt flow.Worktree, msg string) error {
 	firstStageErr := wt.Stage(ctx.Context())
 	if firstStageErr != nil {
