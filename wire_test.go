@@ -268,3 +268,27 @@ func TestGrantClearsPark(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatAxes(t *testing.T) {
+	tests := []struct {
+		name string
+		axes []AxisReport
+		want string
+	}{
+		{"empty", nil, ""},
+		{"single axis", []AxisReport{NewAxisReport(AxisInvocations, 3, 3)}, "3/3 inv (flat)"},
+		{"mixed exhausted and not", []AxisReport{
+			NewAxisReport(AxisInvocations, 3, 3),
+			NewAxisReport(AxisPrompts, 1, 2),
+			NewAxisReport(AxisCost, 11.18, 10),
+			NewAxisReport(AxisTimeout, 0, 10800),
+		}, "3/3 inv (flat) · 1/2 prompts · $11.18/$10.00 (flat) · 0s/3h0m0s"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := FormatAxes(tt.axes); got != tt.want {
+				t.Errorf("FormatAxes() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

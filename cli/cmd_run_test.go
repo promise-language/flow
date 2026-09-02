@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/promise-language/flow"
 	"github.com/promise-language/flow/pkg/backend/fake"
@@ -318,5 +319,68 @@ func TestCmdRun_MutuallyExclusiveFlags(t *testing.T) {
 	code := app.cmdRun(context.Background(), []string{"--json", "--human"})
 	if code != 2 {
 		t.Errorf("cmdRun(--json --human) = %d, want 2", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Budget park narration includes axes (#3)
+// ---------------------------------------------------------------------------
+
+func TestCmdRun_BudgetParkNarratesAxes(t *testing.T) {
+	t.Setenv(outputEnv, "")
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) error {
+			return errors.New("boom")
+		}, flow.StepConfig{Budget: flow.StepBudget{
+			MaxInvocations:          1,
+			MaxPromptsPerInvocation: 2,
+			MaxCostUSD:              10,
+			Timeout:                 30 * time.Minute,
+		}})
+	}, &stubAgent{name: "stub"})
+
+	// Burn the only invocation.
+	res1, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res1.Status != "failed" {
+		t.Fatalf("first run = %+v, want failed", res1)
+	}
+
+	// Now run-step: next dispatch parks on budget.
+	out := &bytes.Buffer{}
+	app.Out = out
+	app.Backend = be
+
+	code := app.cmdRun(context.Background(), []string{"--human"})
+	if code != 0 {
+		t.Fatalf("cmdRun = %d, want 0", code)
+	}
+	got := out.String()
+	if !strings.Contains(got, "axes:") {
+		t.Errorf("expected axes line in park narration; got %q", got)
+	}
+	if !strings.Contains(got, "inv (flat)") {
+		t.Errorf("expected invocations flagged flat; got %q", got)
+	}
+}
+
+func TestCmdRun_NonBudgetParkOmitsAxes(t *testing.T) {
+	t.Setenv(outputEnv, "")
+	app, _, _ := testApp(t, func(f *flow.Flow) {
+		f.AddStep("silent", "plan", func(ctx flow.StepCtx) error {
+			return nil // returns without resolving
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	out := &bytes.Buffer{}
+	app.Out = out
+
+	code := app.cmdRun(context.Background(), []string{"--human"})
+	if code != 0 {
+		t.Fatalf("cmdRun = %d, want 0", code)
+	}
+	if strings.Contains(out.String(), "axes:") {
+		t.Errorf("non-budget park must not emit axes line; got %q", out.String())
 	}
 }

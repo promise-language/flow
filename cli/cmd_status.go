@@ -369,19 +369,16 @@ func parkLine(p *parkPayload) string {
 
 // axesLine joins the per-axis meters into one " · "-separated run.
 func axesLine(axes []axisReportPayload) string {
-	if len(axes) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(axes))
-	for _, a := range axes {
-		parts = append(parts, flow.AxisReport{
+	reports := make([]flow.AxisReport, len(axes))
+	for i, a := range axes {
+		reports[i] = flow.AxisReport{
 			Axis:      flow.BudgetAxis(a.Axis),
 			Used:      a.Used,
 			Granted:   a.Granted,
 			Exhausted: a.Exhausted,
-		}.Format())
+		}
 	}
-	return strings.Join(parts, " · ")
+	return flow.FormatAxes(reports)
 }
 
 // statusTitleMax bounds the human "title:" line, in runes. Item.Title is free
