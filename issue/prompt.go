@@ -198,6 +198,15 @@ const repoRelativePaths = `Cite files by path relative to the repository root, n
 What you write here is published on the item, and no reader shares the
 filesystem you are writing on.`
 
+// narrowGateHint is carried by every producing prompt (implement, review,
+// coverage) so the agent knows it can iterate on a single failing area without
+// re-running the whole gate.
+const narrowGateHint = `To iterate on one failing area without re-running everything, use
+bin/run <gate> — it measures and judges a single gate. Run bin/run -h to
+see the gate names this project defines. Passing one gate is not passing
+the whole: only {{.VerifyCmd}} confirms the full set, and only the full
+set may be cited.`
+
 // renderPrompt executes the project's body for one slot, falling back to the
 // library default when the project supplied none.
 //
@@ -207,13 +216,24 @@ filesystem you are writing on.`
 // would be a prompt this package cannot possibly write well, because the
 // project-specific part is exactly the part it does not know.
 func renderPrompt(cfg Config, id PromptID, pc PromptContext) (string, error) {
-	src, ok := cfg.Prompts[id]
-	if !ok || strings.TrimSpace(src) == "" {
-		src, ok = defaultPrompts[id]
-		if !ok {
+	src, isOverride := cfg.Prompts[id]
+	if !isOverride || strings.TrimSpace(src) == "" {
+		src = defaultPrompts[id]
+		isOverride = false
+		if src == "" {
 			return "", fmt.Errorf("no prompt for %q and no library default", id)
 		}
 	}
+
+	// When a project overrides a slot, append the policy fragments the
+	// default would have carried. The project controls its body; the library
+	// ensures the invariants it requires are not silently lost.
+	if isOverride {
+		if frags, ok := requiredFragments[id]; ok {
+			src = appendFragments(src, frags)
+		}
+	}
+
 	tmpl, err := template.New(string(id)).Parse(src)
 	if err != nil {
 		return "", fmt.Errorf("parse prompt %q: %w", id, err)
@@ -227,6 +247,54 @@ func renderPrompt(cfg Config, id PromptID, pc PromptContext) (string, error) {
 		return "", fmt.Errorf("prompt %q rendered empty", id)
 	}
 	return out, nil
+}
+
+// promptFragments names the policy fragments a prompt slot requires. When a
+// project overrides a slot, the library appends exactly these fragments so that
+// a project cannot silently end up without them.
+type promptFragments struct {
+	repoRelativePaths bool
+	deferCommit       bool
+	workInProgress    bool
+	answers           bool
+	narrowGateHint    bool
+}
+
+// requiredFragments maps each slot that carries policy fragments to the set it
+// requires. Slots absent from this map (the in-session re-prompts) get nothing
+// appended — they run inside a session whose opening prompt already carried
+// them.
+var requiredFragments = map[PromptID]promptFragments{
+	PromptPlan:      {repoRelativePaths: true, workInProgress: true, answers: true},
+	PromptImplement: {deferCommit: true, workInProgress: true, answers: true, narrowGateHint: true},
+	PromptReview:    {repoRelativePaths: true, deferCommit: true, workInProgress: true, answers: true, narrowGateHint: true},
+	PromptCoverage:  {repoRelativePaths: true, deferCommit: true, workInProgress: true, answers: true, narrowGateHint: true},
+}
+
+// appendFragments appends the required policy fragments to a project's override
+// body. Order mirrors the defaults: policy constraints first, then conditional
+// context blocks.
+func appendFragments(body string, frags promptFragments) string {
+	var parts []string
+	if frags.repoRelativePaths {
+		parts = append(parts, repoRelativePaths)
+	}
+	if frags.deferCommit {
+		parts = append(parts, "{{.DeferCommit}}")
+	}
+	if frags.narrowGateHint {
+		parts = append(parts, narrowGateHint)
+	}
+	if frags.workInProgress {
+		parts = append(parts, "{{.WorkInProgressBlock}}")
+	}
+	if frags.answers {
+		parts = append(parts, "{{.AnswersBlock}}")
+	}
+	if len(parts) == 0 {
+		return body
+	}
+	return body + "\n\n" + strings.Join(parts, "\n\n")
 }
 
 // defaultPrompts are the generic fallbacks. See renderPrompt for why they are
@@ -254,6 +322,8 @@ Implement this plan:
 
 Make {{.VerifyCmd}} pass. {{.DeferCommit}}
 
+` + narrowGateHint + `
+
 {{.WorkInProgressBlock}}
 
 {{.AnswersBlock}}
@@ -275,6 +345,8 @@ find. You have the context loaded; leaving a fault for someone else to repair
 costs another turn to rediscover what you already know.
 
 Keep {{.VerifyCmd}} passing. {{.DeferCommit}}
+
+` + narrowGateHint + `
 
 Report what you changed and why, citing file:line, and say plainly what you
 left alone and what needs a human decision. Someone will read this to review
@@ -304,6 +376,8 @@ it is, why it resists testing, and what would have to change. A reason is
 accountable; a list is a handoff to nobody.
 
 Keep {{.VerifyCmd}} passing. {{.DeferCommit}}
+
+` + narrowGateHint + `
 
 Report what you added and what you restructured, so the person reviewing the
 change can see what you did rather than reconstruct it from the diff.

@@ -30,10 +30,6 @@ If this item conflicts with a project constraint you cannot resolve on your own,
 do not guess and do not quietly plan around it — ask, following the guidance
 below, and quote the conflicting statement in the block.
 
-{{.WorkInProgressBlock}}
-
-{{.AnswersBlock}}
-
 {{.AskGuidance}}`,
 
 	issue.PromptImplement: `{{.ItemHeader}}
@@ -45,11 +41,6 @@ Implement this plan:
 Rules for this project:
   - {{.VerifyCmd}} must pass before the change is done.
   - Match the surrounding code's idioms rather than importing your own.
-  - {{.DeferCommit}}
-
-{{.WorkInProgressBlock}}
-
-{{.AnswersBlock}}
 
 {{.AskGuidance}}`,
 
@@ -73,10 +64,6 @@ enough that someone could act on the finding without rediscovering it.
 
 End with PASS or FAIL on its own line.
 
-{{.WorkInProgressBlock}}
-
-{{.AnswersBlock}}
-
 {{.AskGuidance}}`,
 
 	issue.PromptCoverage: `Analyze test coverage of the changes on the current branch.
@@ -84,10 +71,6 @@ End with PASS or FAIL on its own line.
 List the paths a reviewer would expect to be covered and are not, and say
 whether each gap is worth closing now or is acceptable. Recommend PASS or MORE
 TESTS NEEDED on its own line.
-
-{{.WorkInProgressBlock}}
-
-{{.AnswersBlock}}
 
 {{.AskGuidance}}`,
 }

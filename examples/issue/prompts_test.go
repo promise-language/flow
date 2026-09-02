@@ -8,26 +8,21 @@ import (
 	"github.com/promise-language/flow/issue"
 )
 
-// This project's bodies REPLACE the library defaults rather than extending
-// them, so the library's own test that every default renders the stashed work
-// says nothing about the prompts this binary actually sends. A body here that
-// drops the block re-derives, silently and expensively, exactly what an
-// earlier invocation already paid for — and for the plan step, which changes
-// no files, that is the whole step.
-func TestProjectPromptsRenderTheWorkInProgressBlock(t *testing.T) {
-	const notes = "what I worked out before I stopped"
-	pc := issue.PromptContext{WorkInProgress: notes}
+// The library now appends required fragments — including WorkInProgressBlock
+// and AnswersBlock — to project overrides automatically (#47). That guarantee
+// is tested in the library's own TestWorkInProgressReachesEveryResumableDefaultPrompt
+// and TestAnswersReachEveryResumableDefaultPrompt (both with override subtests).
+//
+// This test verifies what the project controls: that its prompt bodies parse
+// and render cleanly against a populated PromptContext.
+func TestProjectPromptsRender(t *testing.T) {
+	pc := issue.PromptContext{WorkInProgress: "notes from earlier"}
 	pc.VerifyCmd = "bin/verify"
+	pc.VerifyOutput = "FAIL"
 	if err := pc.Context.Render(); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 	for id, body := range prompts {
-		// The fix re-prompt is the one exclusion, for the same reason as in the
-		// library: it runs inside a single implement invocation, resuming the
-		// session that has the working-out in context already.
-		if id == issue.PromptImplementFix {
-			continue
-		}
 		t.Run(string(id), func(t *testing.T) {
 			tmpl, err := template.New(string(id)).Parse(body)
 			if err != nil {
@@ -37,13 +32,8 @@ func TestProjectPromptsRenderTheWorkInProgressBlock(t *testing.T) {
 			if err := tmpl.Execute(&b, pc); err != nil {
 				t.Fatalf("execute: %v", err)
 			}
-			if !strings.Contains(b.String(), notes) {
-				t.Errorf("project prompt %q does not render the stashed work — a resumed step would re-derive it", id)
-			}
-			// The framing travels with the notes: read as a finished result,
-			// they would be defended instead of finished.
-			if !strings.Contains(b.String(), "not a result") {
-				t.Errorf("project prompt %q renders the notes without saying they are scaffolding", id)
+			if strings.TrimSpace(b.String()) == "" {
+				t.Errorf("project prompt %q rendered empty", id)
 			}
 		})
 	}
