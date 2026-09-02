@@ -118,10 +118,13 @@ func (e ErrPark) Error() string {
 }
 
 // ErrQuestion — handler emitted one or more questions for the user; flow
-// parks until at least one is answered. The SDK forwards Questions to
-// Backend.AskQuestions, which assigns ids and persists them on the item.
+// parks until at least one is answered. The call to Backend.AskQuestions
+// happens inside stepCtx.AskQuestions, so by the time the orchestrator
+// sees this sentinel the questions have already been persisted. Recorded
+// carries the backend's response (ids and timestamps).
 type ErrQuestion struct {
 	Questions []AgentQuestion
+	Recorded  []Question
 }
 
 func (e ErrQuestion) Error() string {

@@ -808,31 +808,102 @@ func (b *builder) runAgent(ctx flow.StepCtx, req flow.AgentRequest) (*flow.Agent
 		return nil, fmt.Errorf("agent returned no response")
 	}
 	if header, body, ok := detectQuestion(resp.LastText); ok {
-		// The turn that found the ambiguity is the turn that produced the
-		// reasoning behind it: a step does not ask at the start, it asks once it
-		// has read enough to find the question. Stashing the whole final message
-		// is what makes the resumed step continue instead of paying for the same
-		// analysis again to arrive at the question it now has an answer to.
-		//
-		// Best-effort: a stash that failed costs a re-derivation, which is the
-		// old behaviour, and turning it into a step failure would lose the park
-		// as well as the work.
-		if err := ctx.RecordWorkInProgress(resp.LastText); err != nil {
-			ctx.Notify("", "could not record work in progress: "+err.Error())
-		}
-		// Header is the question; Text is the evidence behind it. The step's
-		// own identity is not repeated here — the park record already names the
-		// step, and a header that led with it would push the actual question
-		// off the first line a human reads.
-		//
-		// The response is returned alongside the error so callers that produced
-		// a usable artifact (e.g. stepPlan with a PlanText) can persist it
-		// before propagating the question. Discarding a paid artifact because
-		// the agent also asked a question is the worst outcome — the money is
-		// spent and the work is gone.
-		return resp, ctx.AskQuestions(flow.AgentQuestion{Header: header, Text: body})
+		return b.resolveQuestion(ctx, resp, header, body)
 	}
 	return resp, nil
+}
+
+// resolveQuestion handles a question detected in the agent's response, routing
+// it through a disclosure-revision loop that mirrors resolveMarkdown. On a
+// refusal the agent is asked to reframe the question in the session it already
+// holds; on exhaustion the step parks instead of failing.
+func (b *builder) resolveQuestion(ctx flow.StepCtx, resp *flow.AgentResponse, header, body string) (*flow.AgentResponse, error) {
+	// The turn that found the ambiguity is the turn that produced the
+	// reasoning behind it: stashing the whole final message is what makes the
+	// resumed step continue instead of re-deriving the question.
+	//
+	// Best-effort: a stash that failed costs a re-derivation, which is the
+	// old behaviour, and turning it into a step failure would lose the park
+	// as well as the work.
+	if err := ctx.RecordWorkInProgress(resp.LastText); err != nil {
+		ctx.Notify("", "could not record work in progress: "+err.Error())
+	}
+
+	session := resp.SessionID
+	questionText := header + "\n" + body
+
+	for round := 0; ; round++ {
+		err := ctx.AskQuestions(flow.AgentQuestion{Header: header, Text: body})
+		if err == nil {
+			// Should not happen — AskQuestions always returns a sentinel or
+			// error — but if it does, the question posted and we are done.
+			return resp, nil
+		}
+		var refused flow.ErrDisclosureRefused
+		if !errors.As(err, &refused) {
+			// Either the ErrQuestion sentinel (the question posted and the
+			// orchestrator should park) or a real backend error. Both
+			// propagate unchanged.
+			return resp, err
+		}
+
+		// Stash the refused text before anything else can go wrong.
+		if werr := ctx.RecordWorkInProgress(refusedRecord(refused, questionText)); werr != nil {
+			ctx.Notify("", "could not record refused text: "+werr.Error())
+		}
+		if round >= maxDisclosureRevisions {
+			// A park, not a failure: the work is sound and a person has to
+			// decide. The reason carries NOTHING the guard said — a park is
+			// published through the same guard, and a reason repeating the
+			// guard's answer carries the refused fragment itself.
+			return resp, ctx.Park(flow.ParkRequest{
+				Kind: flow.ParkBlocked,
+				Reason: fmt.Sprintf(
+					"the disclosure guard refused this step's question %d times (%s); "+
+						"what it refused and why are kept with the step for the next run",
+					round+1, refused.Act),
+			})
+		}
+		ctx.Notify("", fmt.Sprintf("question disclosure refused — revising (round %d)", round+1))
+
+		pc, perr := b.promptContext(ctx)
+		if perr != nil {
+			return nil, perr
+		}
+		rpc := pc
+		rpc.Refusal = refused.Error()
+		rpc.RefusedText = questionText
+		prompt, rerr := renderPrompt(b.cfg, PromptRevise, rpc)
+		if rerr != nil {
+			return nil, rerr
+		}
+		// Call ctx.Agent().Run directly — NOT b.runAgent, which detects
+		// questions and calls resolveQuestion, creating infinite recursion.
+		newResp, rerr := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{
+			Prompt:          prompt,
+			PermissionMode:  "plan",
+			ResumeSessionID: session,
+		})
+		if rerr != nil {
+			return nil, rerr
+		}
+		if newResp == nil {
+			return nil, fmt.Errorf("agent returned no response when asked to revise refused question")
+		}
+
+		session = newResp.SessionID
+		resp = newResp
+
+		// Did the agent drop the question on revision?
+		newHeader, newBody, ok := detectQuestion(newResp.LastText)
+		if !ok {
+			// The agent chose not to ask — the step continues without a question.
+			return newResp, nil
+		}
+		header = newHeader
+		body = newBody
+		questionText = header + "\n" + body
+	}
 }
 
 // agentMarkdownStep is the shape shared by the read-only analysis steps: render
