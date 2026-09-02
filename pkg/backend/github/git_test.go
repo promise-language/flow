@@ -1,8 +1,11 @@
 package github
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -78,6 +81,69 @@ func initTestRepo(t *testing.T) *gitOps {
 		t.Fatalf("initial commit: %v", err)
 	}
 	return g
+}
+
+// A command that writes far more than any git diff or log should not exhaust
+// the runner. The captured stdout is truncated to maxGitOutput.
+func TestDefaultGitRunner_BoundsStdout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell script")
+	}
+	dir := t.TempDir()
+	blocks := (maxGitOutput / 1024) + 10
+	script := filepath.Join(dir, "chatty.sh")
+	if err := os.WriteFile(script, []byte(fmt.Sprintf(
+		"#!/bin/sh\ndd if=/dev/zero bs=1024 count=%d 2>/dev/null\n", blocks,
+	)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, err := defaultGitRunner(context.Background(), dir, script)
+	if err != nil {
+		t.Fatalf("defaultGitRunner: %v", err)
+	}
+	if len(stdout) > maxGitOutput {
+		t.Errorf("stdout is %d bytes, want at most %d — the capture is unbounded", len(stdout), maxGitOutput)
+	}
+}
+
+// When a command fails, its stderr is returned for diagnostics. When it
+// succeeds, stderr is discarded — the caller asked for the answer, not the
+// commentary around it.
+func TestDefaultGitRunner_StderrOnlyOnError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell script")
+	}
+	dir := t.TempDir()
+
+	// A command that succeeds and writes to both streams.
+	ok := filepath.Join(dir, "ok.sh")
+	if err := os.WriteFile(ok, []byte("#!/bin/sh\necho answer\necho info >&2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := defaultGitRunner(context.Background(), dir, ok)
+	if err != nil {
+		t.Fatalf("expected success: %v", err)
+	}
+	if !strings.Contains(string(stdout), "answer") {
+		t.Errorf("stdout = %q, want it to contain the answer", stdout)
+	}
+	if len(stderr) != 0 {
+		t.Errorf("stderr = %q on success, want nil — diagnostics belong only with errors", stderr)
+	}
+
+	// A command that fails: stderr is returned.
+	bad := filepath.Join(dir, "bad.sh")
+	if err := os.WriteFile(bad, []byte("#!/bin/sh\necho oops >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err = defaultGitRunner(context.Background(), dir, bad)
+	if err == nil {
+		t.Fatal("expected an error from exit 1")
+	}
+	if !strings.Contains(string(stderr), "oops") {
+		t.Errorf("stderr = %q on failure, want the diagnostic", stderr)
+	}
 }
 
 func TestStageAll_ExcludesFlowDir(t *testing.T) {
