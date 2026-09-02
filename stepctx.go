@@ -69,12 +69,14 @@ type StepCtx interface {
 	MarkStale(id ArtifactId) error
 	Park(req ParkRequest) error
 
-	// AskQuestions surfaces one or more questions for the user. The handler
-	// returns the sentinel error AskQuestions emits; the SDK forwards the
-	// questions to Backend.AskQuestions, which assigns ids and persists them
-	// on the item, then parks the flow until at least one is answered.
-	// Variadic so single-question and multi-question call sites both read
-	// naturally: ctx.AskQuestions(q1) vs ctx.AskQuestions(q1, q2, q3).
+	// AskQuestions surfaces one or more questions for the user. The call
+	// persists questions via Backend.AskQuestions and returns the ErrQuestion
+	// sentinel carrying the backend's response (ids and timestamps). The
+	// orchestrator parks the flow until at least one is answered. A
+	// disclosure refusal is returned as ErrDisclosureRefused so the caller
+	// can revise and re-offer. Variadic so single-question and
+	// multi-question call sites both read naturally:
+	// ctx.AskQuestions(q1) vs ctx.AskQuestions(q1, q2, q3).
 	AskQuestions(qs ...AgentQuestion) error
 
 	// Notify reports a sub-phase progress event ("running verify round 2",
