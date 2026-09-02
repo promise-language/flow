@@ -154,8 +154,12 @@ func TestRenderPrompt_ProjectBodyBeatsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderPrompt: %v", err)
 	}
-	if got != "project-specific: widget is broken" {
-		t.Errorf("got %q, want the project's body rendered", got)
+	if !strings.HasPrefix(got, "project-specific: widget is broken") {
+		t.Errorf("got %q, want the project's body rendered at the start", got)
+	}
+	// The library appends required fragments even on an override.
+	if !strings.Contains(got, "never by absolute path") {
+		t.Errorf("override lost repoRelativePaths fragment:\n%s", got)
 	}
 }
 
@@ -167,14 +171,17 @@ func TestRenderPrompt_FallsBackToDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderPrompt: %v", err)
 	}
-	want, err := renderPrompt(
-		Config{Prompts: map[PromptID]string{PromptReview: defaultPrompts[PromptReview]}},
-		PromptReview, PromptContext{})
+	// A second call with the same empty config must produce the same output —
+	// the fallback is deterministic.
+	again, err := renderPrompt(Config{}, PromptReview, PromptContext{})
 	if err != nil {
-		t.Fatalf("renderPrompt(explicit default): %v", err)
+		t.Fatalf("renderPrompt(second): %v", err)
 	}
-	if got != want {
-		t.Errorf("omitting the override rendered differently from supplying the default:\ngot  %q\nwant %q", got, want)
+	if got != again {
+		t.Errorf("two renders of the fallback differ:\ngot  %q\nwant %q", got, again)
+	}
+	if got == "" {
+		t.Error("fallback rendered empty")
 	}
 }
 
@@ -1049,13 +1056,30 @@ func TestAnswersReachEveryResumableDefaultPrompt(t *testing.T) {
 		if inSessionReprompts[id] {
 			continue
 		}
-		t.Run(string(id), func(t *testing.T) {
+		t.Run("default/"+string(id), func(t *testing.T) {
 			got, err := renderPrompt(Config{}, id, pc)
 			if err != nil {
 				t.Fatalf("renderPrompt: %v", err)
 			}
 			if !strings.Contains(got, "amend the document") {
 				t.Errorf("default prompt %q does not render the answer — a resumed step would re-ask it", id)
+			}
+		})
+	}
+	// A project override must also receive the answers, because the library
+	// appends the AnswersBlock fragment for every slot that requires it.
+	for id, frags := range requiredFragments {
+		if !frags.answers {
+			continue
+		}
+		t.Run("override/"+string(id), func(t *testing.T) {
+			cfg := Config{Prompts: map[PromptID]string{id: "project body"}}
+			got, err := renderPrompt(cfg, id, pc)
+			if err != nil {
+				t.Fatalf("renderPrompt: %v", err)
+			}
+			if !strings.Contains(got, "amend the document") {
+				t.Errorf("override prompt %q does not render the answer — a resumed step would re-ask it", id)
 			}
 		})
 	}
@@ -1178,13 +1202,29 @@ func TestWorkInProgressReachesEveryResumableDefaultPrompt(t *testing.T) {
 		if inSessionReprompts[id] {
 			continue
 		}
-		t.Run(string(id), func(t *testing.T) {
+		t.Run("default/"+string(id), func(t *testing.T) {
 			got, err := renderPrompt(Config{}, id, pc)
 			if err != nil {
 				t.Fatalf("renderPrompt: %v", err)
 			}
 			if !strings.Contains(got, "what I worked out before I stopped") {
 				t.Errorf("default prompt %q does not render the stashed work — a resumed step would re-derive it", id)
+			}
+		})
+	}
+	// A project override must also receive the stashed work.
+	for id, frags := range requiredFragments {
+		if !frags.workInProgress {
+			continue
+		}
+		t.Run("override/"+string(id), func(t *testing.T) {
+			cfg := Config{Prompts: map[PromptID]string{id: "project body"}}
+			got, err := renderPrompt(cfg, id, pc)
+			if err != nil {
+				t.Fatalf("renderPrompt: %v", err)
+			}
+			if !strings.Contains(got, "what I worked out before I stopped") {
+				t.Errorf("override prompt %q does not render the stashed work — a resumed step would re-derive it", id)
 			}
 		})
 	}
@@ -1248,13 +1288,231 @@ func TestPublishedProsePromptsAskForRepositoryRelativePaths(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 	for _, id := range []PromptID{PromptPlan, PromptReview, PromptCoverage} {
-		t.Run(string(id), func(t *testing.T) {
+		t.Run("default/"+string(id), func(t *testing.T) {
 			got, err := renderPrompt(Config{}, id, pc)
 			if err != nil {
 				t.Fatalf("renderPrompt: %v", err)
 			}
 			if !strings.Contains(got, "never by absolute path") {
 				t.Errorf("default prompt %q does not ask for repository-relative paths:\n%s", id, got)
+			}
+		})
+	}
+	// A project override must also receive the fragment.
+	for id, frags := range requiredFragments {
+		if !frags.repoRelativePaths {
+			continue
+		}
+		t.Run("override/"+string(id), func(t *testing.T) {
+			cfg := Config{Prompts: map[PromptID]string{id: "project body"}}
+			got, err := renderPrompt(cfg, id, pc)
+			if err != nil {
+				t.Fatalf("renderPrompt: %v", err)
+			}
+			if !strings.Contains(got, "never by absolute path") {
+				t.Errorf("override prompt %q does not ask for repository-relative paths:\n%s", id, got)
+			}
+		})
+	}
+}
+
+// An override for a producing prompt must carry the required fragments, even
+// though the project body does not mention them.
+func TestRenderPrompt_OverrideCarriesRequiredFragments(t *testing.T) {
+	pc := PromptContext{
+		Prior:          map[StepID]flow.ArtifactRecord{},
+		WorkInProgress: "stashed notes",
+		Answers:        []Answer{{Answer: "yes", Author: "alice"}},
+	}
+	pc.VerifyCmd = "make check"
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for id, frags := range requiredFragments {
+		t.Run(string(id), func(t *testing.T) {
+			cfg := Config{Prompts: map[PromptID]string{id: "minimal project body"}}
+			got, err := renderPrompt(cfg, id, pc)
+			if err != nil {
+				t.Fatalf("renderPrompt: %v", err)
+			}
+			if !strings.HasPrefix(got, "minimal project body") {
+				t.Errorf("project body not at the start:\n%s", got)
+			}
+			if frags.repoRelativePaths && !strings.Contains(got, "never by absolute path") {
+				t.Errorf("missing repoRelativePaths:\n%s", got)
+			}
+			if frags.deferCommit && !strings.Contains(got, "later step") {
+				t.Errorf("missing DeferCommit:\n%s", got)
+			}
+			if frags.narrowGateHint && !strings.Contains(got, "bin/run") {
+				t.Errorf("missing narrowGateHint:\n%s", got)
+			}
+			if frags.workInProgress && !strings.Contains(got, "stashed notes") {
+				t.Errorf("missing WorkInProgressBlock:\n%s", got)
+			}
+			if frags.answers && !strings.Contains(got, "yes") {
+				t.Errorf("missing AnswersBlock:\n%s", got)
+			}
+		})
+	}
+}
+
+// A default prompt already contains its fragments in the template source;
+// renderPrompt must not double-append them.
+func TestRenderPrompt_DefaultDoesNotDoubleAppend(t *testing.T) {
+	pc := PromptContext{Prior: map[StepID]flow.ArtifactRecord{}}
+	pc.VerifyCmd = "make check"
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, id := range []PromptID{PromptPlan, PromptReview, PromptCoverage} {
+		t.Run(string(id), func(t *testing.T) {
+			got, err := renderPrompt(Config{}, id, pc)
+			if err != nil {
+				t.Fatalf("renderPrompt: %v", err)
+			}
+			if n := strings.Count(got, "never by absolute path"); n != 1 {
+				t.Errorf("repoRelativePaths appears %d times in default %q, want exactly 1", n, id)
+			}
+		})
+	}
+}
+
+// The three producing prompts (implement, review, coverage) must name the
+// narrow gate instrument. The plan prompt must not.
+func TestProducingPromptsNameNarrowGate(t *testing.T) {
+	pc := PromptContext{Prior: map[StepID]flow.ArtifactRecord{}}
+	pc.VerifyCmd = "make check"
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, id := range []PromptID{PromptImplement, PromptReview, PromptCoverage} {
+		t.Run("default/"+string(id), func(t *testing.T) {
+			got, err := renderPrompt(Config{}, id, pc)
+			if err != nil {
+				t.Fatalf("renderPrompt: %v", err)
+			}
+			if !strings.Contains(got, "bin/run") {
+				t.Errorf("default prompt %q does not name bin/run:\n%s", id, got)
+			}
+		})
+		t.Run("override/"+string(id), func(t *testing.T) {
+			cfg := Config{Prompts: map[PromptID]string{id: "project body"}}
+			got, err := renderPrompt(cfg, id, pc)
+			if err != nil {
+				t.Fatalf("renderPrompt: %v", err)
+			}
+			if !strings.Contains(got, "bin/run") {
+				t.Errorf("override prompt %q does not name bin/run:\n%s", id, got)
+			}
+		})
+	}
+	t.Run("plan does not name narrow gate", func(t *testing.T) {
+		got, err := renderPrompt(Config{}, PromptPlan, pc)
+		if err != nil {
+			t.Fatalf("renderPrompt: %v", err)
+		}
+		if strings.Contains(got, "bin/run") {
+			t.Errorf("plan prompt should not name the narrow gate instrument:\n%s", got)
+		}
+	})
+}
+
+// A whitespace-only override is treated as absent: the default is used, and
+// no fragments are appended (since the default already carries them).
+func TestRenderPrompt_WhitespaceOnlyOverrideFallsBack(t *testing.T) {
+	pc := PromptContext{Prior: map[StepID]flow.ArtifactRecord{}}
+	pc.VerifyCmd = "make check"
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	// Whitespace-only override → same result as no override.
+	cfg := Config{Prompts: map[PromptID]string{PromptPlan: "   \n\t  "}}
+	got, err := renderPrompt(cfg, PromptPlan, pc)
+	if err != nil {
+		t.Fatalf("renderPrompt: %v", err)
+	}
+	want, err := renderPrompt(Config{}, PromptPlan, pc)
+	if err != nil {
+		t.Fatalf("renderPrompt(default): %v", err)
+	}
+	if got != want {
+		t.Errorf("whitespace-only override did not fall back to default:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+// BuildApp must reject an override whose body, once the library appends its
+// required fragments, does not parse as a valid template. The body alone may
+// parse fine — the validation must include the fragments.
+func TestBuildApp_RejectsOverrideThatBreaksWithFragments(t *testing.T) {
+	// An unclosed action: "{{" parses on its own as literal text in some
+	// template modes, but once fragments append "{{.DeferCommit}}" the
+	// combined source has a real action and the unclosed "{{" becomes a parse
+	// error. Use a body that is unambiguously broken once fragments land.
+	_, err := BuildApp(context.Background(), Config{
+		Role: RoleContributor, BaseBranch: "main", VerifyCmd: []string{"true"},
+		Prompts: map[PromptID]string{
+			PromptImplement: "body with bad template {{ .Nonexistent | bad_func }}",
+		},
+	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
+	if err == nil || !strings.Contains(err.Error(), string(PromptImplement)) {
+		t.Errorf("err = %v, want a parse error naming the slot", err)
+	}
+}
+
+// Every producing default prompt must already contain every fragment its
+// requiredFragments entry declares. If a future edit adds a slot to the map
+// but forgets to put the fragment in the default body, the default would
+// double-append on an override path while silently missing it on the default
+// path.
+func TestRequiredFragments_DefaultsContainDeclaredFragments(t *testing.T) {
+	for id, frags := range requiredFragments {
+		src, ok := defaultPrompts[id]
+		if !ok {
+			t.Errorf("requiredFragments names %q, which has no default prompt", id)
+			continue
+		}
+		t.Run(string(id), func(t *testing.T) {
+			if frags.repoRelativePaths && !strings.Contains(src, repoRelativePaths) {
+				t.Error("default missing repoRelativePaths fragment")
+			}
+			if frags.deferCommit && !strings.Contains(src, "{{.DeferCommit}}") {
+				t.Error("default missing {{.DeferCommit}}")
+			}
+			if frags.narrowGateHint && !strings.Contains(src, narrowGateHint) {
+				t.Error("default missing narrowGateHint")
+			}
+			if frags.workInProgress && !strings.Contains(src, "{{.WorkInProgressBlock}}") {
+				t.Error("default missing {{.WorkInProgressBlock}}")
+			}
+			if frags.answers && !strings.Contains(src, "{{.AnswersBlock}}") {
+				t.Error("default missing {{.AnswersBlock}}")
+			}
+		})
+	}
+}
+
+// In-session re-prompts get no fragments appended, even when overridden.
+func TestRenderPrompt_RepromptsGetNoFragments(t *testing.T) {
+	pc := PromptContext{
+		Prior:          map[StepID]flow.ArtifactRecord{},
+		WorkInProgress: "stashed notes",
+		Answers:        []Answer{{Answer: "yes"}},
+	}
+	pc.VerifyCmd = "make check"
+	pc.VerifyOutput = "FAIL"
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, id := range []PromptID{PromptImplementFix, PromptRevise, PromptCommitRepair, PromptStageRepair} {
+		t.Run(string(id), func(t *testing.T) {
+			cfg := Config{Prompts: map[PromptID]string{id: "reprompt body"}}
+			got, err := renderPrompt(cfg, id, pc)
+			if err != nil {
+				t.Fatalf("renderPrompt: %v", err)
+			}
+			if got != "reprompt body" {
+				t.Errorf("re-prompt %q got unexpected content appended: %q", id, got)
 			}
 		})
 	}

@@ -52,11 +52,16 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 				"issue: Config.Prompts has key %q, which is not a prompt slot — "+
 					"a misspelled key would silently fall back to the library default", id)
 		}
-		// Parse the body too. A template that does not compile fails at step
-		// dispatch otherwise — mid-claim, after the item has been taken — which
-		// is exactly the class of failure this function exists to move to
-		// startup.
-		if _, err := template.New(string(id)).Parse(body); err != nil {
+		// Parse the body WITH the fragments the library will append at render
+		// time. A project body that compiles on its own but breaks once the
+		// library adds {{.DeferCommit}} or similar would fail at step dispatch
+		// — mid-claim, after the item has been taken — which is exactly the
+		// class of failure this function exists to move to startup.
+		toparse := body
+		if frags, ok := requiredFragments[id]; ok {
+			toparse = appendFragments(body, frags)
+		}
+		if _, err := template.New(string(id)).Parse(toparse); err != nil {
 			return cli.App{}, fmt.Errorf("issue: Config.Prompts[%q] does not parse: %w", id, err)
 		}
 	}
