@@ -452,36 +452,65 @@ func (b *builder) commitWithRepair(ctx flow.StepCtx, wt flow.Worktree, msg strin
 		return nil
 	}
 
-	// First refusal: surface the hook's message and let the agent delete the
-	// offending files.
-	ctx.Notify("", fmt.Sprintf("commit refused by pre-commit hook: %s", firstErr))
+	// Bounded content-aware repair loop. A revision costs a prompt, not an
+	// invocation, so a few rounds cannot exhaust an invocation grant.
+	lastErr := firstErr
+	for round := 0; round <= maxDisclosureRevisions; round++ {
+		ctx.Notify("", fmt.Sprintf(
+			"commit refused by pre-commit hook (round %d): %s", round+1, lastErr))
 
-	pc := PromptContext{CommitRefusal: firstErr.Error()}
-	prompt, err := renderPrompt(b.cfg, PromptCommitRepair, pc)
-	if err != nil {
-		return err
+		pc := PromptContext{CommitRefusal: lastErr.Error()}
+		prompt, err := renderPrompt(b.cfg, PromptCommitRepair, pc)
+		if err != nil {
+			return err
+		}
+		_, err = ctx.Agent().Run(ctx.Context(), flow.AgentRequest{
+			Prompt:         prompt,
+			PermissionMode: "acceptEdits",
+		})
+		if err != nil {
+			return err // infrastructure failure
+		}
+
+		// The agent may have edited files → re-verify unconditionally.
+		// For a delete-only repair this is cheap (fewer files, still valid).
+		// For a content repair it is mandatory.
+		if verr := wt.Verify(ctx.Context()); verr != nil {
+			// Verify failed after repair. Stash context and park.
+			ctx.RecordWorkInProgress(fmt.Sprintf(
+				"commit repair round %d: verify failed after editing.\n\n"+
+					"Hook refusal:\n%s\n\nVerify failure:\n%s",
+				round+1, lastErr, verifyTail(verr)))
+			return ctx.Park(flow.ParkRequest{
+				Kind: flow.ParkBlocked,
+				Reason: "the pre-commit hook refused this step's commit and " +
+					"the repair broke verify; details are kept with the step",
+			})
+		}
+
+		if err := wt.Stage(ctx.Context()); err != nil {
+			return err
+		}
+		commitErr := wt.Commit(ctx.Context(), msg)
+		if commitErr == nil {
+			return nil
+		}
+		lastErr = commitErr
 	}
-	// acceptEdits: the agent needs filesystem access to rm the files.
-	_, err = ctx.Agent().Run(ctx.Context(), flow.AgentRequest{
-		Prompt:         prompt,
-		PermissionMode: "acceptEdits",
+
+	// Exhausted. Stash the hook's messages locally — never published.
+	ctx.RecordWorkInProgress(fmt.Sprintf(
+		"commit repair exhausted after %d rounds.\n\n"+
+			"First hook refusal:\n%s\n\nLast hook refusal:\n%s",
+		maxDisclosureRevisions+1, firstErr, lastErr))
+
+	return ctx.Park(flow.ParkRequest{
+		Kind: flow.ParkBlocked,
+		Reason: fmt.Sprintf(
+			"the pre-commit hook refused this step's commit %d times; "+
+				"what it refused is kept with the step for the next run",
+			maxDisclosureRevisions+2),
 	})
-	if err != nil {
-		return err
-	}
-
-	// Re-stage and re-commit.
-	if err := wt.Stage(ctx.Context()); err != nil {
-		return err
-	}
-	secondErr := wt.Commit(ctx.Context(), msg)
-	if secondErr == nil {
-		return nil
-	}
-
-	// Second refusal: deterministic, park at zero cost.
-	return fmt.Errorf("commit refused twice — first: %s — second: %s: %w",
-		firstErr, secondErr, flow.ErrRefused)
 }
 
 // itemLabel names the item in a commit subject, without the closes-reference:

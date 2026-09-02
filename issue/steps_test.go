@@ -2247,6 +2247,10 @@ func TestCommitRepair_Succeeds(t *testing.T) {
 	if agent.reqs[1].PermissionMode != "acceptEdits" {
 		t.Errorf("repair PermissionMode = %q, want acceptEdits", agent.reqs[1].PermissionMode)
 	}
+	// Verify must run after the repair — a content edit invalidates the tree.
+	if wt.validates < 1 {
+		t.Error("verify was not called after the repair")
+	}
 	// The step should resolve normally.
 	if !ctx.didResolve {
 		t.Error("step did not resolve after a successful repair")
@@ -2265,32 +2269,54 @@ func TestCommitRepair_Succeeds(t *testing.T) {
 	}
 }
 
-// Both commits fail — the error wraps flow.ErrRefused so the orchestrator
-// parks at zero cost.
+// All commit attempts fail — the handler parks with a safe reason and stashes
+// the hook's messages locally.
 func TestCommitRepair_SecondRefusalParks(t *testing.T) {
 	wt := resumedWorktree()
-	secondHookErr := errors.New("pre-commit: still refusing — bigfile.bin remains")
-	wt.commitErrs = []error{hookErr, secondHookErr}
-	agent := &scriptedAgent{replies: []string{"done", "deleted the file"}}
+	// The loop tries 1 initial + maxDisclosureRevisions+1 in-loop commits.
+	// All must fail.
+	totalCommits := maxDisclosureRevisions + 2
+	commitErrs := make([]error, totalCommits)
+	for i := range commitErrs {
+		commitErrs[i] = hookErr
+	}
+	wt.commitErrs = commitErrs
+	// Agent: 1 implement + maxDisclosureRevisions+1 repairs.
+	replies := make([]string, maxDisclosureRevisions+2)
+	replies[0] = "done"
+	for i := 1; i < len(replies); i++ {
+		replies[i] = "tried to fix it"
+	}
+	agent := &scriptedAgent{replies: replies}
 	ctx := ctxWithPlan(wt, agent)
 
 	err := testBuilder(t).stepImplement(ctx)
 	if err == nil {
-		t.Fatal("want an error wrapping ErrRefused")
+		t.Fatal("want an error from parking")
 	}
-	if !errors.Is(err, flow.ErrRefused) {
-		t.Errorf("err = %v, want it to wrap flow.ErrRefused", err)
+	// The handler parks via ctx.Park, not ErrRefused.
+	if errors.Is(err, flow.ErrRefused) {
+		t.Error("err wraps ErrRefused — the handler must park directly, not via ErrRefused")
 	}
-	if !strings.Contains(err.Error(), "commit refused twice") {
-		t.Errorf("err = %v, want it to say the commit was refused twice", err)
+	if ctx.park == nil {
+		t.Fatal("no park recorded — exhausted commit repair must park")
 	}
-	// Both error messages must survive — if either is dropped from the format
-	// string, the park reason loses the diagnostic that names the offending file.
-	if !strings.Contains(err.Error(), hookErr.Error()) {
-		t.Errorf("err = %v, want the first hook message preserved", err)
+	if ctx.park.Kind != flow.ParkBlocked {
+		t.Errorf("park kind = %q, want %q", ctx.park.Kind, flow.ParkBlocked)
 	}
-	if !strings.Contains(err.Error(), secondHookErr.Error()) {
-		t.Errorf("err = %v, want the second hook message preserved", err)
+	// The park reason must NOT contain the hook's error text — that is the
+	// one string guaranteed to be refused by the disclosure guard.
+	if strings.Contains(ctx.park.Reason, hookErr.Error()) {
+		t.Errorf("park reason contains the hook's text, which the guard would refuse: %q",
+			ctx.park.Reason)
+	}
+	// The hook's messages must be stashed locally via RecordWorkInProgress.
+	if len(ctx.wipSaves) == 0 {
+		t.Fatal("no WIP stash — the hook's messages have nowhere else to go")
+	}
+	last := ctx.wipSaves[len(ctx.wipSaves)-1]
+	if !strings.Contains(last, hookErr.Error()) {
+		t.Errorf("WIP stash = %q, want it to contain the hook's error text", last)
 	}
 }
 
@@ -2313,6 +2339,10 @@ func TestCommitRepair_RecordOutstanding(t *testing.T) {
 	if !strings.Contains(agent.prompts[0], "refusing to commit binary") {
 		t.Errorf("repair prompt = %q, want the hook's stderr", agent.prompts[0])
 	}
+	// Verify must run after the repair.
+	if wt.validates < 1 {
+		t.Error("verify was not called after the repair")
+	}
 }
 
 // The rendered prompt must carry the hook's stderr verbatim.
@@ -2325,9 +2355,12 @@ func TestCommitRepair_PromptCarriesHookMessage(t *testing.T) {
 	if !strings.Contains(got, "refusing to commit binary: do — 11 MB") {
 		t.Errorf("prompt does not carry the hook's message: %q", got)
 	}
-	// It must name deletion as the only move.
-	if !strings.Contains(got, "Delete") {
-		t.Errorf("prompt does not name deletion: %q", got)
+	// It must offer both editing and deletion as repair options.
+	if !strings.Contains(got, "edit") {
+		t.Errorf("prompt does not mention editing as a repair option: %q", got)
+	}
+	if !strings.Contains(got, "delete") {
+		t.Errorf("prompt does not mention deletion as a repair option: %q", got)
 	}
 	// It must prohibit unstaging and .gitignore.
 	if !strings.Contains(got, "unstage") || !strings.Contains(got, ".gitignore") {
@@ -2354,6 +2387,178 @@ func TestCommitRepair_AgentFailurePropagates(t *testing.T) {
 	}
 	if !errors.Is(err, boom) {
 		t.Errorf("err = %v, want the agent's own error propagated", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Content-aware commit repair — new tests for the bounded loop, re-verify,
+// and safe park reasons.
+// ---------------------------------------------------------------------------
+
+// A content refusal is fixed by editing the file. The agent edits, verify
+// passes, re-commit succeeds.
+func TestCommitRepair_ContentRepairSucceeds(t *testing.T) {
+	wt := resumedWorktree()
+	contentHookErr := errors.New(`git commit: exit status 1 (pre-commit: absolute home path found in test/fixture.go)`)
+	wt.commitErrs = []error{contentHookErr, nil}
+	agent := &scriptedAgent{replies: []string{"done", "edited the fixture"}}
+	ctx := ctxWithPlan(wt, agent)
+
+	if err := testBuilder(t).stepImplement(ctx); err != nil {
+		t.Fatalf("stepImplement: %v", err)
+	}
+	// Verify ran after the repair.
+	if wt.validates < 1 {
+		t.Error("verify was not called after the content repair")
+	}
+	if !ctx.didResolve {
+		t.Error("step did not resolve after a successful content repair")
+	}
+}
+
+// The agent edits a file during repair but the edit breaks verify. The handler
+// parks immediately with a safe reason.
+func TestCommitRepair_ContentRepairVerifyFails(t *testing.T) {
+	contentHookErr := errors.New(`git commit: exit status 1 (pre-commit: absolute home path found in test/fixture.go)`)
+	wt := resumedWorktree()
+	wt.commitErrs = []error{contentHookErr}
+	wt.verifyErr = errors.New("verify failed:\nFAIL pkg/x")
+	wt.verifyAfter = 99 // never passes
+	agent := &scriptedAgent{replies: []string{"edited the fixture"}}
+	ctx := &fakeCtx{wt: wt, agent: agent}
+
+	err := testBuilder(t).commitWithRepair(ctx, wt, "test commit")
+	if err == nil {
+		t.Fatal("want an error from parking")
+	}
+	if ctx.park == nil {
+		t.Fatal("no park recorded — verify failure after repair must park")
+	}
+	if ctx.park.Kind != flow.ParkBlocked {
+		t.Errorf("park kind = %q, want %q", ctx.park.Kind, flow.ParkBlocked)
+	}
+	if !strings.Contains(ctx.park.Reason, "repair broke verify") {
+		t.Errorf("park reason = %q, want it to mention verify failure", ctx.park.Reason)
+	}
+	// The WIP stash must contain both the hook refusal and verify failure.
+	if len(ctx.wipSaves) == 0 {
+		t.Fatal("no WIP stash")
+	}
+	last := ctx.wipSaves[len(ctx.wipSaves)-1]
+	if !strings.Contains(last, "absolute home path") {
+		t.Errorf("WIP stash = %q, want hook refusal text", last)
+	}
+	if !strings.Contains(last, "FAIL pkg/x") {
+		t.Errorf("WIP stash = %q, want verify failure text", last)
+	}
+}
+
+// The first two commits fail, the third succeeds — the loop runs multiple
+// rounds successfully.
+func TestCommitRepair_MultipleRounds(t *testing.T) {
+	wt := resumedWorktree()
+	wt.commitErrs = []error{hookErr, hookErr, nil}
+	agent := &scriptedAgent{replies: []string{"done", "first try", "second try"}}
+	ctx := ctxWithPlan(wt, agent)
+
+	if err := testBuilder(t).stepImplement(ctx); err != nil {
+		t.Fatalf("stepImplement: %v", err)
+	}
+	// Agent: 1 implement + 2 repairs.
+	if agent.calls != 3 {
+		t.Errorf("agent ran %d times, want 3 (implement + 2 repairs)", agent.calls)
+	}
+	// Verify ran each round.
+	if wt.validates < 2 {
+		t.Errorf("verify ran %d times, want at least 2 (one per repair round)", wt.validates)
+	}
+	if !ctx.didResolve {
+		t.Error("step did not resolve after multiple repair rounds")
+	}
+}
+
+// All commits fail for maxDisclosureRevisions+1 rounds — the handler parks
+// with a safe reason and stashes the hook's messages locally.
+func TestCommitRepair_ExhaustsAllRoundsThenParks(t *testing.T) {
+	wt := resumedWorktree()
+	totalCommits := maxDisclosureRevisions + 2
+	commitErrs := make([]error, totalCommits)
+	for i := range commitErrs {
+		commitErrs[i] = hookErr
+	}
+	wt.commitErrs = commitErrs
+	replies := make([]string, maxDisclosureRevisions+2)
+	replies[0] = "done"
+	for i := 1; i < len(replies); i++ {
+		replies[i] = "tried to fix it"
+	}
+	agent := &scriptedAgent{replies: replies}
+	ctx := ctxWithPlan(wt, agent)
+
+	err := testBuilder(t).stepImplement(ctx)
+	if err == nil {
+		t.Fatal("want an error from parking")
+	}
+	if ctx.park == nil {
+		t.Fatal("no park recorded — exhausted rounds must park")
+	}
+	if ctx.park.Kind != flow.ParkBlocked {
+		t.Errorf("park kind = %q, want %q", ctx.park.Kind, flow.ParkBlocked)
+	}
+	// The park reason must not contain hook text.
+	if strings.Contains(ctx.park.Reason, "refusing to commit binary") {
+		t.Errorf("park reason leaks hook text: %q", ctx.park.Reason)
+	}
+	// The WIP stash must contain the hook text.
+	if len(ctx.wipSaves) == 0 {
+		t.Fatal("no WIP stash")
+	}
+	last := ctx.wipSaves[len(ctx.wipSaves)-1]
+	if !strings.Contains(last, hookErr.Error()) {
+		t.Errorf("WIP stash = %q, want hook error text", last)
+	}
+}
+
+// The park reason must never contain any substring from the hook's stderr.
+func TestCommitRepair_ParkReasonOmitsHookText(t *testing.T) {
+	wt := resumedWorktree()
+	// Use a distinctive hook message so we can check for it precisely.
+	distinctive := errors.New(`git commit: exit status 1 (pre-commit: /Users/someone/.ssh/id_rsa found in config/keys.go)`)
+	totalCommits := maxDisclosureRevisions + 2
+	commitErrs := make([]error, totalCommits)
+	for i := range commitErrs {
+		commitErrs[i] = distinctive
+	}
+	wt.commitErrs = commitErrs
+	replies := make([]string, maxDisclosureRevisions+2)
+	replies[0] = "done"
+	for i := 1; i < len(replies); i++ {
+		replies[i] = "tried"
+	}
+	agent := &scriptedAgent{replies: replies}
+	ctx := ctxWithPlan(wt, agent)
+
+	_ = testBuilder(t).stepImplement(ctx)
+	if ctx.park == nil {
+		t.Fatal("no park recorded")
+	}
+	// The hook's message contains "/Users/someone/.ssh/id_rsa" — it must not
+	// appear in the park reason.
+	for _, fragment := range []string{
+		"/Users/someone/.ssh/id_rsa",
+		"config/keys.go",
+		distinctive.Error(),
+	} {
+		if strings.Contains(ctx.park.Reason, fragment) {
+			t.Errorf("park reason contains hook fragment %q: %q", fragment, ctx.park.Reason)
+		}
+	}
+	// But the WIP stash must have it.
+	if len(ctx.wipSaves) == 0 {
+		t.Fatal("no WIP stash for hook text")
+	}
+	if !strings.Contains(ctx.wipSaves[len(ctx.wipSaves)-1], distinctive.Error()) {
+		t.Errorf("WIP stash does not contain the hook's error: %v", ctx.wipSaves)
 	}
 }
 
