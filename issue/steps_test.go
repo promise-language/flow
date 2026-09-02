@@ -261,6 +261,9 @@ type fakeCtx struct {
 	wipErr     error
 	wipSaveErr error
 	wipSaves   []string
+	// wtErr makes Worktree() return this error, modelling an environment
+	// where no worktree is available.
+	wtErr error
 	// resolveErrs is what ResolveMarkdown returns on successive calls, so a
 	// test can script a disclosure refusal followed by an acceptance. A shorter
 	// slice than the number of calls means every later call succeeds.
@@ -347,12 +350,17 @@ func (c *fakeCtx) RecordWorkInProgress(body string) error {
 	c.wip = body
 	return nil
 }
-func (c *fakeCtx) Notify(_, detail string)          { c.notices = append(c.notices, detail) }
-func (c *fakeCtx) Agent() flow.Agent                { return c.agent }
-func (c *fakeCtx) Worktree() (flow.Worktree, error) { return c.wt, nil }
-func (c *fakeCtx) Claim() flow.Claim                { return flow.Claim{} }
-func (c *fakeCtx) VerifyCmd() string                { return "make check" }
-func (c *fakeCtx) RefreshItem() error               { return nil }
+func (c *fakeCtx) Notify(_, detail string) { c.notices = append(c.notices, detail) }
+func (c *fakeCtx) Agent() flow.Agent       { return c.agent }
+func (c *fakeCtx) Worktree() (flow.Worktree, error) {
+	if c.wtErr != nil {
+		return nil, c.wtErr
+	}
+	return c.wt, nil
+}
+func (c *fakeCtx) Claim() flow.Claim  { return flow.Claim{} }
+func (c *fakeCtx) VerifyCmd() string  { return "make check" }
+func (c *fakeCtx) RefreshItem() error { return nil }
 
 type scriptedAgent struct {
 	replies []string
@@ -1291,6 +1299,10 @@ func TestStepCloseBranch_RefusesWhenTheBaseIsNotInTheWorktree(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "main") {
 		t.Fatalf("err = %v, want a refusal naming the base branch that is missing", err)
 	}
+	if !errors.Is(err, flow.ErrRefused) {
+		t.Errorf("err = %v, want it to wrap flow.ErrRefused — a missing base branch "+
+			"is deterministic and cannot change on retry", err)
+	}
 	if ctx.didResolve {
 		t.Error("recorded the worktree as restored when it was not")
 	}
@@ -1308,11 +1320,58 @@ func TestStepCloseBranch_RefusesADirtyWorktree(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "dirty") {
 		t.Fatalf("err = %v, want a refusal naming the dirty tree", err)
 	}
+	if !errors.Is(err, flow.ErrTransient) {
+		t.Errorf("err = %v, want it to wrap flow.ErrTransient — a dirty tree is an "+
+			"environment condition that may resolve", err)
+	}
 	if ctx.didResolve {
 		t.Error("recorded the worktree as restored over uncommitted work")
 	}
 	if wt.branch != testBranch {
 		t.Errorf("worktree moved to %q over a dirty tree", wt.branch)
+	}
+}
+
+func TestStepCloseBranch_WorktreeUnavailableWrapsErrTransient(t *testing.T) {
+	ctx := ctxWithPlan(resumedWorktree(), &scriptedAgent{})
+	ctx.wtErr = errors.New("no worktree allocated")
+
+	err := testBuilder(t).stepCloseBranch(ctx)
+	if err == nil {
+		t.Fatal("want an error when worktree is unavailable")
+	}
+	if !errors.Is(err, flow.ErrTransient) {
+		t.Errorf("err = %v, want it to wrap flow.ErrTransient — no worktree is an "+
+			"infrastructure failure", err)
+	}
+	if !strings.Contains(err.Error(), "no worktree allocated") {
+		t.Errorf("err = %v, want the original message preserved for diagnosis", err)
+	}
+	if ctx.didResolve {
+		t.Error("resolved the flag after a worktree failure")
+	}
+}
+
+func TestStepCloseBranch_BaseBranchLookupFailureWrapsErrTransient(t *testing.T) {
+	wt := resumedWorktree()
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	// A builder with no pre-stored base and a backend that cannot resolve it.
+	b := &builder{cfg: Config{}, role: RoleContributor, backend: &bareBackend{}}
+
+	err := b.stepCloseBranch(ctx)
+	if err == nil {
+		t.Fatal("want an error when base branch lookup fails")
+	}
+	if !errors.Is(err, flow.ErrTransient) {
+		t.Errorf("err = %v, want it to wrap flow.ErrTransient — a failed lookup is an "+
+			"infrastructure failure", err)
+	}
+	if !strings.Contains(err.Error(), "cannot report") {
+		t.Errorf("err = %v, want the underlying message preserved for diagnosis", err)
+	}
+	if ctx.didResolve {
+		t.Error("resolved the flag after a failed base-branch lookup")
 	}
 }
 
