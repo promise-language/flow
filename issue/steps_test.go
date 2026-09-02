@@ -2523,6 +2523,12 @@ func TestCommitRepair_ExhaustsAllRoundsThenParks(t *testing.T) {
 func TestCommitRepair_ParkReasonOmitsHookText(t *testing.T) {
 	wt := resumedWorktree()
 	// Use a distinctive hook message so we can check for it precisely.
+	//
+	// "someone" is deliberate, not arbitrary: the disclosure rules refuse an
+	// absolute home path anywhere in the worktree, exempting only documentation
+	// placeholders (user, username, you, me, someone, runner, dev, u). A
+	// real-looking name here would make the very test that proves such a path is
+	// never published impossible to push.
 	distinctive := errors.New(`git commit: exit status 1 (pre-commit: /Users/someone/.ssh/id_rsa found in config/keys.go)`)
 	totalCommits := maxDisclosureRevisions + 2
 	commitErrs := make([]error, totalCommits)
