@@ -284,7 +284,7 @@ func TestFitReportsIncompleteWhenTheBuildCacheIsUnknown(t *testing.T) {
 		t.Errorf("incomplete = %q, and names nothing after the colon", incomplete)
 	}
 	// An incomplete run is never a pass, so this is already a refusal today.
-	if acceptable, _, _ := judge(Envelope{Gate: "fit", Metrics: metrics, Incomplete: incomplete}); acceptable {
+	if acceptable, _, _ := judge(Envelope{Gate: "fit", Metrics: metrics, Incomplete: incomplete}, map[string]Threshold{}); acceptable {
 		t.Error("a machine whose toolchain cannot be reached was judged fit")
 	}
 }
