@@ -439,19 +439,19 @@ func translateHandlerError(
 	}
 	var question flow.ErrQuestion
 	if errors.As(handlerErr, &question) {
-		recorded, err := app.Backend.AskQuestions(ctx, claim, question.Questions)
-		if err != nil {
-			return flow.InvocationResult{}, fmt.Errorf("backend.AskQuestions: %w", err)
-		}
+		// The backend call already happened inside stepCtx.AskQuestions;
+		// question.Recorded carries the persisted questions with their ids
+		// and timestamps.
+		//
 		// Stamp WHEN the question was asked — a reader scanning the item for
 		// answers has no other way to tell a reply from the question itself.
 		// Prefer the backend's own clock: the replies it later reports are
 		// stamped by that same clock, and mixing in the local one means a
 		// runner running fast discards answers it can never get back.
 		marker := flow.MarkQuestionAskedLocal(time.Now())
-		if len(recorded) > 0 && !recorded[0].AskedAt.IsZero() {
+		if len(question.Recorded) > 0 && !question.Recorded[0].AskedAt.IsZero() {
 			// The backend's own clock — the one the answers will be stamped by.
-			marker = flow.MarkQuestionAsked(recorded[0].AskedAt)
+			marker = flow.MarkQuestionAsked(question.Recorded[0].AskedAt)
 		}
 		req := flow.ParkRequest{
 			Kind:    flow.ParkQuestion,
@@ -877,7 +877,17 @@ func (s *stepCtx) AskQuestions(qs ...flow.AgentQuestion) error {
 	if len(qs) == 0 {
 		return errors.New("ctx.AskQuestions called with no questions")
 	}
-	return flow.ErrQuestion{Questions: qs}
+	recorded, err := s.app.Backend.AskQuestions(s.ctx, s.claim, qs)
+	if err != nil {
+		// A disclosure refusal is returned as-is so the handler-level
+		// revision loop can catch it and re-prompt the agent.
+		var refused flow.ErrDisclosureRefused
+		if errors.As(err, &refused) {
+			return err
+		}
+		return fmt.Errorf("backend.AskQuestions: %w", err)
+	}
+	return flow.ErrQuestion{Questions: qs, Recorded: recorded}
 }
 
 // ParkedOn reports the park this dispatch is resuming from, from the state

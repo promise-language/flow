@@ -269,7 +269,13 @@ type fakeCtx struct {
 	// slice than the number of calls means every later call succeeds.
 	resolveErrs []error
 	resolves    []string
-	notices     []string
+	// askErrs is what AskQuestions returns on successive calls, so a test
+	// can script a disclosure refusal followed by an acceptance. A shorter
+	// slice than the number of calls means every later call returns a
+	// generic sentinel.
+	askErrs  []error
+	askCalls int
+	notices  []string
 }
 
 func (c *fakeCtx) Context() context.Context { return context.Background() }
@@ -338,6 +344,11 @@ func (c *fakeCtx) Park(req flow.ParkRequest) error {
 	return errors.New("parked")
 }
 func (c *fakeCtx) AskQuestions(qs ...flow.AgentQuestion) error {
+	idx := c.askCalls
+	c.askCalls++
+	if idx < len(c.askErrs) && c.askErrs[idx] != nil {
+		return c.askErrs[idx]
+	}
 	c.asked = append(c.asked, qs...)
 	return errors.New("asked")
 }
@@ -1458,6 +1469,154 @@ func TestPromptContextSurvivesAnUnreadableRecord(t *testing.T) {
 	}
 	if pc.WorkInProgressBlock() != "" {
 		t.Error("WorkInProgressBlock() is non-empty with nothing stashed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Question disclosure revision loop.
+// ---------------------------------------------------------------------------
+
+// questionRefusal is a disclosure refusal shaped like the one the guard returns
+// for a question comment.
+func questionRefusal(what string) flow.ErrDisclosureRefused {
+	return flow.ErrDisclosureRefused{
+		Act:    flow.ActQuestion,
+		Reason: errors.New(what),
+	}
+}
+
+// A question carrying a disclosing fragment is revised and re-offered, not
+// killed. The agent keeps the session so the revision costs one prompt.
+func TestQuestionDisclosureRevisionSucceedsOnFirstRetry(t *testing.T) {
+	const disclosingQuestion = "I need to know about /Users/someone/.cache/flow/something.\n" +
+		"NEEDS-ANSWER: cache or new store?\n```\nboth are plausible\n```"
+	const cleanQuestion = "I need to know about the local cache path.\n" +
+		"NEEDS-ANSWER: cache or new store?\n```\nboth are plausible\n```"
+	agent := &scriptedAgent{replies: []string{disclosingQuestion, cleanQuestion}}
+	ctx := ctxWithPlan(resumedWorktree(), agent)
+	ctx.askErrs = []error{questionRefusal("an absolute home path names the machine's user")}
+
+	err := testBuilder(t).stepReview(ctx)
+	if err == nil {
+		t.Fatal("want the ask sentinel to stop the step")
+	}
+	// Two agent calls: the original turn and the revision.
+	if agent.calls != 2 {
+		t.Errorf("agent ran %d times, want 2 (original + revision)", agent.calls)
+	}
+	// The question should have been recorded on the second (clean) attempt.
+	if len(ctx.asked) != 1 {
+		t.Fatalf("asked %d questions, want 1", len(ctx.asked))
+	}
+	if ctx.asked[0].Header != "cache or new store?" {
+		t.Errorf("Header = %q, want the question", ctx.asked[0].Header)
+	}
+	// The revision prompt must carry the refusal and the refused text.
+	rev := agent.reqs[1]
+	if !strings.Contains(rev.Prompt, "an absolute home path names the machine's user") {
+		t.Errorf("revision prompt does not carry the guard's reason: %q", rev.Prompt)
+	}
+	if rev.PermissionMode != "plan" {
+		t.Errorf("revision PermissionMode = %q, want plan — a revision must not edit files", rev.PermissionMode)
+	}
+	if rev.ResumeSessionID != "session-1" {
+		t.Errorf("revision resumes %q, want the session that produced the question", rev.ResumeSessionID)
+	}
+}
+
+// A question that cannot be made postable within the bound parks rather than
+// failing — the work is sound and a person has to decide.
+func TestQuestionDisclosureExhaustionParks(t *testing.T) {
+	const guardAnswer = "an absolute home path was found"
+	// Build enough replies: one original + maxDisclosureRevisions revisions,
+	// all carrying a question with a disclosing fragment.
+	replies := make([]string, maxDisclosureRevisions+1)
+	for i := range replies {
+		replies[i] = fmt.Sprintf("round %d /Users/someone/.cache/flow\n"+
+			"NEEDS-ANSWER: cache or new store?\n```\nboth are plausible\n```", i)
+	}
+	agent := &scriptedAgent{replies: replies}
+	ctx := ctxWithPlan(resumedWorktree(), agent)
+	// Every call to AskQuestions is refused.
+	askErrs := make([]error, maxDisclosureRevisions+1)
+	for i := range askErrs {
+		askErrs[i] = questionRefusal(guardAnswer)
+	}
+	ctx.askErrs = askErrs
+
+	err := testBuilder(t).stepReview(ctx)
+	if err == nil {
+		t.Fatal("want the step to stop when the guard will not take the question")
+	}
+	if ctx.park == nil {
+		t.Fatal("no park recorded — a refusal must not be reported as a failed step")
+	}
+	if ctx.park.Kind != flow.ParkBlocked {
+		t.Errorf("park kind = %q, want %q", ctx.park.Kind, flow.ParkBlocked)
+	}
+	if !strings.Contains(ctx.park.Reason, "disclosure guard refused") {
+		t.Errorf("park reason = %q, want it to name the disclosure refusal", ctx.park.Reason)
+	}
+	// A park is PUBLISHED — Backend.Park posts the whole request as an issue
+	// comment, through the same guard. A reason repeating the guard's answer
+	// carries the refused fragment the guard just refused.
+	if strings.Contains(ctx.park.Reason, guardAnswer) {
+		t.Errorf("park reason repeats the guard's answer, which is the one text that cannot be published: %q",
+			ctx.park.Reason)
+	}
+	// The stash must carry the guard's answer so a human or the next run can
+	// see what was refused and why.
+	last := ctx.wipSaves[len(ctx.wipSaves)-1]
+	if !strings.Contains(last, guardAnswer) {
+		t.Errorf("stashed record does not carry the guard's reason: %q", last)
+	}
+	// Bounded: the opening turn plus maxDisclosureRevisions revisions.
+	if agent.calls != maxDisclosureRevisions+1 {
+		t.Errorf("agent ran %d times, want %d", agent.calls, maxDisclosureRevisions+1)
+	}
+}
+
+// When the agent drops the question during revision (its rewrite has no
+// NEEDS-ANSWER), the step continues normally without parking.
+func TestQuestionDisclosureRevisionDropsQuestion(t *testing.T) {
+	const disclosingQuestion = "Look at /Users/someone/.cache/flow.\n" +
+		"NEEDS-ANSWER: which cache path?\n```\nevidence\n```"
+	const cleanRevision = "After looking at the cache, I see no ambiguity. Continuing."
+	agent := &scriptedAgent{replies: []string{disclosingQuestion, cleanRevision}}
+	ctx := ctxWithPlan(resumedWorktree(), agent)
+	ctx.askErrs = []error{questionRefusal("an absolute home path was found")}
+
+	err := testBuilder(t).stepReview(ctx)
+	// No ErrQuestion sentinel — the step continues.
+	if err != nil {
+		t.Fatalf("want nil error when the agent drops the question, got %v", err)
+	}
+	if len(ctx.asked) != 0 {
+		t.Errorf("asked %d questions, want 0 — the agent dropped the question", len(ctx.asked))
+	}
+	if ctx.park != nil {
+		t.Errorf("parked (%+v) when the agent dropped the question", ctx.park)
+	}
+}
+
+// A non-disclosure error from AskQuestions propagates unchanged — no revision
+// is attempted, because the text was never examined by the guard.
+func TestQuestionNonDisclosureErrorPassesThrough(t *testing.T) {
+	const question = "NEEDS-ANSWER: cache or new store?\n```\nboth are plausible\n```"
+	agent := &scriptedAgent{replies: []string{question}}
+	ctx := ctxWithPlan(resumedWorktree(), agent)
+	boom := errors.New("github: 502 bad gateway")
+	ctx.askErrs = []error{boom}
+
+	err := testBuilder(t).stepReview(ctx)
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the backend's own error unchanged", err)
+	}
+	if agent.calls != 1 {
+		t.Errorf("agent ran %d times, want 1 — nothing should have been revised", agent.calls)
+	}
+	if ctx.park != nil {
+		t.Errorf("parked (%+v) on an error that is not a refusal", ctx.park)
 	}
 }
 
