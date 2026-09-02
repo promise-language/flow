@@ -719,11 +719,11 @@ func (b *builder) followUpCommitMessage(ctx flow.StepCtx) string {
 func (b *builder) stepCloseBranch(ctx flow.StepCtx) error {
 	wt, err := ctx.Worktree()
 	if err != nil {
-		return err
+		return fmt.Errorf("close branch: worktree unavailable: %v: %w", err, flow.ErrTransient)
 	}
 	base, err := b.baseBranch(ctx.Context())
 	if err != nil {
-		return err
+		return fmt.Errorf("close branch: base branch lookup failed: %v: %w", err, flow.ErrTransient)
 	}
 	// Branch CREATES when the name is absent, so the created flag is the check
 	// rather than decoration: without it, a worktree missing the base branch
@@ -731,12 +731,12 @@ func (b *builder) stepCloseBranch(ctx flow.StepCtx) error {
 	// every later item would be cut from the wrong place.
 	created, err := wt.Branch(ctx.Context(), base, "")
 	if err != nil {
-		return err
+		return fmt.Errorf("close branch: checkout %s: %v: %w", base, err, flow.ErrTransient)
 	}
 	if created {
 		return fmt.Errorf("base branch %q is not in this worktree, so the worktree cannot be "+
 			"returned to it — a branch of that name now points at this item's work and has "+
-			"to be resolved by hand", base)
+			"to be resolved by hand: %w", base, flow.ErrRefused)
 	}
 	return ctx.ResolveFlag()
 }
