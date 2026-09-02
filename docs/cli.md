@@ -17,6 +17,7 @@ Every binary built on `cli.Run` exposes exactly this surface.
 | `list` | Report the work available to this operator |
 | `answer <item-id> <text>` | Answer a question a step is parked on |
 | `grant <step> <axis> <amount>` | Add budget to a step and clear a matching budget park |
+| `stale <step-id>` | Mark one resolved artifact stale so its step re-runs |
 | `doctor` | Verify the binary can reach and use its backend |
 
 No command outside this set exists. A binary that needs project-specific behaviour expresses it as a flow, not as a new command.
@@ -47,7 +48,7 @@ Passing both `--json` and `--human` is a usage error, detected before the comman
 
 Commands fall into two shapes, and the shape determines the streams.
 
-### One-shot reports — `list`, `status`, `grant`, `doctor`, `run-step`
+### One-shot reports — `list`, `status`, `grant`, `stale`, `doctor`, `run-step`
 
 The report *is* the output. It goes to **stdout**, rendered in the selected mode.
 
