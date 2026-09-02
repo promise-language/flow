@@ -189,6 +189,15 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		if st, serr := app.Backend.LoadState(ctx, *claim); serr == nil {
 			if f, next := SelectFlow(app, st); f != nil {
 				fmt.Fprintf(app.Err, "resolve: running %q…\n", next)
+			} else if !st.Item.Finalized && flowForType(app, st.Item.Type) == nil {
+				// No flow accepts the type, so RunOne will block rather than
+				// finalize. Announcing "finalizing…" here would tell the
+				// operator the run is completing right before it reports that
+				// nothing ever started. The finalized exemption is RunOne's, and
+				// is repeated here for the same reason the branch exists: an
+				// already-finalized item DOES take the finalize path, so saying
+				// otherwise about it would be the same misreport inverted.
+				fmt.Fprintf(app.Err, "resolve: no flow accepts this item's type…\n")
 			} else {
 				fmt.Fprintf(app.Err, "resolve: no step eligible — finalizing…\n")
 			}
@@ -203,8 +212,18 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			_ = enc.Encode(res)
 		}
 
+		// A result carrying no step name came from the pre-dispatch region of
+		// RunOne, which has two exits: the finalize path, and a stop that
+		// happens before any step can be selected. Only the first is a
+		// finalize, and labelling the second "(finalize)" is the same misreport
+		// the peek above avoids — "(finalize) → blocked" tells the operator the
+		// run reached the finalize on an item where nothing ever started.
 		label := res.Step
-		if label == "" {
+		switch {
+		case label != "":
+		case res.Status == "blocked":
+			label = "(no step)"
+		default:
 			label = "(finalize)"
 		}
 		outcome := fmt.Sprintf("resolve: %s → %s", label, res.Status)

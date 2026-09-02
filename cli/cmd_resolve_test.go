@@ -178,6 +178,68 @@ func TestCmdResolve_EmptyEligibleExitsClean(t *testing.T) {
 	}
 }
 
+// TestCmdResolve_UnmatchedTypeBlocks (#10): an item whose type no flow accepts
+// stops the loop at exit 1 with the mismatch named, and never reports the run
+// as finalized — neither in the outcome line nor in the progress peek that
+// precedes it.
+func TestCmdResolve_UnmatchedTypeBlocks(t *testing.T) {
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "1", Type: "chore", Title: "1"})
+	app, _, errBuf := resolveTestApp(t, be) // flow accepts "task" only
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (blocked); err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), `no flow accepts item type "chore"`) {
+		t.Errorf("expected Err to name the unmatched type; got %q", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "is blocked") {
+		t.Errorf("expected Err to report the item as blocked; got %q", errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "finalized ✓") {
+		t.Errorf("Err must not claim the item finalized; got %q", errBuf.String())
+	}
+	// The progress peek runs before RunOne and must not announce a finalize
+	// that will not happen.
+	if strings.Contains(errBuf.String(), "finalizing…") {
+		t.Errorf("progress peek must not announce finalizing; got %q", errBuf.String())
+	}
+	// Nor may the outcome line label the stop as the finalize step: the result
+	// carries no step name, and the "(finalize)" default for that would print
+	// "(finalize) → blocked" — the same misreport one line further on.
+	if strings.Contains(errBuf.String(), "(finalize)") {
+		t.Errorf("outcome line must not label the stop as a finalize; got %q", errBuf.String())
+	}
+	// It says what did happen, rather than leaving the label blank: dropping
+	// "(finalize)" without putting anything in its place prints "resolve:  →
+	// blocked", which passes the check above and tells the operator nothing.
+	if !strings.Contains(errBuf.String(), "(no step) → blocked") {
+		t.Errorf("outcome line must label the stop as reaching no step; got %q", errBuf.String())
+	}
+}
+
+// TestCmdResolve_FinalizedUnmatchedTypeNarratesFinalize (#10): the peek's
+// unmatched-type branch carries RunOne's already-finalized exemption. An item
+// that IS finalized takes the finalize path, so announcing "no flow accepts
+// this item's type" for it is the same misreport inverted.
+func TestCmdResolve_FinalizedUnmatchedTypeNarratesFinalize(t *testing.T) {
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "1", Type: "chore", Title: "1", Finalized: true})
+	app, _, errBuf := resolveTestApp(t, be) // flow accepts "task" only
+
+	code := app.cmdResolve(context.Background(), []string{"1"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (already finalized); err=%q", code, errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "no flow accepts this item's type") {
+		t.Errorf("peek must not report a block that will not happen; got %q", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "finalized ✓") {
+		t.Errorf("expected the finalize path to be narrated; got %q", errBuf.String())
+	}
+}
+
 func TestCmdResolve_ListEligibleError(t *testing.T) {
 	inner := fake.New()
 	be := &failingListBackend{Backend: inner, err: errors.New("boom")}

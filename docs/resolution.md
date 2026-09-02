@@ -244,6 +244,8 @@ Finalizing marks an item's resolution complete and releases the claim. It is ter
 
 Finalizing means **the work was done**. An item that no flow will act on — because no flow accepts its type — is not finalized on that basis. Reporting success for work that was never attempted hides a misconfiguration, and doing it terminally makes the misconfiguration irreversible.
 
+Such an item is reported `blocked`, naming the type it carries and the types that are registered: nothing failed and no later cycle will pass, so what clears it is a person — a flow registered for that type, or a corrected type on the item.
+
 ## Every outcome leads somewhere
 
 **No step ends in a dead end.** Whatever a step concludes, there is a path from it to a terminal state — the item resolves, or a person acts and it continues.
