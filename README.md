@@ -356,8 +356,8 @@ Every step is capped on four axes; exhausting any one parks the item with
 | Axis | Default | `StepOption` | Where checked |
 |---|---|---|---|
 | invocations | `3` | `MaxInvocations(n)` | SDK pre-dispatch |
-| prompts / invocation | `1` | `MaxPromptsPerInvocation(n)` | metered `Agent` wrapper |
-| cost (USD) | `$10` | `MaxCostUSD(d)` | pre-dispatch + per `Agent.Run` + in-turn via `--max-budget-usd` |
+| prompts / invocation | `50` | `MaxPromptsPerInvocation(n)` | metered `Agent` wrapper |
+| cost (USD) | `$20` | `MaxCostUSD(d)` | pre-dispatch + per `Agent.Run` + in-turn via `--max-budget-usd` |
 | timeout | `30m` | `Timeout(d)` | `context.WithTimeout` |
 
 The cost cap is not exact: a substrate learns what a model call cost only once
