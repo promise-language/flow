@@ -1347,6 +1347,9 @@ func TestStepCloseBranch_WorktreeUnavailableWrapsErrTransient(t *testing.T) {
 	if !strings.Contains(err.Error(), "no worktree allocated") {
 		t.Errorf("err = %v, want the original message preserved for diagnosis", err)
 	}
+	if ctx.didResolve {
+		t.Error("resolved the flag after a worktree failure")
+	}
 }
 
 func TestStepCloseBranch_BaseBranchLookupFailureWrapsErrTransient(t *testing.T) {
@@ -1363,6 +1366,12 @@ func TestStepCloseBranch_BaseBranchLookupFailureWrapsErrTransient(t *testing.T) 
 	if !errors.Is(err, flow.ErrTransient) {
 		t.Errorf("err = %v, want it to wrap flow.ErrTransient — a failed lookup is an "+
 			"infrastructure failure", err)
+	}
+	if !strings.Contains(err.Error(), "cannot report") {
+		t.Errorf("err = %v, want the underlying message preserved for diagnosis", err)
+	}
+	if ctx.didResolve {
+		t.Error("resolved the flag after a failed base-branch lookup")
 	}
 }
 
