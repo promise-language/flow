@@ -330,6 +330,7 @@ func usage(bin string) string {
 usage:
   %[1]s doctor                       verify backend prereqs
   %[1]s list [--scope SCOPE] [--tag T] list items this flow can process
+  %[1]s answer <item-id> <text>       answer a question a step is parked on
   %[1]s claim <item-id>              acquire a claim on an item
   %[1]s run-step                     advance ONE lifecycle item (one prompt → one artifact)
   %[1]s resolve [<item-id>]          run ALL steps until finalized or parked.
