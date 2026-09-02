@@ -114,8 +114,10 @@ func TestBackend_Discover_BasicScopes(t *testing.T) {
 
 	ctx := t.Context()
 
+	acceptsTask := func(t flow.ItemType) bool { return t == "task" }
+
 	// ScopeOpen: both issues visible.
-	items, err := b.Discover(ctx, flow.ScopeOpen, "implement")
+	items, err := b.Discover(ctx, flow.ScopeOpen, "implement", acceptsTask)
 	if err != nil {
 		t.Fatalf("Discover(open): %v", err)
 	}
@@ -123,8 +125,9 @@ func TestBackend_Discover_BasicScopes(t *testing.T) {
 		t.Errorf("Discover(open) returned %d items, want 2", len(items))
 	}
 
-	// ScopeProcessable: only #42 has the flow:implement label.
-	items, err = b.Discover(ctx, flow.ScopeProcessable, "implement")
+	// ScopeProcessable: #42 has type:task (accepted by acceptsTask). #43 has
+	// no type:* label and DefaultType is "" → type "" is not accepted → unhandled.
+	items, err = b.Discover(ctx, flow.ScopeProcessable, "implement", acceptsTask)
 	if err != nil {
 		t.Fatalf("Discover(processable): %v", err)
 	}
@@ -147,6 +150,132 @@ func TestBackend_Discover_BasicScopes(t *testing.T) {
 	}
 }
 
+// TestBackend_Discover_UnseededAcceptedType verifies the core fix: an issue
+// whose type IS accepted but that has NOT been seeded (no flow:<binary> label)
+// appears at processable scope as "available", not filtered out as "unhandled".
+// This is the end-to-end version of the scenario the issue describes.
+func TestBackend_Discover_UnseededAcceptedType(t *testing.T) {
+	mock := newGHMock(t)
+
+	mux := http.NewServeMux()
+	prefix := fmt.Sprintf("/repos/%s/%s", mock.owner, mock.repo)
+
+	mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"name":        mock.repo,
+			"full_name":   mock.owner + "/" + mock.repo,
+			"permissions": mock.perms,
+		})
+	})
+
+	mux.HandleFunc(prefix+"/issues", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, []map[string]any{
+			{
+				"number":     10,
+				"title":      "Unseeded task",
+				"state":      "open",
+				"labels":     toLabelObjs([]string{"type:task"}),
+				"assignees":  toLoginObjs([]string{}),
+				"html_url":   "https://github.com/o/r/issues/10",
+				"updated_at": "2025-01-01T00:00:00Z",
+			},
+			{
+				"number":     11,
+				"title":      "Unseeded task assigned to me",
+				"state":      "open",
+				"labels":     toLabelObjs([]string{"type:task"}),
+				"assignees":  toLoginObjs([]string{"alice"}),
+				"html_url":   "https://github.com/o/r/issues/11",
+				"updated_at": "2025-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"login": "alice"})
+	})
+
+	srv := startMockServer(t, mock, mux)
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+
+	acceptsTask := func(t flow.ItemType) bool { return t == "task" }
+
+	items, err := b.Discover(t.Context(), flow.ScopeProcessable, "implement", acceptsTask)
+	if err != nil {
+		t.Fatalf("Discover(processable): %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2 — unseeded items with accepted type must appear", len(items))
+	}
+
+	// #10: no binary label, not assigned → available.
+	if items[0].Availability != flow.AvailAvailable {
+		t.Errorf("#10 Availability = %q, want %q", items[0].Availability, flow.AvailAvailable)
+	}
+
+	// #11: no binary label, assigned to me → still available, NOT auto.
+	// Auto requires the binary label (applied during seeding).
+	if items[1].Availability != flow.AvailAvailable {
+		t.Errorf("#11 Availability = %q, want %q — unseeded+assigned must not be auto",
+			items[1].Availability, flow.AvailAvailable)
+	}
+}
+
+// TestBackend_Discover_DefaultTypeUnseeded verifies that when DefaultType is
+// configured, an issue with no type:* label derives its type from the default
+// and is available (not unhandled) if acceptsType matches.
+func TestBackend_Discover_DefaultTypeUnseeded(t *testing.T) {
+	mock := newGHMock(t)
+
+	mux := http.NewServeMux()
+	prefix := fmt.Sprintf("/repos/%s/%s", mock.owner, mock.repo)
+
+	mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"name":        mock.repo,
+			"full_name":   mock.owner + "/" + mock.repo,
+			"permissions": mock.perms,
+		})
+	})
+
+	mux.HandleFunc(prefix+"/issues", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, []map[string]any{
+			{
+				"number":     20,
+				"title":      "No type label",
+				"state":      "open",
+				"labels":     toLabelObjs([]string{}),
+				"assignees":  toLoginObjs([]string{}),
+				"html_url":   "https://github.com/o/r/issues/20",
+				"updated_at": "2025-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"login": "alice"})
+	})
+
+	srv := startMockServer(t, mock, mux)
+	defer srv.Close()
+	b := newMockedBackend(t, mock, srv)
+	b.cfg.DefaultType = "task"
+
+	acceptsTask := func(t flow.ItemType) bool { return t == "task" }
+
+	items, err := b.Discover(t.Context(), flow.ScopeProcessable, "implement", acceptsTask)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1 — DefaultType should make the item available", len(items))
+	}
+	if items[0].Availability != flow.AvailAvailable {
+		t.Errorf("Availability = %q, want %q", items[0].Availability, flow.AvailAvailable)
+	}
+}
+
 // TestBackend_Discover_AvailabilityStates verifies deriveAvailability.
 func TestBackend_Discover_AvailabilityStates(t *testing.T) {
 	mock := newGHMock(t)
@@ -154,25 +283,32 @@ func TestBackend_Discover_AvailabilityStates(t *testing.T) {
 	defer srv.Close()
 	b := newMockedBackend(t, mock, srv)
 
+	acceptsAll := func(flow.ItemType) bool { return true }
+	acceptsNone := func(flow.ItemType) bool { return false }
+
 	tests := []struct {
-		name       string
-		labels     []string
-		assignees  []string
-		state      string
-		myLogin    string
-		binaryName string
-		want       flow.Availability
+		name        string
+		labels      []string
+		assignees   []string
+		state       string
+		myLogin     string
+		binaryName  string
+		acceptsType func(flow.ItemType) bool
+		itemType    flow.ItemType
+		want        flow.Availability
 	}{
-		{"closed issue", []string{"flow:implement"}, nil, "closed", "alice", "implement", flow.AvailClosed},
-		{"no binary label = unhandled", []string{"bug"}, nil, "open", "alice", "implement", flow.AvailUnhandled},
-		{"blocked label", []string{"flow:implement", "flow:blocked"}, nil, "open", "alice", "implement", flow.AvailBlocked},
-		{"disabled label", []string{"flow:implement", "flow:disabled"}, nil, "open", "alice", "implement", flow.AvailBlocked},
-		{"needs-answer label", []string{"flow:implement", "flow:needs-answer"}, nil, "open", "alice", "implement", flow.AvailBlocked},
-		{"budget-exhausted", []string{"flow:implement", "flow:budget-exhausted:plan"}, nil, "open", "alice", "implement", flow.AvailBlocked},
-		{"held by another", []string{"flow:implement", "flow:owner:bob"}, []string{"bob"}, "open", "alice", "implement", flow.AvailHeld},
-		{"available — not assigned", []string{"flow:implement"}, nil, "open", "alice", "implement", flow.AvailAvailable},
-		{"auto — assigned, no owner label", []string{"flow:implement"}, []string{"alice"}, "open", "alice", "implement", flow.AvailAuto},
-		{"auto — owned+assigned", []string{"flow:implement", "flow:owner:alice"}, []string{"alice"}, "open", "alice", "implement", flow.AvailAuto},
+		{"closed issue", []string{"flow:implement"}, nil, "closed", "alice", "implement", acceptsAll, "task", flow.AvailClosed},
+		{"type not accepted = unhandled", []string{"bug"}, nil, "open", "alice", "implement", acceptsNone, "bug", flow.AvailUnhandled},
+		{"type accepted, no binary label = available", []string{"bug"}, nil, "open", "alice", "implement", acceptsAll, "bug", flow.AvailAvailable},
+		{"type accepted, no binary label, assigned = available (not auto)", []string{"bug"}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "bug", flow.AvailAvailable},
+		{"blocked label", []string{"flow:implement", "flow:blocked"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.AvailBlocked},
+		{"disabled label", []string{"flow:implement", "flow:disabled"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.AvailBlocked},
+		{"needs-answer label", []string{"flow:implement", "flow:needs-answer"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.AvailBlocked},
+		{"budget-exhausted", []string{"flow:implement", "flow:budget-exhausted:plan"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.AvailBlocked},
+		{"held by another", []string{"flow:implement", "flow:owner:bob"}, []string{"bob"}, "open", "alice", "implement", acceptsAll, "task", flow.AvailHeld},
+		{"available — not assigned", []string{"flow:implement"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.AvailAvailable},
+		{"auto — assigned, binary label present", []string{"flow:implement"}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.AvailAuto},
+		{"auto — owned+assigned", []string{"flow:implement", "flow:owner:alice"}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.AvailAuto},
 	}
 
 	for _, tt := range tests {
@@ -183,6 +319,8 @@ func TestBackend_Discover_AvailabilityStates(t *testing.T) {
 				tt.binaryName,
 				tt.myLogin,
 				tt.state,
+				tt.acceptsType,
+				tt.itemType,
 			)
 			if got != tt.want {
 				t.Errorf("deriveAvailability() = %q, want %q", got, tt.want)
@@ -262,7 +400,8 @@ func TestBackend_Discover_SkipsPullRequests(t *testing.T) {
 	defer srv.Close()
 	b := newMockedBackend(t, mock, srv)
 
-	items, err := b.Discover(t.Context(), flow.ScopeOpen, "implement")
+	acceptsAll := func(flow.ItemType) bool { return true }
+	items, err := b.Discover(t.Context(), flow.ScopeOpen, "implement", acceptsAll)
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -312,7 +451,8 @@ func TestBackend_Discover_HolderFromOwnerLabel(t *testing.T) {
 	defer srv.Close()
 	b := newMockedBackend(t, mock, srv)
 
-	items, err := b.Discover(t.Context(), flow.ScopeOpen, "implement")
+	acceptsAll := func(flow.ItemType) bool { return true }
+	items, err := b.Discover(t.Context(), flow.ScopeOpen, "implement", acceptsAll)
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -364,7 +504,8 @@ func TestBackend_Discover_BlockReason(t *testing.T) {
 	defer srv.Close()
 	b := newMockedBackend(t, mock, srv)
 
-	items, err := b.Discover(t.Context(), flow.ScopeProcessable, "implement")
+	acceptsAll := func(flow.ItemType) bool { return true }
+	items, err := b.Discover(t.Context(), flow.ScopeProcessable, "implement", acceptsAll)
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}

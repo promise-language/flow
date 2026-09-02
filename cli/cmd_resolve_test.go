@@ -868,7 +868,7 @@ type discoverPanicBackend struct {
 	*fake.Backend
 }
 
-func (b *discoverPanicBackend) Discover(ctx context.Context, scope flow.DiscoveryScope, binaryName string) ([]flow.DiscoveryItem, error) {
+func (b *discoverPanicBackend) Discover(ctx context.Context, scope flow.DiscoveryScope, binaryName string, acceptsType func(flow.ItemType) bool) ([]flow.DiscoveryItem, error) {
 	panic("INVARIANT VIOLATION: resolve's auto-select called Discover")
 }
 

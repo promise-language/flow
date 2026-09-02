@@ -17,7 +17,7 @@ type discovererBackend struct {
 	items []flow.DiscoveryItem
 }
 
-func (d *discovererBackend) Discover(ctx context.Context, scope flow.DiscoveryScope, binaryName string) ([]flow.DiscoveryItem, error) {
+func (d *discovererBackend) Discover(ctx context.Context, scope flow.DiscoveryScope, binaryName string, acceptsType func(flow.ItemType) bool) ([]flow.DiscoveryItem, error) {
 	var out []flow.DiscoveryItem
 	for _, item := range d.items {
 		if item.Availability.InScope(scope) {

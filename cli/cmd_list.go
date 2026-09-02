@@ -59,7 +59,10 @@ func (app *App) cmdList(ctx context.Context, args []string) int {
 
 // listViaDiscoverer uses the Discoverer interface.
 func (app *App) listViaDiscoverer(ctx context.Context, disc flow.Discoverer, scope flow.DiscoveryScope, tags []string, mode OutputMode) int {
-	items, err := disc.Discover(ctx, scope, app.Name)
+	acceptsType := func(t flow.ItemType) bool {
+		return flowForType(app, t) != nil
+	}
+	items, err := disc.Discover(ctx, scope, app.Name, acceptsType)
 	if err != nil {
 		fmt.Fprintln(app.Err, "list:", err)
 		return 1
