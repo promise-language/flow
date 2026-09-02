@@ -1912,6 +1912,16 @@ func TestBackend_Claim_CleanTreeSucceeds(t *testing.T) {
 
 // A disclosure refusal on the park reason must not abort the park: the park is
 // recorded with a substitute reason naming the refusal, not the matched text.
+//
+// The fixtures here say "/home/someone/..." rather than a realistic name, and
+// that is deliberate. The refusals below are scripted (the guardFunc stub), so a
+// fixture only has to READ as a home path — while a realistic name would be
+// refused by the real disclosure rules when this branch is pushed, making the
+// very tests that prove such text is never published impossible to commit.
+// "someone" is one of the placeholders those rules exempt (user, username, you,
+// me, someone, runner, dev, u). See findHomePath in the workspace disclosure
+// rules. Note "alice" survives below as a claim OWNER — that is a login, not a
+// home path, and the rule does not match it.
 func TestBackend_ParkRecordsOnDisclosureRefusal(t *testing.T) {
 	mock := newGHMock(t)
 	srv := mock.server()
