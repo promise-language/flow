@@ -12,19 +12,20 @@ Not "text an agent wrote" — every byte, including text the SDK composed itself
 
 ## The surface
 
-The set is closed. A write not on this list does not exist, and adding one means adding it here.
+The set is closed: a disclosure is persisted public state, and a write not on this list does not exist. Adding one means adding it here. A prompt to the model provider is not a disclosure — it is transient and not public state.
 
 | What | Carries |
 |---|---|
-| **Issue comments** | Step artifacts — the plan, the review, the coverage briefing |
+| **Issue comments** | Step artifacts — the plan, the review, the coverage briefing. When an artifact exceeds the comment size limit, its full text is committed to the artifacts branch and the comment keeps a preview with a link |
 | **The parked question** | An agent's own account of what it could not decide, quoting whatever it was looking at |
 | **The state comment** | The flow's bookkeeping, rewritten on every step |
 | **The pull request** | Title, body, and the artifacts assembled into it |
 | **Commit messages** | Text an agent wrote, published by the push |
 | **The diff** | The change itself, published by the push |
 | **Labels** | Names the flow constructs, including claim identifiers |
+| **Assignees** | A login the flow chose to publish — the claim owner, visible on the issue |
 
-The last three are the ones most easily forgotten, because they reach the public surface through git rather than through an API call. They are disclosures all the same: a push is a publication.
+Commit messages, the diff, and labels are the ones most easily forgotten, because they reach the public surface through git rather than through an API call. They are disclosures all the same: a push is a publication.
 
 ## A guard is not a gate
 

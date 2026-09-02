@@ -109,12 +109,9 @@ const (
 	ActMerge           DisclosureAct = "pull-request-merge"
 	ActPush            DisclosureAct = "push"
 
-	// ActAssignee and ActArtifactFile are writes the github backend performs
-	// that docs/disclosure.md's surface table — which declares itself closed —
-	// does not list. The gap predates the seam; making the writes explicit only
-	// made it visible. These names are the interim vocabulary, and they should
-	// be renamed after the document's rows once #50 settles what those rows
-	// are.
+	// ActAssignee maps to the Assignees row. ActArtifactFile maps to
+	// Issue comments — same artifact, different route when it exceeds
+	// the comment size limit.
 	ActAssignee     DisclosureAct = "assignee"
 	ActArtifactFile DisclosureAct = "artifact-file"
 )
