@@ -394,14 +394,19 @@ change can see what you did rather than reconstruct it from the diff.
 {{.CommitRefusal}}
 ` + "```" + `
 
-Delete the offending file(s). That is the ONLY permitted action:
-- Do NOT unstage them — the next stage will re-add them and the refusal repeats.
-- Do NOT add them to .gitignore — an ignored file survives in the tree, passes
-  verify, and breaks the mainline that never receives it.
-- Do NOT edit any tracked source file — the gate already passed on what is here,
-  and a change after it breaks the invariant that what was verified is what lands.
+Read the hook's message and fix the problem:
 
-Delete the file(s) the hook named and nothing else.`,
+- If the hook refused because of CONTENT in a file (an absolute path, a
+  secret, a disclosure), edit the file to fix the offending content. The file
+  belongs in the tree; only its content is wrong.
+- If the hook refused because a file should not be in the tree at all (a
+  binary blob, a build artifact), delete it.
+
+Do NOT unstage files — the next stage will re-add them and the refusal repeats.
+Do NOT add files to .gitignore — an ignored file survives in the tree, passes
+verify, and breaks the mainline that never receives it.
+
+After your repair the verify gate re-runs to confirm the tree is still sound.`,
 
 	PromptStageRepair: `Staging (git add) was refused. Its error message:
 
