@@ -1590,6 +1590,35 @@ func TestCmdResolve_RunnerSuppressesDisplayButNotPacing(t *testing.T) {
 	}
 }
 
+func TestCmdResolve_QuotaPrintedOnBlocked(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv(dispatchedByRunnerEnv, "")
+	inner := fake.New()
+	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be := &fitBackend{Backend: inner}
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+		return ctx.ResolveMarkdown("the plan")
+	})
+	// A preflight that always returns ErrBlocked — produces StatusBlocked.
+	app.Preflight = func(_ context.Context, _ *flow.ItemState) error {
+		return fmt.Errorf("gate blocked: %w", flow.ErrBlocked)
+	}
+
+	code := app.cmdResolve(context.Background(), []string{"1"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
+	}
+	output := errBuf.String()
+	if !strings.Contains(output, "is blocked") {
+		t.Errorf("expected 'is blocked' in stderr; got %q", output)
+	}
+	// Quota should appear at start + on the blocked exit path.
+	count := strings.Count(output, "quota:")
+	if count < 2 {
+		t.Errorf("expected quota line at start and on block (≥2 occurrences); got %d in:\n%s", count, output)
+	}
+}
+
 func TestCmdResolve_PaceZeroSkipsPacing(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv(dispatchedByRunnerEnv, "")
