@@ -81,7 +81,7 @@ func (b *Backend) Name() string { return "github" }
 
 func (b *Backend) SupportedSignals() []flow.SignalDef {
 	return []flow.SignalDef{
-		flow.Signal("pr-open", "PR with the claim branch as head exists in open state"),
+		flow.Signal("pr-open", "a PR for the claim branch has been opened (latched — not unset by merge or close)"),
 		flow.Signal("pr-approved", "PR review state is approved"),
 		flow.Signal("pr-merged", "PR has merged=true"),
 		flow.Signal("pr-closed", "PR is closed (merged or not)"),

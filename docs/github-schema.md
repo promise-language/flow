@@ -159,7 +159,7 @@ The backend derives four signals by polling the pull request on the claim branch
 
 | Signal | Set when |
 |---|---|
-| `pr-open` | The PR exists and its state is `open`. |
+| `pr-open` | A PR for the claim branch has been opened. Latched: once set, not unset by merge or close. |
 | `pr-merged` | The PR is merged. |
 | `pr-closed` | The PR state is `closed`. |
 | `pr-approved` | At least one reviewer's latest review state is `APPROVED`. |
