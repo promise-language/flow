@@ -9,17 +9,7 @@ import (
 	"time"
 )
 
-func TestReportQuota_SkippedWhenRunner(t *testing.T) {
-	t.Setenv(dispatchedByRunnerEnv, "1")
-	var buf bytes.Buffer
-	reportQuota(&buf)
-	if buf.Len() != 0 {
-		t.Errorf("runner-driven run should produce no quota output; got %q", buf.String())
-	}
-}
-
-func TestReportQuota_AttemptedWhenHandDriven(t *testing.T) {
-	t.Setenv(dispatchedByRunnerEnv, "")
+func TestReportQuota_PrintsOnFailure(t *testing.T) {
 	// Set CLAUDE_CONFIG_DIR to a nonexistent path so the credential discovery
 	// fails deterministically — we're testing that the code path runs, not that
 	// it succeeds.
@@ -28,10 +18,33 @@ func TestReportQuota_AttemptedWhenHandDriven(t *testing.T) {
 	reportQuota(&buf)
 	// Should print something (an error about missing credentials).
 	if buf.Len() == 0 {
-		t.Error("hand-driven run should attempt quota and print something")
+		t.Error("reportQuota should print a diagnostic on failure")
 	}
 	if !strings.Contains(buf.String(), "quota:") {
 		t.Errorf("output should be prefixed with 'quota:'; got %q", buf.String())
+	}
+}
+
+func TestReportQuota_NotGatedByRunner(t *testing.T) {
+	// reportQuota no longer checks FLOW_DISPATCHED_BY_RUNNER; call sites gate
+	// display. Verify it prints even when runner env is set.
+	t.Setenv(dispatchedByRunnerEnv, "1")
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	var buf bytes.Buffer
+	reportQuota(&buf)
+	if buf.Len() == 0 {
+		t.Error("reportQuota must not be gated by runner env — call sites handle that")
+	}
+}
+
+func TestReadQuota_ReturnsErrorOnFailure(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	usage, err := readQuota()
+	if err == nil {
+		t.Error("expected error when credentials are missing")
+	}
+	if usage != nil {
+		t.Errorf("expected nil usage on error; got %v", usage)
 	}
 }
 
@@ -306,5 +319,170 @@ func TestWindowLengthFromLabel(t *testing.T) {
 	}
 	if got := windowLengthFromLabel("unknown"); got != 0 {
 		t.Errorf("unknown = %v", got)
+	}
+}
+
+func TestPaceDelay_NoDelayNeeded(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	usage := []windowUsage{{
+		Label:    "5h",
+		Length:   5 * time.Hour,
+		Used:     0.30,
+		ResetsAt: now.Add(2*time.Hour + 30*time.Minute), // elapsed=50%
+	}}
+	targets := paceTargets{FiveHour: 0.90, SevenDay: 0.95}
+	d := paceDelay(usage, targets, now)
+	if d != 0 {
+		t.Errorf("expected no delay; got %v", d)
+	}
+}
+
+func TestPaceDelay_DelayNeeded5h(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	usage := []windowUsage{{
+		Label:    "5h",
+		Length:   5 * time.Hour,
+		Used:     0.60,
+		ResetsAt: now.Add(2*time.Hour + 30*time.Minute), // elapsed=50%
+	}}
+	targets := paceTargets{FiveHour: 0.90, SevenDay: 0.95}
+	d := paceDelay(usage, targets, now)
+	// needed_elapsed = 0.60/0.90 = 0.6667; delay = (0.6667 - 0.50) * 5h ≈ 50 min
+	if d < 49*time.Minute || d > 51*time.Minute {
+		t.Errorf("expected ~50min delay; got %v", d)
+	}
+}
+
+func TestPaceDelay_BothWindowsTighterWins(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	usage := []windowUsage{
+		{
+			Label:    "5h",
+			Length:   5 * time.Hour,
+			Used:     0.50,
+			ResetsAt: now.Add(2*time.Hour + 30*time.Minute), // elapsed=50%
+		},
+		{
+			Label:    "7d",
+			Length:   7 * 24 * time.Hour,
+			Used:     0.80,
+			ResetsAt: now.Add(3 * 24 * time.Hour), // elapsed ~57%
+		},
+	}
+	targets := paceTargets{FiveHour: 0.90, SevenDay: 0.95}
+	d := paceDelay(usage, targets, now)
+
+	// 5h: needed=0.50/0.90=0.556, elapsed=0.50, delay=(0.056)*5h ≈ 16.7 min
+	// 7d: needed=0.80/0.95=0.842, elapsed≈0.571, delay=(0.271)*7d ≈ 45.5h
+	// Tighter is 7d (~45.5h)
+	if d < 45*time.Hour || d > 46*time.Hour {
+		t.Errorf("expected ~45h delay (7d tighter); got %v", d)
+	}
+}
+
+func TestPaceDelay_TargetZeroDisables(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	usage := []windowUsage{{
+		Label:    "5h",
+		Length:   5 * time.Hour,
+		Used:     0.99,
+		ResetsAt: now.Add(2*time.Hour + 30*time.Minute),
+	}}
+	targets := paceTargets{FiveHour: 0, SevenDay: 0}
+	d := paceDelay(usage, targets, now)
+	if d != 0 {
+		t.Errorf("target 0 should disable pacing; got %v", d)
+	}
+}
+
+func TestPaceDelay_Target100PacesToRawElapsed(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	usage := []windowUsage{{
+		Label:    "5h",
+		Length:   5 * time.Hour,
+		Used:     0.55,
+		ResetsAt: now.Add(2*time.Hour + 30*time.Minute), // elapsed=50%
+	}}
+	targets := paceTargets{FiveHour: 1.0, SevenDay: 0}
+	d := paceDelay(usage, targets, now)
+	// needed=0.55/1.0=0.55, delay=(0.55-0.50)*5h=15min
+	if d < 14*time.Minute || d > 16*time.Minute {
+		t.Errorf("expected ~15min delay at target=100%%; got %v", d)
+	}
+}
+
+func TestPaceDelay_AbsentUsageSkipped(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	usage := []windowUsage{{
+		Label:    "5h",
+		Length:   5 * time.Hour,
+		Used:     -1, // absent
+		ResetsAt: now.Add(2*time.Hour + 30*time.Minute),
+	}}
+	targets := paceTargets{FiveHour: 0.90, SevenDay: 0.95}
+	d := paceDelay(usage, targets, now)
+	if d != 0 {
+		t.Errorf("absent usage should be skipped; got %v", d)
+	}
+}
+
+func TestPaceDelay_ZeroLengthSkipped(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	usage := []windowUsage{{
+		Label:    "??",
+		Length:   0,
+		Used:     0.90,
+		ResetsAt: now.Add(1 * time.Hour),
+	}}
+	targets := paceTargets{FiveHour: 0.90, SevenDay: 0.95}
+	d := paceDelay(usage, targets, now)
+	if d != 0 {
+		t.Errorf("zero-length window should be skipped; got %v", d)
+	}
+}
+
+func TestPaceDelay_ElapsedZeroAnyUsageDelays(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	usage := []windowUsage{{
+		Label:    "5h",
+		Length:   5 * time.Hour,
+		Used:     0.10,
+		ResetsAt: now.Add(5 * time.Hour), // elapsed=0%
+	}}
+	targets := paceTargets{FiveHour: 0.90, SevenDay: 0.95}
+	d := paceDelay(usage, targets, now)
+	// ceiling = 0.90 * 0 = 0; used=0.10 > 0, so delay is needed.
+	// needed=0.10/0.90=0.111; delay=0.111*5h ≈ 33.3 min
+	if d < 32*time.Minute || d > 35*time.Minute {
+		t.Errorf("expected ~33min delay at elapsed=0; got %v", d)
+	}
+}
+
+func TestPaceDelay_UsedExceedsTargetAtFullElapsed(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	usage := []windowUsage{{
+		Label:    "5h",
+		Length:   5 * time.Hour,
+		Used:     0.95,
+		ResetsAt: now.Add(30 * time.Minute), // elapsed=90%
+	}}
+	targets := paceTargets{FiveHour: 0.90, SevenDay: 0.95}
+	d := paceDelay(usage, targets, now)
+	// needed=0.95/0.90=1.056 > 1.0 → delay is full remaining time = 30 min
+	if d < 29*time.Minute || d > 31*time.Minute {
+		t.Errorf("expected ~30min delay (full remaining); got %v", d)
+	}
+}
+
+func TestWindowTarget(t *testing.T) {
+	targets := paceTargets{FiveHour: 0.90, SevenDay: 0.95}
+	if got := windowTarget("5h", targets); got != 0.90 {
+		t.Errorf("5h target = %v, want 0.90", got)
+	}
+	if got := windowTarget("7d", targets); got != 0.95 {
+		t.Errorf("7d target = %v, want 0.95", got)
+	}
+	if got := windowTarget("unknown", targets); got != 0 {
+		t.Errorf("unknown target = %v, want 0", got)
 	}
 }

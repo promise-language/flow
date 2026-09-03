@@ -1502,3 +1502,108 @@ func TestResolve_PreClaimTransientUnfitnessProceeds(t *testing.T) {
 		t.Error("item should be claimed after transient unfitness clears")
 	}
 }
+
+func TestCmdResolve_QuotaPrintedAtStartAndFinalize(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv(dispatchedByRunnerEnv, "")
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	output := errBuf.String()
+	// Quota should appear at least twice: once at start, once at finalize.
+	count := strings.Count(output, "quota:")
+	if count < 2 {
+		t.Errorf("expected quota line at start and at finalize (≥2 occurrences); got %d in:\n%s", count, output)
+	}
+}
+
+func TestCmdResolve_QuotaPrintedOnFailedStep(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv(dispatchedByRunnerEnv, "")
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+		return errors.New("boom")
+	})
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
+	}
+	output := errBuf.String()
+	if !strings.Contains(output, "stopped on a failed step") {
+		t.Errorf("expected failure message; got %q", output)
+	}
+	// Quota should appear at start + on the failed exit path.
+	count := strings.Count(output, "quota:")
+	if count < 2 {
+		t.Errorf("expected quota line at start and on failure (≥2 occurrences); got %d in:\n%s", count, output)
+	}
+}
+
+func TestCmdResolve_QuotaPrintedOnParked(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv(dispatchedByRunnerEnv, "")
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+		// Return nil without resolving → parks the step.
+		return nil
+	})
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	output := errBuf.String()
+	count := strings.Count(output, "quota:")
+	if count < 2 {
+		t.Errorf("expected quota line at start and on park (≥2 occurrences); got %d in:\n%s", count, output)
+	}
+}
+
+func TestCmdResolve_RunnerSuppressesDisplayButNotPacing(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv(dispatchedByRunnerEnv, "1")
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	output := errBuf.String()
+	// Runner-driven: no display quota lines.
+	if strings.Contains(output, "quota:") {
+		t.Errorf("runner-driven run should not display quota lines; got:\n%s", output)
+	}
+	// Pacing diagnostic may appear (quota unreadable warning) because
+	// pacing is NOT gated on isRunner — that's the point.
+	if !strings.Contains(output, "quota unreadable") {
+		t.Errorf("runner-driven run should still attempt pacing (and show unreadable warning); got:\n%s", output)
+	}
+}
+
+func TestCmdResolve_PaceZeroSkipsPacing(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv(dispatchedByRunnerEnv, "")
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), []string{"--pace-five-hour", "0", "--pace-seven-day", "0"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	output := errBuf.String()
+	// With both targets at 0, no pacing should be attempted — no unreadable warning.
+	if strings.Contains(output, "quota unreadable") {
+		t.Errorf("pace targets 0 should skip pacing entirely; got:\n%s", output)
+	}
+}

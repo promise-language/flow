@@ -13,27 +13,27 @@ import (
 	"time"
 )
 
-// reportQuota prints Claude subscription window utilisation to w.
-// Called only when a person is driving (FLOW_DISPATCHED_BY_RUNNER absent).
-// Failure never blocks the run — prints the reason and returns.
-func reportQuota(w io.Writer) {
-	if os.Getenv(dispatchedByRunnerEnv) == "1" {
-		return
-	}
-
+// readQuota fetches subscription window usage. Returns the windows on success,
+// or an error whose message is suitable for display. Never blocks the caller on
+// failure — the error is informational.
+func readQuota() ([]windowUsage, error) {
 	token, credErr := discoverOAuthToken()
 	if credErr != "" {
-		fmt.Fprintf(w, "quota: %s\n", credErr)
-		return
+		return nil, fmt.Errorf("%s", credErr)
 	}
 
 	apiBase, baseErr := discoverAPIBase()
 	if baseErr != "" {
-		fmt.Fprintf(w, "quota: %s\n", baseErr)
-		return
+		return nil, fmt.Errorf("%s", baseErr)
 	}
 
-	usage, err := fetchUsage(apiBase, token)
+	return fetchUsage(apiBase, token)
+}
+
+// reportQuota prints Claude subscription window utilisation to w.
+// Failure never blocks the run — prints the reason and returns.
+func reportQuota(w io.Writer) {
+	usage, err := readQuota()
 	if err != nil {
 		fmt.Fprintf(w, "quota: %s\n", err)
 		return
@@ -286,6 +286,70 @@ func windowLengthFromLabel(label string) time.Duration {
 		return 7 * 24 * time.Hour
 	case "24h", "1d":
 		return 24 * time.Hour
+	}
+	return 0
+}
+
+// paceTargets holds the per-window target fractions for pacing.
+type paceTargets struct {
+	FiveHour float64 // e.g. 0.90
+	SevenDay float64 // e.g. 0.95
+}
+
+// paceDelay computes how long to wait before the next step, given current
+// usage and the target fractions. Returns 0 when no delay is needed.
+// Both windows are checked; the tighter constraint wins.
+func paceDelay(usage []windowUsage, targets paceTargets, now time.Time) time.Duration {
+	var maxDelay time.Duration
+	for _, win := range usage {
+		if win.Used < 0 || win.Length <= 0 {
+			continue
+		}
+		target := windowTarget(win.Label, targets)
+		if target <= 0 {
+			continue
+		}
+
+		elapsed := clampFraction(1.0 - float64(win.ResetsAt.Sub(now))/float64(win.Length))
+
+		ceiling := target * elapsed
+		if win.Used <= ceiling {
+			continue
+		}
+
+		// Used > ceiling: compute how long until elapsed catches up.
+		// needed_elapsed = Used / target; delay = (needed - elapsed) * Length.
+		neededElapsed := win.Used / target
+		if neededElapsed > 1.0 {
+			// Used exceeds what the target allows even at 100% elapsed —
+			// delay is the full remaining time of the window.
+			remaining := win.ResetsAt.Sub(now)
+			if remaining < 0 {
+				remaining = 0
+			}
+			if remaining > maxDelay {
+				maxDelay = remaining
+			}
+			continue
+		}
+		delay := time.Duration((neededElapsed - elapsed) * float64(win.Length))
+		if delay < 0 {
+			delay = 0
+		}
+		if delay > maxDelay {
+			maxDelay = delay
+		}
+	}
+	return maxDelay
+}
+
+// windowTarget returns the pacing target fraction for the given window label.
+func windowTarget(label string, targets paceTargets) float64 {
+	switch label {
+	case "5h":
+		return targets.FiveHour
+	case "7d":
+		return targets.SevenDay
 	}
 	return 0
 }
