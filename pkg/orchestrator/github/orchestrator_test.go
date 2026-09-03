@@ -2738,3 +2738,136 @@ func TestClaimRaceReason(t *testing.T) {
 		t.Errorf("claimRaceReason(untimestamped) = %q, want the bare naming", got)
 	}
 }
+
+// pinRandomHalf fixes the randomness in the tokens this claimer mints, so a
+// test can place a contender either side of its own token inside one second.
+func pinRandomHalf(t *testing.T, fill byte) {
+	t.Helper()
+	prev := randRead
+	t.Cleanup(func() { randRead = prev })
+	randRead = func(b []byte) (int, error) {
+		for i := range b {
+			b[i] = fill
+		}
+		return len(b), nil
+	}
+}
+
+// Collection is not the winner's job. A claimer that goes on to lose the race
+// still clears the abandoned token it passed on the way — otherwise a
+// contended item keeps the stranded token, and the refusal it hands the
+// operator names a hash no process holds, which is the reported bug.
+func TestBackend_Claim_LosingClaimerStillCollects(t *testing.T) {
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	live := claimTokenMintedAt(at.Add(-2*time.Second), "0")
+	stale := "flow:claim:" + flow15ClaimToken
+
+	mock := newGHMock(t)
+	mock.issueLabels = []string{stale, "flow:claim:" + live}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+	pinClock(t, at)
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %v (%T)", err, err)
+	}
+	if strings.Contains(refused.Reason, flow15ClaimToken) {
+		t.Errorf("Reason = %q, want the live winner: an abandoned token must never win a race", refused.Reason)
+	}
+	if !strings.Contains(refused.Reason, live) || !strings.Contains(refused.Reason, "2s ago") {
+		t.Errorf("Reason = %q, want the live contender and how long ago it started", refused.Reason)
+	}
+	if left := claimLabelsOn(mock); len(left) != 1 || left[0] != "flow:claim:"+live {
+		t.Errorf("claim labels = %v, want only the live contender's — ours removed, the abandoned one collected", left)
+	}
+}
+
+// Two attempts inside one second still settle. The time half ties there, so
+// the random half decides: a race read off the creation time alone would let
+// both claimers believe they won.
+func TestBackend_Claim_SameSecondRaceSettledByRandomHalf(t *testing.T) {
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+
+	t.Run("smaller random half wins", func(t *testing.T) {
+		other := claimTokenMintedAt(at, "0")
+		mock := newGHMock(t)
+		mock.issueLabels = []string{"flow:claim:" + other}
+		srv := mock.server()
+		defer srv.Close()
+		b := newMockedOrchestrator(t, mock, srv)
+		pinClock(t, at)
+		pinRandomHalf(t, 0x88)
+
+		_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+		var refused flow.ErrClaimRefused
+		if !errors.As(err, &refused) {
+			t.Fatalf("error is not ErrClaimRefused: %v (%T)", err, err)
+		}
+		if !strings.Contains(refused.Reason, other) {
+			t.Errorf("Reason = %q, want the same-second contender that sorts first", refused.Reason)
+		}
+		if contains(mock.labelNames(), "flow:owner:alice") {
+			t.Errorf("owner label written despite losing the race; labels = %v", mock.labelNames())
+		}
+	})
+
+	t.Run("larger random half loses", func(t *testing.T) {
+		other := claimTokenMintedAt(at, "f")
+		mock := newGHMock(t)
+		mock.issueLabels = []string{"flow:claim:" + other}
+		srv := mock.server()
+		defer srv.Close()
+		b := newMockedOrchestrator(t, mock, srv)
+		pinClock(t, at)
+		pinRandomHalf(t, 0x88)
+
+		if _, err := b.Claim(t.Context(), b.refFromIssue(42), nil); err != nil {
+			t.Fatalf("Claim should win against a same-second contender sorting last: %v", err)
+		}
+		if left := claimLabelsOn(mock); len(left) != 1 || left[0] != "flow:claim:"+other {
+			t.Errorf("claim labels = %v, want the contender's, untouched: it is a live attempt", left)
+		}
+	})
+}
+
+// Age collects a race token and nothing else. An item held by another person
+// stays held however old the token stranded on it is: ownership is recorded by
+// a person, and a claim held by something no longer running is recovered by
+// observing the holder gone, never by a timer.
+func TestBackend_Claim_AbandonedTokenIsNotOwnershipRecovery(t *testing.T) {
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	mock := newGHMock(t)
+	mock.assignees = []string{"bob"}
+	mock.issueLabels = []string{
+		"flow:owner:bob",
+		"flow:claim:" + claimTokenMintedAt(at.Add(-3*time.Hour), "0"),
+	}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+	pinClock(t, at)
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %v (%T)", err, err)
+	}
+	if refused.Code != "already-held" {
+		t.Errorf("Code = %q, want already-held: an old token does not free an item someone holds", refused.Code)
+	}
+	if refused.Override != "force" {
+		t.Errorf("Override = %q, want force — the flag that would override this refusal", refused.Override)
+	}
+	if !contains(mock.labelNames(), "flow:owner:bob") {
+		t.Errorf("bob's owner label was removed; labels = %v", mock.labelNames())
+	}
+	mock.mu.Lock()
+	assignees := append([]string(nil), mock.assignees...)
+	mock.mu.Unlock()
+	if !contains(assignees, "bob") {
+		t.Errorf("assignees = %v, want bob still assigned", assignees)
+	}
+}
