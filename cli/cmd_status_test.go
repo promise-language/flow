@@ -210,6 +210,43 @@ func TestStatusHuman_QuestionLineBoundsAHeaderlessQuestion(t *testing.T) {
 	}
 }
 
+// A question entry's key set is a machine contract, the same way the top-level
+// payload's is (TestStatusJSON_Schema). `header` carries no omitempty on
+// purpose: a header-less question reports "" rather than dropping the key, so a
+// tool reading `.questions[].header` never has to tell absent from empty.
+func TestStatusJSON_QuestionKeySet(t *testing.T) {
+	env := newParkGrantEnv(t)
+	if _, err := env.be.AskQuestions(context.Background(), env.claim, []flow.AgentQuestion{
+		{Text: "which base branch?"},
+	}); err != nil {
+		t.Fatalf("AskQuestions: %v", err)
+	}
+
+	if code := env.app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	m := decode(t, env.out)
+	qs, ok := m["questions"].([]any)
+	if !ok || len(qs) != 1 {
+		t.Fatalf("questions = %v, want one entry", m["questions"])
+	}
+	q, ok := qs[0].(map[string]any)
+	if !ok {
+		t.Fatalf("questions[0] = %v, want an object", qs[0])
+	}
+	for _, key := range []string{"id", "header", "text", "answered"} {
+		if _, ok := q[key]; !ok {
+			t.Errorf("question payload missing %q: %v", key, q)
+		}
+	}
+	if q["header"] != "" {
+		t.Errorf("header = %v, want \"\" — the key stays for a header-less question", q["header"])
+	}
+	if q["text"] != "which base branch?" {
+		t.Errorf("text = %v, want the question", q["text"])
+	}
+}
+
 // The human header must name the task, not just its id: "T1566" alone does not
 // tell the operator which task the arena is holding.
 func TestStatusHuman_PrintsTitle(t *testing.T) {

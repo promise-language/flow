@@ -12,6 +12,16 @@ import (
 // handler that could ask.
 func newQuestionEnv(t *testing.T) (*ghMock, *Backend, flow.Claim) {
 	t.Helper()
+	return newQuestionEnvSeeded(t, []flow.ArtifactSpec{
+		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true,
+			Budget: flow.StepBudget{MaxInvocations: 3, MaxCostUSD: 10}},
+	})
+}
+
+// newQuestionEnvSeeded is newQuestionEnv with the checklist named, for a test
+// that needs a step other than the one the park is against.
+func newQuestionEnvSeeded(t *testing.T, specs []flow.ArtifactSpec) (*ghMock, *Backend, flow.Claim) {
+	t.Helper()
 	mock := newGHMock(t)
 	srv := mock.server()
 	t.Cleanup(srv.Close)
@@ -22,10 +32,7 @@ func newQuestionEnv(t *testing.T) (*ghMock, *Backend, flow.Claim) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := b.SeedState(ctx, claim, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true,
-			Budget: flow.StepBudget{MaxInvocations: 3, MaxCostUSD: 10}},
-	}); err != nil {
+	if err := b.SeedState(ctx, claim, specs); err != nil {
 		t.Fatalf("SeedState: %v", err)
 	}
 	return mock, b, claim
@@ -265,6 +272,96 @@ func TestBackend_AnsweredQuestionIsNotInheritedByTheNextQuestionPark(t *testing.
 	}
 	if len(state.Questions) != 0 {
 		t.Errorf("Questions = %+v, want none — nothing registered a question for this park", state.Questions)
+	}
+}
+
+// The record is dropped by the step the park names, and only by that step. A
+// resolve elsewhere on the checklist leaves the question park standing, so
+// dropping the questions with it would reproduce the reported defect exactly:
+// an item parked on a question `answer` has no id to name.
+func TestBackend_QuestionsSurviveAnUnrelatedStepResolving(t *testing.T) {
+	mock, b, claim := newQuestionEnvSeeded(t, []flow.ArtifactSpec{
+		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true,
+			Budget: flow.StepBudget{MaxInvocations: 3, MaxCostUSD: 10}},
+		{Id: "impl", Type: flow.ArtifactMarkdown, Required: true,
+			Budget: flow.StepBudget{MaxInvocations: 3, MaxCostUSD: 10}},
+	})
+	asked := askOne(t, b, claim, flow.AskText("base", "which base branch?"))
+	parkOnQuestion(t, b, claim) // against "plan"
+
+	if err := b.ResolveArtifact(t.Context(), claim, "impl", flow.ArtifactBody{
+		Type: flow.ArtifactMarkdown, Markdown: "the code",
+	}); err != nil {
+		t.Fatalf("ResolveArtifact: %v", err)
+	}
+	state, err := b.LoadState(t.Context(), claim)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if !state.Parked() {
+		t.Fatal("park cleared by a resolve of another step")
+	}
+	if len(state.PendingQuestions()) != 1 {
+		t.Fatalf("PendingQuestions = %d, want 1 — the park it belongs to is still standing",
+			len(state.PendingQuestions()))
+	}
+	if got := state.Questions[0].ID; got != asked.ID {
+		t.Errorf("question id = %q, want %q", got, asked.ID)
+	}
+	if q := storedQuestions(t, mock); len(q) != 1 {
+		t.Errorf("state comment carries %d question(s), want the one the park is waiting on", len(q))
+	}
+}
+
+// One ask may carry several questions — `answer --question` exists for exactly
+// that case, naming one of them by id. Every question must reach the record
+// with its own payload: a record that kept only the first leaves the rest
+// unanswerable, which is the reported defect narrowed to one question.
+func TestBackend_EveryQuestionOfOneAskIsRecorded(t *testing.T) {
+	_, b, claim := newQuestionEnv(t)
+
+	asked := []flow.AgentQuestion{
+		flow.AskYesNo("drop `--yes`?", "Issue #111 asks to remove it."),
+		flow.AskChoice("amend the doc?", "§11 step 1 says it skips.", "amend", "leave"),
+	}
+	recorded, err := b.AskQuestions(t.Context(), claim, asked)
+	if err != nil {
+		t.Fatalf("AskQuestions: %v", err)
+	}
+	if len(recorded) != 2 {
+		t.Fatalf("AskQuestions recorded %d questions, want 2", len(recorded))
+	}
+	parkOnQuestion(t, b, claim)
+
+	state, err := b.LoadState(t.Context(), claim)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Questions) != 2 {
+		t.Fatalf("Questions = %d, want both of the ask", len(state.Questions))
+	}
+	// Order matters as much as presence: `answer` prints the ids for the
+	// operator to choose between, and a payload paired with the wrong id sends
+	// the answer to the other question.
+	for i, want := range recorded {
+		got := state.Questions[i]
+		if got.ID != want.ID {
+			t.Errorf("Questions[%d].ID = %q, want %q", i, got.ID, want.ID)
+		}
+		if got.Header != want.Header || got.Text != want.Text {
+			t.Errorf("Questions[%d] payload = %q / %q, want %q / %q",
+				i, got.Header, got.Text, want.Header, want.Text)
+		}
+		if got.Format != want.Format {
+			t.Errorf("Questions[%d].Format = %q, want %q", i, got.Format, want.Format)
+		}
+	}
+	if strings.Join(state.Questions[1].Options, ",") != "amend,leave" {
+		t.Errorf("Questions[1].Options = %v, want the two asked", state.Questions[1].Options)
+	}
+	if len(state.PendingQuestions()) != 2 {
+		t.Errorf("PendingQuestions = %d, want 2 — `answer --question` names one of these",
+			len(state.PendingQuestions()))
 	}
 }
 
