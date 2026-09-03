@@ -34,6 +34,10 @@ func resolveTestApp(t *testing.T, be flow.Backend) (*App, *bytes.Buffer, *bytes.
 // fail it).
 func resolveTestAppStep(t *testing.T, be flow.Backend, step func(flow.StepCtx) error) (*App, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
+	// Isolate from real credential discovery (Keychain, claude binary) so
+	// reportQuota's exec calls don't hang or hit the network.
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
 	out := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}
 	app := &App{

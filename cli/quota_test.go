@@ -10,10 +10,10 @@ import (
 )
 
 func TestReportQuota_PrintsOnFailure(t *testing.T) {
-	// Set CLAUDE_CONFIG_DIR to a nonexistent path so the credential discovery
-	// fails deterministically — we're testing that the code path runs, not that
-	// it succeeds.
+	// Set CLAUDE_CONFIG_DIR to a nonexistent path and strip PATH so both
+	// file-based and Keychain credential discovery fail deterministically.
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
 	var buf bytes.Buffer
 	reportQuota(&buf)
 	// Should print something (an error about missing credentials).
@@ -30,6 +30,7 @@ func TestReportQuota_NotGatedByRunner(t *testing.T) {
 	// display. Verify it prints even when runner env is set.
 	t.Setenv(dispatchedByRunnerEnv, "1")
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
 	var buf bytes.Buffer
 	reportQuota(&buf)
 	if buf.Len() == 0 {
@@ -39,6 +40,7 @@ func TestReportQuota_NotGatedByRunner(t *testing.T) {
 
 func TestReadQuota_ReturnsErrorOnFailure(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
 	usage, err := readQuota()
 	if err == nil {
 		t.Error("expected error when credentials are missing")
@@ -133,61 +135,16 @@ func TestPrintWindow_ElapsedClamped(t *testing.T) {
 	}
 }
 
-func TestParseUsageResponse_WindowsFormat(t *testing.T) {
+func TestParseUsageResponse_RealSchema(t *testing.T) {
 	body := `{
-		"windows": [
-			{
-				"label": "5h",
-				"length_seconds": 18000,
-				"usage_fraction": 0.47,
-				"resets_at": "2026-09-01T14:24:00Z"
-			},
-			{
-				"label": "7d",
-				"length_seconds": 604800,
-				"usage_fraction": 0.31,
-				"resets_at": "2026-09-04T16:00:00Z"
-			}
-		]
-	}`
-	result, err := parseUsageResponse([]byte(body))
-	if err != nil {
-		t.Fatalf("parseUsageResponse: %v", err)
-	}
-	if len(result) != 2 {
-		t.Fatalf("expected 2 windows; got %d", len(result))
-	}
-	if result[0].Label != "5h" {
-		t.Errorf("window 0 label = %q, want 5h", result[0].Label)
-	}
-	if math.Abs(result[0].Used-0.47) > 0.001 {
-		t.Errorf("window 0 used = %v, want 0.47", result[0].Used)
-	}
-}
-
-func TestParseUsageResponse_EmptyBody(t *testing.T) {
-	_, err := parseUsageResponse([]byte(`{}`))
-	if err == nil {
-		t.Error("expected error for empty response")
-	}
-}
-
-func TestParseUsageResponse_RateLimitsFormat(t *testing.T) {
-	body := `{
-		"rate_limits": [
-			{
-				"window": "5h",
-				"used": 470,
-				"limit": 1000,
-				"resets_at": "2026-09-01T14:24:00Z"
-			},
-			{
-				"window": "7d",
-				"used": 310,
-				"limit": 1000,
-				"resets_at": "2026-09-04T16:00:00Z"
-			}
-		]
+		"five_hour": {
+			"utilization": 47.0,
+			"resets_at": "2026-09-01T14:24:00Z"
+		},
+		"seven_day": {
+			"utilization": 31.0,
+			"resets_at": "2026-09-04T16:00:00Z"
+		}
 	}`
 	result, err := parseUsageResponse([]byte(body))
 	if err != nil {
@@ -205,26 +162,93 @@ func TestParseUsageResponse_RateLimitsFormat(t *testing.T) {
 	if result[0].Length != 5*time.Hour {
 		t.Errorf("window 0 length = %v, want 5h", result[0].Length)
 	}
+	if result[1].Label != "7d" {
+		t.Errorf("window 1 label = %q, want 7d", result[1].Label)
+	}
+	if math.Abs(result[1].Used-0.31) > 0.001 {
+		t.Errorf("window 1 used = %v, want 0.31", result[1].Used)
+	}
+	if result[1].Length != 7*24*time.Hour {
+		t.Errorf("window 1 length = %v, want 7d", result[1].Length)
+	}
 }
 
-func TestParseUsageResponse_RateLimitsZeroLimit(t *testing.T) {
+func TestParseUsageResponse_EmptyBody(t *testing.T) {
+	_, err := parseUsageResponse([]byte(`{}`))
+	if err == nil {
+		t.Error("expected error for empty response")
+	}
+}
+
+func TestParseUsageResponse_NullUtilization(t *testing.T) {
 	body := `{
-		"rate_limits": [
-			{
-				"window": "5h",
-				"used": 100,
-				"limit": 0,
-				"resets_at": "2026-09-01T14:24:00Z"
-			}
-		]
+		"five_hour": {
+			"utilization": null,
+			"resets_at": "2026-09-01T14:24:00Z"
+		}
 	}`
 	result, err := parseUsageResponse([]byte(body))
 	if err != nil {
 		t.Fatalf("parseUsageResponse: %v", err)
 	}
-	// Zero limit means used fraction is unknown (-1).
+	if len(result) != 1 {
+		t.Fatalf("expected 1 window; got %d", len(result))
+	}
 	if result[0].Used != -1 {
-		t.Errorf("zero limit should produce Used=-1; got %v", result[0].Used)
+		t.Errorf("null utilization should produce Used=-1; got %v", result[0].Used)
+	}
+}
+
+func TestParseUsageResponse_OnlyFiveHour(t *testing.T) {
+	body := `{
+		"five_hour": {
+			"utilization": 17.0,
+			"resets_at": "2026-09-01T14:24:00Z"
+		}
+	}`
+	result, err := parseUsageResponse([]byte(body))
+	if err != nil {
+		t.Fatalf("parseUsageResponse: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 window; got %d", len(result))
+	}
+	if result[0].Label != "5h" {
+		t.Errorf("label = %q, want 5h", result[0].Label)
+	}
+	if math.Abs(result[0].Used-0.17) > 0.001 {
+		t.Errorf("used = %v, want 0.17", result[0].Used)
+	}
+}
+
+func TestDiscoverAPIBase_DefaultFallback(t *testing.T) {
+	// Point config dir to an empty temp dir so no settings file is found,
+	// and ensure the claude binary is not on PATH.
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+
+	base, reason := discoverAPIBase()
+	if reason != "" {
+		t.Fatalf("expected success; got reason=%q", reason)
+	}
+	if base != "https://api.anthropic.com" {
+		t.Errorf("base = %q, want https://api.anthropic.com", base)
+	}
+}
+
+func TestDiscoverOAuthToken_KeychainFallback(t *testing.T) {
+	if os.Getenv("GOOS") != "" && os.Getenv("GOOS") != "darwin" {
+		t.Skip("Keychain fallback only runs on macOS")
+	}
+	// Point config dir to an empty temp dir so the file-based path fails.
+	// The Keychain call may or may not succeed depending on the machine,
+	// but it must not panic.
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	tok, reason := discoverOAuthToken()
+	// We cannot assert success (Keychain may not have the entry), but we
+	// can assert it doesn't panic and returns a coherent result.
+	if tok == "" && reason == "" {
+		t.Error("expected either a token or a reason, got neither")
 	}
 }
 
@@ -307,18 +331,6 @@ func TestDiscoverOAuthToken_NoOAuthKey(t *testing.T) {
 	}
 	if !strings.Contains(reason, "no Claude OAuth") {
 		t.Errorf("reason should mention 'no Claude OAuth'; got %q", reason)
-	}
-}
-
-func TestWindowLengthFromLabel(t *testing.T) {
-	if got := windowLengthFromLabel("5h"); got != 5*time.Hour {
-		t.Errorf("5h = %v", got)
-	}
-	if got := windowLengthFromLabel("7d"); got != 7*24*time.Hour {
-		t.Errorf("7d = %v", got)
-	}
-	if got := windowLengthFromLabel("unknown"); got != 0 {
-		t.Errorf("unknown = %v", got)
 	}
 }
 

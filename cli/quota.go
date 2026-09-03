@@ -130,8 +130,21 @@ func discoverOAuthToken() (string, string) {
 		// Found credentials.json but no OAuth key.
 		return "", fmt.Sprintf("no Claude OAuth credentials found in %s", path)
 	}
+	// macOS Keychain fallback: Claude Code stores credentials there, not on disk.
+	if out, err := exec.Command("security", "find-generic-password",
+		"-s", "Claude Code-credentials", "-w").Output(); err == nil {
+		var kc struct {
+			ClaudeAiOauth struct {
+				AccessToken string `json:"accessToken"`
+			} `json:"claudeAiOauth"`
+		}
+		if err := json.Unmarshal(out, &kc); err == nil && kc.ClaudeAiOauth.AccessToken != "" {
+			return kc.ClaudeAiOauth.AccessToken, ""
+		}
+	}
+
 	searched := strings.Join(dirs, ", ")
-	return "", fmt.Sprintf("no Claude credentials found at %s", searched)
+	return "", fmt.Sprintf("no Claude credentials found (searched %s and macOS Keychain)", searched)
 }
 
 // claudeConfigDirs returns the directories to search for Claude credentials,
@@ -180,12 +193,12 @@ func discoverAPIBase() (string, string) {
 		}
 	}
 
-	return "", "could not determine API base — run `claude config set apiBaseUrl <url>` to configure"
+	return "https://api.anthropic.com", ""
 }
 
 // fetchUsage makes an authenticated request for subscription usage.
 func fetchUsage(apiBase, token string) ([]windowUsage, error) {
-	url := apiBase + "/v1/organizations/usage"
+	url := apiBase + "/api/oauth/usage"
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -216,59 +229,43 @@ func fetchUsage(apiBase, token string) ([]windowUsage, error) {
 	return parseUsageResponse(body)
 }
 
-// parseUsageResponse extracts window usage from the API response. The
-// structure is discovered from the response rather than pinned.
+// parseUsageResponse extracts window usage from the API response. The response
+// has top-level "five_hour" and "seven_day" objects, each with "utilization"
+// (percentage 0–100) and "resets_at" (RFC3339).
 func parseUsageResponse(body []byte) ([]windowUsage, error) {
-	// Try to parse as a response carrying rate_limits or usage windows.
-	var envelope struct {
-		RateLimits []struct {
-			Window   string  `json:"window"`
-			Used     float64 `json:"used"`
-			Limit    float64 `json:"limit"`
-			ResetsAt string  `json:"resets_at"`
-		} `json:"rate_limits"`
-		Windows []struct {
-			Label    string  `json:"label"`
-			Length   int     `json:"length_seconds"`
-			Used     float64 `json:"usage_fraction"`
-			ResetsAt string  `json:"resets_at"`
-		} `json:"windows"`
+	type windowData struct {
+		Utilization *float64 `json:"utilization"`
+		ResetsAt    string   `json:"resets_at"`
 	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
+	var resp struct {
+		FiveHour *windowData `json:"five_hour"`
+		SevenDay *windowData `json:"seven_day"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("transport — cannot parse usage response")
 	}
 
 	var result []windowUsage
 
-	// Path 1: windows array.
-	for _, w := range envelope.Windows {
-		t, _ := time.Parse(time.RFC3339, w.ResetsAt)
-		used := w.Used
-		if used < 0 {
-			used = -1
+	if resp.FiveHour != nil {
+		t, _ := time.Parse(time.RFC3339, resp.FiveHour.ResetsAt)
+		used := -1.0
+		if resp.FiveHour.Utilization != nil {
+			used = *resp.FiveHour.Utilization / 100.0
 		}
 		result = append(result, windowUsage{
-			Label:    w.Label,
-			Length:   time.Duration(w.Length) * time.Second,
-			Used:     used,
-			ResetsAt: t,
+			Label: "5h", Length: 5 * time.Hour, Used: used, ResetsAt: t,
 		})
 	}
 
-	// Path 2: rate_limits array (alternative schema).
-	for _, rl := range envelope.RateLimits {
-		t, _ := time.Parse(time.RFC3339, rl.ResetsAt)
-		var used float64 = -1
-		if rl.Limit > 0 {
-			used = rl.Used / rl.Limit
+	if resp.SevenDay != nil {
+		t, _ := time.Parse(time.RFC3339, resp.SevenDay.ResetsAt)
+		used := -1.0
+		if resp.SevenDay.Utilization != nil {
+			used = *resp.SevenDay.Utilization / 100.0
 		}
-		length := windowLengthFromLabel(rl.Window)
-		label := rl.Window
 		result = append(result, windowUsage{
-			Label:    label,
-			Length:   length,
-			Used:     used,
-			ResetsAt: t,
+			Label: "7d", Length: 7 * 24 * time.Hour, Used: used, ResetsAt: t,
 		})
 	}
 
@@ -276,18 +273,6 @@ func parseUsageResponse(body []byte) ([]windowUsage, error) {
 		return nil, fmt.Errorf("transport — usage response contained no window data")
 	}
 	return result, nil
-}
-
-func windowLengthFromLabel(label string) time.Duration {
-	switch label {
-	case "5h":
-		return 5 * time.Hour
-	case "7d":
-		return 7 * 24 * time.Hour
-	case "24h", "1d":
-		return 24 * time.Hour
-	}
-	return 0
 }
 
 // paceTargets holds the per-window target fractions for pacing.

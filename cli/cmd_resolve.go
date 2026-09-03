@@ -231,6 +231,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 
 	enc := json.NewEncoder(app.Out)
 	fitnessWaits := 0
+	quotaWarned := false
 	for range maxResolveSteps {
 		// Pace against subscription quota. The check is before dispatch so the
 		// delay costs nothing that is in flight.
@@ -245,8 +246,9 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 						return 1
 					}
 				}
-			} else {
-				fmt.Fprintf(app.Err, "resolve: ⚠ quota unreadable — %s — pacing disabled for this step\n", qerr)
+			} else if !quotaWarned {
+				fmt.Fprintf(app.Err, "resolve: ⚠ quota unreadable — %s — pacing disabled\n", qerr)
+				quotaWarned = true
 			}
 		}
 
