@@ -541,6 +541,11 @@ const (
 	// behind by a process that died between posting its label and removing
 	// it again, and is collected by the next claimer rather than blocking
 	// the item forever.
+	//
+	// The margin between "seconds" and ten minutes is for the clocks, not
+	// for the attempt: age is read against the collecting claimer's own
+	// clock, so the window also has to cover the disagreement between two
+	// claimers racing from different machines.
 	claimTokenTTL = 10 * time.Minute
 
 	// claimTokenLen is the token's fixed width: claimTokenTimeLen hex digits
