@@ -146,11 +146,34 @@ func TestBackend_QuestionsGatedOnQuestionPark(t *testing.T) {
 	}
 }
 
-// Once the wait ends the questions go with the park — no separate clearing
-// site, so "pending questions with no question park" (the state issue/answers
-// treats as a permanent block) cannot arise here.
+// storedQuestions reads the questions out of the state comment itself.
+//
+// LoadState alone cannot tell "cleared" from "hidden": it returns nothing
+// whenever the item is not parked on a question, so a record left behind in
+// the document reads exactly like one that was dropped — right up to the next
+// question park, which inherits it.
+func storedQuestions(t *testing.T, mock *ghMock) []stateQuestionDoc {
+	t.Helper()
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	for _, c := range mock.comments {
+		doc, _, found, err := extractStateDoc(c.Body)
+		if err != nil {
+			t.Fatalf("extractStateDoc: %v", err)
+		}
+		if found && doc != nil {
+			return doc.Questions
+		}
+	}
+	t.Fatal("no state comment on the issue")
+	return nil
+}
+
+// Once the wait ends the questions go with the park: the record is dropped
+// from the document, not merely hidden by the read gate, so nothing can
+// inherit it later.
 func TestBackend_QuestionsGoneWhenStepResolves(t *testing.T) {
-	_, b, claim := newQuestionEnv(t)
+	mock, b, claim := newQuestionEnv(t)
 	askOne(t, b, claim, flow.AskText("base", "which base branch?"))
 	parkOnQuestion(t, b, claim)
 
@@ -169,10 +192,13 @@ func TestBackend_QuestionsGoneWhenStepResolves(t *testing.T) {
 	if len(state.Questions) != 0 {
 		t.Errorf("Questions = %d after the step resolved, want 0", len(state.Questions))
 	}
+	if q := storedQuestions(t, mock); len(q) != 0 {
+		t.Errorf("state comment still carries %d question(s) after the resolve: %+v", len(q), q)
+	}
 }
 
 func TestBackend_QuestionsGoneAfterResetSeed(t *testing.T) {
-	_, b, claim := newQuestionEnv(t)
+	mock, b, claim := newQuestionEnv(t)
 	askOne(t, b, claim, flow.AskText("base", "which base branch?"))
 	parkOnQuestion(t, b, claim)
 
@@ -185,6 +211,60 @@ func TestBackend_QuestionsGoneAfterResetSeed(t *testing.T) {
 	}
 	if len(state.Questions) != 0 {
 		t.Errorf("Questions = %d after ResetSeed, want 0", len(state.Questions))
+	}
+	if q := storedQuestions(t, mock); len(q) != 0 {
+		t.Errorf("state comment still carries %d question(s) after the reset: %+v", len(q), q)
+	}
+}
+
+// A park of another kind supersedes what the item was waiting on, so the
+// question record goes with the park it belonged to.
+func TestBackend_QuestionsGoneWhenAnotherParkSupersedes(t *testing.T) {
+	mock, b, claim := newQuestionEnv(t)
+	askOne(t, b, claim, flow.AskText("base", "which base branch?"))
+	parkOnQuestion(t, b, claim)
+
+	if err := b.Park(t.Context(), claim, flow.ParkRequest{
+		Kind: flow.ParkBudgetExhausted, Step: "plan", Axis: flow.AxisInvocations,
+		Reason: "ran 3 times without resolving \"plan\"",
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+	if q := storedQuestions(t, mock); len(q) != 0 {
+		t.Errorf("state comment still carries %d question(s) under a budget park: %+v", len(q), q)
+	}
+}
+
+// The consequence of leaving the record behind: a handler that parks on a
+// question by hand — ctx.Park with kind question, which registers nothing —
+// would inherit the previous ask and present it as the outstanding one.
+// `answer` accepts that question, and answering it moves nothing.
+func TestBackend_AnsweredQuestionIsNotInheritedByTheNextQuestionPark(t *testing.T) {
+	_, b, claim := newQuestionEnv(t)
+	stale := askOne(t, b, claim, flow.AskText("base", "which base branch?"))
+	parkOnQuestion(t, b, claim)
+
+	// The wait ends: the step resolves, taking its park with it.
+	if err := b.ResolveArtifact(t.Context(), claim, "plan", flow.ArtifactBody{
+		Type: flow.ArtifactMarkdown, Markdown: "the plan",
+	}); err != nil {
+		t.Fatalf("ResolveArtifact: %v", err)
+	}
+
+	// A later question park that registered no question of its own.
+	parkOnQuestion(t, b, claim)
+
+	state, err := b.LoadState(t.Context(), claim)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	for _, q := range state.Questions {
+		if q.ID == stale.ID {
+			t.Errorf("the answered question %q is reported as outstanding again", q.ID)
+		}
+	}
+	if len(state.Questions) != 0 {
+		t.Errorf("Questions = %+v, want none — nothing registered a question for this park", state.Questions)
 	}
 }
 

@@ -47,7 +47,10 @@ type stateDoc struct {
 	//
 	// Replaced, not appended to, by a new ask: like Park, the field carries
 	// the item's current state rather than its history, which the question
-	// comments already hold.
+	// comments already hold. It is dropped with the park that was waiting on
+	// it — a record that outlives its park is one the next question park
+	// inherits, and an already-answered ask presented as the outstanding one
+	// is worse than none, because `answer` accepts it.
 	Questions []stateQuestionDoc `yaml:"questions,omitempty"`
 	// Finalized marks the item's flow run as complete. Set by Finalize and
 	// read back by LoadState into Item.Finalized so `status` can distinguish

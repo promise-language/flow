@@ -129,7 +129,7 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 				if q.Answered {
 					marker = "[x]"
 				}
-				fmt.Fprintf(app.Out, "  %s %s — %s\n", marker, q.ID, q.Text)
+				fmt.Fprintf(app.Out, "  %s %s — %s\n", marker, q.ID, questionLine(q))
 			}
 		}
 	})
@@ -315,9 +315,26 @@ func artifactState(state *flow.ItemState, id flow.ArtifactId) string {
 func questionPayloads(state *flow.ItemState) []questionPayload {
 	out := make([]questionPayload, 0, len(state.Questions))
 	for _, q := range state.Questions {
-		out = append(out, questionPayload{ID: q.ID, Text: q.Text, Answered: q.Answer != ""})
+		out = append(out, questionPayload{
+			ID: q.ID, Header: q.Header, Text: q.Text, Answered: q.Answer != "",
+		})
 	}
 	return out
+}
+
+// questionLine renders a question as ONE bounded line, the way titleLine
+// bounds the title.
+//
+// Header first, and Text only when there is no header: the header is the short
+// scannable form — under the ask convention it is the question itself — while
+// Text is where a whole fenced evidence block belongs. A checklist entry built
+// from Text splices that block across the listing and buries the question that
+// the entry exists to show. JSON carries both unclipped.
+func questionLine(q questionPayload) string {
+	if s := titleLine(q.Header); s != "" {
+		return s
+	}
+	return titleLine(q.Text)
 }
 
 func parkPayloadOf(p *flow.ParkRequest) *parkPayload {

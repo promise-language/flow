@@ -216,7 +216,14 @@ type grantedOnly struct {
 }
 
 type questionPayload struct {
-	ID       string `json:"id"`
+	ID string `json:"id"`
+	// Header is the question's short scannable form and Text is the whole
+	// prompt — a fenced evidence block, commonly, since that is what the ask
+	// convention puts there. Both go out VERBATIM, unclipped and possibly
+	// multi-line; only the human rendering bounds them (questionLine). Both
+	// carry no omitempty for the same reason Title does: a stable key set is
+	// the machine contract, and a header-less question reports "".
+	Header   string `json:"header"`
 	Text     string `json:"text"`
 	Answered bool   `json:"answered"`
 }

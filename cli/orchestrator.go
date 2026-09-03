@@ -894,8 +894,8 @@ func (s *stepCtx) AskQuestions(qs ...flow.AgentQuestion) error {
 	// A question park's entire recovery path is `answer`, which needs a
 	// registered question to name. Parking on questions the backend recorded
 	// none of leaves an item nothing can move forward, so fail the step here —
-	// at the one point in the SDK where a question park is constructed —
-	// rather than let the park be written and discovered later.
+	// where the ask route knows what was registered — rather than let the park
+	// be written and discovered later.
 	if len(recorded) == 0 {
 		return fmt.Errorf("backend.AskQuestions recorded none of %d question(s): "+
 			"parking on a question nothing registered leaves an item `answer` cannot clear", len(qs))

@@ -34,7 +34,7 @@ The YAML body carries a `schema` field. The current version is **1**. The versio
 | `artifacts` | array | Per-artifact state entries. See below. |
 | `signals` | array | Per-signal state entries. See below. |
 | `park` | object or null | Current park record, or absent when not parked. |
-| `questions` | array | Questions the item is parked on. Present exactly while `park.kind` is `question`. See below. |
+| `questions` | array | Questions the item is parked on. Written by an ask and dropped with the park that was waiting on it; read back only while `park.kind` is `question`. See below. |
 | `finalized` | bool | Whether the item's flow run is complete. |
 
 ### Artifact entries
@@ -89,6 +89,8 @@ Each entry in the `questions` array:
 | `asked_at` | timestamp | When the question comment was created, on **GitHub's** clock — the clock the replies it is compared against are stamped by. |
 
 A new ask replaces the array rather than appending to it: the field carries the questions currently outstanding, and the question comments carry the history. Answers are not recorded here — the issue thread is the answer store.
+
+The array belongs to the park that is waiting on it, and goes wherever that park does: dropped when the asking step resolves, when a park of another kind supersedes it, and on a re-seed. A record left behind would be inherited by the next question park and presented as its outstanding ask, which `answer` would then accept — an answer to a question nothing is waiting on.
 
 ### Park record
 

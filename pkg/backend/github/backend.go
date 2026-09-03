@@ -288,11 +288,12 @@ func (b *Backend) loadState(ctx context.Context, issueNum int, cachedCommentID i
 			}
 			state.Park = parkRequestFromDoc(doc.Park)
 			// Questions are returned exactly while the item is parked on one.
-			// Deriving the list from the park rather than clearing it
-			// separately is what makes "a question park always carries its
-			// question, and nothing else ever does" true by construction:
-			// there is no second clearing site that can fall out of step with
-			// the park, and every path that ends the wait already clears it.
+			// The record is dropped with the park that was waiting on it, so
+			// this gate is a backstop rather than the rule — it covers the one
+			// window the writes cannot: an ask whose park never landed,
+			// because the run died between AskQuestions and Park. Reporting
+			// those questions would offer `answer` a question no park is
+			// waiting on, and answering it would move nothing.
 			if state.Park != nil && state.Park.Kind == flow.ParkQuestion {
 				state.Questions = questionsFromDocs(doc.Questions)
 			}
