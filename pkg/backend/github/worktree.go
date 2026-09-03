@@ -183,8 +183,42 @@ func (w *worktree) RunGate(ctx context.Context, name flow.GateName) (flow.GateRu
 	if !name.Valid() {
 		return flow.GateRun{}, fmt.Errorf("worktree.RunGate: %q is not a declared gate name", name)
 	}
+
+	// Capture tracked state before spawning so the runner can detect a gate
+	// that modified the worktree. See docs/gates-and-commands.md § "The
+	// non-modification rule is checked, not assumed".
+	before, err := w.b.git.StatusPorcelain(ctx)
+	if err != nil {
+		return flow.GateRun{}, fmt.Errorf("worktree.RunGate: cannot snapshot worktree before gate: %w", err)
+	}
+
 	argv := append(append([]string{}, gateEntryPoint...), string(name), envelopeFlag)
-	return runGate(ctx, w.b.cfg.WorktreeDir, name, argv, w.b.cfg.GateTimeout)
+	run, err := runGate(ctx, w.b.cfg.WorktreeDir, name, argv, w.b.cfg.GateTimeout)
+	if err != nil {
+		return run, err
+	}
+
+	// Only override a measured outcome. The four non-measured outcomes are
+	// already failures; overriding them would lose attribution (e.g.,
+	// timeout → broke-contract sends the wrong person to investigate).
+	if run.Outcome != flow.OutcomeMeasured {
+		return run, nil
+	}
+
+	after, err := w.b.git.StatusPorcelain(ctx)
+	if err != nil {
+		run.Outcome = flow.OutcomeBrokeContract
+		run.Detail = fmt.Sprintf("cannot verify worktree integrity after gate: %v", err)
+		return run, nil
+	}
+
+	if before != after {
+		run.Outcome = flow.OutcomeBrokeContract
+		run.Detail = "the gate modified the worktree:\n" + after
+		return run, nil
+	}
+
+	return run, nil
 }
 
 // Judge asks the project whether a measurement is acceptable, by exec'ing its
