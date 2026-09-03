@@ -45,6 +45,10 @@ type fakeWorktree struct {
 	// stageErrs scripts what Stage returns on successive calls. A nil entry
 	// means success for that call. When exhausted, Stage returns nil.
 	stageErrs []error
+	// openErrs scripts what Open returns on successive calls. A nil entry
+	// means success for that call. When exhausted, Open falls back to the
+	// default (success).
+	openErrs []error
 	// dirty models work appearing in the tree AFTER a commit — what the review
 	// and coverage steps do. A Commit that lands clears it, as git does; a
 	// Commit that lands nothing (noCommit) leaves it, as git also does. It also
@@ -229,6 +233,13 @@ func (w *fakeWorktree) RevParse(_ context.Context, rev string) (string, error) {
 func (w *fakeWorktree) Request() flow.RequestManager { return w }
 func (w *fakeWorktree) Open(_ context.Context, base, title, body string) (string, error) {
 	w.calls = append(w.calls, "open")
+	if len(w.openErrs) > 0 {
+		err := w.openErrs[0]
+		w.openErrs = w.openErrs[1:]
+		if err != nil {
+			return "", err
+		}
+	}
 	w.opened, w.openBody = true, body
 	return "https://example.invalid/pr/1", nil
 }
@@ -1269,6 +1280,160 @@ func TestStepOpenPR_BodyCarriesTheGatesResult(t *testing.T) {
 	// there is no artifact recording that it ran.
 	if strings.Contains(wt.openBody, "## Verification") {
 		t.Errorf("body still carries a verification section:\n%s", wt.openBody)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Push disclosure refusal recovery.
+// ---------------------------------------------------------------------------
+
+func TestStepOpenPR_PushRefusal_AgentRepairs_RetrySucceeds(t *testing.T) {
+	wt := resumedWorktree()
+	pushRefusal := flow.ErrDisclosureRefused{
+		Act:    flow.ActPush,
+		Reason: fmt.Errorf("an absolute home path names the machine's user"),
+	}
+	wt.openErrs = []error{pushRefusal, nil}
+
+	agent := &scriptedAgent{}
+	ctx := ctxWithPlan(wt, agent)
+
+	if err := testBuilder(t).stepOpenPR(ctx); err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	if agent.calls != 1 {
+		t.Errorf("agent called %d times, want 1 (one repair turn)", agent.calls)
+	}
+	if len(agent.reqs) < 1 || agent.reqs[0].PermissionMode != "acceptEdits" {
+		t.Error("repair agent was not given acceptEdits permission — it needs to rebase")
+	}
+	if len(agent.prompts) < 1 || !strings.Contains(agent.prompts[0], "absolute home path") {
+		t.Errorf("repair prompt does not contain the refusal text: %q", agent.prompts)
+	}
+	if !wt.opened {
+		t.Error("PR was not opened after successful retry")
+	}
+	if len(ctx.wipSaves) == 0 {
+		t.Error("WIP was not stashed before the repair attempt")
+	}
+}
+
+func TestStepOpenPR_PushRefusalTwice_Parks(t *testing.T) {
+	wt := resumedWorktree()
+	pushRefusal := flow.ErrDisclosureRefused{
+		Act:    flow.ActPush,
+		Reason: fmt.Errorf("an absolute home path names the machine's user"),
+	}
+	wt.openErrs = []error{pushRefusal, pushRefusal}
+
+	agent := &scriptedAgent{}
+	ctx := ctxWithPlan(wt, agent)
+
+	err := testBuilder(t).stepOpenPR(ctx)
+	if err == nil || !strings.Contains(err.Error(), "parked") {
+		t.Fatalf("err = %v, want a park", err)
+	}
+	if agent.calls != 1 {
+		t.Errorf("agent called %d times, want 1 (one attempt, then park)", agent.calls)
+	}
+	if ctx.park == nil {
+		t.Fatal("step did not park")
+	}
+	if ctx.park.Kind != flow.ParkBlocked {
+		t.Errorf("park kind = %v, want ParkBlocked", ctx.park.Kind)
+	}
+	// The park reason must not contain guard details (no paths, no fragments).
+	if strings.Contains(ctx.park.Reason, "absolute home path") {
+		t.Error("park reason contains guard details — it would be refused by the same rule")
+	}
+	if len(ctx.wipSaves) == 0 {
+		t.Error("WIP was not stashed")
+	}
+}
+
+func TestStepOpenPR_NonPushRefusalPassesThrough(t *testing.T) {
+	wt := resumedWorktree()
+	prRefusal := flow.ErrDisclosureRefused{
+		Act:    flow.ActPullRequest,
+		Reason: fmt.Errorf("title contains a home path"),
+	}
+	wt.openErrs = []error{prRefusal}
+
+	agent := &scriptedAgent{}
+	ctx := ctxWithPlan(wt, agent)
+
+	err := testBuilder(t).stepOpenPR(ctx)
+	if err == nil {
+		t.Fatal("expected error to pass through")
+	}
+	var got flow.ErrDisclosureRefused
+	if !errors.As(err, &got) || got.Act != flow.ActPullRequest {
+		t.Errorf("err = %v, want the original ActPullRequest refusal passed through", err)
+	}
+	if agent.calls != 0 {
+		t.Errorf("agent called %d times, want 0 (non-push refusal should not trigger repair)", agent.calls)
+	}
+	if ctx.park != nil {
+		t.Error("non-push refusal should not park")
+	}
+}
+
+func TestStepOpenPR_InfraErrorPassesThrough(t *testing.T) {
+	wt := resumedWorktree()
+	wt.openErrs = []error{fmt.Errorf("network timeout")}
+
+	agent := &scriptedAgent{}
+	ctx := ctxWithPlan(wt, agent)
+
+	err := testBuilder(t).stepOpenPR(ctx)
+	if err == nil || !strings.Contains(err.Error(), "network timeout") {
+		t.Fatalf("err = %v, want the infrastructure error passed through", err)
+	}
+	if agent.calls != 0 {
+		t.Errorf("agent called %d times, want 0", agent.calls)
+	}
+}
+
+func TestStepOpenPR_PushRefusalThenInfraError_Parks(t *testing.T) {
+	wt := resumedWorktree()
+	pushRefusal := flow.ErrDisclosureRefused{
+		Act:    flow.ActPush,
+		Reason: fmt.Errorf("an absolute home path names the machine's user"),
+	}
+	wt.openErrs = []error{pushRefusal, fmt.Errorf("network timeout")}
+
+	agent := &scriptedAgent{}
+	ctx := ctxWithPlan(wt, agent)
+
+	err := testBuilder(t).stepOpenPR(ctx)
+	if err == nil || !strings.Contains(err.Error(), "parked") {
+		t.Fatalf("err = %v, want a park (preserves the rebase work)", err)
+	}
+	if agent.calls != 1 {
+		t.Errorf("agent called %d times, want 1", agent.calls)
+	}
+	if ctx.park == nil {
+		t.Fatal("step did not park")
+	}
+	if ctx.park.Kind != flow.ParkBlocked {
+		t.Errorf("park kind = %v, want ParkBlocked", ctx.park.Kind)
+	}
+}
+
+func TestPromptPushRepair_RendersRefusalAndRebaseInstructions(t *testing.T) {
+	pc := PromptContext{PushRefusal: "found /Users/someone/.ssh/id_rsa"}
+	got, err := renderPrompt(Config{}, PromptPushRepair, pc)
+	if err != nil {
+		t.Fatalf("renderPrompt: %v", err)
+	}
+	if !strings.Contains(got, "found /Users/someone/.ssh/id_rsa") {
+		t.Error("rendered prompt does not contain the refusal text")
+	}
+	if !strings.Contains(got, "rebase") {
+		t.Error("rendered prompt does not mention rebase")
+	}
+	if !strings.Contains(got, "Do NOT push") {
+		t.Error("rendered prompt does not tell the agent not to push")
 	}
 }
 

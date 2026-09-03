@@ -54,6 +54,10 @@ type PromptContext struct {
 	// Non-empty ONLY when rendering PromptStageRepair.
 	StageRefusal string
 
+	// PushRefusal is the disclosure guard's answer when it refused a push.
+	// Non-empty ONLY when rendering PromptPushRepair.
+	PushRefusal string
+
 	// Prior carries upstream artifacts as records rather than strings, so a
 	// body cannot silently interpolate a patch into a markdown slot. Read them
 	// through PriorMarkdown / PriorPatch / PriorJSON.
@@ -421,6 +425,29 @@ Delete the offending file(s). That is the ONLY permitted action:
   and a change after it breaks the invariant that what was verified is what lands.
 
 Delete the file(s) the error named and nothing else.`,
+
+	PromptPushRepair: `The disclosure guard refused the push. Its answer:
+
+` + "```" + `
+{{.PushRefusal}}
+` + "```" + `
+
+The guard scans every commit's patch, not just the final tree. Editing the file
+in the worktree and committing a fix is NOT enough — the earlier commits still
+carry the offending text in their diffs, and the guard will refuse identically.
+
+You must rewrite the commits that introduced the text:
+
+1. Find the rebase target: ` + "`" + `git merge-base HEAD $(git rev-parse --abbrev-ref @{upstream} 2>/dev/null || echo origin/main)` + "`" + `
+2. Use ` + "`" + `git rebase --exec` + "`" + ` from that base to substitute the offending fragment
+   with an exempt placeholder (e.g. replace a real username with "someone" or
+   "dev") across every commit that carries it.
+3. Stage and amend each commit the exec visits — the rebase ` + "`--exec`" + ` flag does
+   this naturally.
+
+Do NOT push — the step retries the push itself after your repair.
+Do NOT re-run the integration gate — it already passed on the branch content,
+and the fix is cosmetic (placeholder substitution), not structural.`,
 
 	PromptRevise: `The text you just produced was NOT published. A guard examines everything this
 flow writes outward before it is sent, and it refused this:
