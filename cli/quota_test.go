@@ -474,6 +474,80 @@ func TestPaceDelay_UsedExceedsTargetAtFullElapsed(t *testing.T) {
 	}
 }
 
+func TestPaceDelay_EmptyUsage(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	targets := paceTargets{FiveHour: 0.90, SevenDay: 0.95}
+	d := paceDelay(nil, targets, now)
+	if d != 0 {
+		t.Errorf("empty usage should return 0; got %v", d)
+	}
+}
+
+func TestPaceDelay_UnknownLabelSkipped(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	usage := []windowUsage{{
+		Label:    "24h",
+		Length:   24 * time.Hour,
+		Used:     0.99,
+		ResetsAt: now.Add(12 * time.Hour), // elapsed=50%
+	}}
+	targets := paceTargets{FiveHour: 0.90, SevenDay: 0.95}
+	d := paceDelay(usage, targets, now)
+	if d != 0 {
+		t.Errorf("unknown label should be skipped; got %v", d)
+	}
+}
+
+func TestPaceDelay_ExpiredWindowNoDelay(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	usage := []windowUsage{{
+		Label:    "5h",
+		Length:   5 * time.Hour,
+		Used:     0.80,
+		ResetsAt: now.Add(-10 * time.Minute), // already expired
+	}}
+	targets := paceTargets{FiveHour: 0.90, SevenDay: 0.95}
+	d := paceDelay(usage, targets, now)
+	// elapsed clamped to 1.0; ceiling = 0.90 * 1.0 = 0.90; Used 0.80 <= 0.90 → no delay.
+	if d != 0 {
+		t.Errorf("expired window with Used < target should not delay; got %v", d)
+	}
+}
+
+func TestPaceDelay_ExactlyAtCeilingNoDelay(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	// Set up so that Used == target * elapsed exactly.
+	// elapsed = 50%, target = 0.90 → ceiling = 0.45; Used = 0.45.
+	usage := []windowUsage{{
+		Label:    "5h",
+		Length:   5 * time.Hour,
+		Used:     0.45,
+		ResetsAt: now.Add(2*time.Hour + 30*time.Minute), // elapsed=50%
+	}}
+	targets := paceTargets{FiveHour: 0.90, SevenDay: 0.95}
+	d := paceDelay(usage, targets, now)
+	if d != 0 {
+		t.Errorf("Used exactly at ceiling should not delay; got %v", d)
+	}
+}
+
+func TestPaceDelay_SevenDayOnly(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	usage := []windowUsage{{
+		Label:    "7d",
+		Length:   7 * 24 * time.Hour,
+		Used:     0.60,
+		ResetsAt: now.Add(3 * 24 * time.Hour), // elapsed ≈ 57.1%
+	}}
+	targets := paceTargets{FiveHour: 0.90, SevenDay: 0.95}
+	d := paceDelay(usage, targets, now)
+	// ceiling = 0.95 * 0.571 ≈ 0.543; Used 0.60 > 0.543 → delay.
+	// needed = 0.60/0.95 ≈ 0.6316; delay = (0.6316 - 0.5714) * 7d ≈ 10.2h
+	if d < 9*time.Hour || d > 11*time.Hour {
+		t.Errorf("expected ~10h delay for 7d-only; got %v", d)
+	}
+}
+
 func TestWindowTarget(t *testing.T) {
 	targets := paceTargets{FiveHour: 0.90, SevenDay: 0.95}
 	if got := windowTarget("5h", targets); got != 0.90 {
