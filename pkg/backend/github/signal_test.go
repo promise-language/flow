@@ -193,3 +193,87 @@ func TestRefreshPRSignals_NeverPolledOpen_StaysFalse(t *testing.T) {
 		t.Fatal("pr-open should stay false — latch must not synthesize a set from nothing")
 	}
 }
+
+func TestRefreshPRSignals_Lifecycle_OpenThenMerged(t *testing.T) {
+	// The regression scenario from issue #136: poll sees the PR open,
+	// then the PR merges, and the next poll must NOT unset pr-open.
+	m := &signalMock{
+		owner: "o", repo: "r",
+		pr: map[string]any{
+			"number": 1,
+			"state":  "open",
+			"merged": false,
+		},
+	}
+	srv := m.server()
+	defer srv.Close()
+	b := newSignalBackend(t, m, srv)
+
+	state := newState()
+
+	// Poll 1: PR is open.
+	if err := b.refreshPRSignals(t.Context(), 42, state); err != nil {
+		t.Fatalf("poll 1: %v", err)
+	}
+	if !state.SignalSet("pr-open") {
+		t.Fatal("poll 1: pr-open should be set")
+	}
+
+	// PR merges between polls.
+	m.mu.Lock()
+	m.pr["state"] = "closed"
+	m.pr["merged"] = true
+	m.mu.Unlock()
+
+	// Poll 2: PR is now merged — pr-open must stay set (the latch).
+	if err := b.refreshPRSignals(t.Context(), 42, state); err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	if !state.SignalSet("pr-open") {
+		t.Fatal("poll 2: pr-open must remain set after merge — this is the bug from issue #136")
+	}
+	if !state.SignalSet("pr-merged") {
+		t.Fatal("poll 2: pr-merged should be set")
+	}
+}
+
+func TestRefreshPRSignals_Lifecycle_OpenThenClosedNoMerge(t *testing.T) {
+	// Same lifecycle but for a PR closed without merging.
+	m := &signalMock{
+		owner: "o", repo: "r",
+		pr: map[string]any{
+			"number": 1,
+			"state":  "open",
+			"merged": false,
+		},
+	}
+	srv := m.server()
+	defer srv.Close()
+	b := newSignalBackend(t, m, srv)
+
+	state := newState()
+
+	// Poll 1: PR is open.
+	if err := b.refreshPRSignals(t.Context(), 42, state); err != nil {
+		t.Fatalf("poll 1: %v", err)
+	}
+	if !state.SignalSet("pr-open") {
+		t.Fatal("poll 1: pr-open should be set")
+	}
+
+	// PR is closed without merging.
+	m.mu.Lock()
+	m.pr["state"] = "closed"
+	m.mu.Unlock()
+
+	// Poll 2: pr-open must stay set.
+	if err := b.refreshPRSignals(t.Context(), 42, state); err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	if !state.SignalSet("pr-open") {
+		t.Fatal("poll 2: pr-open must remain set after close")
+	}
+	if state.SignalSet("pr-merged") {
+		t.Fatal("poll 2: pr-merged should not be set for a non-merge close")
+	}
+}
