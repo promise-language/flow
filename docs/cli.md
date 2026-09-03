@@ -132,7 +132,9 @@ A step that needs a human decision asks a question and parks. `answer` is how th
 
 **It requires no claim.** The arena holding the item is not the party who answers — a maintainer, the reporter, or a passer-by can all unblock a step, which is the point of asking in the open. `answer` therefore addresses the item by id, like `status`, and works from any machine.
 
-Answering **clears the item's outstanding-question marker**. The moment an answer exists, "a human must answer this" has stopped being true, and anything advertising that state — a label, a listing, a dashboard query — must stop advertising it. A marker that outlives the condition it describes is worse than no marker: it is read as current.
+An answer is recorded **against the question it answers**, and the item's outstanding-question marker **clears when the last pending question is answered** — not when the first one is. The marker describes one condition, *a human must answer this*, and that condition stays true while any question is still waiting.
+
+Both directions of getting this wrong are the same mistake. A marker that outlives the condition is read as current when it is not; a marker cleared while two questions still wait stops advertising a state that is still true, and the run resumes on a decision nobody finished giving. Anything advertising the state — a label, a listing, a dashboard query — tracks the condition, not the most recent answer.
 
 Answering does not resume the item. Resumption is a separate, deliberate act — `resolve` or `run-step` — because somebody has to decide the answer is complete and the work should continue.
 
@@ -214,11 +216,15 @@ When the reason is an unfinished dependency, the **blocking items are reported b
 
 Two things follow from that. An operator reading the listing can see that the blocker is itself listed, and whether *it* is workable, which turns "this is blocked" into "go work that one instead". And anything acting on the listing gets the identifiers without parsing them out of prose, which is the same reason references belong in fields everywhere else in this system.
 
-The blocking items are reported as identifiers only. Their own state is not resolved on their behalf — that would mean a lookup per blocker, and the identifier is enough to look one up or to spot it elsewhere in the listing.
+The blocking items are reported as references, each with **whether it has finished**. That much comes free: an item is blocked precisely because some blocker has not finished, so anything able to say the item is blocked already knows which one. Reporting the list without it would answer *these were declared as blockers* when the question is *what am I waiting on* — and would send an operator to look up every entry to find the one still open.
+
+Nothing further is resolved on their behalf. A blocker's title, who holds it, whether it is itself blocked — those are lookups the caller can make, and a reference is enough both to make one and to recognise the blocker elsewhere in the listing. It is a **reference**, not the rendering of one: what an operator reads is that reference displayed, and what anything acting on the listing gets is the reference itself.
 
 A filter is not widened to include blockers. `--tag` and `--scope` mean what they say; a blocker outside the filter is still named, and still addressable.
 
-Dependencies are not a concept this SDK models. Whether one item waits on another is the backend's knowledge, and the backend supplies the state, the reason, and the references. A backend with no dependency notion simply never reports them.
+**The SDK carries dependencies; it does not interpret them.** Whether one item waits on another is the backend's knowledge, and the backend supplies the state, the reason and the references. Nothing here resolves a blocker, walks a graph, or decides when one clears — those answers are the backend's, and this binary only relays what it is told and offers a way to record what a run discovers.
+
+Recording one is supported rather than incidental. A dependency is found part-way through work at least as often as it is known when an item is filed, so a run that discovers one has somewhere to put it. A backend whose store has no dependency notion still answers — it refuses what it cannot represent, which tells a caller something, where silently accepting and forgetting would not. See [backend.md](backend.md).
 
 `auto` and `available` are distinct because `list` and `resolve` draw from different sets. `list` reports work that could be taken; auto-selection draws only from work already opted in. Widening what an operator can see never widens what an unattended `resolve` will start on — and because both commands accept the same `--tag` filter, they read as symmetrical and are not. The state is what makes that visible in the listing rather than a rule the reader has to know.
 
@@ -280,7 +286,7 @@ It checks exactly these things:
 |---|---|
 | The backend is reachable and usable | Work is claimed against a store that cannot be read or written |
 | The agent can be invoked | Every step dies on its first turn, reported as an agent fault rather than a broken environment |
-| The verify command exists and is executable, when one is configured | A step finishes its work, goes to verify it, and fails on a missing command |
+| The verify command exists and is executable | A step finishes its work, goes to verify it, and fails on a missing command |
 | The gate entry point exists and is executable | Every gate reports `could not start`, on every retry, after the budget is spent |
 | Normative documentation is present — `docs/` exists and holds at least one document | An agent works without access to what the project defines as correct, and produces something plausible instead of something right |
 | The `fit` gate reports clear | The machine runs out of what the project's work requires part-way through an item, and the failure is read as a defect in the change |
