@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"os"
 	"strings"
 	"time"
 
@@ -52,6 +53,8 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("resolve")
 	of := addOutputFlags(fs)
 	forceUnadmitted := fs.Bool("force-unadmitted", false, "override the arena admission check (audited)")
+	paceFiveHour := fs.Float64("pace-five-hour", 90, "target % of elapsed for 5h window (0=no pacing, 100=raw elapsed)")
+	paceSevenDay := fs.Float64("pace-seven-day", 95, "target % of elapsed for 7d window (0=no pacing, 100=raw elapsed)")
 	var tags stringSliceFlag
 	fs.Var(&tags, "tag", "filter eligible set by tag (repeatable, conjunctive)")
 	if !app.parseArgs(fs, args) {
@@ -218,9 +221,35 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	// We announce each step BEFORE running it (so the long pause is attributed
 	// to a named step) and report the outcome after.
 	fmt.Fprintf(app.Err, "resolve: driving %s to completion (until finalized or parked)…\n", claim.ItemRef.Display)
+
+	isRunner := os.Getenv(dispatchedByRunnerEnv) == "1"
+	targets := paceTargets{FiveHour: *paceFiveHour / 100, SevenDay: *paceSevenDay / 100}
+
+	if !isRunner {
+		reportQuota(app.Err)
+	}
+
 	enc := json.NewEncoder(app.Out)
 	fitnessWaits := 0
 	for range maxResolveSteps {
+		// Pace against subscription quota. The check is before dispatch so the
+		// delay costs nothing that is in flight.
+		if targets.FiveHour > 0 || targets.SevenDay > 0 {
+			if usage, qerr := readQuota(); qerr == nil {
+				if d := paceDelay(usage, targets, time.Now()); d > 0 {
+					fmt.Fprintf(app.Err, "resolve: pacing — waiting %s for quota headroom\n", formatDurationCompact(d))
+					select {
+					case <-time.After(d):
+					case <-ctx.Done():
+						fmt.Fprintln(app.Err, "resolve: interrupted while pacing")
+						return 1
+					}
+				}
+			} else {
+				fmt.Fprintf(app.Err, "resolve: ⚠ quota unreadable — %s — pacing disabled for this step\n", qerr)
+			}
+		}
+
 		// Best-effort peek so we can name the step we're about to run. RunOne
 		// re-derives this itself; the peek is purely for the progress line and
 		// never gates execution (a transient read error just skips the label).
@@ -282,6 +311,9 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		switch flow.InvocationStatus(res.Status) {
 		case flow.StatusFailed:
 			fmt.Fprintf(app.Err, "resolve: %s stopped on a failed step\n", claim.ItemRef.Display)
+			if !isRunner {
+				reportQuota(app.Err)
+			}
 			return 1
 		case flow.StatusBlocked:
 			// An environment condition is re-measured, never assumed to persist
@@ -317,12 +349,17 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			}
 			// A gate only a human can clear, or the fitness wait exhausted.
 			fmt.Fprintf(app.Err, "resolve: %s is blocked — %s\n", claim.ItemRef.Display, res.Reason)
+			if !isRunner {
+				reportQuota(app.Err)
+			}
 			return 1
 		case flow.StatusParked, flow.StatusSkipped:
 			// Parked (question/budget/timeout) or skipped (preflight refusal,
 			// e.g. an already-finalized item). Stop and let the operator act.
 			fmt.Fprintf(app.Err, "resolve: %s %s — run `status %s` to inspect\n", claim.ItemRef.Display, res.Status, claim.ItemRef.Display)
-			reportQuota(app.Err)
+			if !isRunner {
+				reportQuota(app.Err)
+			}
 			return 0
 		case flow.StatusDone:
 			// Finalize case: RunOne ran no step (empty Step) because no eligible
@@ -330,13 +367,18 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			if res.Step == "" {
 				suffix := finalTotalSuffix(ctx, app, *claim)
 				fmt.Fprintf(app.Err, "resolve: %s finalized ✓%s\n", claim.ItemRef.Display, suffix)
-				reportQuota(app.Err)
+				if !isRunner {
+					reportQuota(app.Err)
+				}
 				return 0
 			}
 			// Otherwise a step advanced; loop to run the next one.
 		}
 	}
 	fmt.Fprintf(app.Err, "resolve: stopped after %d step attempts without finalizing (runaway guard); run `status` to inspect\n", maxResolveSteps)
+	if !isRunner {
+		reportQuota(app.Err)
+	}
 	return 1
 }
 
