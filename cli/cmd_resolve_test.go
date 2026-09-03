@@ -1623,6 +1623,27 @@ func TestCmdResolve_QuotaPrintedOnBlocked(t *testing.T) {
 	}
 }
 
+func TestCmdResolve_QuotaUnreadableWarnedOnce(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv(dispatchedByRunnerEnv, "")
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	// Default pacing targets are non-zero, so readQuota is called on every
+	// loop iteration. With an empty config dir it always fails. The loop
+	// runs at least twice (step + finalize), so the dedup guard is exercised.
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	output := errBuf.String()
+	count := strings.Count(output, "quota unreadable")
+	if count != 1 {
+		t.Errorf("expected exactly 1 'quota unreadable' warning (dedup); got %d in:\n%s", count, output)
+	}
+}
+
 func TestCmdResolve_PaceZeroSkipsPacing(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv(dispatchedByRunnerEnv, "")

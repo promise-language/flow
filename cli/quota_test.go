@@ -294,6 +294,50 @@ func TestDiscoverOAuthToken_ValidCredentials(t *testing.T) {
 	}
 }
 
+func TestDiscoverOAuthToken_AccessTokenField(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+
+	creds := `{
+		"claudeAiOauth": {
+			"accessToken": "at-from-keychain"
+		}
+	}`
+	if err := os.WriteFile(dir+"/credentials.json", []byte(creds), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tok, reason := discoverOAuthToken()
+	if reason != "" {
+		t.Fatalf("expected success; got reason=%q", reason)
+	}
+	if tok != "at-from-keychain" {
+		t.Errorf("token = %q, want at-from-keychain", tok)
+	}
+}
+
+func TestDiscoverOAuthToken_SnakeCaseAccessToken(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+
+	creds := `{
+		"claudeAiOauth": {
+			"access_token": "at-snake"
+		}
+	}`
+	if err := os.WriteFile(dir+"/credentials.json", []byte(creds), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tok, reason := discoverOAuthToken()
+	if reason != "" {
+		t.Fatalf("expected success; got reason=%q", reason)
+	}
+	if tok != "at-snake" {
+		t.Errorf("token = %q, want at-snake", tok)
+	}
+}
+
 func TestDiscoverOAuthToken_EmptyToken(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", dir)
@@ -570,5 +614,57 @@ func TestWindowTarget(t *testing.T) {
 	}
 	if got := windowTarget("unknown", targets); got != 0 {
 		t.Errorf("unknown target = %v, want 0", got)
+	}
+}
+
+func TestParseUsageResponse_MalformedJSON(t *testing.T) {
+	_, err := parseUsageResponse([]byte(`not json`))
+	if err == nil {
+		t.Error("expected error for malformed JSON")
+	}
+	if !strings.Contains(err.Error(), "cannot parse") {
+		t.Errorf("error should mention 'cannot parse'; got %q", err)
+	}
+}
+
+func TestParseUsageResponse_OnlySevenDay(t *testing.T) {
+	body := `{
+		"seven_day": {
+			"utilization": 62.0,
+			"resets_at": "2026-09-04T16:00:00Z"
+		}
+	}`
+	result, err := parseUsageResponse([]byte(body))
+	if err != nil {
+		t.Fatalf("parseUsageResponse: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 window; got %d", len(result))
+	}
+	if result[0].Label != "7d" {
+		t.Errorf("label = %q, want 7d", result[0].Label)
+	}
+	if math.Abs(result[0].Used-0.62) > 0.001 {
+		t.Errorf("used = %v, want 0.62", result[0].Used)
+	}
+}
+
+func TestDiscoverAPIBase_FromSettings(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	t.Setenv("PATH", t.TempDir()) // prevent claude binary fallback
+
+	settings := `{"apiBaseUrl": "https://custom.example.com/v1/"}`
+	if err := os.WriteFile(dir+"/settings.json", []byte(settings), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	base, reason := discoverAPIBase()
+	if reason != "" {
+		t.Fatalf("expected success; got reason=%q", reason)
+	}
+	// Trailing slash should be stripped.
+	if base != "https://custom.example.com/v1" {
+		t.Errorf("base = %q, want https://custom.example.com/v1", base)
 	}
 }
