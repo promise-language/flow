@@ -33,6 +33,8 @@ type Backend struct {
 	// worktrees is one checkout per item; see Worktree.
 	worktrees       map[string]*fakeWorktree
 	nothingToCommit bool
+	branchHeads     map[string]string
+	initialBranch   string
 }
 
 // defaultSupportedArtifacts is the schema an unconfigured fake reports — the
@@ -702,6 +704,10 @@ func (b *Backend) Worktree(ctx context.Context, claim flow.Claim) (flow.Worktree
 	wt.verdict = b.verdict
 	wt.supportsRequest = b.supportsRequest
 	wt.nothingToCommit = b.nothingToCommit
+	wt.branchHeads = b.branchHeads
+	if b.initialBranch != "" && wt.branch == "" {
+		wt.branch = b.initialBranch
+	}
 	return wt, nil
 }
 
@@ -714,6 +720,29 @@ func (b *Backend) SetNothingToCommit(v bool) {
 	for _, wt := range b.worktrees {
 		wt.nothingToCommit = v
 	}
+}
+
+// SetBranchHeads populates a per-branch SHA map on every worktree (existing
+// and future). When set, RevParse("HEAD") looks up the current branch in
+// this map before falling back to the commit-counter formula. This models
+// the real-world fact that switching branches changes the SHA HEAD resolves to.
+func (b *Backend) SetBranchHeads(m map[string]string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.branchHeads = m
+	for _, wt := range b.worktrees {
+		wt.branchHeads = m
+	}
+}
+
+// SetInitialBranch sets the branch that new worktrees start on. Existing
+// worktrees are unaffected — call this before any step runs. An empty string
+// means "main" (the default). This models a checkout that is already on a
+// claim branch when the step handler acquires the worktree.
+func (b *Backend) SetInitialBranch(name string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.initialBranch = name
 }
 
 // SetDirty makes Worktree.IsDirty report true for all existing worktrees and
@@ -750,6 +779,10 @@ type fakeWorktree struct {
 	supportsRequest bool
 	branch          string
 	dirty           bool
+	// branchHeads maps branch names to SHAs so RevParse("HEAD") returns a
+	// branch-specific value when set. Models the real-world fact that
+	// switching branches changes the SHA HEAD resolves to.
+	branchHeads map[string]string
 }
 
 func (w *fakeWorktree) Branch(ctx context.Context, name, base string) (bool, error) {
@@ -796,9 +829,22 @@ func (w *fakeWorktree) Push(ctx context.Context) error { return nil }
 // RevParse models a branch that advances only when a commit lands, so a caller
 // can tell recorded work from a no-op commit — the distinction the real
 // interface exists for. Any rev other than HEAD resolves to the base.
+//
+// When branchHeads is set, HEAD resolves to the entry for the current branch
+// (using "main" when branch is ""), modelling the real-world fact that
+// switching branches changes the SHA HEAD resolves to.
 func (w *fakeWorktree) RevParse(ctx context.Context, rev string) (string, error) {
 	if rev != "HEAD" {
 		return "sha-0", nil
+	}
+	if w.branchHeads != nil {
+		name := w.branch
+		if name == "" {
+			name = "main"
+		}
+		if sha, ok := w.branchHeads[name]; ok {
+			return sha, nil
+		}
 	}
 	return fmt.Sprintf("sha-%d", w.commits), nil
 }

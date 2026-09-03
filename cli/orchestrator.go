@@ -553,13 +553,17 @@ func bumpInvocations(ctx context.Context, app *App, claim flow.Claim, state *flo
 // Uses the parent ctx (not stepCtx) for the post-handler reads, since the
 // step's deadline may have been consumed.
 func checkWriteContract(ctx context.Context, wt flow.Worktree, snap *writeSnapshot, wc flow.WriteContract) string {
-	if !wc.MayBranch {
-		branch, err := wt.CurrentBranch(ctx)
-		if err == nil && branch != snap.branch {
-			return fmt.Sprintf("branch moved: was %q, now %q", snap.branch, branch)
-		}
+	branch, berr := wt.CurrentBranch(ctx)
+	branchChanged := berr == nil && branch != snap.branch
+
+	if !wc.MayBranch && branchChanged {
+		return fmt.Sprintf("branch moved: was %q, now %q", snap.branch, branch)
 	}
-	if !wc.MayCommit {
+	// A permitted branch switch necessarily moves HEAD to the target
+	// branch's tip.  That is the branch permission's consequence, not an
+	// independent commit, so the commit check is skipped when the branch
+	// legitimately changed.
+	if !wc.MayCommit && !(wc.MayBranch && branchChanged) {
 		sha, err := wt.RevParse(ctx, "HEAD")
 		if err == nil && sha != snap.commitSHA {
 			return fmt.Sprintf("commit moved: was %.12s, now %.12s", snap.commitSHA, sha)
