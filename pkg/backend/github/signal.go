@@ -49,7 +49,7 @@ func (b *Backend) refreshPRSignals(ctx context.Context, issueNum int, state *flo
 		// No PR yet — signals stay unset.
 		return nil
 	}
-	merged := pr.GetMerged()
+	merged := pr.GetMerged() || pr.MergedAt != nil
 	open := pr.GetState() == "open" || state.SignalSet("pr-open")
 	closed := pr.GetState() == "closed"
 	state.Signals["pr-open"] = flow.SignalState{Set: open, ObservedAt: now, By: "poll"}

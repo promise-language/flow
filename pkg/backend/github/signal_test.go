@@ -237,6 +237,114 @@ func TestRefreshPRSignals_Lifecycle_OpenThenMerged(t *testing.T) {
 	}
 }
 
+func TestRefreshPRSignals_MergedVia_MergedAt_Only(t *testing.T) {
+	// The list endpoint returns merged_at but not the merged boolean.
+	// refreshPRSignals must detect the merge via MergedAt.
+	m := &signalMock{
+		owner: "o", repo: "r",
+		pr: map[string]any{
+			"number":    1,
+			"state":     "closed",
+			"merged_at": "2024-01-15T10:00:00Z",
+			// No "merged" key — this is what the list endpoint returns.
+		},
+	}
+	srv := m.server()
+	defer srv.Close()
+	b := newSignalBackend(t, m, srv)
+
+	state := newState()
+	state.Signals["pr-open"] = flow.SignalState{Set: true, By: "poll"}
+
+	if err := b.refreshPRSignals(t.Context(), 42, state); err != nil {
+		t.Fatalf("refreshPRSignals: %v", err)
+	}
+	if !state.SignalSet("pr-merged") {
+		t.Fatal("pr-merged should be set when merged_at is present (list endpoint shape)")
+	}
+	if !state.SignalSet("pr-closed") {
+		t.Fatal("pr-closed should be set")
+	}
+}
+
+func TestRefreshPRSignals_Lifecycle_OpenThenMergedViaMergedAt(t *testing.T) {
+	// Poll 1 sees the PR open; between polls the PR merges; poll 2 sees
+	// state:"closed" with merged_at set but no merged boolean (list endpoint).
+	m := &signalMock{
+		owner: "o", repo: "r",
+		pr: map[string]any{
+			"number": 1,
+			"state":  "open",
+		},
+	}
+	srv := m.server()
+	defer srv.Close()
+	b := newSignalBackend(t, m, srv)
+
+	state := newState()
+
+	// Poll 1: PR is open.
+	if err := b.refreshPRSignals(t.Context(), 42, state); err != nil {
+		t.Fatalf("poll 1: %v", err)
+	}
+	if !state.SignalSet("pr-open") {
+		t.Fatal("poll 1: pr-open should be set")
+	}
+	if state.SignalSet("pr-merged") {
+		t.Fatal("poll 1: pr-merged should not be set")
+	}
+
+	// PR merges between polls — list endpoint returns merged_at, not merged.
+	m.mu.Lock()
+	m.pr["state"] = "closed"
+	m.pr["merged_at"] = "2024-01-15T10:00:00Z"
+	delete(m.pr, "merged")
+	m.mu.Unlock()
+
+	// Poll 2: pr-merged must be set via merged_at; pr-open stays latched.
+	if err := b.refreshPRSignals(t.Context(), 42, state); err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	if !state.SignalSet("pr-open") {
+		t.Fatal("poll 2: pr-open must remain set after merge (latch)")
+	}
+	if !state.SignalSet("pr-merged") {
+		t.Fatal("poll 2: pr-merged should be set via merged_at")
+	}
+	if !state.SignalSet("pr-closed") {
+		t.Fatal("poll 2: pr-closed should be set")
+	}
+}
+
+func TestRefreshPRSignals_ClosedNoMerge_ListEndpointShape(t *testing.T) {
+	// The list endpoint for a non-merged closed PR omits both "merged" and
+	// "merged_at". The MergedAt != nil fallback must not false-positive.
+	m := &signalMock{
+		owner: "o", repo: "r",
+		pr: map[string]any{
+			"number": 1,
+			"state":  "closed",
+			// No "merged" key, no "merged_at" key — list endpoint shape.
+		},
+	}
+	srv := m.server()
+	defer srv.Close()
+	b := newSignalBackend(t, m, srv)
+
+	state := newState()
+	state.Signals["pr-open"] = flow.SignalState{Set: true, By: "poll"}
+
+	if err := b.refreshPRSignals(t.Context(), 42, state); err != nil {
+		t.Fatalf("refreshPRSignals: %v", err)
+	}
+	if state.SignalSet("pr-merged") {
+		t.Fatal("pr-merged must not be set when neither merged nor merged_at is present")
+	}
+	if !state.SignalSet("pr-closed") {
+		t.Fatal("pr-closed should be set")
+	}
+}
+
 func TestRefreshPRSignals_Lifecycle_OpenThenClosedNoMerge(t *testing.T) {
 	// Same lifecycle but for a PR closed without merging.
 	m := &signalMock{
