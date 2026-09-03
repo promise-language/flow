@@ -195,6 +195,9 @@ func TestStepVerifyMerge_GateRefuses(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when gate refuses")
 	}
+	if errors.Is(err, flow.ErrTransient) {
+		t.Errorf("err = %v, must NOT wrap flow.ErrTransient — a refusal is a real verdict about the change, not infrastructure", err)
+	}
 	if ctx.didResolve {
 		t.Error("step resolved despite gate refusal")
 	}
@@ -333,6 +336,18 @@ func TestStepVerifyMerge_RebuildToolsFails(t *testing.T) {
 	}
 	if ctx.didResolve {
 		t.Error("step resolved despite rebuild failure")
+	}
+	// The gate must not have been called — a stale-tools rebuild that failed
+	// means there is nothing usable to measure with.
+	for _, c := range wt.fakeWorktree.calls {
+		if c == "gate:integration" {
+			t.Error("gate ran despite rebuild failure — should have short-circuited")
+		}
+	}
+	// RevertMergePrep must still be called (the defer was set up before
+	// RebuildTools ran).
+	if wt.revertPrepCalls != 1 {
+		t.Errorf("RevertMergePrep called %d times, want 1 — the defer must fire even when rebuild fails", wt.revertPrepCalls)
 	}
 }
 

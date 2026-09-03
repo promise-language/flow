@@ -1244,6 +1244,9 @@ func TestStepOpenPR_DoesNotProposeWhatTheJudgeRefuses(t *testing.T) {
 	if !strings.Contains(err.Error(), wt.judgeDetail) {
 		t.Errorf("err = %v, want the judge's reason carried", err)
 	}
+	if errors.Is(err, flow.ErrTransient) {
+		t.Errorf("err = %v, must NOT wrap flow.ErrTransient — a refusal is a real verdict about the change, not infrastructure", err)
+	}
 	if wt.opened {
 		t.Error("opened a pull request the gate refused")
 	}
