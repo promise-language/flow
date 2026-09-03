@@ -287,6 +287,15 @@ func (b *Backend) loadState(ctx context.Context, issueNum int, cachedCommentID i
 				state.Signals[flow.SignalId(sd.Id)] = signalStateFromDoc(sd)
 			}
 			state.Park = parkRequestFromDoc(doc.Park)
+			// Questions are returned exactly while the item is parked on one.
+			// Deriving the list from the park rather than clearing it
+			// separately is what makes "a question park always carries its
+			// question, and nothing else ever does" true by construction:
+			// there is no second clearing site that can fall out of step with
+			// the park, and every path that ends the wait already clears it.
+			if state.Park != nil && state.Park.Kind == flow.ParkQuestion {
+				state.Questions = questionsFromDocs(doc.Questions)
+			}
 			state.Item.Finalized = doc.Finalized
 		}
 	}

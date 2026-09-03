@@ -744,7 +744,9 @@ func parkDetailSuffix(park *flow.ParkRequest, state *flow.ItemState) string {
 	if len(pending) == 0 {
 		return ""
 	}
-	return fmt.Sprintf(" (%s: %q)", pending[0].ID, pending[0].Text)
+	// The one-line form: Text may be a whole fenced evidence block, and this
+	// suffix is appended to a single-line message.
+	return fmt.Sprintf(" (%s: %q)", pending[0].ID, questionSummary(pending[0].AgentQuestion))
 }
 
 // remedyFor names what actually clears each park kind, so the refusal ends
