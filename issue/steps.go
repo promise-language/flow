@@ -638,7 +638,60 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 	}
 	ctx.Notify("", "pushing and opening pull request")
 	_, err = flow.Open(ctx.Context(), wt, base, title, body)
-	return err
+	if err == nil {
+		return nil
+	}
+
+	// Only recover ActPush refusals. An ActPullRequest refusal (PR body/title)
+	// is a different surface — return it as-is.
+	var refused flow.ErrDisclosureRefused
+	if !errors.As(err, &refused) || refused.Act != flow.ActPush {
+		return err
+	}
+
+	// Stash before anything else can fail.
+	ctx.RecordWorkInProgress(fmt.Sprintf(
+		"The disclosure guard refused the push.\n\nThe refusal:\n\n%s",
+		refused.Error()))
+
+	ctx.Notify("", "disclosure refused the push — asking the agent to rewrite history")
+
+	pc := PromptContext{PushRefusal: refused.Error()}
+	prompt, rerr := renderPrompt(b.cfg, PromptPushRepair, pc)
+	if rerr != nil {
+		return rerr
+	}
+	_, rerr = b.runAgent(ctx, flow.AgentRequest{
+		Prompt:         prompt,
+		PermissionMode: "acceptEdits",
+	})
+	if rerr != nil {
+		return rerr
+	}
+
+	// One retry.
+	ctx.Notify("", "retrying push after history rewrite")
+	_, err = flow.Open(ctx.Context(), wt, base, title, body)
+	if err == nil {
+		return nil
+	}
+
+	// Second failure: park, don't fail.
+	// Infrastructure errors on retry are also parked — the work is done,
+	// and a transient push failure after a successful rebase should not
+	// discard the rebase.
+	var refused2 flow.ErrDisclosureRefused
+	if errors.As(err, &refused2) {
+		ctx.RecordWorkInProgress(fmt.Sprintf(
+			"The disclosure guard refused the push a second time.\n\nThe refusal:\n\n%s",
+			refused2.Error()))
+	}
+
+	return ctx.Park(flow.ParkRequest{
+		Kind: flow.ParkBlocked,
+		Reason: "the disclosure guard refused this step's push twice; " +
+			"what it refused and why are kept with the step for the next run",
+	})
 }
 
 // runIntegrationGate measures subject and asks the project whether the

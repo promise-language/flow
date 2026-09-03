@@ -103,6 +103,10 @@ const (
 	// PromptStageRepair is the repair prompt issued when staging (git add)
 	// refuses. PromptContext.StageRefusal carries the error message.
 	PromptStageRepair PromptID = "stage:repair"
+
+	// PromptPushRepair is the repair prompt issued when the disclosure guard
+	// refuses a push. PromptContext.PushRefusal carries the guard's answer.
+	PromptPushRepair PromptID = "push:repair"
 )
 
 // Role is the capability the authenticated principal holds on the repository,

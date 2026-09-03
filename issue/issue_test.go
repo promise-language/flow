@@ -614,6 +614,7 @@ func TestEveryPromptSlotBelongsToARegisteredStep(t *testing.T) {
 		PromptRevise:       true,
 		PromptCommitRepair: true,
 		PromptStageRepair:  true,
+		PromptPushRepair:   true,
 	}
 	for id := range defaultPrompts {
 		if inSessionReprompts[id] {
@@ -1012,7 +1013,7 @@ func TestEveryPromptSlotHasADefault(t *testing.T) {
 	for _, id := range []PromptID{
 		PromptPlan, PromptImplement, PromptImplementFix,
 		PromptReview, PromptCoverage, PromptCommitRepair,
-		PromptStageRepair,
+		PromptStageRepair, PromptPushRepair,
 	} {
 		if _, ok := defaultPrompts[id]; !ok {
 			t.Errorf("no library default for %q", id)
@@ -1051,6 +1052,7 @@ func TestAnswersReachEveryResumableDefaultPrompt(t *testing.T) {
 		PromptRevise:       true,
 		PromptCommitRepair: true,
 		PromptStageRepair:  true,
+		PromptPushRepair:   true,
 	}
 	for id := range defaultPrompts {
 		if inSessionReprompts[id] {
@@ -1197,6 +1199,7 @@ func TestWorkInProgressReachesEveryResumableDefaultPrompt(t *testing.T) {
 		PromptRevise:       true,
 		PromptCommitRepair: true,
 		PromptStageRepair:  true,
+		PromptPushRepair:   true,
 	}
 	for id := range defaultPrompts {
 		if inSessionReprompts[id] {
@@ -1504,7 +1507,7 @@ func TestRenderPrompt_RepromptsGetNoFragments(t *testing.T) {
 	if err := pc.Context.Render(); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	for _, id := range []PromptID{PromptImplementFix, PromptRevise, PromptCommitRepair, PromptStageRepair} {
+	for _, id := range []PromptID{PromptImplementFix, PromptRevise, PromptCommitRepair, PromptStageRepair, PromptPushRepair} {
 		t.Run(string(id), func(t *testing.T) {
 			cfg := Config{Prompts: map[PromptID]string{id: "reprompt body"}}
 			got, err := renderPrompt(cfg, id, pc)
