@@ -488,6 +488,121 @@ func TestRunGate_DetectsWorktreeModification(t *testing.T) {
 	}
 }
 
+// A gate that deletes a tracked file has modified the worktree, same as one
+// that edits or adds.
+func TestRunGate_DetectsTrackedFileDeletion(t *testing.T) {
+	requireRealProcesses(t)
+
+	w, _ := gateWorktreeGit(t, `rm tracked; echo '{"g":1}'`, 30*time.Second)
+	run, err := w.RunGate(context.Background(), flow.GateIntegration)
+	if err != nil {
+		t.Fatalf("RunGate: %v", err)
+	}
+	if run.Outcome != flow.OutcomeBrokeContract {
+		t.Errorf("outcome = %q, want %q", run.Outcome, flow.OutcomeBrokeContract)
+	}
+	if !strings.Contains(run.Detail, "tracked") {
+		t.Errorf("Detail = %q, want it to name the file that was changed", run.Detail)
+	}
+}
+
+// When the worktree modification check finds a difference, the Detail must
+// carry the porcelain output so a human reading the run knows WHAT changed.
+func TestRunGate_ModificationDetailNamesTheChangedFiles(t *testing.T) {
+	requireRealProcesses(t)
+
+	w, _ := gateWorktreeGit(t, `echo x >> tracked; touch newfile; echo '{"g":1}'`, 30*time.Second)
+	run, err := w.RunGate(context.Background(), flow.GateIntegration)
+	if err != nil {
+		t.Fatalf("RunGate: %v", err)
+	}
+	if run.Outcome != flow.OutcomeBrokeContract {
+		t.Fatalf("outcome = %q, want %q", run.Outcome, flow.OutcomeBrokeContract)
+	}
+	if !strings.Contains(run.Detail, "tracked") {
+		t.Errorf("Detail = %q, want it to mention 'tracked'", run.Detail)
+	}
+	if !strings.Contains(run.Detail, "newfile") {
+		t.Errorf("Detail = %q, want it to mention 'newfile'", run.Detail)
+	}
+}
+
+// If StatusPorcelain fails BEFORE the gate runs, RunGate must return an error
+// (not an outcome) and must not spawn the gate at all. An outcome implies the
+// gate ran; an error means nothing happened.
+func TestRunGate_PreSnapshotFailureIsAnErrorAndDoesNotSpawn(t *testing.T) {
+	requireRealProcesses(t)
+
+	dir := filepath.Join(t.TempDir(), "work tree")
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeScript(t, dir, "gate", "touch ran\necho '{}'", 0o755)
+
+	b := &Backend{cfg: Config{WorktreeDir: dir, GateTimeout: 30 * time.Second}}
+	b.git = &gitOps{dir: dir, runner: func(_ context.Context, _, _ string, args ...string) ([]byte, []byte, error) {
+		for _, a := range args {
+			if a == "status" {
+				return nil, nil, fmt.Errorf("injected: git status failed")
+			}
+		}
+		return nil, nil, nil
+	}}
+	w := &worktree{b: b}
+
+	run, err := w.RunGate(context.Background(), flow.GateIntegration)
+	if err == nil || !strings.Contains(err.Error(), "cannot snapshot worktree before gate") {
+		t.Fatalf("err = %v, want an error about the pre-snapshot failure", err)
+	}
+	if run.Outcome != "" {
+		t.Errorf("outcome = %q, want none — nothing was run", run.Outcome)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "ran")); statErr == nil {
+		t.Error("the gate was spawned despite the pre-snapshot failure")
+	}
+}
+
+// If StatusPorcelain fails AFTER a measured gate, the outcome must be
+// broke_contract (not an error and not measured). The gate DID run; the runner
+// cannot verify that it left the worktree intact, so it must refuse to call the
+// result a measurement.
+func TestRunGate_PostSnapshotFailureIsBrokeContract(t *testing.T) {
+	requireRealProcesses(t)
+
+	dir := filepath.Join(t.TempDir(), "work tree")
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeScript(t, dir, "gate", `echo '{"gate":"integration"}'`, 0o755)
+
+	calls := 0
+	b := &Backend{cfg: Config{WorktreeDir: dir, GateTimeout: 30 * time.Second}}
+	b.git = &gitOps{dir: dir, runner: func(_ context.Context, _, _ string, args ...string) ([]byte, []byte, error) {
+		for _, a := range args {
+			if a == "status" {
+				calls++
+				if calls == 1 {
+					return nil, nil, nil // pre-snapshot succeeds
+				}
+				return nil, nil, fmt.Errorf("injected: post-snapshot failed")
+			}
+		}
+		return nil, nil, nil
+	}}
+	w := &worktree{b: b}
+
+	run, err := w.RunGate(context.Background(), flow.GateIntegration)
+	if err != nil {
+		t.Fatalf("RunGate returned error: %v — a post-snapshot failure is an outcome, not an error", err)
+	}
+	if run.Outcome != flow.OutcomeBrokeContract {
+		t.Errorf("outcome = %q, want %q", run.Outcome, flow.OutcomeBrokeContract)
+	}
+	if !strings.Contains(run.Detail, "cannot verify worktree integrity") {
+		t.Errorf("Detail = %q, want it to explain the post-snapshot failure", run.Detail)
+	}
+}
+
 // gateWorktreeGit is like gateWorktree but initializes a real git repository,
 // so StatusPorcelain works and the worktree modification check runs against
 // actual git state.
