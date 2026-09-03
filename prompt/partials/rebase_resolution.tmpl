@@ -5,8 +5,14 @@
 - **Exception — duplicate fix:** if the conflict exists because the mainline already
   landed the same fix our branch carries (two independent spellings of one repair),
   integrating both sides produces permanent divergence that re-conflicts on every
-  subsequent rebase. Take the mainline's version and drop ours. Record what was dropped
-  and the upstream commit that supersedes it in the rebase commit message.
+  subsequent rebase. Take the mainline's version and drop ours — that is
+  `git checkout --ours <file>`, NOT `--theirs`. Git swaps the two during a rebase:
+  `--ours` is the branch being rebased ONTO (the mainline), `--theirs` is our own work
+  being replayed. Reaching for `--theirs` keeps the side that was meant to be dropped,
+  resolves the file silently, and brings the identical conflict back on every later
+  rebase. To confirm the right side was taken: after `git add <file>`,
+  `git diff --cached HEAD -- <file>` is empty. Record what was dropped and the upstream
+  commit that supersedes it in the rebase commit message.
   **Evidence test (mid-rebase):** run `git log --oneline -5 HEAD -- <file>` — `HEAD`
   during a rebase is the mainline side. If an upstream commit in that list applies
   what our change applies, the conflict is a duplicate fix.
