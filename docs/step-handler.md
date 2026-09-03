@@ -102,7 +102,7 @@ The record is **scaffolding, not a result**: it does not resolve the step, decid
 
 ## Worktree
 
-`ctx.Worktree()` lazily acquires and caches the backend's `Worktree` for the active claim. The worktree is the local-git surface handlers use for branching, committing, pushing, running gates, and managing pull requests. See [backend.md](backend.md) for the worktree contract.
+`ctx.Worktree()` lazily acquires and caches the orchestrator's `Worktree` for the active claim. The worktree is the local-git surface handlers use for branching, committing, pushing, running gates, and managing pull requests. See [orchestrator.md](orchestrator.md) for the worktree contract.
 
 ## Other context
 
@@ -118,5 +118,5 @@ The record is **scaffolding, not a result**: it does not resolve the step, decid
 - [artifacts-and-signals.md](artifacts-and-signals.md) — the result kinds and their types.
 - [flow-registration.md](flow-registration.md) — how steps are declared.
 - [agent.md](agent.md) — the agent interface and permission modes.
-- [backend.md](backend.md) — the worktree and backend contract.
+- [orchestrator.md](orchestrator.md) — the worktree and orchestrator contract.
 - [resolution.md](resolution.md) — the lifecycle that dispatches handlers.

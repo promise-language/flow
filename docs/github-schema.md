@@ -210,5 +210,5 @@ The GitHub backend's work-in-progress store is the worktree-local `.flow/work/` 
 ## Cross-references
 
 - [artifacts-and-signals.md](artifacts-and-signals.md) — the result kinds stored here.
-- [backend.md](backend.md) — the SDK ↔ backend boundary this schema implements.
+- [orchestrator.md](orchestrator.md) — the SDK ↔ orchestrator boundary this schema implements.
 - [resolution.md](resolution.md) — the lifecycle whose state this schema persists.
