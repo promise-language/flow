@@ -282,7 +282,7 @@ func TestGrantPark_PromptsAxisRaisesTheCap(t *testing.T) {
 func TestGrantPark_RefusesNonBudgetPark(t *testing.T) {
 	env := newParkGrantEnv(t)
 	if _, err := env.be.AskQuestions(context.Background(), env.claim, []flow.AgentQuestion{
-		flow.AskText("base", "which base branch?"),
+		flow.AskText("which base branch?", "main, or the release branch?"),
 	}); err != nil {
 		t.Fatalf("AskQuestions: %v", err)
 	}
@@ -292,6 +292,7 @@ func TestGrantPark_RefusesNonBudgetPark(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2", code)
 	}
+	// The header is the scannable form, so it is what the refusal names.
 	for _, want := range []string{"not a budget cap", "which base branch?", "Answer the question"} {
 		if !strings.Contains(env.err.String(), want) {
 			t.Errorf("stderr = %q, want %q", env.err.String(), want)
@@ -299,6 +300,29 @@ func TestGrantPark_RefusesNonBudgetPark(t *testing.T) {
 	}
 	if got := env.rec(t, "plan").GrantedInvocations; got != 3 {
 		t.Errorf("GrantedInvocations = %d, want 3 (unchanged)", got)
+	}
+}
+
+// A question's Text is where a whole fenced evidence block belongs, and the
+// refusal is one line. Without a header the message takes the first line of
+// the text, not the block.
+func TestGrantPark_QuestionRefusalStaysOneLine(t *testing.T) {
+	env := newParkGrantEnv(t)
+	if _, err := env.be.AskQuestions(context.Background(), env.claim, []flow.AgentQuestion{
+		{Text: "should the doc be amended?\n\n```\nrelease.md §11 step 1 says `--yes` skips\n```"},
+	}); err != nil {
+		t.Fatalf("AskQuestions: %v", err)
+	}
+	env.park(t, flow.ParkRequest{Kind: flow.ParkQuestion, Step: "plan", Reason: "question pending"})
+
+	if code := env.grant(); code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	if !strings.Contains(env.err.String(), "should the doc be amended?") {
+		t.Errorf("stderr = %q, want the question's first line", env.err.String())
+	}
+	if strings.Contains(env.err.String(), "release.md §11") {
+		t.Errorf("stderr = %q, want the evidence block left out of the one-line message", env.err.String())
 	}
 }
 

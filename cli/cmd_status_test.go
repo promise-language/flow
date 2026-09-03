@@ -140,6 +140,113 @@ func TestTitleLine_ClipsRunesNotBytes(t *testing.T) {
 	}
 }
 
+// The ask convention puts the QUESTION on the sentinel line (the Header) and
+// the evidence for it in a fenced block (the Text). A checklist entry rendered
+// from Text therefore shows the evidence and not the question, and a
+// multi-line block breaks the listing apart. The human line takes the header;
+// JSON keeps both verbatim, so nothing that needs the block loses it.
+func TestStatusHuman_QuestionLineShowsTheQuestionNotTheEvidence(t *testing.T) {
+	env := newParkGrantEnv(t)
+	if _, err := env.be.AskQuestions(context.Background(), env.claim, []flow.AgentQuestion{
+		flow.AskText("should docs/release.md be amended?",
+			"§11 step 1 says \"`--yes` skips\".\n\nRecommendation: amend."),
+	}); err != nil {
+		t.Fatalf("AskQuestions: %v", err)
+	}
+
+	if code := env.app.cmdStatus(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	out := env.out.String()
+	if !strings.Contains(out, "should docs/release.md be amended?") {
+		t.Errorf("status did not print the question:\n%s", out)
+	}
+	if strings.Contains(out, "Recommendation: amend.") {
+		t.Errorf("status spliced the evidence block into the checklist:\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "should docs/release.md be amended?") && !strings.HasPrefix(line, "  [ ] ") {
+			t.Errorf("question line is not a checklist entry: %q", line)
+		}
+	}
+
+	// The machine contract is unclipped: both halves reach a tool whole.
+	env.out.Reset()
+	if code := env.app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus --json = %d; stderr=%q", code, env.err.String())
+	}
+	var payload statusPayload
+	if err := json.Unmarshal(env.out.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(payload.Questions) != 1 {
+		t.Fatalf("questions = %d, want 1", len(payload.Questions))
+	}
+	if payload.Questions[0].Header != "should docs/release.md be amended?" {
+		t.Errorf("header = %q, want the question", payload.Questions[0].Header)
+	}
+	if !strings.Contains(payload.Questions[0].Text, "Recommendation: amend.") {
+		t.Errorf("text = %q, want the whole evidence block", payload.Questions[0].Text)
+	}
+}
+
+// A question with no header falls back to the text — bounded the same way, so
+// a handler that called ctx.AskQuestions directly with a multi-line prompt
+// still cannot break the listing.
+func TestStatusHuman_QuestionLineBoundsAHeaderlessQuestion(t *testing.T) {
+	env := newParkGrantEnv(t)
+	if _, err := env.be.AskQuestions(context.Background(), env.claim, []flow.AgentQuestion{
+		{Text: "which base branch?\nmain, or the release branch?"},
+	}); err != nil {
+		t.Fatalf("AskQuestions: %v", err)
+	}
+
+	if code := env.app.cmdStatus(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	out := env.out.String()
+	if !strings.Contains(out, "which base branch? main, or the release branch?") {
+		t.Errorf("headerless question did not collapse onto one line:\n%s", out)
+	}
+}
+
+// A question entry's key set is a machine contract, the same way the top-level
+// payload's is (TestStatusJSON_Schema). `header` carries no omitempty on
+// purpose: a header-less question reports "" rather than dropping the key, so a
+// tool reading `.questions[].header` never has to tell absent from empty.
+func TestStatusJSON_QuestionKeySet(t *testing.T) {
+	env := newParkGrantEnv(t)
+	if _, err := env.be.AskQuestions(context.Background(), env.claim, []flow.AgentQuestion{
+		{Text: "which base branch?"},
+	}); err != nil {
+		t.Fatalf("AskQuestions: %v", err)
+	}
+
+	if code := env.app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	m := decode(t, env.out)
+	qs, ok := m["questions"].([]any)
+	if !ok || len(qs) != 1 {
+		t.Fatalf("questions = %v, want one entry", m["questions"])
+	}
+	q, ok := qs[0].(map[string]any)
+	if !ok {
+		t.Fatalf("questions[0] = %v, want an object", qs[0])
+	}
+	for _, key := range []string{"id", "header", "text", "answered"} {
+		if _, ok := q[key]; !ok {
+			t.Errorf("question payload missing %q: %v", key, q)
+		}
+	}
+	if q["header"] != "" {
+		t.Errorf("header = %v, want \"\" — the key stays for a header-less question", q["header"])
+	}
+	if q["text"] != "which base branch?" {
+		t.Errorf("text = %v, want the question", q["text"])
+	}
+}
+
 // The human header must name the task, not just its id: "T1566" alone does not
 // tell the operator which task the arena is holding.
 func TestStatusHuman_PrintsTitle(t *testing.T) {

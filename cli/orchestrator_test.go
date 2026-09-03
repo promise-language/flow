@@ -2009,6 +2009,62 @@ func TestQuestionReason_FallsBackToTextWithoutHeader(t *testing.T) {
 	}
 }
 
+// emptyAskBackend records nothing: AskQuestions reports success and returns no
+// questions. That is the shape that produced the reported defect — a question
+// park whose recovery path (`answer`) has no registered question to name.
+type emptyAskBackend struct {
+	*fake.Backend
+	parks int
+}
+
+func (b *emptyAskBackend) AskQuestions(context.Context, flow.Claim, []flow.AgentQuestion) ([]flow.Question, error) {
+	return nil, nil
+}
+
+func (b *emptyAskBackend) Park(ctx context.Context, claim flow.Claim, req flow.ParkRequest) error {
+	b.parks++
+	return b.Backend.Park(ctx, claim, req)
+}
+
+// A backend that registers none of the questions must fail the step, not park
+// on them: an item parked on a question nothing recorded cannot be answered,
+// and nothing else clears that park.
+func TestRunOne_AskQuestionsRecordingNothingFailsInsteadOfParking(t *testing.T) {
+	var handlerErr error
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("asks", "plan", func(ctx flow.StepCtx) error {
+			handlerErr = ctx.AskQuestions(flow.AskText("base", "which base branch?"))
+			return handlerErr
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	backend := &emptyAskBackend{Backend: be}
+	app.Backend = backend
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "failed" {
+		t.Errorf("status = %q, want failed", res.Status)
+	}
+	if handlerErr == nil {
+		t.Fatal("ctx.AskQuestions returned nil; want an error")
+	}
+	var question flow.ErrQuestion
+	if errors.As(handlerErr, &question) {
+		t.Errorf("ctx.AskQuestions returned ErrQuestion %+v; want a plain error, so nothing parks", question)
+	}
+	if !strings.Contains(handlerErr.Error(), "recorded none") {
+		t.Errorf("err = %v, want it to say the backend recorded none of the questions", handlerErr)
+	}
+	if backend.parks != 0 {
+		t.Errorf("Park called %d times, want 0", backend.parks)
+	}
+	if state, _ := be.LoadState(context.Background(), claim); state.Parked() {
+		t.Errorf("item parked on %+v, want no park", state.Park)
+	}
+}
+
 // A question park raised through ctx.Park must carry the ask time, exactly as
 // the ctx.AskQuestions route does. Without it a reader scanning for answers has
 // no boundary and takes every comment already on the item — including ones

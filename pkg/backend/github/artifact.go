@@ -134,8 +134,11 @@ func (b *Backend) ResetSeed(ctx context.Context, claim flow.Claim) error {
 	// The park belongs to the cleared checklist — a park naming a step that no
 	// longer has a budget record would survive the reset and misreport the item
 	// as blocked forever. (fake.ResetSeed clears its park for the same reason.)
+	// The questions belong to the park: they are what it was waiting on, so
+	// they are dropped with it rather than carried into the new checklist.
 	clearedLabel := parkLabel(b.labels, parkRequestFromDoc(doc.Park))
 	doc.Park = nil
+	doc.Questions = nil
 	if _, err := b.updateStateComment(ctx, issueNum, stateID, *doc, claim.Owner); err != nil {
 		return fmt.Errorf("reset state comment: %w", err)
 	}
@@ -280,11 +283,15 @@ func (b *Backend) ResolveArtifact(ctx context.Context, claim flow.Claim, id flow
 
 	// A park recorded against this step is obsolete once the step resolves —
 	// drop it (and its label) rather than let LoadState keep reporting a
-	// reason that no longer holds.
+	// reason that no longer holds. The questions go with it: they are what the
+	// park was waiting on, and a record that outlives its park is one a later
+	// question park inherits — presenting an ask nobody is waiting on as the
+	// outstanding one.
 	clearedLabel := ""
 	if doc.Park != nil && doc.Park.Step == string(id) {
 		clearedLabel = parkLabel(b.labels, parkRequestFromDoc(doc.Park))
 		doc.Park = nil
+		doc.Questions = nil
 	}
 
 	_ = owner // we patch as the current user (state comment author); owner stays as-is
@@ -528,6 +535,17 @@ func (b *Backend) Park(ctx context.Context, claim flow.Claim, req flow.ParkReque
 	// that is not an error.
 	if err := b.mutateStateDoc(ctx, claim, "Park", func(doc *stateDoc) error {
 		doc.Park = parkDocFromRequest(req, nowUTC())
+		// A park of any other kind supersedes whatever the item was waiting on,
+		// so the question record goes with the park it belonged to. Left
+		// behind, it is inherited by the next question park — which then
+		// presents an ask nobody is waiting on as the outstanding one.
+		//
+		// A question park keeps it: this is the write that follows
+		// AskQuestions on the ask path, and the record it just wrote is
+		// exactly the one this park is for.
+		if req.Kind != flow.ParkQuestion {
+			doc.Questions = nil
+		}
 		return nil
 	}); err != nil && !errors.Is(err, errNoStateComment) {
 		return err
@@ -569,6 +587,23 @@ func (b *Backend) AskQuestions(ctx context.Context, claim flow.Claim, qs []flow.
 	askedAt := created.GetCreatedAt().Time
 	for i := range out {
 		out[i].AskedAt = askedAt
+	}
+	// Record the questions in the state doc — the machine-readable half, and
+	// the only one LoadState can return. It must follow the post (whose
+	// CreatedAt is the AskedAt these records carry) and precede the label,
+	// which advertises "a human must answer this": that is only true once the
+	// record that lets `answer` name a question exists.
+	//
+	// A failure here is fatal, deliberately unlike Park's errNoStateComment
+	// tolerance. An item can be parked before it is seeded; a question cannot
+	// be asked before it is, because the handler that asks runs after the
+	// mandatory-seed gate. Tolerating it would recreate exactly the state this
+	// record exists to prevent — a question park nothing can clear.
+	if err := b.mutateStateDoc(ctx, claim, "AskQuestions", func(doc *stateDoc) error {
+		doc.Questions = questionDocsFromRecorded(out)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("record questions in state comment: %w", err)
 	}
 	if err := b.out.AddLabels(ctx, issueNum, []string{b.labels.NeedsAnswer()}); err != nil {
 		return nil, fmt.Errorf("add needs-answer label: %w", err)

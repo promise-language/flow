@@ -38,6 +38,20 @@ type stateDoc struct {
 	// reading it costs no extra API call and a new park supersedes the old
 	// one instead of accumulating.
 	Park *stateParkDoc `yaml:"park,omitempty"`
+	// Questions are the questions the item is currently parked on. Written by
+	// AskQuestions and read back by LoadState, for the same reason Park is:
+	// the question comment the ask also posts is for humans, and nothing can
+	// reconstruct an id or a backend timestamp from it. Without this record
+	// LoadState returns no questions at all, so `answer` — the only command
+	// that clears a question park — refuses every item it is pointed at.
+	//
+	// Replaced, not appended to, by a new ask: like Park, the field carries
+	// the item's current state rather than its history, which the question
+	// comments already hold. It is dropped with the park that was waiting on
+	// it — a record that outlives its park is one the next question park
+	// inherits, and an already-answered ask presented as the outstanding one
+	// is worse than none, because `answer` accepts it.
+	Questions []stateQuestionDoc `yaml:"questions,omitempty"`
 	// Finalized marks the item's flow run as complete. Set by Finalize and
 	// read back by LoadState into Item.Finalized so `status` can distinguish
 	// "finalized" from "no flow currently eligible".
@@ -106,6 +120,58 @@ func parkRequestFromDoc(d *stateParkDoc) *flow.ParkRequest {
 		})
 	}
 	return req
+}
+
+// stateQuestionDoc is one recorded question. It carries the whole
+// AgentQuestion payload the Backend.AskQuestions contract requires a backend
+// to persist, plus the id the backend assigned and the timestamp — GitHub's
+// clock — that answer scanning compares replies against.
+//
+// No answer field: the issue thread IS the answer store (see ReadAnswers), so
+// a copy of the answer here would be a second version of that fact to keep in
+// step with the first.
+type stateQuestionDoc struct {
+	ID          string    `yaml:"id"`
+	Header      string    `yaml:"header,omitempty"`
+	Text        string    `yaml:"text,omitempty"`
+	Format      string    `yaml:"format,omitempty"`
+	Options     []string  `yaml:"options,omitempty"`
+	MultiSelect bool      `yaml:"multi_select,omitempty"`
+	AskedAt     time.Time `yaml:"asked_at,omitempty"`
+}
+
+func questionDocsFromRecorded(qs []flow.Question) []stateQuestionDoc {
+	var docs []stateQuestionDoc
+	for _, q := range qs {
+		docs = append(docs, stateQuestionDoc{
+			ID:          q.ID,
+			Header:      q.Header,
+			Text:        q.Text,
+			Format:      string(q.Format),
+			Options:     q.Options,
+			MultiSelect: q.MultiSelect,
+			AskedAt:     q.AskedAt,
+		})
+	}
+	return docs
+}
+
+func questionsFromDocs(docs []stateQuestionDoc) []flow.Question {
+	var qs []flow.Question
+	for _, d := range docs {
+		qs = append(qs, flow.Question{
+			ID: d.ID,
+			AgentQuestion: flow.AgentQuestion{
+				Text:        d.Text,
+				Header:      d.Header,
+				Format:      flow.QuestionFormat(d.Format),
+				Options:     d.Options,
+				MultiSelect: d.MultiSelect,
+			},
+			AskedAt: d.AskedAt,
+		})
+	}
+	return qs
 }
 
 type stateArtifactDoc struct {
