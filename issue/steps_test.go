@@ -1420,6 +1420,83 @@ func TestStepOpenPR_PushRefusalThenInfraError_Parks(t *testing.T) {
 	}
 }
 
+func TestStepOpenPR_PushRefusal_AgentFails_ReturnsAgentError(t *testing.T) {
+	wt := resumedWorktree()
+	pushRefusal := flow.ErrDisclosureRefused{
+		Act:    flow.ActPush,
+		Reason: fmt.Errorf("an absolute home path names the machine's user"),
+	}
+	wt.openErrs = []error{pushRefusal}
+
+	agent := &scriptedAgent{errs: []error{fmt.Errorf("substrate died")}}
+	ctx := ctxWithPlan(wt, agent)
+
+	err := testBuilder(t).stepOpenPR(ctx)
+	if err == nil || !strings.Contains(err.Error(), "substrate died") {
+		t.Fatalf("err = %v, want the agent error propagated", err)
+	}
+	if ctx.park != nil {
+		t.Error("agent failure should not park — the repair was not attempted")
+	}
+	// Open must not be retried when the agent itself failed.
+	if wt.opened {
+		t.Error("PR was opened despite agent failure")
+	}
+}
+
+func TestStepOpenPR_PushRefusalTwice_WIPUpdatedTwice(t *testing.T) {
+	wt := resumedWorktree()
+	first := flow.ErrDisclosureRefused{
+		Act:    flow.ActPush,
+		Reason: fmt.Errorf("first: found /Users/someone/"),
+	}
+	second := flow.ErrDisclosureRefused{
+		Act:    flow.ActPush,
+		Reason: fmt.Errorf("second: found /Users/someone/"),
+	}
+	wt.openErrs = []error{first, second}
+
+	agent := &scriptedAgent{}
+	ctx := ctxWithPlan(wt, agent)
+
+	err := testBuilder(t).stepOpenPR(ctx)
+	if err == nil || !strings.Contains(err.Error(), "parked") {
+		t.Fatalf("err = %v, want a park", err)
+	}
+	if len(ctx.wipSaves) != 2 {
+		t.Fatalf("WIP saved %d times, want 2 (initial stash + second refusal)", len(ctx.wipSaves))
+	}
+	if !strings.Contains(ctx.wipSaves[0], "first: found") {
+		t.Errorf("first WIP save does not carry the first refusal: %q", ctx.wipSaves[0])
+	}
+	if !strings.Contains(ctx.wipSaves[1], "second: found") {
+		t.Errorf("second WIP save does not carry the second refusal: %q", ctx.wipSaves[1])
+	}
+}
+
+func TestStepOpenPR_PushRefusalThenInfraError_WIPNotUpdatedTwice(t *testing.T) {
+	wt := resumedWorktree()
+	pushRefusal := flow.ErrDisclosureRefused{
+		Act:    flow.ActPush,
+		Reason: fmt.Errorf("an absolute home path names the machine's user"),
+	}
+	wt.openErrs = []error{pushRefusal, fmt.Errorf("network timeout")}
+
+	agent := &scriptedAgent{}
+	ctx := ctxWithPlan(wt, agent)
+
+	err := testBuilder(t).stepOpenPR(ctx)
+	if err == nil || !strings.Contains(err.Error(), "parked") {
+		t.Fatalf("err = %v, want a park", err)
+	}
+	// Only one WIP save: the initial stash. An infra error is not a disclosure
+	// refusal, so the second RecordWorkInProgress (which captures the guard's
+	// words) must not fire.
+	if len(ctx.wipSaves) != 1 {
+		t.Fatalf("WIP saved %d times, want 1 (initial stash only — infra error has no guard text to record)", len(ctx.wipSaves))
+	}
+}
+
 func TestPromptPushRepair_RendersRefusalAndRebaseInstructions(t *testing.T) {
 	pc := PromptContext{PushRefusal: "found /Users/someone/.ssh/id_rsa"}
 	got, err := renderPrompt(Config{}, PromptPushRepair, pc)
