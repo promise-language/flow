@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -46,7 +47,12 @@ func gateWorktree(t *testing.T, script string, timeout time.Duration) (*worktree
 	b := &Backend{cfg: Config{WorktreeDir: dir, GateTimeout: timeout}}
 	// A gate does not go through the configured-command seam: that seam reports
 	// (stdout, stderr, error), which cannot express what a runner has to see.
-	b.git = &gitOps{dir: dir, runner: func(_ context.Context, _, name string, _ ...string) ([]byte, []byte, error) {
+	b.git = &gitOps{dir: dir, runner: func(_ context.Context, _, name string, args ...string) ([]byte, []byte, error) {
+		for _, a := range args {
+			if a == "status" {
+				return nil, nil, nil // StatusPorcelain: appears clean
+			}
+		}
 		t.Errorf("a gate was spawned through the command runner (%s)", name)
 		return nil, nil, nil
 	}}
@@ -424,6 +430,100 @@ func TestRunGate_PassesStderrThroughAndKeepsItOutOfTheResult(t *testing.T) {
 	if strings.Contains(string(run.Stdout), "suite 3 of 9") {
 		t.Errorf("stderr reached Stdout: %q", run.Stdout)
 	}
+}
+
+// The worktree modification check: a gate that modifies tracked or untracked
+// state under measurement must be reported as broke_contract, never measured.
+// See docs/gates-and-commands.md § "The non-modification rule is checked, not
+// assumed".
+func TestRunGate_DetectsWorktreeModification(t *testing.T) {
+	requireRealProcesses(t)
+
+	for _, c := range []struct {
+		name    string
+		script  string
+		outcome flow.GateOutcome
+		timeout time.Duration
+	}{{
+		name:    "clean gate stays measured",
+		script:  `echo '{"g":1}'`,
+		outcome: flow.OutcomeMeasured,
+		timeout: 30 * time.Second,
+	}, {
+		name:    "modifies tracked file",
+		script:  `echo x >> tracked; echo '{"g":1}'`,
+		outcome: flow.OutcomeBrokeContract,
+		timeout: 30 * time.Second,
+	}, {
+		name:    "creates untracked file",
+		script:  `touch stray; echo '{"g":1}'`,
+		outcome: flow.OutcomeBrokeContract,
+		timeout: 30 * time.Second,
+	}, {
+		name:    "modifies and restores",
+		script:  `echo x >> tracked; git checkout -- tracked; echo '{"g":1}'`,
+		outcome: flow.OutcomeMeasured,
+		timeout: 30 * time.Second,
+	}, {
+		name:    "timed out gate that also modified is still timed out",
+		script:  `touch stray; exec sleep 60`,
+		outcome: flow.OutcomeTimedOut,
+		timeout: 100 * time.Millisecond,
+	}, {
+		name:    "died gate that also modified is still died",
+		script:  `touch stray; exit 0`,
+		outcome: flow.OutcomeDied,
+		timeout: 30 * time.Second,
+	}} {
+		t.Run(c.name, func(t *testing.T) {
+			w, _ := gateWorktreeGit(t, c.script, c.timeout)
+			run, err := w.RunGate(context.Background(), flow.GateIntegration)
+			if err != nil {
+				t.Fatalf("RunGate: %v", err)
+			}
+			if run.Outcome != c.outcome {
+				t.Errorf("outcome = %q, want %q (detail: %s)", run.Outcome, c.outcome, run.Detail)
+			}
+		})
+	}
+}
+
+// gateWorktreeGit is like gateWorktree but initializes a real git repository,
+// so StatusPorcelain works and the worktree modification check runs against
+// actual git state.
+func gateWorktreeGit(t *testing.T, script string, timeout time.Duration) (*worktree, string) {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "work tree")
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Initialize a git repo with a tracked file so tests can modify it.
+	gitInit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tracked"), []byte("original\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInit("init")
+	if script != "" {
+		writeScript(t, dir, "gate", script, 0o755)
+	}
+	gitInit("add", "-A")
+	gitInit("commit", "-m", "init")
+
+	b := &Backend{cfg: Config{WorktreeDir: dir, GateTimeout: timeout}}
+	b.git = newGitOps(dir)
+	return &worktree{b: b}, dir
 }
 
 // A gate that leaves a background child holding the stdout pipe must not hold
