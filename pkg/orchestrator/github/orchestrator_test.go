@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,6 +54,15 @@ type ghMock struct {
 
 	// other issue numbers this mock will resolve, for blocker targets
 	otherIssues []int
+
+	// failRemoveLabel names labels whose DELETE returns 500, so a test can
+	// prove a best-effort cleanup does not decide anything.
+	failRemoveLabel map[string]bool
+
+	// hideLabelOnRead, when set, drops the labels it selects from the served
+	// issue read (after claimTokenRead is applied), so a test can model a
+	// read that does not show what was just written to it — selectively.
+	hideLabelOnRead func(name string) bool
 
 	// comments
 	nextCommentID int64
@@ -268,6 +278,15 @@ func (m *ghMock) handleIssue(w http.ResponseWriter, r *http.Request) {
 		m.issueLabels = withoutClaimTokens(m.issueLabels)
 		served = m.issueLabels
 	}
+	if m.hideLabelOnRead != nil {
+		filtered := make([]string, 0, len(served))
+		for _, n := range served {
+			if !m.hideLabelOnRead(n) {
+				filtered = append(filtered, n)
+			}
+		}
+		served = filtered
+	}
 	writeJSON(w, map[string]any{
 		"number":     m.issueNum,
 		"title":      m.issueTitle,
@@ -401,6 +420,10 @@ func (m *ghMock) handleIssueLabels(w http.ResponseWriter, r *http.Request) {
 func (m *ghMock) handleRemoveLabel(w http.ResponseWriter, r *http.Request, name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.failRemoveLabel[name] {
+		http.Error(w, "remove label refused", 500)
+		return
+	}
 	if m.strictLabelRemoval && !contains(m.issueLabels, name) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
@@ -2262,5 +2285,456 @@ func TestBackend_ParkNonDisclosureErrorStillFails(t *testing.T) {
 	var refused flow.ErrDisclosureRefused
 	if errors.As(err, &refused) {
 		t.Errorf("error is ErrDisclosureRefused, want a non-disclosure error: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Claim tokens: the race token is self-limiting
+//
+// The token only ever exists INSIDE one claim attempt — every exit from the
+// attempt removes it. A process that dies in between strands a token no
+// process holds and nothing expires, and because the smallest token wins,
+// that one token blocks the item for every later claimer, permanently. The
+// two halves of the fix are covered below: the token carries its creation
+// time, and a claimer collects abandoned tokens while settling the race.
+// ---------------------------------------------------------------------------
+
+// pinClock pins the package clock for the duration of the test and returns a
+// setter, so a test can also advance time.
+func pinClock(t *testing.T, at time.Time) func(time.Time) {
+	t.Helper()
+	prev := nowUTC
+	var mu sync.Mutex
+	now := at.UTC()
+	nowUTC = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	t.Cleanup(func() { nowUTC = prev })
+	return func(to time.Time) {
+		mu.Lock()
+		defer mu.Unlock()
+		now = to.UTC()
+	}
+}
+
+// claimTokenMintedAt builds a token of the real shape, minted at `at`, whose
+// random half is one hex digit repeated — so a test can pin its order against
+// the token the backend mints for itself.
+func claimTokenMintedAt(at time.Time, fill string) string {
+	return fmt.Sprintf("%08x%s", uint64(at.Unix())&0xffffffff, strings.Repeat(fill, 16))
+}
+
+// The token observed stranded on flow#15: the untimestamped 32-hex format,
+// which is what a leaked token in the wild looks like today.
+const flow15ClaimToken = "3e1b7684aa88a090d806abc11f3b45be"
+
+// claimLabelsOn returns the flow:claim:* labels currently on the mock issue.
+func claimLabelsOn(m *ghMock) []string {
+	var out []string
+	for _, n := range m.labelNames() {
+		if strings.HasPrefix(n, "flow:claim:") {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func TestNewClaimToken_ShapeAndCreationTime(t *testing.T) {
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	set := pinClock(t, at)
+
+	tok := newClaimToken()
+	if len(tok) != claimTokenLen {
+		t.Fatalf("token %q has length %d, want %d", tok, len(tok), claimTokenLen)
+	}
+	if _, err := hex.DecodeString(tok); err != nil {
+		t.Errorf("token %q is not hex: %v", tok, err)
+	}
+	secs, err := strconv.ParseUint(tok[:claimTokenTimeLen], 16, 64)
+	if err != nil {
+		t.Fatalf("time half of %q does not parse: %v", tok, err)
+	}
+	if int64(secs) != at.Unix() {
+		t.Errorf("time half of %q decodes to %d, want %d (the pinned second)", tok, secs, at.Unix())
+	}
+	if other := newClaimToken(); other == tok {
+		t.Errorf("two tokens minted in the same second collided: %q", tok)
+	}
+
+	// Chronological order is lexicographic order — that is what keeps the
+	// earliest attempt still in flight the winner of the race.
+	set(at.Add(time.Second))
+	later := newClaimToken()
+	if !(tok < later) {
+		t.Errorf("token minted earlier (%q) does not sort before a later one (%q)", tok, later)
+	}
+}
+
+// A minted token reads back with an age, whatever else does not.
+func TestClaimTokenAge(t *testing.T) {
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	set := pinClock(t, at)
+
+	fresh := newClaimToken()
+	if age, ok := claimTokenAge(fresh); !ok || age != 0 {
+		t.Errorf("claimTokenAge(fresh) = (%v, %v), want (0s, true)", age, ok)
+	}
+	set(at.Add(11 * time.Minute))
+	if age, ok := claimTokenAge(fresh); !ok || age != 11*time.Minute {
+		t.Errorf("claimTokenAge(11m old) = (%v, %v), want (11m0s, true)", age, ok)
+	}
+	set(at)
+
+	// Anything that does not carry a readable creation time.
+	for _, c := range []struct {
+		name  string
+		token string
+	}{
+		{"flow#15's untimestamped token", flow15ClaimToken},
+		{"non-hex, right length", "zzzzzzzz0123456789abcdef"},
+		{"empty", ""},
+		{"one digit short", newClaimToken()[:claimTokenLen-1]},
+	} {
+		if age, ok := claimTokenAge(c.token); ok {
+			t.Errorf("claimTokenAge(%s) = (%v, true), want ok=false", c.name, age)
+		}
+	}
+}
+
+// The TTL is the boundary, and a token with no creation time is abandoned on
+// the same basis: it has no way to expire on its own.
+func TestClaimTokenAbandoned(t *testing.T) {
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	set := pinClock(t, at)
+	tok := newClaimToken()
+
+	for _, c := range []struct {
+		name string
+		now  time.Time
+		want bool
+	}{
+		{"just minted", at, false},
+		{"one second inside the TTL", at.Add(claimTokenTTL - time.Second), false},
+		{"one second past the TTL", at.Add(claimTokenTTL + time.Second), true},
+		{"minted in the future (clock skew)", at.Add(-time.Minute), false},
+	} {
+		set(c.now)
+		if got := claimTokenAbandoned(tok); got != c.want {
+			t.Errorf("claimTokenAbandoned(%s) = %v, want %v", c.name, got, c.want)
+		}
+	}
+
+	set(at)
+	if !claimTokenAbandoned(flow15ClaimToken) {
+		t.Error("a token carrying no creation time should be abandoned: it can never expire")
+	}
+}
+
+// The flow#15 regression: a stranded untimestamped token made the item
+// permanently unclaimable. Claiming now collects it and proceeds.
+func TestBackend_Claim_CollectsLeakedUntimestampedToken(t *testing.T) {
+	mock := newGHMock(t)
+	mock.issueLabels = []string{"flow:claim:" + flow15ClaimToken}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+	pinClock(t, time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC))
+
+	claim, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	if err != nil {
+		t.Fatalf("Claim should collect the stranded token and succeed: %v", err)
+	}
+	if claim.Account != "alice" {
+		t.Errorf("claim.Account = %q, want alice", claim.Account)
+	}
+	if left := claimLabelsOn(mock); len(left) != 0 {
+		t.Errorf("claim labels left on the issue: %v", left)
+	}
+	if !contains(mock.labelNames(), "flow:owner:alice") {
+		t.Errorf("owner label missing; labels = %v", mock.labelNames())
+	}
+}
+
+// An abandoned token of the current format is collected even though it would
+// have won the race — being older is exactly what makes it abandoned.
+func TestBackend_Claim_CollectsAbandonedTokenThatWouldHaveWon(t *testing.T) {
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	stale := claimTokenMintedAt(at.Add(-20*time.Minute), "0")
+
+	mock := newGHMock(t)
+	mock.issueLabels = []string{"flow:claim:" + stale}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+	pinClock(t, at)
+
+	if _, err := b.Claim(t.Context(), b.refFromIssue(42), nil); err != nil {
+		t.Fatalf("Claim should collect the abandoned token and succeed: %v", err)
+	}
+	if left := claimLabelsOn(mock); len(left) != 0 {
+		t.Errorf("claim labels left on the issue: %v", left)
+	}
+}
+
+// Several stranded tokens are all collected in one attempt.
+func TestBackend_Claim_CollectsSeveralAbandonedTokens(t *testing.T) {
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	mock := newGHMock(t)
+	mock.issueLabels = []string{
+		"flow:claim:" + flow15ClaimToken,
+		"flow:claim:" + claimTokenMintedAt(at.Add(-20*time.Minute), "0"),
+		"flow:claim:" + claimTokenMintedAt(at.Add(-3*time.Hour), "1"),
+	}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+	pinClock(t, at)
+
+	if _, err := b.Claim(t.Context(), b.refFromIssue(42), nil); err != nil {
+		t.Fatalf("Claim should collect every abandoned token and succeed: %v", err)
+	}
+	if left := claimLabelsOn(mock); len(left) != 0 {
+		t.Errorf("claim labels left on the issue: %v", left)
+	}
+}
+
+// A live contender that sorts first still wins, and the refusal now says so:
+// it names the winner and how long ago that attempt started.
+func TestBackend_Claim_RefusesToLiveContender(t *testing.T) {
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	live := claimTokenMintedAt(at.Add(-3*time.Second), "0")
+
+	mock := newGHMock(t)
+	mock.issueLabels = []string{"flow:claim:" + live}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+	pinClock(t, at)
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	if err == nil {
+		t.Fatal("Claim should lose the race to a live contender that sorts first")
+	}
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T", err)
+	}
+	if refused.Code != "claim-race" {
+		t.Errorf("Code = %q, want claim-race", refused.Code)
+	}
+	if !refused.ItemScoped {
+		t.Error("ItemScoped = false, want true (another item could succeed)")
+	}
+	if refused.Override != "" {
+		t.Errorf("Override = %q, want empty: a live race is not something to override", refused.Override)
+	}
+	if !strings.Contains(refused.Reason, live) {
+		t.Errorf("Reason %q does not name the winning token", refused.Reason)
+	}
+	if !strings.Contains(refused.Reason, "3s ago") {
+		t.Errorf("Reason %q does not say how long ago the winning attempt started", refused.Reason)
+	}
+
+	// Our own label is cleaned up; the live contender's is left alone.
+	if left := claimLabelsOn(mock); len(left) != 1 || left[0] != "flow:claim:"+live {
+		t.Errorf("claim labels = %v, want only the live contender's", left)
+	}
+	if contains(mock.labelNames(), "flow:owner:alice") {
+		t.Errorf("owner label written despite losing the race; labels = %v", mock.labelNames())
+	}
+	mock.mu.Lock()
+	assignees := append([]string(nil), mock.assignees...)
+	mock.mu.Unlock()
+	if len(assignees) != 0 {
+		t.Errorf("assignees = %v, want none: the race was lost", assignees)
+	}
+}
+
+// A live contender that sorts last loses, and its label is not touched — it
+// belongs to an attempt still running.
+func TestBackend_Claim_LeavesLiveContenderSortingLast(t *testing.T) {
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	live := claimTokenMintedAt(at.Add(time.Second), "0")
+
+	mock := newGHMock(t)
+	mock.issueLabels = []string{"flow:claim:" + live}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+	pinClock(t, at)
+
+	if _, err := b.Claim(t.Context(), b.refFromIssue(42), nil); err != nil {
+		t.Fatalf("Claim should win against a contender that sorts last: %v", err)
+	}
+	if left := claimLabelsOn(mock); len(left) != 1 || left[0] != "flow:claim:"+live {
+		t.Errorf("claim labels = %v, want the live contender's, untouched", left)
+	}
+}
+
+// Collection is best-effort, like every other cleanup in Claim: an
+// undeletable stale token is disregarded and the claim still goes through.
+func TestBackend_Claim_CollectionIsBestEffort(t *testing.T) {
+	stale := "flow:claim:" + flow15ClaimToken
+	mock := newGHMock(t)
+	mock.issueLabels = []string{stale}
+	mock.failRemoveLabel = map[string]bool{stale: true}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+	pinClock(t, time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC))
+
+	if _, err := b.Claim(t.Context(), b.refFromIssue(42), nil); err != nil {
+		t.Fatalf("Claim should succeed even when the stale label cannot be removed: %v", err)
+	}
+	if !contains(mock.labelNames(), stale) {
+		t.Fatal("test is not exercising the failure path: the stale label was removed")
+	}
+	if !contains(mock.labelNames(), "flow:owner:alice") {
+		t.Errorf("owner label missing; labels = %v", mock.labelNames())
+	}
+}
+
+// A claimer never judges its own token: a clock that jumps mid-attempt must
+// not make it delete its own label and find no contender left.
+func TestBackend_Claim_NeverCollectsItsOwnToken(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+
+	// The clock jumps an hour the moment our own claim label lands — that is,
+	// between minting the token and settling the race.
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	prev := nowUTC
+	t.Cleanup(func() { nowUTC = prev })
+	nowUTC = func() time.Time {
+		if len(claimLabelsOn(mock)) > 0 {
+			return at.Add(time.Hour)
+		}
+		return at
+	}
+
+	if _, err := b.Claim(t.Context(), b.refFromIssue(42), nil); err != nil {
+		t.Fatalf("Claim should not collect its own token: %v", err)
+	}
+	if left := claimLabelsOn(mock); len(left) != 0 {
+		t.Errorf("claim labels left on the issue: %v", left)
+	}
+	if !contains(mock.labelNames(), "flow:owner:alice") {
+		t.Errorf("owner label missing; labels = %v", mock.labelNames())
+	}
+}
+
+// A claimer that cannot see the label it just posted refuses, and says which
+// race it is: nothing was settled, so nothing was won.
+//
+// Nothing is asserted about the claim label left behind on this path — that
+// it is not removed here is promise-language/flow#157, and this test is not
+// the place to pin it either way.
+func TestBackend_Claim_RefusesWhenOwnLabelUnobserved(t *testing.T) {
+	mock := newGHMock(t)
+	mock.hideLabelOnRead = func(name string) bool {
+		return strings.HasPrefix(name, "flow:claim:")
+	}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+	pinClock(t, time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC))
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	if err == nil {
+		t.Fatal("Claim should refuse when its own label is not in the re-read")
+	}
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T", err)
+	}
+	if refused.Code != "claim-race" {
+		t.Errorf("Code = %q, want claim-race", refused.Code)
+	}
+	if !refused.ItemScoped {
+		t.Error("ItemScoped = false, want true")
+	}
+	if !strings.Contains(refused.Reason, "absent on re-read") {
+		t.Errorf("Reason = %q, want the unobserved-label race", refused.Reason)
+	}
+	if contains(mock.labelNames(), "flow:owner:alice") {
+		t.Errorf("owner label written despite refusing; labels = %v", mock.labelNames())
+	}
+}
+
+// The same, with an abandoned token also on the item: it is collected rather
+// than treated as the winner of a race nobody was in.
+func TestBackend_Claim_UnobservedOwnLabelStillCollects(t *testing.T) {
+	stale := "flow:claim:" + flow15ClaimToken
+	mock := newGHMock(t)
+	mock.issueLabels = []string{stale}
+	// Hide only the current-format tokens — that is ours — leaving the
+	// stranded one visible to the re-read.
+	mock.hideLabelOnRead = func(name string) bool {
+		tok, ok := strings.CutPrefix(name, "flow:claim:")
+		return ok && len(tok) == claimTokenLen
+	}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+	pinClock(t, time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC))
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %v (%T)", err, err)
+	}
+	if !strings.Contains(refused.Reason, "absent on re-read") {
+		t.Errorf("Reason = %q, want the unobserved-label race, not a loss to an abandoned token", refused.Reason)
+	}
+	if contains(mock.labelNames(), stale) {
+		t.Errorf("the abandoned token survived the attempt; labels = %v", mock.labelNames())
+	}
+}
+
+// The randomness fallback keeps the token's shape. A token of another width
+// orders ill-definedly against every other one, and carries no creation time
+// a later claimer could read.
+func TestNewClaimToken_RandomnessFailureKeepsShape(t *testing.T) {
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	pinClock(t, at)
+	prev := randRead
+	t.Cleanup(func() { randRead = prev })
+	randRead = func([]byte) (int, error) { return 0, errors.New("no entropy") }
+
+	tok := newClaimToken()
+	if len(tok) != claimTokenLen {
+		t.Fatalf("fallback token %q has length %d, want %d", tok, len(tok), claimTokenLen)
+	}
+	age, ok := claimTokenAge(tok)
+	if !ok {
+		t.Fatalf("fallback token %q carries no readable creation time", tok)
+	}
+	if age != 0 {
+		t.Errorf("fallback token age = %v, want 0s (minted at the pinned second)", age)
+	}
+}
+
+// The race refusal describes the winner, because after collection a winning
+// token is always a live attempt.
+func TestClaimRaceReason(t *testing.T) {
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	pinClock(t, at)
+
+	live := claimTokenMintedAt(at.Add(-3*time.Second), "0")
+	if got := claimRaceReason(live); !strings.Contains(got, live) || !strings.Contains(got, "3s ago") {
+		t.Errorf("claimRaceReason(3s-old) = %q, want the token and its age", got)
+	}
+	// A clock behind the winner's must not read as a negative age.
+	future := claimTokenMintedAt(at.Add(time.Minute), "0")
+	if got := claimRaceReason(future); !strings.Contains(got, "0s ago") {
+		t.Errorf("claimRaceReason(future token) = %q, want an age of 0s", got)
+	}
+	// Nothing to describe: name the token and stop.
+	if got := claimRaceReason(flow15ClaimToken); got != "claim race lost to "+flow15ClaimToken {
+		t.Errorf("claimRaceReason(untimestamped) = %q, want the bare naming", got)
 	}
 }

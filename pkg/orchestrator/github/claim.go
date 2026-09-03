@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,12 +18,13 @@ import (
 
 // Claim acquires an exclusive lease on the given issue. Algorithm:
 //
-//  1. POST a random claim label flow:claim:<hex>.
-//  2. GET the issue's labels; if multiple flow:claim:* are present, the
-//     lexicographically smallest hex wins.
+//  1. POST a claim label flow:claim:<token> (see newClaimToken).
+//  2. GET the issue's labels; DELETE any flow:claim:* token abandoned by an
+//     attempt that is no longer running, then, if multiple remain, the
+//     lexicographically smallest token wins.
 //  3. Losers DELETE their own claim label and return an error.
 //  4. Winner: POST self as assignee, POST flow:owner:<login>, DELETE
-//     flow:claim:<hex>.
+//     flow:claim:<token>.
 //  5. POST or supersede the state comment.
 //
 // NEITHER THE ARENA NOR THE ACCOUNT IS A PARAMETER. Both are ambient, fixed by
@@ -156,7 +158,7 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 	}
 
 	// Phase 1: post a random claim label.
-	token := randomClaimToken()
+	token := newClaimToken()
 	claimLabel := b.labels.ClaimToken(token)
 	if err := b.out.AddLabels(ctx, issueNum, []string{claimLabel}); err != nil {
 		return flow.Claim{}, fmt.Errorf("add claim label: %w", err)
@@ -169,26 +171,46 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 		return flow.Claim{}, fmt.Errorf("get issue (post-claim): %w", err)
 	}
 	contenders := b.claimContenders(labelNamesOf(issue2.Labels))
-	if len(contenders) == 0 {
+	// Collect abandoned tokens before settling. A claim attempt that died
+	// between posting its label and removing it again leaves a token no
+	// process holds and nothing expires; because the smallest token wins,
+	// one such token blocks the item for every later claimer, permanently.
+	// A token older than any attempt could be — or one carrying no creation
+	// time — is abandoned, so it is removed and takes no part in the race.
+	//
+	// We never test our own token: a clock adjustment mid-attempt must not
+	// make a claimer delete its own label. Removal is best-effort, like
+	// every other cleanup here — the decision does not depend on it, so two
+	// claimers seeing the same abandoned token both disregard it and settle
+	// on the same winner.
+	live := make([]string, 0, len(contenders))
+	for _, c := range contenders {
+		if c != token && claimTokenAbandoned(c) {
+			_ = b.out.RemoveLabel(ctx, issueNum, b.labels.ClaimToken(c))
+			continue
+		}
+		live = append(live, c)
+	}
+	if len(live) == 0 {
 		// Our own token is not in the read. Two events produce that and this
 		// read cannot tell them apart: another actor stripped the label, or the
 		// read is too stale to show a POST that landed. Remove it either way —
 		// a stripped label is already gone and the removal 404s harmlessly,
 		// while a label that is still there and unremoved is an orphaned token
-		// nothing is left running to collect.
+		// the next claimer could only collect after its TTL.
 		_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
 		return flow.Claim{}, flow.ErrClaimRefused{
 			Code: "claim-race", ItemScoped: true,
 			Reason: "claim race: our claim token was absent on re-read",
 		}
 	}
-	sort.Strings(contenders)
-	if contenders[0] != token {
+	sort.Strings(live)
+	if live[0] != token {
 		// Lost the race — clean up our label.
 		_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
 		return flow.Claim{}, flow.ErrClaimRefused{
 			Code: "claim-race", ItemScoped: true,
-			Reason: fmt.Sprintf("claim race lost to %s", contenders[0]),
+			Reason: claimRaceReason(live[0]),
 		}
 	}
 
@@ -513,12 +535,80 @@ func hasLabel(names []string, want string) bool {
 	return false
 }
 
-func randomClaimToken() string {
-	buf := make([]byte, 16) // 128 bits
-	if _, err := rand.Read(buf); err != nil {
-		// Random failure: fall back to timestamp; collision impact is
-		// minimal in single-runner scenarios.
-		return fmt.Sprintf("%016x", time.Now().UnixNano())
+const (
+	// claimTokenTTL bounds how long a claim attempt can plausibly be in
+	// flight. An attempt is seconds long; a token older than this was left
+	// behind by a process that died between posting its label and removing
+	// it again, and is collected by the next claimer rather than blocking
+	// the item forever.
+	claimTokenTTL = 10 * time.Minute
+
+	// claimTokenLen is the token's fixed width: claimTokenTimeLen hex digits
+	// of creation time followed by 16 of randomness.
+	claimTokenLen     = 24
+	claimTokenTimeLen = 8
+)
+
+// randRead is the randomness source for claim tokens. Patched by tests.
+var randRead = rand.Read
+
+// newClaimToken mints a claim-race token: 8 hex digits of creation time (unix
+// seconds) then 16 of randomness. The time leads so lexicographic order is
+// chronological order — the earliest attempt still in flight wins — and so a
+// later claimer can tell a live attempt from one that was abandoned.
+//
+// The clock is read through nowUTC, the package's one time source.
+func newClaimToken() string {
+	secs := uint64(nowUTC().Unix()) & 0xffffffff
+	buf := make([]byte, 8) // 64 bits
+	if _, err := randRead(buf); err != nil {
+		// Random failure: fall back to sub-second time for the random half.
+		// Collision impact is minimal in single-runner scenarios. The width
+		// is the same as the real thing — a token of another length orders
+		// ill-definedly against every other one.
+		return fmt.Sprintf("%08x%016x", secs, uint64(nowUTC().UnixNano()))
 	}
-	return hex.EncodeToString(buf)
+	return fmt.Sprintf("%08x%s", secs, hex.EncodeToString(buf))
+}
+
+// claimTokenAge returns how long ago the token was minted. ok is false when
+// the token carries no creation time to read — a different width, a non-hex
+// character, or the untimestamped format that predates this one.
+func claimTokenAge(token string) (time.Duration, bool) {
+	if len(token) != claimTokenLen {
+		return 0, false
+	}
+	if _, err := hex.DecodeString(token); err != nil {
+		return 0, false
+	}
+	// ParseUint, not ParseInt: the latter accepts sign forms.
+	secs, err := strconv.ParseUint(token[:claimTokenTimeLen], 16, 64)
+	if err != nil {
+		return 0, false
+	}
+	return nowUTC().Sub(time.Unix(int64(secs), 0).UTC()), true
+}
+
+// claimTokenAbandoned reports whether a token found on the item was left
+// behind by an attempt that is no longer running. A token older than any
+// attempt could be is abandoned by definition; so is one carrying no creation
+// time at all, which predates this format and therefore has no way to expire.
+func claimTokenAbandoned(token string) bool {
+	age, ok := claimTokenAge(token)
+	return !ok || age > claimTokenTTL
+}
+
+// claimRaceReason describes the token that won the race. Abandoned tokens are
+// collected before the race is settled, so a token that wins is a live
+// attempt, and the refusal says so rather than naming a bare hash.
+func claimRaceReason(winner string) string {
+	age, ok := claimTokenAge(winner)
+	if !ok {
+		return fmt.Sprintf("claim race lost to %s", winner)
+	}
+	if age < 0 {
+		age = 0
+	}
+	return fmt.Sprintf("claim race lost to %s: a claim attempt started %s ago; re-run in a moment",
+		winner, age.Truncate(time.Second))
 }
