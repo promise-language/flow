@@ -34,6 +34,10 @@ func resolveTestApp(t *testing.T, be flow.Backend) (*App, *bytes.Buffer, *bytes.
 // fail it).
 func resolveTestAppStep(t *testing.T, be flow.Backend, step func(flow.StepCtx) error) (*App, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
+	// Isolate from real credential discovery (Keychain, claude binary) so
+	// reportQuota's exec calls don't hang or hit the network.
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
 	out := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}
 	app := &App{
@@ -1616,6 +1620,27 @@ func TestCmdResolve_QuotaPrintedOnBlocked(t *testing.T) {
 	count := strings.Count(output, "quota:")
 	if count < 2 {
 		t.Errorf("expected quota line at start and on block (≥2 occurrences); got %d in:\n%s", count, output)
+	}
+}
+
+func TestCmdResolve_QuotaUnreadableWarnedOnce(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv(dispatchedByRunnerEnv, "")
+	be := fake.New()
+	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	// Default pacing targets are non-zero, so readQuota is called on every
+	// loop iteration. With an empty config dir it always fails. The loop
+	// runs at least twice (step + finalize), so the dedup guard is exercised.
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	output := errBuf.String()
+	count := strings.Count(output, "quota unreadable")
+	if count != 1 {
+		t.Errorf("expected exactly 1 'quota unreadable' warning (dedup); got %d in:\n%s", count, output)
 	}
 }
 
