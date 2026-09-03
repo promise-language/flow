@@ -163,6 +163,14 @@ func (w *worktree) RevertMergePrep(ctx context.Context) error {
 	return w.b.git.ResetHardTo(ctx, w.mergeRestorePoint)
 }
 
+// RebuildTools implements flow.ToolsRebuilder: run ./make in the worktree
+// to rebuild dev tools against the current tree.  The meta-builder runs via
+// 'go run' and is never stale itself; it short-circuits when tools are
+// already up to date.
+func (w *worktree) RebuildTools(ctx context.Context) error {
+	return w.run(ctx, "rebuild tools", []string{"./make"})
+}
+
 // Verify runs cfg.VerifyCmd in cfg.WorktreeDir. Exit-0 → success.
 func (w *worktree) Verify(ctx context.Context) error {
 	if len(w.b.cfg.VerifyCmd) == 0 {
