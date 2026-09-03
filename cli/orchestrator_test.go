@@ -236,6 +236,72 @@ func TestWriteContract_AllowedBranch(t *testing.T) {
 	}
 }
 
+func TestWriteContract_MayBranch_HeadChanges(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("close-branch", "plan", func(ctx flow.StepCtx) error {
+			wt, err := ctx.Worktree()
+			if err != nil {
+				return err
+			}
+			// First switch to a feature branch (simulates being on the claim branch).
+			if _, err := wt.Branch(ctx.Context(), "feature-x", ""); err != nil {
+				return err
+			}
+			// Then switch back to main (what close-branch does).
+			if _, err := wt.Branch(ctx.Context(), "main", ""); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("done")
+		}, flow.StepConfig{Writes: flow.WriteContract{MayBranch: true}})
+	}, &stubAgent{name: "stub"})
+
+	// Make the two branches resolve to different SHAs, so the commit check
+	// would fire without the fix.
+	be.SetBranchHeads(map[string]string{
+		"feature-x": "aaa111",
+		"main":      "bbb222",
+	})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusDone) {
+		t.Fatalf("status = %q, want done; park = %+v", res.Status, res.Park)
+	}
+}
+
+func TestWriteContract_MayBranch_NoBranchChange_CommitCaught(t *testing.T) {
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("sneaky", "plan", func(ctx flow.StepCtx) error {
+			wt, err := ctx.Worktree()
+			if err != nil {
+				return err
+			}
+			// Do NOT switch branch, but do commit — MayBranch alone should
+			// not exempt this.
+			if err := wt.Commit(ctx.Context(), "sneaky commit"); err != nil {
+				return err
+			}
+			return ctx.ResolveMarkdown("done")
+		}, flow.StepConfig{Writes: flow.WriteContract{MayBranch: true}})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusParked) {
+		t.Fatalf("status = %q, want parked", res.Status)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkWriteContract {
+		t.Fatalf("park = %+v, want ParkWriteContract", res.Park)
+	}
+	if !strings.Contains(res.Park.Reason, "commit moved") {
+		t.Errorf("reason = %q, want contains 'commit moved'", res.Park.Reason)
+	}
+}
+
 func TestWriteContract_AllowedDirtyTree(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("edit", "plan", func(ctx flow.StepCtx) error {
