@@ -243,11 +243,8 @@ func TestWriteContract_MayBranch_HeadChanges(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			// First switch to a feature branch (simulates being on the claim branch).
-			if _, err := wt.Branch(ctx.Context(), "feature-x", ""); err != nil {
-				return err
-			}
-			// Then switch back to main (what close-branch does).
+			// Switch to main — what close-branch does when leaving the claim
+			// branch.
 			if _, err := wt.Branch(ctx.Context(), "main", ""); err != nil {
 				return err
 			}
@@ -255,8 +252,9 @@ func TestWriteContract_MayBranch_HeadChanges(t *testing.T) {
 		}, flow.StepConfig{Writes: flow.WriteContract{MayBranch: true}})
 	}, &stubAgent{name: "stub"})
 
-	// Make the two branches resolve to different SHAs, so the commit check
-	// would fire without the fix.
+	// Start on the claim branch with a different SHA than main, so the
+	// commit check would fire without the fix.
+	be.SetInitialBranch("feature-x")
 	be.SetBranchHeads(map[string]string{
 		"feature-x": "aaa111",
 		"main":      "bbb222",

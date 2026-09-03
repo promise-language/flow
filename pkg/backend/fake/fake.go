@@ -34,6 +34,7 @@ type Backend struct {
 	worktrees       map[string]*fakeWorktree
 	nothingToCommit bool
 	branchHeads     map[string]string
+	initialBranch   string
 }
 
 // defaultSupportedArtifacts is the schema an unconfigured fake reports — the
@@ -704,6 +705,9 @@ func (b *Backend) Worktree(ctx context.Context, claim flow.Claim) (flow.Worktree
 	wt.supportsRequest = b.supportsRequest
 	wt.nothingToCommit = b.nothingToCommit
 	wt.branchHeads = b.branchHeads
+	if b.initialBranch != "" && wt.branch == "" {
+		wt.branch = b.initialBranch
+	}
 	return wt, nil
 }
 
@@ -729,6 +733,16 @@ func (b *Backend) SetBranchHeads(m map[string]string) {
 	for _, wt := range b.worktrees {
 		wt.branchHeads = m
 	}
+}
+
+// SetInitialBranch sets the branch that new worktrees start on. Existing
+// worktrees are unaffected — call this before any step runs. An empty string
+// means "main" (the default). This models a checkout that is already on a
+// claim branch when the step handler acquires the worktree.
+func (b *Backend) SetInitialBranch(name string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.initialBranch = name
 }
 
 // SetDirty makes Worktree.IsDirty report true for all existing worktrees and
