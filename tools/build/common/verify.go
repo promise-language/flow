@@ -65,9 +65,9 @@ func verifySteps(repoRoot string) []step {
 	if Exists(filepath.Join(repoRoot, "go.mod")) {
 		return []step{
 			{"format", checkFormatted},
-			{"vet", func(r string) error { return RunIn(r, "go", "vet", "./...") }},
-			{"build", func(r string) error { return RunIn(r, "go", "build", "./...") }},
-			{"test", func(r string) error { return RunIn(r, "go", "test", "./...") }},
+			{"vet", func(r string) error { return runAllModules(r, "vet") }},
+			{"build", func(r string) error { return runAllModules(r, "build") }},
+			{"test", func(r string) error { return runAllModules(r, "test") }},
 		}
 	}
 	stub := func(label string) step {
@@ -77,6 +77,16 @@ func verifySteps(repoRoot string) []step {
 		}}
 	}
 	return []step{stub("format"), stub("vet"), stub("build"), stub("test")}
+}
+
+// runAllModules runs `go <verb> ./...` in every module of the repository.
+func runAllModules(repoRoot, verb string) error {
+	for _, dir := range modules(repoRoot) {
+		if err := RunIn(dir, "go", verb, "./..."); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkFormatted reports unformatted files instead of rewriting them.
