@@ -45,3 +45,6 @@ bin/
 
 # written by `workspace setup` — per-host/per-clone, never committed
 /.claude/settings.local.json
+
+# written by `workspace setup` — per-host/per-clone, never committed
+/.workspace/
