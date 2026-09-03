@@ -1161,6 +1161,9 @@ func TestStepOpenPR_DoesNotProposeWhatWasNeverMeasured(t *testing.T) {
 				t.Errorf("err = %v, want it to say plainly that nothing was measured "+
 					"about the change", err)
 			}
+			if !errors.Is(err, flow.ErrTransient) {
+				t.Errorf("err = %v, want it to wrap flow.ErrTransient — a non-measured outcome is infrastructure", err)
+			}
 			if wt.opened {
 				t.Error("opened a pull request that was never measured")
 			}
@@ -1191,6 +1194,9 @@ func TestStepOpenPR_AGateThatCouldNotRunIsNotTheChangeFailing(t *testing.T) {
 	if !strings.Contains(err.Error(), "permission denied") {
 		t.Errorf("err = %v, want the runner's own failure surfaced — it is the actionable part", err)
 	}
+	if !errors.Is(err, flow.ErrTransient) {
+		t.Errorf("err = %v, want it to wrap flow.ErrTransient — a gate that could not run is infrastructure", err)
+	}
 	if wt.opened {
 		t.Error("opened a pull request no gate ever ran against")
 	}
@@ -1214,6 +1220,9 @@ func TestStepOpenPR_ABrokenJudgeIsNotARefusal(t *testing.T) {
 	if !strings.Contains(err.Error(), "no such file") {
 		t.Errorf("err = %v, want the judge's own failure surfaced", err)
 	}
+	if !errors.Is(err, flow.ErrTransient) {
+		t.Errorf("err = %v, want it to wrap flow.ErrTransient — a broken judge is infrastructure", err)
+	}
 	if wt.opened {
 		t.Error("opened a pull request with no verdict about it")
 	}
@@ -1234,6 +1243,9 @@ func TestStepOpenPR_DoesNotProposeWhatTheJudgeRefuses(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), wt.judgeDetail) {
 		t.Errorf("err = %v, want the judge's reason carried", err)
+	}
+	if errors.Is(err, flow.ErrTransient) {
+		t.Errorf("err = %v, must NOT wrap flow.ErrTransient — a refusal is a real verdict about the change, not infrastructure", err)
 	}
 	if wt.opened {
 		t.Error("opened a pull request the gate refused")

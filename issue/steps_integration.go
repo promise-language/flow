@@ -45,6 +45,15 @@ func (b *builder) stepVerifyMerge(ctx flow.StepCtx) error {
 				ctx.Notify("", "could not revert merge simulation: "+rerr.Error())
 			}
 		}()
+
+		// The merge brought main's tree into the worktree — tool source may
+		// have changed, making compiled binaries stale.  Rebuild before
+		// running the gate so the staleness check does not refuse to measure.
+		if rb, ok := wt.(flow.ToolsRebuilder); ok {
+			if err := rb.RebuildTools(ctx.Context()); err != nil {
+				return fmt.Errorf("could not rebuild tools against the merge result: %w", err)
+			}
+		}
 	}
 
 	verdict, err := b.runIntegrationGate(ctx, wt, "the merge result")

@@ -793,6 +793,14 @@ type MergeResultPreparer interface {
 	RevertMergePrep(ctx context.Context) error
 }
 
+// ToolsRebuilder is an optional Worktree capability: rebuild the project's
+// dev tools so they match the current tree.  Needed after
+// PrepareMergeResult changes the tree — compiled tools may be stale when
+// the merge brings newer tool source from the base branch.
+type ToolsRebuilder interface {
+	RebuildTools(ctx context.Context) error
+}
+
 // isNilRequest catches both untyped-nil interfaces and the typed-nil pitfall
 // (a non-nil interface header pointing at a nil concrete pointer), which a
 // plain `rq == nil` check misses and which would otherwise panic on the

@@ -724,18 +724,19 @@ func (b *builder) runIntegrationGate(ctx flow.StepCtx, wt flow.Worktree, subject
 	if err != nil {
 		return flow.GateVerdict{}, fmt.Errorf(
 			"no %s gate ran on %s, so nothing was measured — this is not the "+
-				"change failing: %w", flow.GateIntegration, subject, err)
+				"change failing: %w: %w", flow.GateIntegration, subject, err, flow.ErrTransient)
 	}
 	if run.Outcome != flow.OutcomeMeasured {
 		return flow.GateVerdict{}, fmt.Errorf(
 			"the %s gate reports %q on %s, so nothing was measured — this is not "+
-				"the change failing%s", flow.GateIntegration, run.Outcome, subject, detailSuffix(run.Detail))
+				"the change failing%s: %w", flow.GateIntegration, run.Outcome, subject,
+			detailSuffix(run.Detail), flow.ErrTransient)
 	}
 	verdict, err := wt.Judge(ctx.Context(), run)
 	if err != nil {
 		return flow.GateVerdict{}, fmt.Errorf(
 			"the %s gate measured %s but no verdict exists, which is not a refusal — "+
-				"the project's judging layer could not answer: %w", flow.GateIntegration, subject, err)
+				"the project's judging layer could not answer: %w: %w", flow.GateIntegration, subject, err, flow.ErrTransient)
 	}
 	if !verdict.Acceptable {
 		return flow.GateVerdict{}, fmt.Errorf(

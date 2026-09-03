@@ -113,6 +113,7 @@ Each optional capability is a separate interface. A backend that does not suppor
 | `Finalizer` | Mark an item's flow run complete and release its claim. |
 | `ManualTakeover` | Signal that the operator has taken manual control of an item. |
 | `MergeResultPreparer` | Set up the tree to reflect the merge result so the gate measures what will actually land. |
+| `ToolsRebuilder` | Rebuild dev tools so they match the current tree. Needed after `MergeResultPreparer` changes the tree. |
 | `PRFinder` | Look up the pull request for the current claim branch. |
 
 ## What a backend may refuse

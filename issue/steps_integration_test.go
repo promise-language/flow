@@ -28,6 +28,10 @@ type integrationWorktree struct {
 	revertPrepErr   error
 	revertPrepCalls int
 
+	// Tools rebuild
+	toolsRebuilt    bool
+	rebuildToolsErr error
+
 	// Merge execution
 	merged   bool
 	mergeErr error
@@ -81,6 +85,15 @@ func (w *integrationWorktree) PrepareMergeResult(_ context.Context, _ string) er
 func (w *integrationWorktree) RevertMergePrep(_ context.Context) error {
 	w.revertPrepCalls++
 	return w.revertPrepErr
+}
+
+func (w *integrationWorktree) RebuildTools(_ context.Context) error {
+	w.fakeWorktree.calls = append(w.fakeWorktree.calls, "rebuild-tools")
+	if w.rebuildToolsErr != nil {
+		return w.rebuildToolsErr
+	}
+	w.toolsRebuilt = true
+	return nil
 }
 
 // Worktree returns the integrationWorktree itself for steps that call
@@ -137,12 +150,26 @@ func TestStepVerifyMerge_GatePassesMergeResultAccepted(t *testing.T) {
 	if ctx.resolved.Type != flow.ArtifactMarkdown {
 		t.Errorf("resolved a %v, want markdown", ctx.resolved.Type)
 	}
-	// The merge simulation should have been prepared and reverted.
+	// The merge simulation should have been prepared, tools rebuilt, and reverted.
 	if !wt.mergePrepped {
 		t.Error("merge result was not prepared")
 	}
+	if !wt.toolsRebuilt {
+		t.Error("tools were not rebuilt after merge-prep")
+	}
 	if wt.revertPrepCalls != 1 {
 		t.Errorf("RevertMergePrep called %d times, want 1", wt.revertPrepCalls)
+	}
+	// Call order: merge-prep before rebuild-tools before gate:integration.
+	want := []string{"merge-prep", "rebuild-tools", "gate:integration"}
+	idx := 0
+	for _, c := range wt.fakeWorktree.calls {
+		if idx < len(want) && c == want[idx] {
+			idx++
+		}
+	}
+	if idx != len(want) {
+		t.Errorf("calls = %v, want subsequence %v", wt.fakeWorktree.calls, want)
 	}
 	// The carry-through caveat should have been notified.
 	found := false
@@ -168,6 +195,9 @@ func TestStepVerifyMerge_GateRefuses(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when gate refuses")
 	}
+	if errors.Is(err, flow.ErrTransient) {
+		t.Errorf("err = %v, must NOT wrap flow.ErrTransient — a refusal is a real verdict about the change, not infrastructure", err)
+	}
 	if ctx.didResolve {
 		t.Error("step resolved despite gate refusal")
 	}
@@ -181,6 +211,9 @@ func TestStepVerifyMerge_GateError(t *testing.T) {
 	err := testBuilder(t).stepVerifyMerge(ctx)
 	if err == nil {
 		t.Fatal("expected error when gate cannot run")
+	}
+	if !errors.Is(err, flow.ErrTransient) {
+		t.Errorf("err = %v, want it to wrap flow.ErrTransient — a gate that could not run is infrastructure", err)
 	}
 	if ctx.didResolve {
 		t.Error("step resolved despite gate error")
@@ -198,6 +231,9 @@ func TestStepVerifyMerge_GateNotMeasured(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when gate outcome is not measured")
 	}
+	if !errors.Is(err, flow.ErrTransient) {
+		t.Errorf("err = %v, want it to wrap flow.ErrTransient — a non-measured outcome is infrastructure", err)
+	}
 	if ctx.didResolve {
 		t.Error("step resolved despite non-measured outcome")
 	}
@@ -211,6 +247,9 @@ func TestStepVerifyMerge_JudgeError(t *testing.T) {
 	err := testBuilder(t).stepVerifyMerge(ctx)
 	if err == nil {
 		t.Fatal("expected error when judge cannot answer")
+	}
+	if !errors.Is(err, flow.ErrTransient) {
+		t.Errorf("err = %v, want it to wrap flow.ErrTransient — a broken judge is infrastructure", err)
 	}
 	if ctx.didResolve {
 		t.Error("step resolved despite judge error")
@@ -269,12 +308,67 @@ func TestStepVerifyMerge_WithoutMergeResultPreparer(t *testing.T) {
 	if !ctx.didResolve {
 		t.Fatal("step did not resolve")
 	}
-	// No merge prep calls should have happened — fakeWorktree is not a
-	// MergeResultPreparer.
+	// No merge prep or rebuild calls should have happened — fakeWorktree is
+	// not a MergeResultPreparer, and the rebuild is inside that guard.
 	for _, c := range wt.calls {
 		if c == "merge-prep" {
 			t.Error("merge-prep should not have been called on a non-MergeResultPreparer worktree")
 		}
+		if c == "rebuild-tools" {
+			t.Error("rebuild-tools should not have been called — it is inside the MergeResultPreparer guard")
+		}
+	}
+}
+
+func TestStepVerifyMerge_RebuildToolsFails(t *testing.T) {
+	wt := newIntegrationWorktree()
+	wt.rebuildToolsErr = errors.New("./make: exit status 2")
+	wt.envelope = []byte(`{"coverage": 95}`)
+	wt.thresholds = []byte(`{"coverage": 80}`)
+	ctx := newIntegrationCtx(wt)
+
+	err := testBuilder(t).stepVerifyMerge(ctx)
+	if err == nil {
+		t.Fatal("expected error when tools rebuild fails")
+	}
+	if errors.Is(err, flow.ErrTransient) {
+		t.Error("a rebuild failure should not be transient — it signals a broken build environment")
+	}
+	if ctx.didResolve {
+		t.Error("step resolved despite rebuild failure")
+	}
+	// The gate must not have been called — a stale-tools rebuild that failed
+	// means there is nothing usable to measure with.
+	for _, c := range wt.fakeWorktree.calls {
+		if c == "gate:integration" {
+			t.Error("gate ran despite rebuild failure — should have short-circuited")
+		}
+	}
+	// RevertMergePrep must still be called (the defer was set up before
+	// RebuildTools ran).
+	if wt.revertPrepCalls != 1 {
+		t.Errorf("RevertMergePrep called %d times, want 1 — the defer must fire even when rebuild fails", wt.revertPrepCalls)
+	}
+}
+
+func TestStepVerifyMerge_RebuildToolsCallOrder(t *testing.T) {
+	wt := newIntegrationWorktree()
+	wt.envelope = []byte(`{"coverage": 95}`)
+	wt.thresholds = []byte(`{"coverage": 80}`)
+	ctx := newIntegrationCtx(wt)
+
+	if err := testBuilder(t).stepVerifyMerge(ctx); err != nil {
+		t.Fatalf("stepVerifyMerge: %v", err)
+	}
+	want := []string{"merge-prep", "rebuild-tools", "gate:integration"}
+	idx := 0
+	for _, c := range wt.fakeWorktree.calls {
+		if idx < len(want) && c == want[idx] {
+			idx++
+		}
+	}
+	if idx != len(want) {
+		t.Errorf("calls = %v, want subsequence %v", wt.fakeWorktree.calls, want)
 	}
 }
 
