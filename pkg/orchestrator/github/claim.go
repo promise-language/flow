@@ -170,10 +170,16 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 	}
 	contenders := b.claimContenders(labelNamesOf(issue2.Labels))
 	if len(contenders) == 0 {
-		// Race condition — our label was stripped before we could read it.
+		// Our own token is not in the read. Two events produce that and this
+		// read cannot tell them apart: another actor stripped the label, or the
+		// read is too stale to show a POST that landed. Remove it either way —
+		// a stripped label is already gone and the removal 404s harmlessly,
+		// while a label that is still there and unremoved is an orphaned token
+		// nothing is left running to collect.
+		_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
 		return flow.Claim{}, flow.ErrClaimRefused{
 			Code: "claim-race", ItemScoped: true,
-			Reason: "claim race: label removed before observation",
+			Reason: "claim race: our claim token was absent on re-read",
 		}
 	}
 	sort.Strings(contenders)

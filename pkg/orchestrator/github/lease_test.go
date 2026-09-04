@@ -164,6 +164,64 @@ func TestBackend_Claim_NamesTheArenaItBinds(t *testing.T) {
 	}
 }
 
+// A claim attempt that loses reports that it lost; IT DOES NOT PARTIALLY APPLY
+// (docs/resolution-standalone.md, "Claiming without a lease service"). The
+// zero-contender branch returned its refusal while leaving the flow:claim:<hex>
+// it had just posted on the issue — a token on an item no process holds, which
+// `labels.Maintained` will not let ItemEditor.RemoveTag delete and `release`
+// does not touch, so the next claimer whose random token sorts larger loses to
+// nobody.
+//
+// The branch fires on either of two events the read cannot tell apart, so both
+// are exercised: a read too stale to show a POST that landed, and a token
+// another actor genuinely stripped.
+func TestBackend_Claim_ZeroContenderRefusalDoesNotOrphanItsToken(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		claimTokenRead string
+	}{
+		{"stale read", "hidden"},
+		{"stripped by another actor", "stripped"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := newGHMock(t)
+			mock.claimTokenRead = tc.claimTokenRead
+			srv := mock.server()
+			t.Cleanup(srv.Close)
+			b := newMockedOrchestrator(t, mock, srv)
+
+			_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+			var refused flow.ErrClaimRefused
+			if !errors.As(err, &refused) {
+				t.Fatalf("Claim error = %v, want ErrClaimRefused — a token absent on re-read is a loss", err)
+			}
+			if refused.Code != "claim-race" {
+				t.Errorf("Code = %q, want claim-race", refused.Code)
+			}
+			if !refused.ItemScoped {
+				t.Error("ItemScoped = false; the refusal is about this item, and another may still succeed")
+			}
+
+			for _, l := range mock.labelNames() {
+				if strings.HasPrefix(l, "flow:claim:") {
+					t.Errorf("labels = %v, want no flow:claim:* — the refused attempt orphaned its token",
+						mock.labelNames())
+				}
+			}
+			// And it took no lease on the way out.
+			if contains(mock.labelNames(), "flow:owner:alice") {
+				t.Errorf("labels = %v, want no owner label — the attempt lost", mock.labelNames())
+			}
+			mock.mu.Lock()
+			assignees := append([]string(nil), mock.assignees...)
+			mock.mu.Unlock()
+			if len(assignees) != 0 {
+				t.Errorf("assignees = %v, want none — the attempt lost", assignees)
+			}
+		})
+	}
+}
+
 // Finalize REFUSES an item that is not terminal. Finalizing does not MAKE one
 // terminal — nothing here closes an issue — so a finalized item still open
 // would claim the work is over while the orchestrator says it is not.
