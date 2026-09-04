@@ -25,7 +25,7 @@ import (
 // fixed once built. Set Config.Role to remove the call entirely; base branch
 // and principal are already lazy and cost nothing at startup.
 func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
-	if deps.Backend == nil {
+	if deps.Orchestrator == nil {
 		return cli.App{}, fmt.Errorf("issue: Deps.Backend is required")
 	}
 	if deps.Agent == nil {
@@ -66,7 +66,7 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 		}
 	}
 
-	role, err := resolveRole(ctx, cfg, deps.Backend)
+	role, err := resolveRole(ctx, cfg, deps.Orchestrator)
 	if err != nil {
 		return cli.App{}, err
 	}
@@ -81,7 +81,7 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 				"must be able to", RoleContributor)
 	}
 
-	b := &builder{cfg: cfg, role: role, backend: deps.Backend}
+	b := &builder{cfg: cfg, role: role, backend: deps.Orchestrator}
 	if cfg.BaseBranch != "" {
 		b.base.Store(&cfg.BaseBranch)
 	}
@@ -106,7 +106,7 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 
 	app := cli.App{
 		Name:         cfg.BinaryName,
-		Backend:      deps.Backend,
+		Orchestrator: deps.Orchestrator,
 		Agent:        deps.Agent,
 		Telemetry:    deps.Telemetry,
 		Artifacts:    artifactsFor(role, cfg.CarryThrough),
@@ -116,7 +116,7 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 		// cli.App wants the display form (it reaches prompts and messages);
 		// cfg.VerifyCmd is argv because that is what a backend execs.
 		VerifyCmd: strings.Join(cfg.VerifyCmd, " "),
-		Preflight: answerGate(deps.Backend, b.principal),
+		Preflight: answerGate(deps.Orchestrator, b.principal),
 	}
 	return app, nil
 }

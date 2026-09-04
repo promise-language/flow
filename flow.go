@@ -13,7 +13,7 @@ type Flow struct {
 	types          []ItemType
 	steps          []*step
 	stepByName     map[string]*step
-	stepByResult   map[string]*step // keyed by ArtifactId OR SignalId as string
+	stepByResult   map[StepId]*step // keyed by the step's result id — ArtifactId or SignalId
 	requireSignals []SignalId
 }
 
@@ -27,7 +27,7 @@ func NewFlow(name string, types []ItemType) *Flow {
 		name:         name,
 		types:        types,
 		stepByName:   map[string]*step{},
-		stepByResult: map[string]*step{},
+		stepByResult: map[StepId]*step{},
 	}
 }
 
@@ -68,7 +68,7 @@ func (f *Flow) AddStep(name string, result ArtifactId, do StepHandler, cfg StepC
 	if _, dup := f.stepByName[name]; dup {
 		panic(fmt.Sprintf("flow.AddStep: duplicate step name %q in flow %q", name, f.name))
 	}
-	if _, dup := f.stepByResult[string(result)]; dup {
+	if _, dup := f.stepByResult[StepId(result)]; dup {
 		panic(fmt.Sprintf("flow.AddStep: duplicate result %q in flow %q", result, f.name))
 	}
 	f.appendStep(&step{
@@ -79,7 +79,7 @@ func (f *Flow) AddStep(name string, result ArtifactId, do StepHandler, cfg StepC
 		required: !cfg.Optional, // Required by default; StepConfig.Optional opts out
 		budget:   cfg.Budget,
 		writes:   cfg.Writes,
-	}, string(result))
+	}, StepId(result))
 }
 
 // AddSignalStep registers a side-effect step that completes when `signal` is
@@ -98,7 +98,7 @@ func (f *Flow) AddSignalStep(name string, signal SignalId, do StepHandler, cfg S
 	if _, dup := f.stepByName[name]; dup {
 		panic(fmt.Sprintf("flow.AddSignalStep: duplicate step name %q in flow %q", name, f.name))
 	}
-	if _, dup := f.stepByResult[string(signal)]; dup {
+	if _, dup := f.stepByResult[StepId(signal)]; dup {
 		panic(fmt.Sprintf("flow.AddSignalStep: duplicate result %q in flow %q", signal, f.name))
 	}
 	f.appendStep(&step{
@@ -109,12 +109,12 @@ func (f *Flow) AddSignalStep(name string, signal SignalId, do StepHandler, cfg S
 		required: !cfg.Optional,
 		budget:   cfg.Budget,
 		writes:   cfg.Writes,
-	}, string(signal))
+	}, StepId(signal))
 }
 
 // AwaitSignal registers a pure wait — no handler. The lifecycle item
 // completes when `signal` is set on the item by any means (another flow's
-// AddSignalStep, or an external event the backend observes).
+// AddSignalStep, or an external event the orchestrator observes).
 func (f *Flow) AwaitSignal(name string, signal SignalId, cfg StepConfig) {
 	if name == "" {
 		panic("flow.AwaitSignal: empty step name")
@@ -125,7 +125,7 @@ func (f *Flow) AwaitSignal(name string, signal SignalId, cfg StepConfig) {
 	if _, dup := f.stepByName[name]; dup {
 		panic(fmt.Sprintf("flow.AwaitSignal: duplicate step name %q in flow %q", name, f.name))
 	}
-	if _, dup := f.stepByResult[string(signal)]; dup {
+	if _, dup := f.stepByResult[StepId(signal)]; dup {
 		panic(fmt.Sprintf("flow.AwaitSignal: duplicate result %q in flow %q", signal, f.name))
 	}
 	f.appendStep(&step{
@@ -133,12 +133,12 @@ func (f *Flow) AwaitSignal(name string, signal SignalId, cfg StepConfig) {
 		name:     name,
 		signal:   signal,
 		required: !cfg.Optional,
-	}, string(signal))
+	}, StepId(signal))
 }
 
 // appendStep records a fully-built step in registration order and indexes it
 // by name and result. Shared tail of AddStep / AddSignalStep / AwaitSignal.
-func (f *Flow) appendStep(s *step, resultKey string) {
+func (f *Flow) appendStep(s *step, resultKey StepId) {
 	f.steps = append(f.steps, s)
 	f.stepByName[s.name] = s
 	f.stepByResult[resultKey] = s
@@ -163,21 +163,21 @@ func (f *Flow) AcceptsType(t ItemType) bool {
 }
 
 // Pending returns true iff the named lifecycle item is unresolved on the
-// given ItemState.
-func (f *Flow) Pending(s *ItemState, name string) bool {
+// given Item.
+func (f *Flow) Pending(it *Item, name string) bool {
 	st := f.stepByName[name]
 	if st == nil {
 		return false
 	}
-	return f.stepPending(s, st)
+	return f.stepPending(it, st)
 }
 
 // stepPending — internal predicate that knows how to derive "is this step
-// complete?" from the ItemState, per step kind.
-func (f *Flow) stepPending(state *ItemState, st *step) bool {
+// complete?" from the Item, per step kind.
+func (f *Flow) stepPending(state *Item, st *step) bool {
 	switch st.kind {
 	case stepArtifact:
-		// Operator opt-out: when the backend surfaces an ArtifactRecord
+		// Operator opt-out: when the orchestrator surfaces an ArtifactRecord
 		// for this id with Required=false AND it isn't already resolved,
 		// the operator has explicitly removed it from the checklist
 		// ("don't run this step"). Skip — DeriveNext moves on to the
@@ -199,7 +199,7 @@ func (f *Flow) stepPending(state *ItemState, st *step) bool {
 		if rec.Stale {
 			return true
 		}
-		// Resolved and not flagged stale by the backend → nothing to do.
+		// Resolved and not flagged stale by the orchestrator → nothing to do.
 		return false
 	case stepSignal, stepAwait:
 		return !state.SignalSet(st.signal)
@@ -210,9 +210,9 @@ func (f *Flow) stepPending(state *ItemState, st *step) bool {
 // DeriveNext returns the first unresolved lifecycle item in registration
 // order, with ok==true. ok==false means the flow has nothing more to do on
 // this item.
-func (f *Flow) DeriveNext(s *ItemState) (string, bool) {
+func (f *Flow) DeriveNext(it *Item) (string, bool) {
 	for _, st := range f.steps {
-		if f.stepPending(s, st) {
+		if f.stepPending(it, st) {
 			return st.name, true
 		}
 	}
@@ -225,7 +225,7 @@ type LifecycleKind int
 
 const (
 	LifecycleArtifact LifecycleKind = iota + 1 // AddStep — handler resolves an artifact
-	LifecycleSignal                            // AddSignalStep — handler side-effects; backend writes signal
+	LifecycleSignal                            // AddSignalStep — handler side-effects; orchestrator writes signal
 	LifecycleAwait                             // AwaitSignal — no handler; pure wait
 )
 
@@ -242,13 +242,15 @@ type LifecycleItem struct {
 	Writes     WriteContract // what the step may change in the worktree
 }
 
-// Result returns the result identifier as a string — either the ArtifactId or
-// the SignalId, depending on Kind. Used for InvocationResult / budget keying.
-func (li LifecycleItem) Result() string {
+// Result returns the step's identity: its ArtifactId when it produces an
+// artifact, its SignalId when it completes on a signal. Inside a flow the two
+// are a single namespace, which is what makes a StepId unambiguous without a
+// discriminator.
+func (li LifecycleItem) Result() StepId {
 	if li.Kind == LifecycleArtifact {
-		return string(li.ArtifactId)
+		return StepId(li.ArtifactId)
 	}
-	return string(li.SignalId)
+	return StepId(li.SignalId)
 }
 
 // Item returns the LifecycleItem for the named step. ok==false if the name is
@@ -261,15 +263,14 @@ func (f *Flow) Item(name string) (LifecycleItem, bool) {
 	return toLifecycleItem(st), true
 }
 
-// ItemByResult returns the LifecycleItem whose Result() (ArtifactId or
-// SignalId, as a string) equals key. ok==false if no step produces that
-// result.
+// ItemByResult returns the LifecycleItem whose Result() equals key. ok==false
+// if no step produces that result.
 //
 // The result id is a step's identity — it keys the budget record and it is the
 // only name `grant` accepts — so callers resolving an operator-supplied or
 // park-recorded id look it up here rather than through Item (which is keyed by
 // the human label).
-func (f *Flow) ItemByResult(key string) (LifecycleItem, bool) {
+func (f *Flow) ItemByResult(key StepId) (LifecycleItem, bool) {
 	st, ok := f.stepByResult[key]
 	if !ok {
 		return LifecycleItem{}, false
@@ -309,10 +310,10 @@ func toLifecycleItem(st *step) LifecycleItem {
 }
 
 // IsReady returns true iff all RequireSignal preconditions are set on the
-// given ItemState.
-func (f *Flow) IsReady(s *ItemState) bool {
+// given Item.
+func (f *Flow) IsReady(it *Item) bool {
 	for _, sig := range f.requireSignals {
-		if !s.SignalSet(sig) {
+		if !it.SignalSet(sig) {
 			return false
 		}
 	}
@@ -320,12 +321,12 @@ func (f *Flow) IsReady(s *ItemState) bool {
 }
 
 // IsDone returns true iff every required lifecycle item is resolved.
-func (f *Flow) IsDone(s *ItemState) bool {
+func (f *Flow) IsDone(it *Item) bool {
 	for _, st := range f.steps {
 		if !st.required {
 			continue
 		}
-		if f.stepPending(s, st) {
+		if f.stepPending(it, st) {
 			return false
 		}
 	}
@@ -334,20 +335,20 @@ func (f *Flow) IsDone(s *ItemState) bool {
 
 // TerminalReason returns a short reason string when the flow has stopped
 // making progress. Empty string means "still pending / ready to dispatch."
-func (f *Flow) TerminalReason(s *ItemState) string {
-	if f.IsDone(s) {
+func (f *Flow) TerminalReason(it *Item) string {
+	if f.IsDone(it) {
 		return "done"
 	}
-	if !f.IsReady(s) {
+	if !f.IsReady(it) {
 		return "awaiting-preconditions"
 	}
-	if _, ok := f.DeriveNext(s); !ok {
+	if _, ok := f.DeriveNext(it); !ok {
 		return "no-pending-steps"
 	}
 	return ""
 }
 
-// SeedSpec returns the ArtifactSpec slice the backend should pre-load at seed
+// SeedSpec returns the ArtifactSpec slice the orchestrator should pre-load at seed
 // time. Reads the per-step StepConfig values (merged with defaults).
 func (f *Flow) SeedSpec(artifactDefs map[ArtifactId]ArtifactDef) []ArtifactSpec {
 	out := make([]ArtifactSpec, 0, len(f.steps))

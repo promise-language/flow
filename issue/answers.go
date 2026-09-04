@@ -37,12 +37,12 @@ import (
 // self is a resolver rather than a value: resolving the principal eagerly would
 // put a network call in BuildApp, which runs before every command including the
 // one meant to diagnose network failures.
-func answerGate(backend flow.Backend, self func(context.Context) string) flow.PreflightFunc {
+func answerGate(backend flow.Orchestrator, self func(context.Context) string) flow.PreflightFunc {
 	reader, ok := backend.(AnswerReader)
 	if !ok {
 		return nil
 	}
-	return func(ctx context.Context, state *flow.ItemState) error {
+	return func(ctx context.Context, state *flow.Item) error {
 		park := state.Park
 		if park == nil || park.Kind != flow.ParkQuestion {
 			// No question park, but the item may still carry unanswered
@@ -58,7 +58,7 @@ func answerGate(backend flow.Backend, self func(context.Context) string) flow.Pr
 			return nil
 		}
 		since := flow.QuestionAskedAt(park)
-		answers, err := reader.ReadAnswers(ctx, state.Item, since, self(ctx))
+		answers, err := reader.ReadAnswers(ctx, *state, since, self(ctx))
 		if err != nil {
 			// Reading answers is the gate's whole job; if it fails we cannot
 			// tell "answered" from "unanswered". Block rather than guess —

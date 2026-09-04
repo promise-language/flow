@@ -7,7 +7,7 @@ import "testing"
 func TestAvailability_InScope(t *testing.T) {
 	levels := []struct {
 		avail Availability
-		scope DiscoveryScope
+		scope ItemScope
 	}{
 		{AvailClosed, ScopeAll},
 		{AvailUnhandled, ScopeOpen},
@@ -39,13 +39,13 @@ func TestAvailability_InScope(t *testing.T) {
 
 // TestValidScope covers the closed set.
 func TestValidScope(t *testing.T) {
-	valid := []DiscoveryScope{ScopeAll, ScopeOpen, ScopeProcessable, ScopeWorkable, ScopeFree, ScopeAuto}
+	valid := []ItemScope{ScopeAll, ScopeOpen, ScopeProcessable, ScopeWorkable, ScopeFree, ScopeAuto}
 	for _, s := range valid {
 		if !ValidScope(s) {
 			t.Errorf("ValidScope(%q) = false, want true", s)
 		}
 	}
-	invalid := []DiscoveryScope{"galaxy", "", "ALL"}
+	invalid := []ItemScope{"galaxy", "", "ALL"}
 	for _, s := range invalid {
 		if ValidScope(s) {
 			t.Errorf("ValidScope(%q) = true, want false", s)

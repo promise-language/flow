@@ -8,12 +8,12 @@ import (
 	"testing"
 
 	"github.com/promise-language/flow"
-	"github.com/promise-language/flow/pkg/backend/fake"
+	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
 
 // reseedTestSetup builds an App with an active claim and a seeded artifact,
 // following the grantTestSetup pattern.
-func reseedTestSetup(t *testing.T) (*App, *fake.Backend, *bytes.Buffer, *bytes.Buffer) {
+func reseedTestSetup(t *testing.T) (*App, *fake.Orchestrator, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	a := &stubAgent{name: "stub"}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
@@ -22,7 +22,7 @@ func reseedTestSetup(t *testing.T) (*App, *fake.Backend, *bytes.Buffer, *bytes.B
 		}, flow.StepConfig{})
 	}, a)
 
-	if err := be.SeedState(context.Background(), claim, []flow.ArtifactSpec{
+	if err := be.SeedState(context.Background(), claim.ItemRef, []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactMarkdown},
 	}); err != nil {
 		t.Fatalf("SeedState: %v", err)
@@ -60,11 +60,11 @@ func TestCmdReseed_Force_ClearsState(t *testing.T) {
 	}
 
 	// Prove the seed was cleared: SeedState should succeed again.
-	claim, err := be.LookupActiveClaim(context.Background(), "alice")
+	claim, err := be.LookupActiveClaim(context.Background())
 	if err != nil {
 		t.Fatalf("LookupActiveClaim: %v", err)
 	}
-	if err := be.SeedState(context.Background(), *claim, []flow.ArtifactSpec{
+	if err := be.SeedState(context.Background(), claim.ItemRef, []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactMarkdown},
 	}); err != nil {
 		t.Fatalf("SeedState after reseed should succeed, got: %v", err)
@@ -74,11 +74,11 @@ func TestCmdReseed_Force_ClearsState(t *testing.T) {
 func TestCmdReseed_NoClaim(t *testing.T) {
 	app, be, _, errBuf := reseedTestSetup(t)
 
-	claim, err := be.LookupActiveClaim(context.Background(), "alice")
+	claim, err := be.LookupActiveClaim(context.Background())
 	if err != nil {
 		t.Fatalf("LookupActiveClaim: %v", err)
 	}
-	if err := be.Release(context.Background(), *claim); err != nil {
+	if err := be.Release(context.Background(), claim.ItemRef); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 
@@ -94,16 +94,16 @@ func TestCmdReseed_NoClaim(t *testing.T) {
 // unsupportedReseedBackend wraps a real backend but overrides ResetSeed to
 // return ErrResetSeedUnsupported.
 type unsupportedReseedBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 }
 
-func (b *unsupportedReseedBackend) ResetSeed(ctx context.Context, claim flow.Claim) error {
-	return flow.ErrResetSeedUnsupported
+func (b *unsupportedReseedBackend) ResetSeed(ctx context.Context, ref flow.ItemRef) error {
+	return flow.ErrUnsupported
 }
 
 func TestCmdReseed_UnsupportedBackend(t *testing.T) {
 	app, _, _, errBuf := reseedTestSetup(t)
-	app.Backend = &unsupportedReseedBackend{app.Backend.(*fake.Backend)}
+	app.Orchestrator = &unsupportedReseedBackend{app.Orchestrator.(*fake.Orchestrator)}
 
 	code := app.cmdReseed(context.Background(), []string{"--force"})
 	if code != 1 {
@@ -117,16 +117,16 @@ func TestCmdReseed_UnsupportedBackend(t *testing.T) {
 // errorReseedBackend wraps a real backend but overrides ResetSeed to return a
 // generic error.
 type errorReseedBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 }
 
-func (b *errorReseedBackend) ResetSeed(ctx context.Context, claim flow.Claim) error {
+func (b *errorReseedBackend) ResetSeed(ctx context.Context, ref flow.ItemRef) error {
 	return errors.New("kaboom: storage unavailable")
 }
 
 func TestCmdReseed_BackendError(t *testing.T) {
 	app, _, _, errBuf := reseedTestSetup(t)
-	app.Backend = &errorReseedBackend{app.Backend.(*fake.Backend)}
+	app.Orchestrator = &errorReseedBackend{app.Orchestrator.(*fake.Orchestrator)}
 
 	code := app.cmdReseed(context.Background(), []string{"--force"})
 	if code != 1 {
@@ -151,9 +151,9 @@ func TestCmdReseed_UnexpectedArg(t *testing.T) {
 
 func TestCmdReseed_LookupActiveClaimError(t *testing.T) {
 	app, _, _, errBuf := reseedTestSetup(t)
-	app.Backend = &failingLookupActiveClaimBackend{
-		Backend: app.Backend.(*fake.Backend),
-		err:     errors.New("network timeout"),
+	app.Orchestrator = &failingLookupActiveClaimBackend{
+		Orchestrator: app.Orchestrator.(*fake.Orchestrator),
+		err:          errors.New("network timeout"),
 	}
 
 	code := app.cmdReseed(context.Background(), []string{"--force"})

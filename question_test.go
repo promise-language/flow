@@ -95,9 +95,9 @@ func TestErrQuestion_Error(t *testing.T) {
 	}
 }
 
-func TestItemState_PendingQuestions(t *testing.T) {
+func TestItem_PendingQuestions(t *testing.T) {
 	now := time.Now()
-	state := &ItemState{
+	item := &Item{
 		Questions: []Question{
 			{ID: "q1", AgentQuestion: AgentQuestion{Text: "Open"}},
 			{ID: "q2", AgentQuestion: AgentQuestion{Text: "Answered"},
@@ -105,7 +105,7 @@ func TestItemState_PendingQuestions(t *testing.T) {
 			{ID: "q3", AgentQuestion: AgentQuestion{Text: "Also open"}},
 		},
 	}
-	pending := state.PendingQuestions()
+	pending := item.PendingQuestions()
 	if len(pending) != 2 {
 		t.Fatalf("PendingQuestions len = %d, want 2", len(pending))
 	}

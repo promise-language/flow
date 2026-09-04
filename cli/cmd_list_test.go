@@ -8,17 +8,17 @@ import (
 	"testing"
 
 	"github.com/promise-language/flow"
-	"github.com/promise-language/flow/pkg/backend/fake"
+	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
 
 // discovererBackend wraps the fake backend and adds Discoverer capability.
 type discovererBackend struct {
-	*fake.Backend
-	items []flow.DiscoveryItem
+	*fake.Orchestrator
+	items []flow.ItemInfo
 }
 
-func (d *discovererBackend) Discover(ctx context.Context, scope flow.DiscoveryScope, binaryName string, acceptsType func(flow.ItemType) bool) ([]flow.DiscoveryItem, error) {
-	var out []flow.DiscoveryItem
+func (d *discovererBackend) List(ctx context.Context, scope flow.ItemScope, binaryName flow.BinaryName, acceptsType func(flow.ItemType) bool) ([]flow.ItemInfo, error) {
+	var out []flow.ItemInfo
 	for _, item := range d.items {
 		if item.Availability.InScope(scope) {
 			out = append(out, item)
@@ -31,14 +31,13 @@ func (d *discovererBackend) Discover(ctx context.Context, scope flow.DiscoverySc
 // scope and falls back to the legacy path when no Discoverer is available.
 func TestCmdList_DefaultScope(t *testing.T) {
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "task one"})
+	be.AddItem("1", flow.Item{Type: "task", Title: "task one"})
 
 	app := &App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:     []*flow.Flow{makeTestFlow(t)},
-		Owner:     "alice",
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:        []*flow.Flow{makeTestFlow(t)},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -52,8 +51,10 @@ func TestCmdList_DefaultScope(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("cmdList = %d; stderr=%q", code, errBuf.String())
 	}
-	if !strings.Contains(out.String(), "task one") {
-		t.Errorf("output missing item display; got:\n%s", out.String())
+	// The listing line is display, availability, holder — the three things a
+	// person scanning for something to work needs.
+	if !strings.Contains(out.String(), "1\tauto") {
+		t.Errorf("output missing the item's display and availability; got:\n%s", out.String())
 	}
 }
 
@@ -61,19 +62,18 @@ func TestCmdList_DefaultScope(t *testing.T) {
 // Discoverer backend.
 func TestCmdList_WithDiscoverer_ScopeOpen(t *testing.T) {
 	be := &discovererBackend{
-		Backend: fake.New(),
-		items: []flow.DiscoveryItem{
-			{BackendName: "fake", Display: "o/r#1", Ref: json.RawMessage(`"1"`), Title: "task one", Availability: flow.AvailAuto, Tags: []string{"type:task"}},
-			{BackendName: "fake", Display: "o/r#2", Ref: json.RawMessage(`"2"`), Title: "task two", Availability: flow.AvailUnhandled, Tags: []string{"bug"}},
+		Orchestrator: fake.New(),
+		items: []flow.ItemInfo{
+			{Ref: flow.ItemRef{OrchestratorName: "fake", Display: "o/r#1", Ref: json.RawMessage(`"1"`)}, Title: "task one", Availability: flow.AvailAuto, Tags: []flow.TagId{"type:task"}},
+			{Ref: flow.ItemRef{OrchestratorName: "fake", Display: "o/r#2", Ref: json.RawMessage(`"2"`)}, Title: "task two", Availability: flow.AvailUnhandled, Tags: []flow.TagId{"bug"}},
 		},
 	}
 
 	app := &App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:     []*flow.Flow{makeTestFlow(t)},
-		Owner:     "alice",
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:        []*flow.Flow{makeTestFlow(t)},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -96,19 +96,18 @@ func TestCmdList_WithDiscoverer_ScopeOpen(t *testing.T) {
 // TestCmdList_WithDiscoverer_ScopeProcessable filters to only processable.
 func TestCmdList_WithDiscoverer_ScopeProcessable(t *testing.T) {
 	be := &discovererBackend{
-		Backend: fake.New(),
-		items: []flow.DiscoveryItem{
-			{BackendName: "fake", Display: "o/r#1", Ref: json.RawMessage(`"1"`), Title: "task one", Availability: flow.AvailAuto, Tags: []string{"type:task"}},
-			{BackendName: "fake", Display: "o/r#2", Ref: json.RawMessage(`"2"`), Title: "task two", Availability: flow.AvailUnhandled, Tags: []string{"bug"}},
+		Orchestrator: fake.New(),
+		items: []flow.ItemInfo{
+			{Ref: flow.ItemRef{OrchestratorName: "fake", Display: "o/r#1", Ref: json.RawMessage(`"1"`)}, Title: "task one", Availability: flow.AvailAuto, Tags: []flow.TagId{"type:task"}},
+			{Ref: flow.ItemRef{OrchestratorName: "fake", Display: "o/r#2", Ref: json.RawMessage(`"2"`)}, Title: "task two", Availability: flow.AvailUnhandled, Tags: []flow.TagId{"bug"}},
 		},
 	}
 
 	app := &App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:     []*flow.Flow{makeTestFlow(t)},
-		Owner:     "alice",
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:        []*flow.Flow{makeTestFlow(t)},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -134,19 +133,18 @@ func TestCmdList_WithDiscoverer_ScopeProcessable(t *testing.T) {
 // TestCmdList_TagFilter tests conjunctive tag filtering.
 func TestCmdList_TagFilter(t *testing.T) {
 	be := &discovererBackend{
-		Backend: fake.New(),
-		items: []flow.DiscoveryItem{
-			{BackendName: "fake", Display: "o/r#1", Ref: json.RawMessage(`"1"`), Title: "both tags", Availability: flow.AvailAuto, Tags: []string{"priority:high", "area:api"}},
-			{BackendName: "fake", Display: "o/r#2", Ref: json.RawMessage(`"2"`), Title: "one tag", Availability: flow.AvailAuto, Tags: []string{"priority:high"}},
+		Orchestrator: fake.New(),
+		items: []flow.ItemInfo{
+			{Ref: flow.ItemRef{OrchestratorName: "fake", Display: "o/r#1", Ref: json.RawMessage(`"1"`)}, Title: "both tags", Availability: flow.AvailAuto, Tags: []flow.TagId{"priority:high", "area:api"}},
+			{Ref: flow.ItemRef{OrchestratorName: "fake", Display: "o/r#2", Ref: json.RawMessage(`"2"`)}, Title: "one tag", Availability: flow.AvailAuto, Tags: []flow.TagId{"priority:high"}},
 		},
 	}
 
 	app := &App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:     []*flow.Flow{makeTestFlow(t)},
-		Owner:     "alice",
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:        []*flow.Flow{makeTestFlow(t)},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -172,11 +170,10 @@ func TestCmdList_TagFilter(t *testing.T) {
 func TestCmdList_UnknownScope(t *testing.T) {
 	be := fake.New()
 	app := &App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:     []*flow.Flow{makeTestFlow(t)},
-		Owner:     "alice",
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:        []*flow.Flow{makeTestFlow(t)},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -195,19 +192,18 @@ func TestCmdList_UnknownScope(t *testing.T) {
 // availability field with the auto-selectable marker.
 func TestCmdList_JSON_Availability(t *testing.T) {
 	be := &discovererBackend{
-		Backend: fake.New(),
-		items: []flow.DiscoveryItem{
-			{BackendName: "fake", Display: "o/r#1", Ref: json.RawMessage(`"1"`), Title: "auto item", Availability: flow.AvailAuto, Tags: []string{"type:task"}},
-			{BackendName: "fake", Display: "o/r#2", Ref: json.RawMessage(`"2"`), Title: "available item", Availability: flow.AvailAvailable, Tags: []string{"type:task"}},
+		Orchestrator: fake.New(),
+		items: []flow.ItemInfo{
+			{Ref: flow.ItemRef{OrchestratorName: "fake", Display: "o/r#1", Ref: json.RawMessage(`"1"`)}, Title: "auto item", Availability: flow.AvailAuto, Tags: []flow.TagId{"type:task"}},
+			{Ref: flow.ItemRef{OrchestratorName: "fake", Display: "o/r#2", Ref: json.RawMessage(`"2"`)}, Title: "available item", Availability: flow.AvailAvailable, Tags: []flow.TagId{"type:task"}},
 		},
 	}
 
 	app := &App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:     []*flow.Flow{makeTestFlow(t)},
-		Owner:     "alice",
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:        []*flow.Flow{makeTestFlow(t)},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -239,73 +235,18 @@ func TestCmdList_JSON_Availability(t *testing.T) {
 	}
 }
 
-// TestCmdList_TagWithoutDiscoverer verifies that --tag is refused when the
-// backend doesn't implement Discoverer.
-func TestCmdList_TagWithoutDiscoverer(t *testing.T) {
-	be := fake.New()
-	app := &App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:     []*flow.Flow{makeTestFlow(t)},
-		Owner:     "alice",
-	}
-	if err := app.validate(); err != nil {
-		t.Fatalf("validate: %v", err)
-	}
-	app.Out = newDiscardWriter()
-	errBuf := &bytes.Buffer{}
-	app.Err = errBuf
-
-	code := app.cmdList(context.Background(), []string{"--tag", "priority:high"})
-	if code != 1 {
-		t.Errorf("exit code = %d, want 1", code)
-	}
-	if !strings.Contains(errBuf.String(), "does not support --tag") {
-		t.Errorf("expected --tag refusal message; got %q", errBuf.String())
-	}
-}
-
-// TestCmdList_ScopeWithoutDiscoverer verifies that non-default scopes other
-// than auto are refused when the backend lacks Discoverer.
-func TestCmdList_ScopeWithoutDiscoverer(t *testing.T) {
-	be := fake.New()
-	app := &App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:     []*flow.Flow{makeTestFlow(t)},
-		Owner:     "alice",
-	}
-	if err := app.validate(); err != nil {
-		t.Fatalf("validate: %v", err)
-	}
-	app.Out = newDiscardWriter()
-	errBuf := &bytes.Buffer{}
-	app.Err = errBuf
-
-	code := app.cmdList(context.Background(), []string{"--scope", "open"})
-	if code != 1 {
-		t.Errorf("exit code = %d, want 1", code)
-	}
-	if !strings.Contains(errBuf.String(), "does not support --scope") {
-		t.Errorf("expected --scope refusal message; got %q", errBuf.String())
-	}
-}
-
 // TestCmdList_EmptyDiscovery verifies the empty-result message includes the
 // scope name, not a generic "no eligible items".
 func TestCmdList_EmptyDiscovery(t *testing.T) {
 	be := &discovererBackend{
-		Backend: fake.New(),
-		items:   nil, // empty
+		Orchestrator: fake.New(),
+		items:        nil, // empty
 	}
 	app := &App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:     []*flow.Flow{makeTestFlow(t)},
-		Owner:     "alice",
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:        []*flow.Flow{makeTestFlow(t)},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)

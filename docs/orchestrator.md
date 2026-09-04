@@ -8,7 +8,7 @@
 
 ## What an orchestrator is
 
-An orchestrator is what the SDK talks to. It leases items to arenas, holds their state, runs gates and commands in a worktree, and lands what those produce. **Where it stores any of that is its own business** — the GitHub orchestrator (`pkg/backend/github`) keeps state on issues, the tracker orchestrator (closed-source) in its own service — and a store is something an orchestrator uses, not something it is.
+An orchestrator is what the SDK talks to. It leases items to arenas, holds their state, runs gates and commands in a worktree, and lands what those produce. **Where it stores any of that is its own business** — the GitHub orchestrator (`pkg/orchestrator/github`) keeps state on issues, the tracker orchestrator (closed-source) in its own service — and a store is something an orchestrator uses, not something it is.
 
 It may be **local or remote**. A remote one is a service that dispatches to many arenas; a local one is the binary orchestrating itself against a store it reaches directly, which is what the GitHub orchestrator is. Both satisfy the same `Orchestrator` interface, and nothing above this boundary knows which it is talking to.
 

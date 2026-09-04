@@ -99,7 +99,7 @@ func newPromptContext(ctx flow.StepCtx, cfg Config, role Role, prior []StepID) (
 	item := ctx.Item()
 	pc := PromptContext{
 		Context: prompt.Context{
-			ItemID:          item.ID,
+			ItemID:          item.Ref.Display,
 			ItemType:        string(item.Type),
 			ItemTitle:       item.Title,
 			ItemDescription: item.Body,

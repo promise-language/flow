@@ -18,7 +18,7 @@ Every binary built on `cli.Run` exposes exactly this surface.
 | `answer <item-id> <text>` | Answer a question a step is parked on |
 | `grant <step> <axis> <amount>` | Add budget to a step and clear a matching budget park |
 | `stale <step-id>` | Mark one resolved artifact stale so its step re-runs |
-| `doctor` | Verify the binary can reach and use its backend |
+| `doctor` | Verify the binary can reach and use its orchestrator |
 
 No command outside this set exists. A binary that needs project-specific behaviour expresses it as a flow, not as a new command.
 

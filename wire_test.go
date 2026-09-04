@@ -58,14 +58,15 @@ func TestInvocationResult_WithPark(t *testing.T) {
 
 func TestClaim_JSONRoundTrip(t *testing.T) {
 	in := Claim{
-		BackendName: "github",
+		OrchestratorName: "github",
 		ItemRef: ItemRef{
-			BackendName: "github",
-			Display:     "owner/repo#42",
-			Ref:         json.RawMessage(`{"owner":"o","repo":"r","number":42}`),
+			OrchestratorName: "github",
+			Display:          "owner/repo#42",
+			Ref:              json.RawMessage(`{"owner":"o","repo":"r","number":42}`),
 		},
-		Owner: "alice",
-		Token: json.RawMessage(`{"state_comment_id":12345}`),
+		Arena:   Arena{Host: "build01", Id: "/w/repo"},
+		Account: "alice",
+		Token:   json.RawMessage(`{"state_comment_id":12345}`),
 	}
 	b, err := json.Marshal(in)
 	if err != nil {
@@ -75,8 +76,14 @@ func TestClaim_JSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(b, &out); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if out.BackendName != in.BackendName || out.Owner != in.Owner {
+	if out.OrchestratorName != in.OrchestratorName || out.Account != in.Account {
 		t.Errorf("round-trip: %+v != %+v", out, in)
+	}
+	// The arena is what the lease binds to, so a claim that lost it on the way
+	// through the file would leave the holder unidentifiable wherever one
+	// account runs more than one arena.
+	if out.Arena != in.Arena {
+		t.Errorf("round-trip Arena = %+v, want %+v", out.Arena, in.Arena)
 	}
 }
 
@@ -169,17 +176,17 @@ func TestInvocationResult_DurationOmittedWhenZero(t *testing.T) {
 	}
 }
 
-// GrantClearsPark is the single rule every backend applies in Grant. The cases
+// GrantClearsPark is the single rule every orchestrator applies in Grant. The cases
 // that matter: only a budget park on THIS step clears, and only when the axis
 // actually has room afterwards — a token grant must leave the park standing.
 func TestGrantClearsPark(t *testing.T) {
-	budgetPark := func(step string, axis BudgetAxis) *ParkRequest {
+	budgetPark := func(step StepId, axis BudgetAxis) *ParkRequest {
 		return &ParkRequest{Kind: ParkBudgetExhausted, Step: step, Axis: axis}
 	}
 	tests := []struct {
 		name string
 		park *ParkRequest
-		key  string
+		key  ArtifactId
 		post ArtifactRecord
 		g    Grant
 		want bool

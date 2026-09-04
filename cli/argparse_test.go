@@ -7,18 +7,17 @@ import (
 	"testing"
 
 	"github.com/promise-language/flow"
-	"github.com/promise-language/flow/pkg/backend/fake"
+	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
 
 func newArgparseApp(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	be := fake.New()
 	app := &App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:     []*flow.Flow{newDummyFlow("x")},
-		Owner:     "alice",
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:        []*flow.Flow{newDummyFlow("x")},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)

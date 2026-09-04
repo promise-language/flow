@@ -23,13 +23,13 @@
 //
 // # Shape of a consumer
 //
-//	backend, _ := ghbackend.NewBackend(ghbackend.Config{BinaryName: "issue", ...})
+//	orch, _ := ghorch.New(ghorch.Config{BinaryName: "issue", ...})
 //	app, err := issue.BuildApp(issue.Config{
 //	    BinaryName: "issue",
 //	    VerifyCmd:  []string{"bin/verify", "--wasm"},
 //	    Prompts:    myPrompts,          // //go:embed templates/*.tmpl
 //	    Budgets:    myBudgets,          // optional per-step overrides
-//	}, issue.Deps{Backend: backend, Agent: claude.New()})
+//	}, issue.Deps{Orchestrator: orch, Agent: claude.New()})
 //	if err != nil { ... }
 //	os.Exit(cli.Run(app))
 package issue
@@ -130,7 +130,7 @@ type Answer = flow.Answer
 // ---------------------------------------------------------------------------
 // Optional backend capabilities.
 //
-// This package takes a flow.Backend, not a concrete one. The three interfaces
+// This package takes a flow.Orchestrator, not a concrete one. The three interfaces
 // below are how it reaches capabilities that only some backends have. Each is
 // probed with a type assertion and degrades explicitly — never silently.
 // ---------------------------------------------------------------------------
@@ -151,7 +151,7 @@ type RoleProber interface {
 // wrong on master and trunk repos, and a branch cut from the wrong base is not
 // discovered until the PR is opened against it. Config.BaseBranch overrides.
 type BranchDetector interface {
-	DefaultBranch(ctx context.Context) (string, error)
+	DefaultBranch(ctx context.Context) (flow.BranchName, error)
 }
 
 // AnswerReader reads human replies to a question the flow asked, so a parked
@@ -233,7 +233,7 @@ type Config struct {
 
 	// BaseBranch overrides the base the working branch is cut from. Zero value
 	// means detect it (see BranchDetector).
-	BaseBranch string
+	BaseBranch flow.BranchName
 
 	// MaxFixRounds bounds the implement step's verify-fix loop. Zero means
 	// DefaultMaxFixRounds. The loop is ALSO bounded by the step's prompt
@@ -244,9 +244,9 @@ type Config struct {
 
 // Deps is the runtime wiring: everything with an identity or a side effect.
 type Deps struct {
-	Backend   flow.Backend
-	Agent     flow.Agent
-	Telemetry flow.Telemetry
+	Orchestrator flow.Orchestrator
+	Agent        flow.Agent
+	Telemetry    flow.Telemetry
 }
 
 // DefaultMaxFixRounds bounds the verify-fix loop when Config.MaxFixRounds is

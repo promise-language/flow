@@ -12,6 +12,16 @@ import (
 	"github.com/promise-language/flow"
 )
 
+// itemRefFor is the address every Orchestrator method takes, in place of the
+// store id Item used to carry.
+func itemRefFor(id string) flow.ItemRef {
+	return flow.ItemRef{
+		OrchestratorName: "fake",
+		Display:          id,
+		Ref:              json.RawMessage(fmt.Sprintf("%q", id)),
+	}
+}
+
 // The canonical steps carried every severe bug found in review, and a
 // source-text grep is not coverage. These drive the real handlers against a
 // worktree that can model the states that actually break them: a branch that
@@ -22,22 +32,28 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakeWorktree struct {
-	branch      string
-	exists      map[string]bool // branches that already exist
-	head        string          // current commit
-	base        string          // the base commit every branch starts from
+	branch      flow.BranchName
+	exists      map[flow.BranchName]bool // branches that already exist
+	head        flow.CommitSha           // current commit
+	base        flow.CommitSha           // the base commit every branch starts from
 	commits     int
 	noCommit    bool  // Commit lands nothing, as git does with nothing staged
-	verifyErr   error // nil once verifyAfter rounds have run
+	verifyErr   error // what verify prints while it is still failing
 	validates   int
 	verifyAfter int
-	staged      bool
-	revsAsked   []string
-	strictRevs  map[string]bool // when set, any other revision errors
-	pushed      bool
-	opened      bool
-	openBody    string
-	captured    []byte
+	// verifyOutcome is what the RUNNER observed. Empty means measured — the
+	// only outcome a caller may read a check result out of.
+	verifyOutcome flow.Outcome
+	// runErr models a request the runner could not attempt at all: no command
+	// ran and no outcome exists.
+	runErr     error
+	staged     bool
+	revsAsked  []flow.Revision
+	strictRevs map[flow.Revision]bool // when set, any other revision errors
+	pushed     bool
+	opened     bool
+	openBody   string
+	captured   []byte
 	// commitErrs scripts what Commit returns on successive calls. A nil entry
 	// means success for that call. When exhausted, Commit falls back to the
 	// noCommit flag as before.
@@ -59,7 +75,7 @@ type fakeWorktree struct {
 	// a gate that could not be run at all — no outcome exists, which is a
 	// different fact from any outcome it could have reported.
 	gatesRun    []flow.GateName
-	gateOutcome map[flow.GateName]flow.GateOutcome
+	gateOutcome map[flow.GateName]flow.Outcome
 	gateErr     error
 	// envelope is what the gate printed on stdout — what the judge is handed
 	// and what travels with the verdict.
@@ -86,7 +102,7 @@ type fakeWorktree struct {
 }
 
 func newFakeWorktree() *fakeWorktree {
-	return &fakeWorktree{exists: map[string]bool{}, head: "base", base: "base"}
+	return &fakeWorktree{exists: map[flow.BranchName]bool{}, head: "base", base: "base"}
 }
 
 // testBranch is the claim branch for the item every test here uses.
@@ -101,8 +117,8 @@ func resumedWorktree() *fakeWorktree {
 	return wt
 }
 
-func (w *fakeWorktree) Branch(_ context.Context, name, base string) (bool, error) {
-	w.calls = append(w.calls, "branch:"+name)
+func (w *fakeWorktree) Branch(_ context.Context, name, base flow.BranchName) (bool, error) {
+	w.calls = append(w.calls, "branch:"+string(name))
 	if w.branch == name {
 		return false, nil // already there; git does not look at the tree
 	}
@@ -120,8 +136,8 @@ func (w *fakeWorktree) Branch(_ context.Context, name, base string) (bool, error
 	w.head = w.base // a fresh branch starts at the base branch's tip
 	return true, nil
 }
-func (w *fakeWorktree) CurrentBranch(context.Context) (string, error) { return w.branch, nil }
-func (w *fakeWorktree) IsDirty(context.Context) (bool, error)         { return len(w.dirty) > 0, nil }
+func (w *fakeWorktree) CurrentBranch(context.Context) (flow.BranchName, error) { return w.branch, nil }
+func (w *fakeWorktree) IsDirty(context.Context) (bool, error)                  { return len(w.dirty) > 0, nil }
 func (w *fakeWorktree) Commit(_ context.Context, msg string) error {
 	w.calls = append(w.calls, "commit")
 	if len(w.commitErrs) > 0 {
@@ -136,7 +152,7 @@ func (w *fakeWorktree) Commit(_ context.Context, msg string) error {
 	}
 	w.commits++
 	w.commitMsgs = append(w.commitMsgs, msg)
-	w.head = fmt.Sprintf("sha-%d", w.commits)
+	w.head = flow.CommitSha(fmt.Sprintf("sha-%d", w.commits))
 	w.dirty = nil
 	return nil
 }
@@ -152,12 +168,31 @@ func (w *fakeWorktree) Stage(context.Context) error {
 	return nil
 }
 func (w *fakeWorktree) Push(context.Context) error { w.pushed = true; return nil }
-func (w *fakeWorktree) Verify(context.Context) error {
-	w.validates++
-	if w.validates > w.verifyAfter {
-		return nil
+
+// Run is the command seam. It returns a RUN, not a bare error: the outcome
+// separates "ran and reported" from "could not start", "timed out" and "died",
+// and the three have different budget consequences.
+func (w *fakeWorktree) Run(_ context.Context, name flow.CommandName) (flow.CommandRun, error) {
+	if name != flow.CommandVerify {
+		return flow.CommandRun{}, fmt.Errorf("fake: no %q command here: %w", name, flow.ErrUnsupported)
 	}
-	return w.verifyErr
+	w.validates++
+	w.calls = append(w.calls, "verify")
+	if w.runErr != nil {
+		return flow.CommandRun{}, w.runErr
+	}
+	if w.verifyOutcome != "" && w.verifyOutcome != flow.OutcomeMeasured {
+		return flow.CommandRun{
+			Command: name, Outcome: w.verifyOutcome, ExitCode: -1,
+			Detail: "the fake was configured to report " + string(w.verifyOutcome),
+		}, nil
+	}
+	run := flow.CommandRun{Command: name, Outcome: flow.OutcomeMeasured}
+	if w.validates <= w.verifyAfter && w.verifyErr != nil {
+		run.ExitCode = 1
+		run.Stdout = []byte(w.verifyErr.Error())
+	}
+	return run, nil
 }
 
 // RunGate answers for any declared name. gateOutcome names the ones that do
@@ -217,7 +252,7 @@ func (w *fakeWorktree) CapturePatch(context.Context) ([]byte, error) {
 	}
 	return w.captured, nil
 }
-func (w *fakeWorktree) RevParse(_ context.Context, rev string) (string, error) {
+func (w *fakeWorktree) RevParse(_ context.Context, rev flow.Revision) (flow.CommitSha, error) {
 	w.revsAsked = append(w.revsAsked, rev)
 	// A backend that cannot resolve a revision must error rather than fall
 	// back to HEAD, or a caller comparing a branch against its base gets the
@@ -231,7 +266,22 @@ func (w *fakeWorktree) RevParse(_ context.Context, rev string) (string, error) {
 	return w.base, nil
 }
 func (w *fakeWorktree) Request() flow.RequestManager { return w }
-func (w *fakeWorktree) Open(_ context.Context, base, title, body string) (string, error) {
+
+// FindPR reports the pull request this fake opened, if any. RequestManager is
+// one capability, so the double implements all of it.
+// PrepareMergeResult, RevertMergePrep and RebuildTools are no-ops here: the
+// tests that are about them use integrationWorktree, which records each call.
+func (w *fakeWorktree) PrepareMergeResult(context.Context, flow.BranchName) error { return nil }
+func (w *fakeWorktree) RevertMergePrep(context.Context) error                     { return nil }
+func (w *fakeWorktree) RebuildTools(context.Context) error                        { return nil }
+
+func (w *fakeWorktree) FindPR(context.Context) (flow.PRInfo, error) {
+	if !w.opened {
+		return flow.PRInfo{}, errors.New("fake: no pull request for this branch")
+	}
+	return flow.PRInfo{URL: "https://example.invalid/pr/1", MergeCommitSHA: w.head}, nil
+}
+func (w *fakeWorktree) Open(_ context.Context, base flow.BranchName, title, body string) (flow.RequestUrl, error) {
 	w.calls = append(w.calls, "open")
 	if len(w.openErrs) > 0 {
 		err := w.openErrs[0]
@@ -253,7 +303,7 @@ func (w *fakeWorktree) callIndex(op string) int {
 	}
 	return -1
 }
-func (w *fakeWorktree) Merge(context.Context, string) error             { return nil }
+func (w *fakeWorktree) Merge(context.Context, flow.RequestUrl) error    { return nil }
 func (w *fakeWorktree) Mergeable(context.Context, string) (bool, error) { return true, nil }
 
 type fakeCtx struct {
@@ -440,7 +490,7 @@ func (a *scriptedAgent) Run(_ context.Context, req flow.AgentRequest) (*flow.Age
 func testBuilder(t *testing.T) *builder {
 	t.Helper()
 	b := &builder{cfg: Config{VerifyCmd: []string{"make", "check"}}, role: RoleContributor}
-	base := "main"
+	base := flow.BranchName("main")
 	b.base.Store(&base)
 	return b
 }
@@ -450,7 +500,7 @@ func testBuilder(t *testing.T) *builder {
 // SHAPED, not just non-empty, because implement now refuses narration.
 func ctxWithPlan(wt *fakeWorktree, agent flow.Agent) *fakeCtx {
 	return &fakeCtx{
-		item:  flow.Item{ID: "42", Type: "task", Title: "widget is broken"},
+		item:  flow.Item{Ref: itemRefFor("42"), Type: "task", Title: "widget is broken"},
 		wt:    wt,
 		agent: agent,
 		arts: map[flow.ArtifactId]flow.ArtifactRecord{
@@ -760,7 +810,7 @@ func TestStepImplement_RecordsTheCommitItProduced(t *testing.T) {
 	if ctx.resolved.Type != flow.ArtifactCommitHash {
 		t.Fatalf("resolved a %v, want a commit hash", ctx.resolved.Type)
 	}
-	if ctx.resolved.CommitHash != wt.head {
+	if ctx.resolved.CommitHash != string(wt.head) {
 		t.Errorf("recorded %q, want HEAD after the commit (%q)", ctx.resolved.CommitHash, wt.head)
 	}
 	if len(ctx.resolved.Patch.Diff) != 0 {
@@ -925,7 +975,7 @@ func TestAnswersSkippedWhenNotParkedOnAQuestion(t *testing.T) {
 }
 
 type answeringBackend struct {
-	flow.Backend
+	flow.Orchestrator
 	answers []flow.Answer
 	calls   int
 }
@@ -941,7 +991,7 @@ func (b *answeringBackend) ReadAnswers(context.Context, flow.Item, time.Time, st
 // that pair is a step that will not run on every backend.
 func TestStepsOnlyRevParseTheGuaranteedRevisions(t *testing.T) {
 	wt := newFakeWorktree()
-	wt.strictRevs = map[string]bool{"HEAD": true, "main": true}
+	wt.strictRevs = map[flow.Revision]bool{"HEAD": true, "main": true}
 	b := testBuilder(t)
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
@@ -1082,13 +1132,13 @@ func TestOnlyTheImplementCommitCarriesTheClosesReference(t *testing.T) {
 
 	var carrying []string
 	for _, msg := range wt.commitMsgs {
-		if strings.Contains(msg, closesRef(ctx.item.ID)) {
+		if strings.Contains(msg, closesRef(ctx.item.Ref.Display)) {
 			carrying = append(carrying, msg)
 		}
 	}
 	if len(carrying) != 1 {
 		t.Fatalf("%d of %d commits carry %q, want exactly one:\n%s",
-			len(carrying), len(wt.commitMsgs), closesRef(ctx.item.ID),
+			len(carrying), len(wt.commitMsgs), closesRef(ctx.item.Ref.Display),
 			strings.Join(wt.commitMsgs, "\n---\n"))
 	}
 	// And it is the first one: the implement commit is the one the item is
@@ -1138,16 +1188,16 @@ func TestStepOpenPR_MeasuresTheBranchAsItWillBeProposed(t *testing.T) {
 // change failing, and a message that read that way would send someone looking
 // for a defect that is not there.
 //
-// Derived from AllGateOutcomes rather than listed, so a sixth outcome cannot be
+// Derived from AllOutcomes rather than listed, so a sixth outcome cannot be
 // added without this test failing.
 func TestStepOpenPR_DoesNotProposeWhatWasNeverMeasured(t *testing.T) {
-	for _, outcome := range flow.AllGateOutcomes() {
+	for _, outcome := range flow.AllOutcomes() {
 		if outcome == flow.OutcomeMeasured {
 			continue
 		}
 		t.Run(string(outcome), func(t *testing.T) {
 			wt := resumedWorktree()
-			wt.gateOutcome = map[flow.GateName]flow.GateOutcome{flow.GateIntegration: outcome}
+			wt.gateOutcome = map[flow.GateName]flow.Outcome{flow.GateIntegration: outcome}
 			ctx := ctxWithPlan(wt, &scriptedAgent{})
 
 			err := testBuilder(t).stepOpenPR(ctx)
@@ -3551,7 +3601,7 @@ func TestStepImplement_HappyPathNotifications(t *testing.T) {
 	want := []string{
 		"implement round 1",
 		"awaiting the agent",
-		"running the verify gate",
+		"running the verify command",
 		"staging and committing",
 	}
 	if len(ctx.notices) < len(want) {
@@ -3583,11 +3633,11 @@ func TestStepImplement_FixLoopNotifications(t *testing.T) {
 	want := []string{
 		"implement round 1",
 		"awaiting the agent",
-		"running the verify gate",
+		"running the verify command",
 		// round 1 fails — no "staging and committing"
 		"implement round 2",
 		"awaiting the agent",
-		"running the verify gate",
+		"running the verify command",
 		// round 2 passes
 		"staging and committing",
 	}
@@ -3649,13 +3699,13 @@ func TestStepImplement_ExhaustedRoundsOmitStagingNotification(t *testing.T) {
 	// The gate notification must still appear for each attempt.
 	gateCount := 0
 	for _, n := range ctx.notices {
-		if n == "running the verify gate" {
+		if n == "running the verify command" {
 			gateCount++
 		}
 	}
 	// opening turn + 1 fix round = 2 verify attempts
 	if gateCount != 2 {
-		t.Errorf("gate notifications = %d, want 2 (opening turn + 1 fix round); notices = %v",
+		t.Errorf("verify notifications = %d, want 2 (opening turn + 1 fix round); notices = %v",
 			gateCount, ctx.notices)
 	}
 }

@@ -36,7 +36,7 @@ const (
 
 // plannedGrant is one step's computed budget delta, before it is applied.
 type plannedGrant struct {
-	id     string
+	id     flow.ArtifactId
 	grant  flow.Grant
 	before flow.ArtifactRecord
 }
@@ -79,7 +79,7 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 		return app.usageError("grant: empty step id")
 	}
 
-	claim, err := app.Backend.LookupActiveClaim(ctx, app.Owner)
+	claim, err := app.Orchestrator.LookupActiveClaim(ctx)
 	if err != nil {
 		fmt.Fprintln(app.Err, "grant:", err)
 		return 1
@@ -88,14 +88,14 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 		fmt.Fprintln(app.Err, "grant: no active claim")
 		return 1
 	}
-	state, err := app.Backend.LoadState(ctx, *claim)
+	state, err := app.Orchestrator.Load(ctx, claim.ItemRef)
 	if err != nil {
 		fmt.Fprintln(app.Err, "grant:", err)
 		return 1
 	}
-	f := flowForType(app, state.Item.Type)
+	f := flowForType(app, state.Type)
 	if f == nil {
-		fmt.Fprintf(app.Err, "grant: no flow in this binary handles item type %q — nothing to grant\n", state.Item.Type)
+		fmt.Fprintf(app.Err, "grant: no flow in this binary handles item type %q — nothing to grant\n", state.Type)
 		return 1
 	}
 
@@ -138,11 +138,11 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 	// has" should cost nothing.
 	for _, p := range plans {
 		if p.empty() {
-			payload.Unchanged = append(payload.Unchanged, p.id)
+			payload.Unchanged = append(payload.Unchanged, string(p.id))
 			continue
 		}
 		if !*dryRun {
-			if err := app.Backend.Grant(ctx, *claim, p.id, p.grant); err != nil {
+			if err := app.Orchestrator.Grant(ctx, claim.ItemRef, p.id, p.grant); err != nil {
 				fmt.Fprintln(app.Err, "grant:", err)
 				return 1
 			}
@@ -212,7 +212,7 @@ func (a grantAmounts) zeroOn(axis flow.BudgetAxis) bool {
 
 // planManual builds the single-step additive grant: the historical behavior,
 // now behind the identity checks.
-func (app *App) planManual(f *flow.Flow, state *flow.ItemState, arg string, a grantAmounts) planOutcome {
+func (app *App) planManual(f *flow.Flow, state *flow.Item, arg string, a grantAmounts) planOutcome {
 	id, ok := app.resolveGrantTarget(f, state, arg)
 	if !ok {
 		return refuse()
@@ -229,12 +229,12 @@ func (app *App) planManual(f *flow.Flow, state *flow.ItemState, arg string, a gr
 		app.usageError("grant: at least one of --invocations / --prompts / --cost / --timeout must be set")
 		return refuse()
 	}
-	return planned(plannedGrant{id: id, grant: g, before: state.Artifact(flow.ArtifactId(id))})
+	return planned(plannedGrant{id: id, grant: g, before: state.Artifact(id)})
 }
 
 // planPark tops up exactly the axis that parked the step. `grant` is almost
 // always typed because an item parked, so this is what bare `grant` does.
-func (app *App) planPark(f *flow.Flow, state *flow.ItemState, display string, a grantAmounts) planOutcome {
+func (app *App) planPark(f *flow.Flow, state *flow.Item, display string, a grantAmounts) planOutcome {
 	park := state.Park
 	if park == nil {
 		// Name the item the way every other command names it (the ref display,
@@ -406,8 +406,8 @@ func parkIncrement(axes []flow.BudgetAxis, rec flow.ArtifactRecord, budget flow.
 // package defaults for a step that is seeded on the item but no longer in the
 // flow — its ItemByResult lookup misses, and a zero budget would silently make
 // the cost and timeout headroom zero.
-func stepBudgetFor(f *flow.Flow, id string) flow.StepBudget {
-	if li, ok := f.ItemByResult(id); ok {
+func stepBudgetFor(f *flow.Flow, id flow.ArtifactId) flow.StepBudget {
+	if li, ok := f.ItemByResult(flow.StepId(id)); ok {
 		return li.Budget
 	}
 	return flow.DefaultStepBudget()
@@ -416,7 +416,7 @@ func stepBudgetFor(f *flow.Flow, id string) flow.StepBudget {
 // planAll sweeps every pending step, raising each axis to at least
 // consumption + headroom. The max() shape means a step that already has room
 // yields a zero delta and no write at all.
-func (app *App) planAll(f *flow.Flow, state *flow.ItemState, a grantAmounts) planOutcome {
+func (app *App) planAll(f *flow.Flow, state *flow.Item, a grantAmounts) planOutcome {
 	var plans []plannedGrant
 	for _, li := range f.Items() {
 		if li.Kind != flow.LifecycleArtifact {
@@ -434,7 +434,7 @@ func (app *App) planAll(f *flow.Flow, state *flow.ItemState, a grantAmounts) pla
 			continue
 		}
 		plans = append(plans, plannedGrant{
-			id:     li.Result(),
+			id:     li.ArtifactId,
 			grant:  sweepIncrement(rec, li.Budget, a),
 			before: rec,
 		})
@@ -543,9 +543,9 @@ func timeoutHeadroom(budget flow.StepBudget) int64 {
 // resolveGrantTarget turns an operator-supplied argument into a step id, or
 // refuses with a message that names the legal ids. Every refusal happens
 // before any backend write.
-func (app *App) resolveGrantTarget(f *flow.Flow, state *flow.ItemState, arg string) (string, bool) {
+func (app *App) resolveGrantTarget(f *flow.Flow, state *flow.Item, arg string) (flow.ArtifactId, bool) {
 	// The step id is the identity: exact match, no prefix or case folding.
-	if li, ok := f.ItemByResult(arg); ok {
+	if li, ok := f.ItemByResult(flow.StepId(arg)); ok {
 		switch li.Kind {
 		case flow.LifecycleSignal, flow.LifecycleAwait:
 			fmt.Fprintf(app.Err, "grant: step %q is a signal step and carries no budget (nothing to grant)\n", arg)
@@ -555,7 +555,7 @@ func (app *App) resolveGrantTarget(f *flow.Flow, state *flow.ItemState, arg stri
 			fmt.Fprintf(app.Err, "grant: item not seeded — no budget record for %q (run `run-step` once first)\n", arg)
 			return "", false
 		}
-		return arg, true
+		return li.ArtifactId, true
 	}
 	// The human label is NOT an identity. Say so, and name the id.
 	if li, ok := f.Item(arg); ok {
@@ -567,7 +567,7 @@ func (app *App) resolveGrantTarget(f *flow.Flow, state *flow.ItemState, arg stri
 	// unambiguous, so honor it — loudly.
 	if _, seeded := state.Artifacts[flow.ArtifactId(arg)]; seeded {
 		fmt.Fprintf(app.Err, "grant: warning — %q is seeded on this item but no longer part of flow %q; granting anyway\n", arg, f.Name())
-		return arg, true
+		return flow.ArtifactId(arg), true
 	}
 	ids := grantableIDs(f)
 	fmt.Fprintf(app.Err, "grant: unknown step id %q\n", arg)
@@ -582,22 +582,22 @@ func (app *App) resolveGrantTarget(f *flow.Flow, state *flow.ItemState, arg stri
 // written by this version record the id; one written by an older version
 // recorded the human label, so that is accepted too rather than stranding an
 // item parked before the upgrade.
-func (app *App) resolveParkStep(f *flow.Flow, state *flow.ItemState, park *flow.ParkRequest) (string, bool) {
-	id := ""
+func (app *App) resolveParkStep(f *flow.Flow, state *flow.Item, park *flow.ParkRequest) (flow.ArtifactId, bool) {
+	id := flow.ArtifactId("")
 	switch li, ok := f.ItemByResult(park.Step); {
 	case ok && li.Kind != flow.LifecycleArtifact:
 		fmt.Fprintf(app.Err, "grant: park names signal step %q, which carries no budget — nothing to grant\n", park.Step)
 		return "", false
 	case ok:
-		id = park.Step
+		id = li.ArtifactId
 	default:
 		// A park written before ParkRequest.Step carried the id recorded the
 		// human label; map it rather than strand an item parked across the
 		// upgrade.
-		if byLabel, found := f.Item(park.Step); found && byLabel.Kind == flow.LifecycleArtifact {
-			id = byLabel.Result()
+		if byLabel, found := f.Item(string(park.Step)); found && byLabel.Kind == flow.LifecycleArtifact {
+			id = byLabel.ArtifactId
 		} else if _, seeded := state.Artifacts[flow.ArtifactId(park.Step)]; seeded {
-			id = park.Step
+			id = flow.ArtifactId(park.Step)
 		} else {
 			fmt.Fprintf(app.Err, "grant: park names step %q, which is not a step of flow %q — grant it explicitly by id\n", park.Step, f.Name())
 			fmt.Fprintf(app.Err, "       valid ids: %s\n", idList(grantableIDs(f)))
@@ -607,7 +607,7 @@ func (app *App) resolveParkStep(f *flow.Flow, state *flow.ItemState, park *flow.
 	// The budget lives on the seeded record; without one there is nothing for
 	// the backend to add to, and its error would name the artifact rather than
 	// the real problem.
-	if _, seeded := state.Artifacts[flow.ArtifactId(id)]; !seeded {
+	if _, seeded := state.Artifacts[id]; !seeded {
 		fmt.Fprintf(app.Err, "grant: park names %q but the item has no budget record for it (not seeded) — nothing to grant\n", id)
 		return "", false
 	}
@@ -619,7 +619,7 @@ func grantableIDs(f *flow.Flow) []string {
 	var out []string
 	for _, li := range f.Items() {
 		if li.Kind == flow.LifecycleArtifact {
-			out = append(out, li.Result())
+			out = append(out, string(li.ArtifactId))
 		}
 	}
 	return out
@@ -681,7 +681,7 @@ func withinOneEdit(a, b string) bool {
 // it can, by prediction when nothing was written. A dry run predicts with the
 // same rule the backend applies (flow.GrantClearsPark), so the preview and the
 // real thing cannot disagree.
-func (app *App) reportUnparked(ctx context.Context, claim flow.Claim, before *flow.ItemState, plans []plannedGrant, dryRun bool) bool {
+func (app *App) reportUnparked(ctx context.Context, claim flow.Claim, before *flow.Item, plans []plannedGrant, dryRun bool) bool {
 	if before.Park == nil {
 		return false
 	}
@@ -693,7 +693,7 @@ func (app *App) reportUnparked(ctx context.Context, claim flow.Claim, before *fl
 		}
 		return false
 	}
-	after, err := app.Backend.LoadState(ctx, claim)
+	after, err := app.Orchestrator.Load(ctx, claim.ItemRef)
 	if err != nil {
 		// The grants landed; we just can't confirm the park state. Say no
 		// rather than claim an unpark we did not observe.
@@ -713,7 +713,7 @@ func applyGrant(rec flow.ArtifactRecord, g flow.Grant) flow.ArtifactRecord {
 }
 
 func deltaOf(p plannedGrant) grantDelta {
-	d := grantDelta{ID: p.id}
+	d := grantDelta{ID: string(p.id)}
 	if p.grant.Invocations != 0 {
 		d.Invocations = &intDelta{From: p.before.GrantedInvocations, To: p.before.GrantedInvocations + p.grant.Invocations}
 	}
@@ -736,7 +736,7 @@ func deltaOf(p plannedGrant) grantDelta {
 // parkDetailSuffix adds the concrete blocker to a non-budget park message —
 // for a question park, the question itself, which is what the operator has to
 // act on.
-func parkDetailSuffix(park *flow.ParkRequest, state *flow.ItemState) string {
+func parkDetailSuffix(park *flow.ParkRequest, state *flow.Item) string {
 	if park.Kind != flow.ParkQuestion {
 		return ""
 	}
@@ -767,7 +767,7 @@ func remedyFor(kind flow.ParkKind) string {
 	return "Clear the blocker on the item, then re-run the step."
 }
 
-func printGrantHuman(app *App, payload grantPayload, state *flow.ItemState) {
+func printGrantHuman(app *App, payload grantPayload, state *flow.Item) {
 	// The note is a RESULT ("nothing to grant"), not an error, so it goes to
 	// stdout only — writing it to stderr as well would print it twice in a
 	// terminal, where both streams land in the same place.

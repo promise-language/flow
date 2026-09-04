@@ -237,9 +237,22 @@ type listItemPayload struct {
 	Display      string   `json:"display"`
 	Title        string   `json:"title,omitempty"`
 	Owner        string   `json:"owner"`
-	Backend      string   `json:"backend"`
+	Backend      string   `json:"orchestrator"`
 	Availability string   `json:"availability,omitempty"`
 	Tags         []string `json:"tags,omitempty"`
+	// Blocked answers "is this blocked right now?" — item-level, and the same
+	// whoever asks, unlike Availability which reports `closed` or `unhandled`
+	// instead when those come first on the ladder.
+	Blocked   bool   `json:"blocked,omitempty"`
+	BlockKind string `json:"block_kind,omitempty"`
+	// BlockReason is prose FOR A PERSON. Nothing parses it, branches on it, or
+	// infers a state from it — the fields beside it carry every machine-readable
+	// fact, which is why the reason never names an item.
+	BlockReason string `json:"block_reason,omitempty"`
+	// BlockedBy carries the blockers still open, as references — so something
+	// can act on them, which is the whole point of reporting them as data
+	// rather than copied into the reason's prose.
+	BlockedBy []string `json:"blocked_by,omitempty"`
 }
 
 type grantPayload struct {

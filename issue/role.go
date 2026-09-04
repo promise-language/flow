@@ -15,7 +15,7 @@ import (
 // permission model is a configuration error rather than a guess: picking the
 // wrong step set silently would route a contributor into merge steps they
 // cannot perform, and the failure would not surface until the merge call.
-func resolveRole(ctx context.Context, cfg Config, backend flow.Backend) (Role, error) {
+func resolveRole(ctx context.Context, cfg Config, backend flow.Orchestrator) (Role, error) {
 	switch cfg.Role {
 	case RoleContributor, RoleMaintainer:
 		return cfg.Role, nil
@@ -62,7 +62,7 @@ func roleFromPermissions(p flow.RepoPermissions) Role {
 // and the failure mode is quiet: the branch is cut from a base that does not
 // exist or is stale, and nothing notices until the pull request is opened
 // against it. So it is either configured or detected, never assumed.
-func resolveBaseBranch(ctx context.Context, cfg Config, backend flow.Backend) (string, error) {
+func resolveBaseBranch(ctx context.Context, cfg Config, backend flow.Orchestrator) (flow.BranchName, error) {
 	if cfg.BaseBranch != "" {
 		return cfg.BaseBranch, nil
 	}
@@ -86,7 +86,7 @@ func resolveBaseBranch(ctx context.Context, cfg Config, backend flow.Backend) (s
 // including `doctor`, whose whole purpose is to diagnose the auth and network
 // failures this call can hit. A binary that cannot start when the network is
 // down cannot tell you the network is down.
-func (b *builder) baseBranch(ctx context.Context) (string, error) {
+func (b *builder) baseBranch(ctx context.Context) (flow.BranchName, error) {
 	if p := b.base.Load(); p != nil {
 		return *p, nil
 	}

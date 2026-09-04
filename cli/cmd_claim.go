@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/promise-language/flow"
 )
@@ -38,7 +37,7 @@ func (app *App) cmdClaim(ctx context.Context, args []string) int {
 		overrides = append(overrides, flow.OverrideUnadmitted)
 	}
 
-	claim, err := app.Backend.Claim(ctx, ref, app.Owner, overrides)
+	claim, err := app.Orchestrator.Claim(ctx, ref, overrides)
 	if err != nil {
 		var refused flow.ErrClaimRefused
 		if errors.As(err, &refused) {
@@ -48,42 +47,19 @@ func (app *App) cmdClaim(ctx context.Context, args []string) int {
 		fmt.Fprintln(app.Err, "claim:", err)
 		return 1
 	}
-	fmt.Fprintf(app.Out, "claimed %s as %s\n", ref.Display, app.Owner)
-	_ = claim // backend persists its own lease state (see Backend.LookupActiveClaim)
+	// The account is AMBIENT — the orchestrator read it rather than being told —
+	// so it is reported from the claim it minted, which is the one the work is
+	// actually done as.
+	fmt.Fprintf(app.Out, "claimed %s as %s\n", ref.Display, claim.Account)
 	return 0
 }
 
-// resolveClaimRef turns the user-typed item id into a backend ItemRef. When
-// the backend implements flow.RefResolver (e.g. the tracker, where the ref is
-// just the id) it resolves directly — no ListEligible round-trip, and the item
-// need not be in the eligible set to be claimed. Otherwise it falls back to
-// listing eligible items and substring-matching the display string.
+// resolveClaimRef turns the user-typed item id into an ItemRef.
+//
+// One route, and it is ResolveRef. The old fallback — listing the selectable
+// set and substring-matching Display — resolved by projection, so it answered
+// with AN item rather than THE item, and it confined `claim` to whatever
+// happened to be in that set.
 func (app *App) resolveClaimRef(ctx context.Context, itemID string) (flow.ItemRef, error) {
-	if rr, ok := app.Backend.(flow.RefResolver); ok {
-		return rr.ResolveRef(ctx, itemID)
-	}
-	refs, err := app.Backend.ListEligible(ctx)
-	if err != nil {
-		return flow.ItemRef{}, err
-	}
-	ref, ok := matchItemRef(refs, itemID)
-	if !ok {
-		return flow.ItemRef{}, fmt.Errorf("no eligible item matching %q", itemID)
-	}
-	return ref, nil
-}
-
-// matchItemRef returns the first ref whose Display contains itemID as a
-// substring or matches the trailing path segment. Sufficient for v1; the
-// github backend's Display is "owner/repo#42", so "42" matches uniquely.
-func matchItemRef(refs []flow.ItemRef, itemID string) (flow.ItemRef, bool) {
-	for _, r := range refs {
-		if r.Display == itemID {
-			return r, true
-		}
-		if strings.Contains(r.Display, itemID) {
-			return r, true
-		}
-	}
-	return flow.ItemRef{}, false
+	return app.Orchestrator.ResolveRef(ctx, itemID)
 }

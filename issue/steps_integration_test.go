@@ -18,8 +18,8 @@ type integrationWorktree struct {
 	fakeWorktree
 
 	// PR lookup
-	prURL            string
-	prMergeCommitSHA string
+	prURL            flow.RequestUrl
+	prMergeCommitSHA flow.CommitSha
 	findPRErr        error
 
 	// Merge simulation
@@ -44,17 +44,17 @@ func newIntegrationWorktree() *integrationWorktree {
 	}
 }
 
-// Request returns the worktree itself, which implements both RequestManager
-// and PRFinder.
+// Request returns the worktree itself: RequestManager is one capability, so
+// the double implements all six methods or none.
 func (w *integrationWorktree) Request() flow.RequestManager { return w }
 
-func (w *integrationWorktree) Open(_ context.Context, _, _, body string) (string, error) {
+func (w *integrationWorktree) Open(_ context.Context, _ flow.BranchName, _, body string) (flow.RequestUrl, error) {
 	w.fakeWorktree.calls = append(w.fakeWorktree.calls, "open")
 	w.fakeWorktree.opened, w.fakeWorktree.openBody = true, body
 	return "https://example.invalid/pr/1", nil
 }
 
-func (w *integrationWorktree) Merge(_ context.Context, _ string) error {
+func (w *integrationWorktree) Merge(_ context.Context, _ flow.RequestUrl) error {
 	w.fakeWorktree.calls = append(w.fakeWorktree.calls, "merge")
 	if w.mergeErr != nil {
 		return w.mergeErr
@@ -73,7 +73,7 @@ func (w *integrationWorktree) FindPR(_ context.Context) (flow.PRInfo, error) {
 	}, nil
 }
 
-func (w *integrationWorktree) PrepareMergeResult(_ context.Context, _ string) error {
+func (w *integrationWorktree) PrepareMergeResult(_ context.Context, _ flow.BranchName) error {
 	w.fakeWorktree.calls = append(w.fakeWorktree.calls, "merge-prep")
 	if w.mergePrepErr != nil {
 		return w.mergePrepErr
@@ -105,7 +105,7 @@ func (w *integrationWorktree) asWorktree() flow.Worktree { return w }
 // the contributor phase).
 func integrationCtx(wt *integrationWorktree) *fakeCtx {
 	return &fakeCtx{
-		item: flow.Item{ID: "42", Type: "task", Title: "widget is broken"},
+		item: flow.Item{Ref: itemRefFor("42"), Type: "task", Title: "widget is broken"},
 		wt:   &wt.fakeWorktree,
 		arts: map[flow.ArtifactId]flow.ArtifactRecord{
 			"plan":           {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "the plan"},
@@ -222,7 +222,7 @@ func TestStepVerifyMerge_GateError(t *testing.T) {
 
 func TestStepVerifyMerge_GateNotMeasured(t *testing.T) {
 	wt := newIntegrationWorktree()
-	wt.gateOutcome = map[flow.GateName]flow.GateOutcome{
+	wt.gateOutcome = map[flow.GateName]flow.Outcome{
 		flow.GateIntegration: flow.OutcomeDied,
 	}
 	ctx := newIntegrationCtx(wt)
@@ -291,7 +291,7 @@ func TestStepVerifyMerge_WithoutMergeResultPreparer(t *testing.T) {
 	// Use fakeCtx directly — fakeWorktree does NOT implement
 	// MergeResultPreparer, so the if-prep branch is skipped.
 	ctx := &fakeCtx{
-		item: flow.Item{ID: "42", Type: "task", Title: "widget is broken"},
+		item: flow.Item{Ref: itemRefFor("42"), Type: "task", Title: "widget is broken"},
 		wt:   wt,
 		arts: map[flow.ArtifactId]flow.ArtifactRecord{
 			"plan":           {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "the plan"},

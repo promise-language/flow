@@ -22,51 +22,50 @@ func (s *stubWorktree) Judge(ctx context.Context, run GateRun) (GateVerdict, err
 }
 
 // Stubs for the rest of the Worktree interface.
-func (s *stubWorktree) Branch(context.Context, string, string) (bool, error) {
+func (s *stubWorktree) Branch(context.Context, BranchName, BranchName) (bool, error) {
 	panic("not implemented")
 }
-func (s *stubWorktree) CurrentBranch(context.Context) (string, error) {
+func (s *stubWorktree) CurrentBranch(context.Context) (BranchName, error) {
 	panic("not implemented")
 }
 func (s *stubWorktree) IsDirty(context.Context) (bool, error) { panic("not implemented") }
 func (s *stubWorktree) Stage(context.Context) error           { panic("not implemented") }
 func (s *stubWorktree) Commit(context.Context, string) error  { panic("not implemented") }
 func (s *stubWorktree) Push(context.Context) error            { panic("not implemented") }
-func (s *stubWorktree) RevParse(context.Context, string) (string, error) {
+func (s *stubWorktree) RevParse(context.Context, Revision) (CommitSha, error) {
 	panic("not implemented")
 }
-func (s *stubWorktree) Verify(context.Context) error                 { panic("not implemented") }
+func (s *stubWorktree) Run(context.Context, CommandName) (CommandRun, error) {
+	panic("not implemented")
+}
 func (s *stubWorktree) CapturePatch(context.Context) ([]byte, error) { panic("not implemented") }
 func (s *stubWorktree) Request() RequestManager                      { return nil }
 
-func TestCheckFit_AcceptableReturnsNil(t *testing.T) {
-	wt := &stubWorktree{
+// measuredFit builds a stub whose fit gate measures and whose judge answers.
+func measuredFit(t *testing.T, acceptable bool, detail string) *stubWorktree {
+	t.Helper()
+	return &stubWorktree{
 		runGate: func(_ context.Context, name GateName) (GateRun, error) {
+			if name != GateFit {
+				t.Errorf("RunGate asked for %q, want %q", name, GateFit)
+			}
 			return GateRun{Gate: name, Outcome: OutcomeMeasured}, nil
 		},
 		judge: func(_ context.Context, _ GateRun) (GateVerdict, error) {
-			return GateVerdict{Acceptable: true}, nil
+			return GateVerdict{Acceptable: acceptable, Detail: detail}, nil
 		},
 	}
-	if err := CheckFit(context.Background(), wt); err != nil {
+}
+
+func TestCheckFit_MeasuredAndAcceptableIsFit(t *testing.T) {
+	if err := CheckFit(context.Background(), measuredFit(t, true, "")); err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
 }
 
-func TestCheckFit_UnacceptableReturnsErrUnfit(t *testing.T) {
-	detail := "coverage 42% < 80%"
-	wt := &stubWorktree{
-		runGate: func(_ context.Context, name GateName) (GateRun, error) {
-			return GateRun{Gate: name, Outcome: OutcomeMeasured}, nil
-		},
-		judge: func(_ context.Context, _ GateRun) (GateVerdict, error) {
-			return GateVerdict{Acceptable: false, Detail: detail}, nil
-		},
-	}
-	err := CheckFit(context.Background(), wt)
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
+func TestCheckFit_MeasuredAndUnacceptableIsUnfitWithDetail(t *testing.T) {
+	detail := "disk 96% full"
+	err := CheckFit(context.Background(), measuredFit(t, false, detail))
 	if !errors.Is(err, ErrUnfit) {
 		t.Fatalf("expected ErrUnfit, got %v", err)
 	}
@@ -76,37 +75,54 @@ func TestCheckFit_UnacceptableReturnsErrUnfit(t *testing.T) {
 	}
 }
 
-func TestCheckFit_RunGateErrorIsFailOpen(t *testing.T) {
+// The three fail-CLOSED paths. Each of them once returned nil — "cannot check →
+// do not refuse" — which treated a broken fit gate as a fit machine, the one
+// state `fit` exists to stop anyone proceeding from. No outcome is not a
+// passing outcome.
+
+func TestCheckFit_RunGateErrorIsUnfit(t *testing.T) {
 	wt := &stubWorktree{
 		runGate: func(context.Context, GateName) (GateRun, error) {
 			return GateRun{}, errors.New("boom")
 		},
 		judge: func(context.Context, GateRun) (GateVerdict, error) {
-			t.Fatal("Judge must not be called when RunGate errors")
+			t.Fatal("Judge must not be called when RunGate errors — there is no run to judge")
 			return GateVerdict{}, nil
 		},
 	}
-	if err := CheckFit(context.Background(), wt); err != nil {
-		t.Fatalf("expected nil (fail-open), got %v", err)
+	err := CheckFit(context.Background(), wt)
+	if !errors.Is(err, ErrUnfit) {
+		t.Fatalf("RunGate error: got %v, want ErrUnfit — a fit gate that cannot run has not reported the machine fit", err)
 	}
 }
 
-func TestCheckFit_NonMeasuredOutcomeIsFailOpen(t *testing.T) {
-	wt := &stubWorktree{
-		runGate: func(_ context.Context, name GateName) (GateRun, error) {
-			return GateRun{Gate: name, Outcome: OutcomeDied}, nil
-		},
-		judge: func(context.Context, GateRun) (GateVerdict, error) {
-			t.Fatal("Judge must not be called for non-measured outcome")
-			return GateVerdict{}, nil
-		},
-	}
-	if err := CheckFit(context.Background(), wt); err != nil {
-		t.Fatalf("expected nil (fail-open), got %v", err)
+// Every non-measured outcome, enumerated from AllOutcomes rather than listed,
+// so a sixth outcome does not silently acquire the fail-open behaviour this
+// test exists to prevent.
+func TestCheckFit_EveryNonMeasuredOutcomeIsUnfit(t *testing.T) {
+	for _, outcome := range AllOutcomes() {
+		if outcome == OutcomeMeasured {
+			continue
+		}
+		t.Run(string(outcome), func(t *testing.T) {
+			wt := &stubWorktree{
+				runGate: func(_ context.Context, name GateName) (GateRun, error) {
+					return GateRun{Gate: name, Outcome: outcome, Detail: "detail for " + string(outcome)}, nil
+				},
+				judge: func(context.Context, GateRun) (GateVerdict, error) {
+					t.Fatalf("Judge must not be called for outcome %s — only a measurement may be judged", outcome)
+					return GateVerdict{}, nil
+				},
+			}
+			err := CheckFit(context.Background(), wt)
+			if !errors.Is(err, ErrUnfit) {
+				t.Fatalf("outcome %s: got %v, want ErrUnfit", outcome, err)
+			}
+		})
 	}
 }
 
-func TestCheckFit_JudgeErrorIsFailOpen(t *testing.T) {
+func TestCheckFit_JudgeErrorIsUnfit(t *testing.T) {
 	wt := &stubWorktree{
 		runGate: func(_ context.Context, name GateName) (GateRun, error) {
 			return GateRun{Gate: name, Outcome: OutcomeMeasured}, nil
@@ -115,8 +131,9 @@ func TestCheckFit_JudgeErrorIsFailOpen(t *testing.T) {
 			return GateVerdict{}, errors.New("judge broke")
 		},
 	}
-	if err := CheckFit(context.Background(), wt); err != nil {
-		t.Fatalf("expected nil (fail-open), got %v", err)
+	err := CheckFit(context.Background(), wt)
+	if !errors.Is(err, ErrUnfit) {
+		t.Fatalf("Judge error: got %v, want ErrUnfit — an unanswerable judge has not reported the machine fit", err)
 	}
 }
 

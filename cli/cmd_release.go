@@ -9,7 +9,7 @@ func (app *App) cmdRelease(ctx context.Context, args []string) int {
 	if !app.rejectArgs("release", args) {
 		return 2
 	}
-	claim, err := app.Backend.LookupActiveClaim(ctx, app.Owner)
+	claim, err := app.Orchestrator.LookupActiveClaim(ctx)
 	if err != nil {
 		fmt.Fprintln(app.Err, "release:", err)
 		return 1
@@ -18,7 +18,7 @@ func (app *App) cmdRelease(ctx context.Context, args []string) int {
 		fmt.Fprintln(app.Err, "release: no active claim")
 		return 1
 	}
-	if err := app.Backend.Release(ctx, *claim); err != nil {
+	if err := app.Orchestrator.Release(ctx, claim.ItemRef); err != nil {
 		fmt.Fprintln(app.Err, "release:", err)
 		return 1
 	}

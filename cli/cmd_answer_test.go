@@ -4,18 +4,34 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/promise-language/flow"
-	"github.com/promise-language/flow/pkg/backend/fake"
+	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
+
+// askAll records each question in turn. AskQuestion takes ONE and appends, so a
+// test wanting several asks several times — which is exactly what a handler
+// with several questions does.
+func askAll(o flow.Orchestrator, ctx context.Context, c flow.Claim, qs []flow.AgentQuestion) ([]flow.Question, error) {
+	var out []flow.Question
+	for _, q := range qs {
+		rec, err := o.AskQuestion(ctx, c.ItemRef, q)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, rec)
+	}
+	return out, nil
+}
 
 // answerTestSetup builds an App + claim with one pending question on the item.
 // Returns the app (with captured stdout/stderr), the fake backend, and the
 // item ID.
-func answerTestSetup(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer, *fake.Backend, string) {
+func answerTestSetup(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer, *fake.Orchestrator, string) {
 	t.Helper()
 	a := &stubAgent{name: "stub"}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
@@ -25,10 +41,10 @@ func answerTestSetup(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer, *fake.Ba
 	}, a)
 
 	// Ask a question so there is something to answer.
-	if _, err := be.AskQuestions(context.Background(), claim, []flow.AgentQuestion{
+	if _, err := askAll(be, context.Background(), claim, []flow.AgentQuestion{
 		{Text: "should we re-plan?"},
 	}); err != nil {
-		t.Fatalf("AskQuestions: %v", err)
+		t.Fatalf("AskQuestion: %v", err)
 	}
 
 	var out, errBuf bytes.Buffer
@@ -49,10 +65,10 @@ func TestCmdAnswer_HappyPath_OneQuestion(t *testing.T) {
 	}
 
 	// Verify the answer was recorded in the backend.
-	ref := flow.ItemRef{BackendName: "fake", Display: itemID, Ref: json.RawMessage(`"` + itemID + `"`)}
-	st, err := be.LoadStateByRef(context.Background(), ref)
+	ref := flow.ItemRef{OrchestratorName: "fake", Display: itemID, Ref: json.RawMessage(`"` + itemID + `"`)}
+	st, err := be.Load(context.Background(), ref)
 	if err != nil {
-		t.Fatalf("LoadStateByRef: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 	pending := st.PendingQuestions()
 	if len(pending) != 0 {
@@ -64,14 +80,14 @@ func TestCmdAnswer_MultipleQuestions_NoFlag(t *testing.T) {
 	app, _, errBuf, be, itemID := answerTestSetup(t)
 
 	// Add a second question.
-	claim, err := be.LookupActiveClaim(context.Background(), "alice")
+	claim, err := be.LookupActiveClaim(context.Background())
 	if err != nil {
 		t.Fatalf("LookupActiveClaim: %v", err)
 	}
-	if _, err := be.AskQuestions(context.Background(), *claim, []flow.AgentQuestion{
+	if _, err := askAll(be, context.Background(), *claim, []flow.AgentQuestion{
 		{Text: "what approach?"},
 	}); err != nil {
-		t.Fatalf("AskQuestions: %v", err)
+		t.Fatalf("AskQuestion: %v", err)
 	}
 
 	code := app.cmdAnswer(context.Background(), []string{itemID, "answer"})
@@ -87,23 +103,23 @@ func TestCmdAnswer_MultipleQuestions_WithFlag(t *testing.T) {
 	app, out, errBuf, be, itemID := answerTestSetup(t)
 
 	// Add a second question.
-	claim, err := be.LookupActiveClaim(context.Background(), "alice")
+	claim, err := be.LookupActiveClaim(context.Background())
 	if err != nil {
 		t.Fatalf("LookupActiveClaim: %v", err)
 	}
-	qs, err := be.AskQuestions(context.Background(), *claim, []flow.AgentQuestion{
+	qs, err := askAll(be, context.Background(), *claim, []flow.AgentQuestion{
 		{Text: "what approach?"},
 	})
 	if err != nil {
-		t.Fatalf("AskQuestions: %v", err)
+		t.Fatalf("AskQuestion: %v", err)
 	}
 	targetID := qs[0].ID
 
-	code := app.cmdAnswer(context.Background(), []string{itemID, "option B", "--question", targetID})
+	code := app.cmdAnswer(context.Background(), []string{itemID, "option B", "--question", string(targetID)})
 	if code != 0 {
 		t.Fatalf("cmdAnswer = %d, want 0; stderr=%q", code, errBuf.String())
 	}
-	if !strings.Contains(out.String(), targetID) {
+	if !strings.Contains(out.String(), string(targetID)) {
 		t.Errorf("stdout = %q, want question id %q", out.String(), targetID)
 	}
 }
@@ -201,13 +217,13 @@ func TestCmdAnswer_BadQuestionFlag(t *testing.T) {
 	}
 }
 
-// TestCmdAnswer_BackendLacksQuestionAnswerer verifies the error path when the
-// backend does not implement QuestionAnswerer.
-func TestCmdAnswer_BackendLacksQuestionAnswerer(t *testing.T) {
+// There are no optional capabilities: an orchestrator that cannot record an
+// answer implements PostAnswer and REFUSES. `answer` must report the refusal
+// and exit non-zero — an operator who typed an answer needs to know it landed
+// nowhere.
+func TestCmdAnswer_OrchestratorRefusesToRecordAnswers(t *testing.T) {
 	app, _, _, _, itemID := answerTestSetup(t)
-
-	// Replace backend with one that lacks QuestionAnswerer.
-	app.Backend = noAnswerBackend{app.Backend}
+	app.Orchestrator = refusingAnswerBackend{app.Orchestrator}
 
 	var errBuf bytes.Buffer
 	app.Err = &errBuf
@@ -216,23 +232,26 @@ func TestCmdAnswer_BackendLacksQuestionAnswerer(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("cmdAnswer = %d, want 1", code)
 	}
-	if !strings.Contains(errBuf.String(), "does not support") {
-		t.Errorf("stderr = %q, want 'does not support'", errBuf.String())
+	if !strings.Contains(errBuf.String(), "answer") {
+		t.Errorf("stderr = %q, want the refusal reported", errBuf.String())
 	}
 }
 
-// noAnswerBackend wraps a Backend but hides QuestionAnswerer.
-type noAnswerBackend struct {
-	flow.Backend
+// refusingAnswerBackend answers the question the contract asks — "can you do
+// this?" — with a typed no.
+type refusingAnswerBackend struct {
+	flow.Orchestrator
 }
 
-// TestCmdAnswer_BackendLacksStateInspector verifies the error path when the
-// backend does not implement StateInspector.
-func TestCmdAnswer_BackendLacksStateInspector(t *testing.T) {
-	app, _, _, _, itemID := answerTestSetup(t)
+func (b refusingAnswerBackend) PostAnswer(context.Context, flow.ItemRef, flow.QuestionId, string) error {
+	return fmt.Errorf("this orchestrator records no answers: %w", flow.ErrUnsupported)
+}
 
-	// Replace backend with one that lacks StateInspector.
-	app.Backend = noInspectorBackend{app.Backend}
+// An item that cannot be loaded cannot be answered: the question ids live on
+// it, so there is nothing to match --question against and nothing to record.
+func TestCmdAnswer_LoadFailureIsReported(t *testing.T) {
+	app, _, _, _, itemID := answerTestSetup(t)
+	app.Orchestrator = unloadableBackend{app.Orchestrator}
 
 	var errBuf bytes.Buffer
 	app.Err = &errBuf
@@ -241,22 +260,18 @@ func TestCmdAnswer_BackendLacksStateInspector(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("cmdAnswer = %d, want 1", code)
 	}
-	if !strings.Contains(errBuf.String(), "cannot inspect") {
-		t.Errorf("stderr = %q, want 'cannot inspect'", errBuf.String())
+	if errBuf.Len() == 0 {
+		t.Error("stderr is empty, want the load failure reported")
 	}
 }
 
-// noInspectorBackend wraps a Backend and provides QuestionAnswerer but hides
-// StateInspector.
-type noInspectorBackend struct {
-	flow.Backend
+type unloadableBackend struct {
+	flow.Orchestrator
 }
 
-func (b noInspectorBackend) PostAnswer(ctx context.Context, ref flow.ItemRef, text string) error {
-	return nil
+func (b unloadableBackend) Load(context.Context, flow.ItemRef) (*flow.Item, error) {
+	return nil, errors.New("orchestrator unreachable")
 }
-
-func (b noInspectorBackend) ClearQuestionMarker(ctx context.Context, ref flow.ItemRef) {}
 
 // TestCmdAnswer_PostAnswerError verifies that when PostAnswer returns an error,
 // cmdAnswer exits 1 and reports the error on stderr.
@@ -264,7 +279,7 @@ func TestCmdAnswer_PostAnswerError(t *testing.T) {
 	app, _, _, _, itemID := answerTestSetup(t)
 
 	// Replace backend with one whose PostAnswer always fails.
-	app.Backend = failingAnswerBackend{app.Backend}
+	app.Orchestrator = failingAnswerBackend{app.Orchestrator}
 
 	var errBuf bytes.Buffer
 	app.Out = newDiscardWriter()
@@ -279,19 +294,12 @@ func TestCmdAnswer_PostAnswerError(t *testing.T) {
 	}
 }
 
-// failingAnswerBackend wraps a Backend and provides a PostAnswer that always
-// errors. It must also implement StateInspector so the command reaches the
-// PostAnswer call.
+// failingAnswerBackend provides a PostAnswer that always errors, so the
+// command's own reporting of a failed write is what is under test.
 type failingAnswerBackend struct {
-	flow.Backend
+	flow.Orchestrator
 }
 
-func (b failingAnswerBackend) PostAnswer(_ context.Context, _ flow.ItemRef, _ string) error {
+func (b failingAnswerBackend) PostAnswer(_ context.Context, _ flow.ItemRef, _ flow.QuestionId, _ string) error {
 	return fmt.Errorf("backend broke")
-}
-
-func (b failingAnswerBackend) ClearQuestionMarker(_ context.Context, _ flow.ItemRef) {}
-
-func (b failingAnswerBackend) LoadStateByRef(ctx context.Context, ref flow.ItemRef) (*flow.ItemState, error) {
-	return b.Backend.(flow.StateInspector).LoadStateByRef(ctx, ref)
 }

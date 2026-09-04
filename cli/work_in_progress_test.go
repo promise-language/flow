@@ -3,26 +3,38 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/promise-language/flow"
-	"github.com/promise-language/flow/pkg/backend/fake"
+	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
 
 // noWorkBackend hides the fake's work-in-progress store by wrapping it in the
 // interface every backend must satisfy. A backend that simply does not
 // implement the optional one is the case a step has to keep working against.
-type noWorkBackend struct{ flow.Backend }
+// noWorkBackend refuses the work-in-progress store rather than lacking it:
+// there are no optional capabilities, so "no store here" is an answer the
+// method gives.
+type noWorkBackend struct{ flow.Orchestrator }
+
+func (noWorkBackend) SaveWorkInProgress(context.Context, flow.ItemRef, flow.StepId, string) error {
+	return fmt.Errorf("this orchestrator keeps no work-in-progress store: %w", flow.ErrUnsupported)
+}
+
+func (noWorkBackend) LoadWorkInProgress(context.Context, flow.ItemRef, flow.StepId) (string, error) {
+	return "", nil
+}
 
 // clearFailsBackend answers every clear with an error. The artifact has landed
 // by the time the clear runs, so this is the case that must NOT be reported as
 // a failed step.
 type clearFailsBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	err error
 }
 
-func (b clearFailsBackend) ClearWorkInProgress(context.Context, flow.Claim, string) error {
+func (b clearFailsBackend) ClearWorkInProgress(context.Context, flow.ItemRef, flow.StepId) error {
 	return b.err
 }
 
@@ -43,7 +55,7 @@ func TestWorkInProgress_BackendWithoutAStore(t *testing.T) {
 			return ctx.ResolveMarkdown("the plan")
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
-	app.Backend = noWorkBackend{app.Backend}
+	app.Orchestrator = noWorkBackend{app.Orchestrator}
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -55,8 +67,8 @@ func TestWorkInProgress_BackendWithoutAStore(t *testing.T) {
 	if gotBody != "" || gotErr != nil {
 		t.Errorf("WorkInProgress() = (%q, %v), want (\"\", nil) with no store", gotBody, gotErr)
 	}
-	if !errors.Is(saveErr, flow.ErrWorkInProgressUnsupported) {
-		t.Errorf("RecordWorkInProgress = %v, want ErrWorkInProgressUnsupported", saveErr)
+	if !errors.Is(saveErr, flow.ErrUnsupported) {
+		t.Errorf("RecordWorkInProgress = %v, want ErrUnsupported", saveErr)
 	}
 }
 
@@ -117,7 +129,7 @@ func TestWorkInProgress_ClearedWhenTheStepResolves(t *testing.T) {
 	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
 		t.Fatalf("RunOne = (%+v, %v), want done", res, err)
 	}
-	got, err := be.LoadWorkInProgress(context.Background(), claim, "plan")
+	got, err := be.LoadWorkInProgress(context.Background(), claim.ItemRef, "plan")
 	if err != nil {
 		t.Fatalf("LoadWorkInProgress: %v", err)
 	}
@@ -140,7 +152,7 @@ func TestWorkInProgress_ClearFailureDoesNotFailTheStep(t *testing.T) {
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	app.Telemetry = tel
-	app.Backend = clearFailsBackend{Backend: be, err: errors.New("disk went away")}
+	app.Orchestrator = clearFailsBackend{Orchestrator: be, err: errors.New("disk went away")}
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -149,7 +161,7 @@ func TestWorkInProgress_ClearFailureDoesNotFailTheStep(t *testing.T) {
 	if res.Status != "done" {
 		t.Errorf("res = %+v, want done — the artifact landed", res)
 	}
-	state, _ := be.LoadState(context.Background(), claim)
+	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if rec := state.Artifact("plan"); !rec.Resolved {
 		t.Error("plan is not resolved, but ResolveArtifact succeeded")
 	}
@@ -193,7 +205,7 @@ func TestWorkInProgress_IsNotVisibleToAnotherStep(t *testing.T) {
 	}
 	// Resolve the plan through the backend, which does NOT clear the record —
 	// the state a run killed between the write and the cleanup leaves behind.
-	if err := be.ResolveArtifact(context.Background(), claim, "plan",
+	if err := be.ResolveArtifact(context.Background(), claim.ItemRef, "plan",
 		flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"}); err != nil {
 		t.Fatalf("ResolveArtifact: %v", err)
 	}
@@ -203,7 +215,7 @@ func TestWorkInProgress_IsNotVisibleToAnotherStep(t *testing.T) {
 	if reviewSaw != "" {
 		t.Errorf("review read %q — that is the plan step's reasoning", reviewSaw)
 	}
-	if got, _ := be.LoadWorkInProgress(context.Background(), claim, "plan"); got == "" {
+	if got, _ := be.LoadWorkInProgress(context.Background(), claim.ItemRef, "plan"); got == "" {
 		t.Fatal("the plan's record is gone, so this proved nothing about keying")
 	}
 }
@@ -212,23 +224,23 @@ func TestWorkInProgress_IsNotVisibleToAnotherStep(t *testing.T) {
 // A store that is there but broken is not a store that is absent: the step is
 // told, once.
 type loadFailsBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	err   error
 	loads int
 }
 
-func (b *loadFailsBackend) LoadWorkInProgress(context.Context, flow.Claim, string) (string, error) {
+func (b *loadFailsBackend) LoadWorkInProgress(context.Context, flow.ItemRef, flow.StepId) (string, error) {
 	b.loads++
 	return "", b.err
 }
 
 // saveFailsBackend takes nothing and says so.
 type saveFailsBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	err error
 }
 
-func (b saveFailsBackend) SaveWorkInProgress(context.Context, flow.Claim, string, string) error {
+func (b saveFailsBackend) SaveWorkInProgress(context.Context, flow.ItemRef, flow.StepId, string) error {
 	return b.err
 }
 
@@ -251,8 +263,8 @@ func TestWorkInProgress_ReadFailureReachesTheStep(t *testing.T) {
 			return ctx.ResolveMarkdown("the plan")
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
-	store := &loadFailsBackend{Backend: be, err: wantErr}
-	app.Backend = store
+	store := &loadFailsBackend{Orchestrator: be, err: wantErr}
+	app.Orchestrator = store
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -288,7 +300,7 @@ func TestWorkInProgress_SaveFailureReachesTheStepAndStashesNothing(t *testing.T)
 			return ctx.ResolveMarkdown("the plan")
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
-	app.Backend = saveFailsBackend{Backend: be, err: wantErr}
+	app.Orchestrator = saveFailsBackend{Orchestrator: be, err: wantErr}
 
 	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
 		t.Fatalf("RunOne = (%+v, %v), want done", res, err)

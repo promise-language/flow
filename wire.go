@@ -69,16 +69,16 @@ const (
 )
 
 // ParkRequest is what handlers (via ctx.Park) or the SDK pass to
-// Backend.Park to mark a step blocked / waiting on input / exhausted.
+// Orchestrator.Park to mark a step blocked / waiting on input / exhausted.
 type ParkRequest struct {
 	Kind ParkKind `json:"kind"`
-	// Step is the step's ID — its ArtifactId (or SignalId), NOT the human
+	// Step is the StepId — its ArtifactId (or SignalId), NOT the human
 	// label passed as AddStep's first argument. The id is what identifies a
 	// step everywhere else (it keys the budget record, and it is the only
 	// thing `grant` accepts), so a park that named the label could not be
 	// matched to the record whose budget caused it. The SDK fills this in
 	// from LifecycleItem.Result() when a handler leaves it empty.
-	Step string     `json:"step,omitempty"`
+	Step StepId     `json:"step,omitempty"`
 	Axis BudgetAxis `json:"axis,omitempty"` // set when Kind==ParkBudgetExhausted
 	// Axes is the state of EVERY budget axis at park time, not just the one
 	// in Axis. Reporting only the tripping axis cost the operator a round-trip
@@ -220,17 +220,17 @@ func QuestionAskedAt(park *ParkRequest) time.Time {
 	return time.Time{}
 }
 
-// GrantClearsPark reports whether a grant against budget key `key` — producing
-// the post-grant record `post` — satisfies the park in `park` and so must
-// clear it. Backends call this from Grant so the rule is identical everywhere
-// (see the Backend.Grant contract).
+// GrantClearsPark reports whether a grant against the artifact `key` —
+// producing the post-grant record `post` — satisfies the park in `park` and so
+// must clear it. Orchestrators call this from Grant so the rule is identical
+// everywhere (see the Orchestrator.Grant contract).
 //
 // Only a ParkBudgetExhausted park on this very step can be cleared, and only
 // when the offending axis now has headroom: granting $0.01 against a step that
 // is $2.40 over clears nothing, and saying otherwise would report an item as
 // resumable when the next dispatch would re-park it.
-func GrantClearsPark(park *ParkRequest, key string, post ArtifactRecord, g Grant) bool {
-	if park == nil || park.Kind != ParkBudgetExhausted || park.Step != key {
+func GrantClearsPark(park *ParkRequest, key ArtifactId, post ArtifactRecord, g Grant) bool {
+	if park == nil || park.Kind != ParkBudgetExhausted || park.Step != StepId(key) {
 		return false
 	}
 	switch park.Axis {
@@ -281,22 +281,24 @@ type UserAnswer struct {
 	AnsweredAt *time.Time `json:"answered_at,omitempty"`
 }
 
-// Question is a recorded ask_user_question entry on an item: a backend-
-// assigned id plus the AgentQuestion that was asked and, once answered, the
-// UserAnswer. The embedded structs flatten into one JSON object.
+// Question is a recorded ask_user_question entry on an item: an
+// orchestrator-assigned QuestionId plus the AgentQuestion that was asked and,
+// once answered, the UserAnswer. The embedded structs flatten into one JSON
+// object.
 type Question struct {
-	ID string `json:"id"`
+	ID QuestionId `json:"id"`
 	AgentQuestion
 	UserAnswer
 
-	// AskedAt is when the backend recorded the question, on the BACKEND's
-	// clock. Optional; zero when a backend has no server-side timestamp.
+	// AskedAt is when the orchestrator recorded the question, on the
+	// ORCHESTRATOR's clock. Optional; zero when one has no server-side
+	// timestamp.
 	//
 	// It exists because "answered after the question" is decided by comparing
-	// this against reply timestamps that also come from the backend. Stamping
-	// it locally instead compares two different clocks, and a runner running
-	// even slightly fast would silently discard every answer — a stall with no
-	// diagnostic, since the reply's own timestamp never changes.
+	// this against reply timestamps that also come from the orchestrator.
+	// Stamping it locally instead compares two different clocks, and a runner
+	// running even slightly fast would silently discard every answer — a stall
+	// with no diagnostic, since the reply's own timestamp never changes.
 	AskedAt time.Time `json:"asked_at,omitempty"`
 }
 
@@ -355,6 +357,13 @@ type InvocationResult struct {
 	Status       string       `json:"status"` // done | skipped | failed | parked | blocked
 	Reason       string       `json:"reason,omitempty"`
 	Park         *ParkRequest `json:"park,omitempty"`
+
+	// Finalized reports whether the flow run was RECORDED complete, which is
+	// not the same as reaching the end of the flow: Finalize refuses an item
+	// the orchestrator does not yet consider finished, so a run can legitimately
+	// end with every step done and nothing finalized. A caller printing
+	// "finalized ✓" needs to know which happened.
+	Finalized bool `json:"finalized,omitempty"`
 
 	// DurationSeconds is the step's wall-clock time, measured by the
 	// orchestrator around handler dispatch. Zero-valued with omitempty means

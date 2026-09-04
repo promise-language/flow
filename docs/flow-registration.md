@@ -17,8 +17,8 @@ Every lifecycle item is one of three kinds:
 | Kind | Registration | Handler | Result written by |
 |---|---|---|---|
 | **Artifact step** | `AddStep(name, result, handler, cfg)` | Required — must call matching `ctx.Resolve*` | Handler |
-| **Signal step** | `AddSignalStep(name, signal, handler, cfg)` | Required — must NOT call any `ctx.Resolve*` | Backend (side effect or poll) |
-| **Signal wait** | `AwaitSignal(name, signal, cfg)` | None | Backend (side effect or poll) |
+| **Signal step** | `AddSignalStep(name, signal, handler, cfg)` | Required — must NOT call any `ctx.Resolve*` | Orchestrator (side effect or poll) |
+| **Signal wait** | `AwaitSignal(name, signal, cfg)` | None | Orchestrator (side effect or poll) |
 
 An artifact step's handler **must** call exactly one `Resolve*` matching the artifact's declared type before returning nil. A signal step's handler **must not** call any `Resolve*` — signals are never handler-writable (see [artifacts-and-signals.md](artifacts-and-signals.md)). An `AwaitSignal` item has no handler; it completes when the signal is set by any means.
 
@@ -48,7 +48,7 @@ The set of axes is closed. See [resolution.md](resolution.md) for what happens w
 
 `RequireSignal(signal)` adds an **eligibility precondition**. The flow is only selected for an item when all required signals are already set on that item. This is a gate on flow selection, not a lifecycle item — it does not appear in the step ordering and is not advanced.
 
-`IsReady(state)` reports whether all preconditions are satisfied for a given `ItemState`.
+`IsReady(state)` reports whether all preconditions are satisfied for a given `Item`.
 
 ## Ordering and completion
 
@@ -64,14 +64,14 @@ These are programming errors, not runtime conditions.
 
 ## Startup validation
 
-At startup, the SDK validates every artifact and signal reference against the backend:
+At startup, the SDK validates every artifact and signal reference against the orchestrator:
 
-- Every `ArtifactId` used by an `AddStep` must appear in `Backend.SupportedArtifacts()`, with a matching `ArtifactType`. A mismatch is refused at startup (exit 2) rather than failing at resolve-time after a step has run.
-- Every `SignalId` used by `AddSignalStep`, `AwaitSignal`, or `RequireSignal` must appear in `Backend.SupportedSignals()`. An unknown signal is refused at startup.
+- Every `ArtifactId` used by an `AddStep` must appear in `Orchestrator.SupportedArtifacts()`, with a matching `ArtifactType`. A mismatch is refused at startup (exit 2) rather than failing at resolve-time after a step has run.
+- Every `SignalId` used by `AddSignalStep`, `AwaitSignal`, or `RequireSignal` must appear in `Orchestrator.SupportedSignals()`. An unknown signal is refused at startup.
 
 ## Seeding
 
-`SeedSpec(artifactDefs)` returns the `ArtifactSpec` slice the backend pre-loads at seed time. It reads the per-step `StepConfig` values (merged with defaults) for each artifact step. Signal steps and signal waits produce no seed entries — they have no budget record.
+`SeedSpec(artifactDefs)` returns the `ArtifactSpec` slice the orchestrator pre-loads at seed time. It reads the per-step `StepConfig` values (merged with defaults) for each artifact step. Signal steps and signal waits produce no seed entries — they have no budget record.
 
 ## Cross-references
 

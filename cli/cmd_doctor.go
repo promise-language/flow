@@ -3,8 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
-
-	"github.com/promise-language/flow"
+	"strings"
 )
 
 // Output glyphs visually distinct from the rest of the SDK output so the
@@ -25,7 +24,7 @@ func (app *App) cmdDoctor(ctx context.Context, args []string) int {
 	if !app.rejectArgs("doctor", args) {
 		return 2
 	}
-	if d, ok := app.Backend.(Doctor); ok {
+	if d, ok := app.Orchestrator.(Doctor); ok {
 		if err := d.Doctor(ctx); err != nil {
 			fmt.Fprintf(app.Err, "%s doctor: %s\n", glyphFail, err)
 			return 1
@@ -34,24 +33,33 @@ func (app *App) cmdDoctor(ctx context.Context, args []string) int {
 		app.reportCapabilities()
 		return 0
 	}
-	// Fallback: list eligible items as a connectivity probe.
-	if _, err := app.Backend.ListEligible(ctx); err != nil {
-		fmt.Fprintf(app.Err, "%s doctor: backend.ListEligible failed: %s\n", glyphFail, err)
+	// Fallback: ask for the auto-selectable set as a connectivity probe.
+	if _, err := app.Orchestrator.ListAutoSelectable(ctx, nil); err != nil {
+		fmt.Fprintf(app.Err, "%s doctor: orchestrator.ListAutoSelectable failed: %s\n", glyphFail, err)
 		return 1
 	}
-	fmt.Fprintf(app.Out, "%s doctor: OK (no backend.Doctor; probed via ListEligible)\n", glyphOK)
+	fmt.Fprintf(app.Out, "%s doctor: OK (no orchestrator Doctor probe; probed via ListAutoSelectable)\n", glyphOK)
 	app.reportCapabilities()
 	return 0
 }
 
-// reportCapabilities prints which optional Backend capabilities are available.
+// reportCapabilities prints what this orchestrator declares.
+//
+// There is nothing here about OPTIONAL capabilities any more: every method is
+// required, so the only thing worth reporting is what it says it can run.
 func (app *App) reportCapabilities() {
-	_, hasInspector := app.Backend.(flow.StateInspector)
-	if hasInspector {
-		fmt.Fprintf(app.Out, "  status <id>: available (backend supports StateInspector)\n")
-	} else {
-		fmt.Fprintf(app.Out, "  status <id>: unavailable (backend does not support StateInspector; use claim first)\n")
+	gates := app.Orchestrator.SupportedGates()
+	names := make([]string, 0, len(gates))
+	for _, g := range gates {
+		names = append(names, string(g.Name))
 	}
+	fmt.Fprintf(app.Out, "  gates: %s\n", strings.Join(names, ", "))
+	cmds := app.Orchestrator.SupportedCommands()
+	cnames := make([]string, 0, len(cmds))
+	for _, c := range cmds {
+		cnames = append(cnames, string(c.Name))
+	}
+	fmt.Fprintf(app.Out, "  commands: %s\n", strings.Join(cnames, ", "))
 	if app.CarryThrough {
 		fmt.Fprintf(app.Out, "  carry-through: enabled — carries to merge (not independent review)\n")
 	}

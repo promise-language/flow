@@ -238,7 +238,7 @@ func TestParkLineOmitsAxesWhenAbsent(t *testing.T) {
 func TestGrantAcceptsFlagForParkReportedFlatAxis(t *testing.T) {
 	env := newParkGrantEnv(t)
 	// Actually spend the cost cap, so the park below describes a real record.
-	if err := env.be.AddCost(context.Background(), env.claim, "plan", 10); err != nil {
+	if err := env.be.AddCost(context.Background(), env.claim.ItemRef, "plan", 10); err != nil {
 		t.Fatalf("AddCost: %v", err)
 	}
 	// Parked on cost; prompts is flat too, and only the park knows it — the

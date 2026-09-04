@@ -24,8 +24,10 @@ type App struct {
 	// labeling and by status output.
 	Name string
 
-	// Backend implements the storage + worktree boundary. Required.
-	Backend flow.Backend
+	// Orchestrator is what the SDK talks to: it leases items to arenas, holds
+	// their state, runs gates and commands in a worktree, and lands what those
+	// produce. Required.
+	Orchestrator flow.Orchestrator
 
 	// Agent is what ctx.Agent() returns to handlers, wrapped in the
 	// SDK-metered chokepoint. Required.
@@ -35,10 +37,18 @@ type App struct {
 	// binary may reference. Required (non-empty).
 	Artifacts []flow.ArtifactDef
 
-	// Signals declares the backend-observed signals this binary cares
-	// about. Optional; every referenced signal must appear in the backend's
-	// SupportedSignals().
+	// Signals declares the orchestrator-observed signals this binary cares
+	// about. Optional; every referenced signal must appear in the
+	// orchestrator's SupportedSignals().
 	Signals []flow.SignalDef
+
+	// Gates declares the gates this binary's flows ask for beyond the two every
+	// orchestrator must have. Optional; every entry must appear in the
+	// orchestrator's SupportedGates(), and startup refuses one that does not —
+	// the same rule signals and artifacts are already under, for the same
+	// reason: a flow naming a gate nothing can run should fail before an item
+	// is claimed.
+	Gates []flow.GateName
 
 	// Telemetry is the optional sink for StepCtx.Notify calls. When nil,
 	// Notify is a no-op. NOT a liveness signal — see flow.Telemetry's
@@ -46,7 +56,7 @@ type App struct {
 	Telemetry flow.Telemetry
 
 	// Preflight is an optional cross-flow gate run on every RunOne dispatch,
-	// AFTER Backend.LoadState and the terminal-done short-circuit, and BEFORE
+	// AFTER Orchestrator.Load and the terminal-done short-circuit, and BEFORE
 	// seed / handler dispatch. Returning a non-nil error short-circuits the
 	// invocation with status="skipped"; an error wrapping flow.ErrBlocked
 	// reports status="blocked" instead, which the CLI exits non-zero on. See
@@ -58,11 +68,6 @@ type App struct {
 	// flow whose Types() match item.Type AND RequireSignal preconditions
 	// are satisfied AND has at least one pending lifecycle item.
 	Flows []*flow.Flow
-
-	// Owner overrides the principal recorded on claims. When empty, falls
-	// back to $USER (or "anonymous" if unset). Backends may apply their
-	// own canonicalization (e.g., github uses the authenticated gh login).
-	Owner string
 
 	// Quota reads the subscription windows `resolve` paces against. **Nil means
 	// no pacing**, and that is what makes pacing safe to have at all: it reaches
@@ -125,9 +130,6 @@ func RunWithArgs(app App, args []string) int {
 	}
 	if app.Name == "" {
 		app.Name = deriveBinaryName(os.Args)
-	}
-	if app.Owner == "" {
-		app.Owner = deriveOwner()
 	}
 	if app.Quota == nil {
 		app.Quota = readQuota
@@ -195,8 +197,8 @@ func RunWithArgs(app App, args []string) int {
 // validate is the startup gate. Refuses to start (returns a named error) if
 // the App is malformed in any way the SDK can detect.
 func (app *App) validate() error {
-	if app.Backend == nil {
-		return errors.New("App.Backend is required")
+	if app.Orchestrator == nil {
+		return errors.New("App.Orchestrator is required")
 	}
 	if app.Agent == nil {
 		return errors.New("App.Agent is required")
@@ -230,18 +232,51 @@ func (app *App) validate() error {
 		app.signalById[sd.Id] = sd
 	}
 
-	// Every declared signal must be supported by the backend.
+	// Every declared signal must be supported by the orchestrator.
 	supported := map[flow.SignalId]struct{}{}
-	for _, sd := range app.Backend.SupportedSignals() {
+	for _, sd := range app.Orchestrator.SupportedSignals() {
 		supported[sd.Id] = struct{}{}
 	}
 	for _, sd := range app.Signals {
 		if _, ok := supported[sd.Id]; !ok {
-			return fmt.Errorf("signal %q declared but not in Backend.SupportedSignals() (backend %q)", sd.Id, app.Backend.Name())
+			return fmt.Errorf("signal %q declared but not in Orchestrator.SupportedSignals() (orchestrator %q)", sd.Id, app.Orchestrator.Name())
 		}
 	}
 
-	// Every declared artifact must be in the backend's canonical schema — by
+	// Gates and commands are declared and validated at startup, exactly as
+	// signals and artifacts are. A flow naming a gate nothing can run fails
+	// BEFORE an item is claimed rather than part-way through one, when a step
+	// has already burned a turn getting there.
+	gates := app.Orchestrator.SupportedGates()
+	for _, want := range flow.RequiredGates() {
+		if !flow.HasGate(gates, want) {
+			return fmt.Errorf("orchestrator %q does not declare the required gate %q", app.Orchestrator.Name(), want)
+		}
+	}
+	commands := app.Orchestrator.SupportedCommands()
+	for _, want := range flow.RequiredCommands() {
+		if !flow.HasCommand(commands, want) {
+			return fmt.Errorf("orchestrator %q does not declare the required command %q", app.Orchestrator.Name(), want)
+		}
+	}
+	for _, gd := range gates {
+		if !gd.Name.Valid() {
+			return fmt.Errorf("orchestrator %q declares gate %q, which is not a valid gate name", app.Orchestrator.Name(), gd.Name)
+		}
+	}
+	for _, cd := range commands {
+		if !cd.Name.Valid() {
+			return fmt.Errorf("orchestrator %q declares command %q, which is not one of the three command names", app.Orchestrator.Name(), cd.Name)
+		}
+	}
+	// Every gate a flow names must be one the orchestrator can run.
+	for _, name := range app.Gates {
+		if !flow.HasGate(gates, name) {
+			return fmt.Errorf("gate %q declared in App.Gates but not in Orchestrator.SupportedGates() (orchestrator %q)", name, app.Orchestrator.Name())
+		}
+	}
+
+	// Every declared artifact must be in the orchestrator's canonical schema — by
 	// id AND type. Symmetric with the signal check above: a flow whose declared
 	// artifact the backend cannot persist (unknown id, or a type that
 	// disagrees with the backend's schema) could never finalize the step that
@@ -250,16 +285,16 @@ func (app *App) validate() error {
 	// per-flow loop below guarantees every step result is in App.Artifacts, so
 	// checking the declared set here transitively covers every step result.
 	recordable := map[flow.ArtifactId]flow.ArtifactDef{}
-	for _, ad := range app.Backend.SupportedArtifacts() {
+	for _, ad := range app.Orchestrator.SupportedArtifacts() {
 		recordable[ad.Id] = ad
 	}
 	for _, ad := range app.Artifacts {
 		def, ok := recordable[ad.Id]
 		if !ok {
-			return fmt.Errorf("artifact %q declared but not in Backend.SupportedArtifacts() (backend %q)", ad.Id, app.Backend.Name())
+			return fmt.Errorf("artifact %q declared but not in Orchestrator.SupportedArtifacts() (orchestrator %q)", ad.Id, app.Orchestrator.Name())
 		}
 		if def.Type != ad.Type {
-			return fmt.Errorf("artifact %q declared with type %v but Backend %q records it as %v", ad.Id, ad.Type, app.Backend.Name(), def.Type)
+			return fmt.Errorf("artifact %q declared with type %v but orchestrator %q records it as %v", ad.Id, ad.Type, app.Orchestrator.Name(), def.Type)
 		}
 	}
 
@@ -333,21 +368,11 @@ func deriveBinaryName(argv []string) string {
 	return base
 }
 
-func deriveOwner() string {
-	if u := os.Getenv("USER"); u != "" {
-		return u
-	}
-	if u := os.Getenv("USERNAME"); u != "" {
-		return u
-	}
-	return "anonymous"
-}
-
 func usage(bin string) string {
 	return fmt.Sprintf(`%[1]s — flow binary
 
 usage:
-  %[1]s doctor                       verify backend prereqs
+  %[1]s doctor                       verify orchestrator prereqs
   %[1]s list [--scope SCOPE] [--tag T] list items this flow can process
   %[1]s answer <item-id> <text>       answer a question a step is parked on
   %[1]s claim <item-id>              acquire a claim on an item
@@ -355,7 +380,7 @@ usage:
   %[1]s resolve [<item-id>]          run ALL steps until finalized or parked.
                                      With <item-id>, claims it first; else uses the active claim.
   %[1]s status [<item-id>]           read-only lifecycle checklist. With <item-id>, inspects
-                                     that item without claiming it (requires StateInspector).
+                                     that item without claiming it.
   %[1]s grant                        top up the parked step's parked axis (the usual case)
   %[1]s grant --all                  top up every pending step over its consumption
   %[1]s grant <step-id> [--invocations N] [--cost USD] [--prompts N] [--timeout SECONDS]

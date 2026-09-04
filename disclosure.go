@@ -114,6 +114,22 @@ const (
 	// the comment size limit.
 	ActAssignee     DisclosureAct = "assignee"
 	ActArtifactFile DisclosureAct = "artifact-file"
+
+	// ActItemEdit is a change to the item's own request — its title and body —
+	// through ItemEditor. It is a disclosure like any other: the result is
+	// visible to everyone who can see the item and is not undone by forgetting
+	// it happened.
+	//
+	// It is distinct from ActLabel because the two carry different things and a
+	// guard decides differently about each: a label is a name the flow
+	// constructed, while a title and a body are prose that can carry anything a
+	// caller put in them. An editor staging both proposes both, each with its
+	// own origin.
+	ActItemEdit DisclosureAct = "item-edit"
+
+	// ActBlocker records that one item waits on another. The reference is
+	// published on the item and visible to everyone who can see it.
+	ActBlocker DisclosureAct = "blocker"
 )
 
 // AllDisclosureActs returns every declared act, in declaration order. A guard
@@ -123,6 +139,7 @@ func AllDisclosureActs() []DisclosureAct {
 	return []DisclosureAct{
 		ActArtifactComment, ActStateComment, ActParkRecord, ActQuestion, ActAnswer, ActLabel,
 		ActPullRequest, ActMerge, ActPush, ActAssignee, ActArtifactFile,
+		ActItemEdit, ActBlocker,
 	}
 }
 

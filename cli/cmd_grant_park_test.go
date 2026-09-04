@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/promise-language/flow"
-	"github.com/promise-language/flow/pkg/backend/fake"
+	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
 
 // parkGrantEnv is the scaffolding for the identity/park tests: a flow with two
@@ -16,7 +16,7 @@ import (
 // signal step, seeded with explicit budgets.
 type parkGrantEnv struct {
 	app   *App
-	be    *fake.Backend
+	be    *fake.Orchestrator
 	claim flow.Claim
 	out   *bytes.Buffer
 	err   *bytes.Buffer
@@ -54,32 +54,32 @@ func newParkGrantEnv(t *testing.T) *parkGrantEnv {
 
 func (e *parkGrantEnv) seed(t *testing.T, specs []flow.ArtifactSpec) {
 	t.Helper()
-	if err := e.be.SeedState(context.Background(), e.claim, specs); err != nil {
+	if err := e.be.SeedState(context.Background(), e.claim.ItemRef, specs); err != nil {
 		t.Fatalf("SeedState: %v", err)
 	}
 }
 
 func (e *parkGrantEnv) rec(t *testing.T, id flow.ArtifactId) flow.ArtifactRecord {
 	t.Helper()
-	st, err := e.be.LoadState(context.Background(), e.claim)
+	st, err := e.be.Load(context.Background(), e.claim.ItemRef)
 	if err != nil {
-		t.Fatalf("LoadState: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 	return st.Artifact(id)
 }
 
 func (e *parkGrantEnv) park(t *testing.T, req flow.ParkRequest) {
 	t.Helper()
-	if err := e.be.Park(context.Background(), e.claim, req); err != nil {
+	if err := e.be.Park(context.Background(), e.claim.ItemRef, req); err != nil {
 		t.Fatalf("Park: %v", err)
 	}
 }
 
 func (e *parkGrantEnv) parked(t *testing.T) *flow.ParkRequest {
 	t.Helper()
-	st, err := e.be.LoadState(context.Background(), e.claim)
+	st, err := e.be.Load(context.Background(), e.claim.ItemRef)
 	if err != nil {
-		t.Fatalf("LoadState: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 	return st.Park
 }
@@ -89,7 +89,7 @@ func (e *parkGrantEnv) grant(args ...string) int {
 }
 
 // budgetExhausted is the park RunOne writes when a step burns its invocations.
-func budgetExhausted(step string, axis flow.BudgetAxis) flow.ParkRequest {
+func budgetExhausted(step flow.StepId, axis flow.BudgetAxis) flow.ParkRequest {
 	return flow.ParkRequest{Kind: flow.ParkBudgetExhausted, Step: step, Axis: axis, Reason: "test park"}
 }
 
@@ -183,7 +183,7 @@ func TestGrantTarget_SeededButNoLongerInFlow(t *testing.T) {
 	env := newParkGrantEnv(t)
 	// A second seed is refused by the fake, so reset first and seed a set that
 	// includes an id the flow no longer declares.
-	if err := env.be.ResetSeed(context.Background(), env.claim); err != nil {
+	if err := env.be.ResetSeed(context.Background(), env.claim.ItemRef); err != nil {
 		t.Fatalf("ResetSeed: %v", err)
 	}
 	env.seed(t, []flow.ArtifactSpec{
@@ -209,7 +209,7 @@ func TestGrantTarget_SeededButNoLongerInFlow(t *testing.T) {
 func TestGrantPark_InvocationsAxis(t *testing.T) {
 	env := newParkGrantEnv(t)
 	for range 3 {
-		if err := env.be.BumpInvocations(context.Background(), env.claim, "plan"); err != nil {
+		if err := env.be.BumpInvocations(context.Background(), env.claim.ItemRef, "plan"); err != nil {
 			t.Fatalf("BumpInvocations: %v", err)
 		}
 	}
@@ -232,7 +232,7 @@ func TestGrantPark_InvocationsAxis(t *testing.T) {
 
 func TestGrantPark_CostAxisUsesStepBudgetAsHeadroom(t *testing.T) {
 	env := newParkGrantEnv(t)
-	if err := env.be.AddCost(context.Background(), env.claim, "plan", 12.40); err != nil {
+	if err := env.be.AddCost(context.Background(), env.claim.ItemRef, "plan", 12.40); err != nil {
 		t.Fatalf("AddCost: %v", err)
 	}
 	env.park(t, budgetExhausted("plan", flow.AxisCost))
@@ -281,10 +281,10 @@ func TestGrantPark_PromptsAxisRaisesTheCap(t *testing.T) {
 // bare `grant` must say what will, and write nothing.
 func TestGrantPark_RefusesNonBudgetPark(t *testing.T) {
 	env := newParkGrantEnv(t)
-	if _, err := env.be.AskQuestions(context.Background(), env.claim, []flow.AgentQuestion{
+	if _, err := askAll(env.be, context.Background(), env.claim, []flow.AgentQuestion{
 		flow.AskText("which base branch?", "main, or the release branch?"),
 	}); err != nil {
-		t.Fatalf("AskQuestions: %v", err)
+		t.Fatalf("AskQuestion: %v", err)
 	}
 	env.park(t, flow.ParkRequest{Kind: flow.ParkQuestion, Step: "plan", Reason: "question pending"})
 
@@ -308,10 +308,10 @@ func TestGrantPark_RefusesNonBudgetPark(t *testing.T) {
 // the text, not the block.
 func TestGrantPark_QuestionRefusalStaysOneLine(t *testing.T) {
 	env := newParkGrantEnv(t)
-	if _, err := env.be.AskQuestions(context.Background(), env.claim, []flow.AgentQuestion{
+	if _, err := askAll(env.be, context.Background(), env.claim, []flow.AgentQuestion{
 		{Text: "should the doc be amended?\n\n```\nrelease.md §11 step 1 says `--yes` skips\n```"},
 	}); err != nil {
-		t.Fatalf("AskQuestions: %v", err)
+		t.Fatalf("AskQuestion: %v", err)
 	}
 	env.park(t, flow.ParkRequest{Kind: flow.ParkQuestion, Step: "plan", Reason: "question pending"})
 
@@ -353,7 +353,7 @@ func TestGrantPark_RefusesRefusedPark(t *testing.T) {
 
 func TestGrantPark_StaleParkOnResolvedStep(t *testing.T) {
 	env := newParkGrantEnv(t)
-	if err := env.be.ResolveArtifact(context.Background(), env.claim, "plan",
+	if err := env.be.ResolveArtifact(context.Background(), env.claim.ItemRef, "plan",
 		flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "done"}); err != nil {
 		t.Fatalf("ResolveArtifact: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestGrantPark_StaleWhenHeadroomAlreadyExists(t *testing.T) {
 
 func TestGrantPark_RejectsFlagForOtherAxis(t *testing.T) {
 	env := newParkGrantEnv(t)
-	if err := env.be.AddCost(context.Background(), env.claim, "plan", 12); err != nil {
+	if err := env.be.AddCost(context.Background(), env.claim.ItemRef, "plan", 12); err != nil {
 		t.Fatalf("AddCost: %v", err)
 	}
 	env.park(t, budgetExhausted("plan", flow.AxisCost))
@@ -414,7 +414,7 @@ func TestGrantPark_RejectsFlagForOtherAxis(t *testing.T) {
 func TestGrantPark_FlagOverridesHeadroom(t *testing.T) {
 	env := newParkGrantEnv(t)
 	for range 3 {
-		if err := env.be.BumpInvocations(context.Background(), env.claim, "plan"); err != nil {
+		if err := env.be.BumpInvocations(context.Background(), env.claim.ItemRef, "plan"); err != nil {
 			t.Fatalf("BumpInvocations: %v", err)
 		}
 	}
@@ -433,7 +433,7 @@ func TestGrantPark_FlagOverridesHeadroom(t *testing.T) {
 func TestGrantPark_AcceptsLegacyLabelInParkRecord(t *testing.T) {
 	env := newParkGrantEnv(t)
 	for range 3 {
-		if err := env.be.BumpInvocations(context.Background(), env.claim, "plan"); err != nil {
+		if err := env.be.BumpInvocations(context.Background(), env.claim.ItemRef, "plan"); err != nil {
 			t.Fatalf("BumpInvocations: %v", err)
 		}
 	}
@@ -451,7 +451,7 @@ func TestGrantPark_AcceptsLegacyLabelInParkRecord(t *testing.T) {
 // otherwise a tool grants a token amount and loops forever.
 func TestGrant_TooSmallLeavesParkAndReportsIt(t *testing.T) {
 	env := newParkGrantEnv(t)
-	if err := env.be.AddCost(context.Background(), env.claim, "plan", 12.40); err != nil {
+	if err := env.be.AddCost(context.Background(), env.claim.ItemRef, "plan", 12.40); err != nil {
 		t.Fatalf("AddCost: %v", err)
 	}
 	env.park(t, budgetExhausted("plan", flow.AxisCost))
@@ -474,11 +474,11 @@ func TestGrant_TooSmallLeavesParkAndReportsIt(t *testing.T) {
 func TestGrantAll_ToppsUpPendingOnly(t *testing.T) {
 	env := newParkGrantEnv(t)
 	for range 3 {
-		if err := env.be.BumpInvocations(context.Background(), env.claim, "plan"); err != nil {
+		if err := env.be.BumpInvocations(context.Background(), env.claim.ItemRef, "plan"); err != nil {
 			t.Fatalf("BumpInvocations: %v", err)
 		}
 	}
-	if err := env.be.ResolveArtifact(context.Background(), env.claim, "commit",
+	if err := env.be.ResolveArtifact(context.Background(), env.claim.ItemRef, "commit",
 		flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: "abc"}); err != nil {
 		t.Fatalf("ResolveArtifact: %v", err)
 	}
@@ -523,7 +523,7 @@ func TestGrantAll_RejectsStepId(t *testing.T) {
 func TestGrant_DryRunWritesNothing(t *testing.T) {
 	env := newParkGrantEnv(t)
 	for range 3 {
-		if err := env.be.BumpInvocations(context.Background(), env.claim, "plan"); err != nil {
+		if err := env.be.BumpInvocations(context.Background(), env.claim.ItemRef, "plan"); err != nil {
 			t.Fatalf("BumpInvocations: %v", err)
 		}
 	}
@@ -603,7 +603,7 @@ func TestGrantPark_ParkOnUnseededStep(t *testing.T) {
 func TestGrant_DryRunPredictsUnparkWithoutClaimingIt(t *testing.T) {
 	env := newParkGrantEnv(t)
 	for range 3 {
-		if err := env.be.BumpInvocations(context.Background(), env.claim, "plan"); err != nil {
+		if err := env.be.BumpInvocations(context.Background(), env.claim.ItemRef, "plan"); err != nil {
 			t.Fatalf("BumpInvocations: %v", err)
 		}
 	}
@@ -633,7 +633,7 @@ func TestGrantPark_TimeoutParkAlsoTopsUpExhaustedInvocations(t *testing.T) {
 	env := newParkGrantEnv(t)
 	ctx := context.Background()
 	for range 3 { // burn all 3 seeded invocations
-		if err := env.be.BumpInvocations(ctx, env.claim, "plan"); err != nil {
+		if err := env.be.BumpInvocations(ctx, env.claim.ItemRef, "plan"); err != nil {
 			t.Fatalf("BumpInvocations: %v", err)
 		}
 	}
@@ -659,11 +659,11 @@ func TestGrantPark_TimeoutParkAlsoTopsUpExhaustedCost(t *testing.T) {
 	env := newParkGrantEnv(t)
 	ctx := context.Background()
 	for range 3 {
-		if err := env.be.BumpInvocations(ctx, env.claim, "plan"); err != nil {
+		if err := env.be.BumpInvocations(ctx, env.claim.ItemRef, "plan"); err != nil {
 			t.Fatalf("BumpInvocations: %v", err)
 		}
 	}
-	if err := env.be.AddCost(ctx, env.claim, "plan", 12); err != nil {
+	if err := env.be.AddCost(ctx, env.claim.ItemRef, "plan", 12); err != nil {
 		t.Fatalf("AddCost: %v", err)
 	}
 	env.park(t, budgetExhausted("plan", flow.AxisTimeout))
@@ -713,7 +713,7 @@ func TestGrantPark_FlagSetsCollateralAxisHeadroom(t *testing.T) {
 	env := newParkGrantEnv(t)
 	ctx := context.Background()
 	for range 3 {
-		if err := env.be.BumpInvocations(ctx, env.claim, "plan"); err != nil {
+		if err := env.be.BumpInvocations(ctx, env.claim.ItemRef, "plan"); err != nil {
 			t.Fatalf("BumpInvocations: %v", err)
 		}
 	}
@@ -749,7 +749,7 @@ func TestGrantPark_RejectsExplicitZeroOnCollateralAxis(t *testing.T) {
 	env := newParkGrantEnv(t)
 	ctx := context.Background()
 	for range 3 {
-		if err := env.be.BumpInvocations(ctx, env.claim, "plan"); err != nil {
+		if err := env.be.BumpInvocations(ctx, env.claim.ItemRef, "plan"); err != nil {
 			t.Fatalf("BumpInvocations: %v", err)
 		}
 	}

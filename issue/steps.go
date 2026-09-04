@@ -15,12 +15,12 @@ import (
 type builder struct {
 	cfg     Config
 	role    Role
-	backend flow.Backend
+	backend flow.Orchestrator
 	// base is resolved lazily, on the first step that needs it — see
 	// baseBranch. Resolving it in BuildApp would put a network call between
 	// the operator and `doctor`, the command that exists to diagnose exactly
 	// the failures that call can hit.
-	base atomic.Pointer[string]
+	base atomic.Pointer[flow.BranchName]
 	// self is the backend principal, resolved lazily for the same reason.
 	self atomic.Pointer[string]
 }
@@ -206,7 +206,7 @@ func (b *builder) stepOpenBranch(ctx flow.StepCtx) error {
 	if err != nil {
 		return err
 	}
-	return ctx.ResolveCommitHash(head)
+	return ctx.ResolveCommitHash(string(head))
 }
 
 // stepImplement makes the change and drives it to a passing gate.
@@ -296,9 +296,15 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 		}
 		session = resp.SessionID
 
-		ctx.Notify("", "running the verify gate")
-		verr := wt.Verify(ctx.Context())
-		if verr == nil {
+		ctx.Notify("", "running the verify command")
+		run, rerr := wt.Run(ctx.Context(), flow.CommandVerify)
+		if rerr != nil {
+			return rerr // no command ran and no outcome exists
+		}
+		if err := verifyOutcomeError(run); err != nil {
+			return err
+		}
+		if run.ExitCode == 0 {
 			break
 		}
 		// A failure observed on an unfit machine does not reach an agent:
@@ -316,11 +322,11 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 			// work stays in the worktree either way, so a human who fixes the
 			// blocker or raises MaxFixRounds resumes from where it stopped.
 			return fmt.Errorf("verify still failing after %d fix attempts: %s",
-				attempt, verifyTail(verr))
+				attempt, verifyTail(run))
 		}
 		// Re-prompt with the failing tail. Rebuilt each round so the context
 		// carries THIS round's output, not the first round's.
-		pc.VerifyOutput = verifyTail(verr)
+		pc.VerifyOutput = verifyTail(run)
 		prompt, err = renderPrompt(b.cfg, PromptImplementFix, pc)
 		if err != nil {
 			return err
@@ -361,7 +367,7 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 	if err != nil {
 		return err
 	}
-	if head == baseSHA {
+	if string(head) == baseSHA {
 		return fmt.Errorf("branch %q carries no commits beyond %s, the commit it was cut from — "+
 			"the agent changed nothing, so there is nothing to open a pull request from",
 			b.branchName(ctx), baseSHA)
@@ -372,7 +378,7 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 	// legitimately empty — a record that may be empty, that nothing reads back,
 	// and that can disagree with what it copies. A commit names exactly one
 	// state and is never ambiguous.
-	return ctx.ResolveCommitHash(head)
+	return ctx.ResolveCommitHash(string(head))
 }
 
 // recordStepWork commits whatever the calling step changed and refuses to
@@ -477,12 +483,19 @@ func (b *builder) commitWithRepair(ctx flow.StepCtx, wt flow.Worktree, msg strin
 		// The agent may have edited files → re-verify unconditionally.
 		// For a delete-only repair this is cheap (fewer files, still valid).
 		// For a content repair it is mandatory.
-		if verr := wt.Verify(ctx.Context()); verr != nil {
-			// Verify failed after repair. Stash context and park.
+		run, rerr := wt.Run(ctx.Context(), flow.CommandVerify)
+		if rerr != nil {
+			return rerr // no command ran and no outcome exists
+		}
+		if err := verifyOutcomeError(run); err != nil {
+			return err
+		}
+		if run.ExitCode != 0 {
+			// Verify RAN and reported failures. Stash context and park.
 			ctx.RecordWorkInProgress(fmt.Sprintf(
 				"commit repair round %d: verify failed after editing.\n\n"+
 					"Hook refusal:\n%s\n\nVerify failure:\n%s",
-				round+1, lastErr, verifyTail(verr)))
+				round+1, lastErr, verifyTail(run)))
 			return ctx.Park(flow.ParkRequest{
 				Kind: flow.ParkBlocked,
 				Reason: "the pre-commit hook refused this step's commit and " +
@@ -521,7 +534,7 @@ func (b *builder) commitWithRepair(ctx flow.StepCtx, wt flow.Worktree, msg strin
 func (b *builder) itemLabel(ctx flow.StepCtx) string {
 	item := ctx.Item()
 	if item.Title == "" {
-		return "#" + item.ID
+		return "#" + item.Ref.Display
 	}
 	return item.Title
 }
@@ -584,7 +597,7 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 	item := ctx.Item()
 	title := item.Title
 	if title == "" {
-		title = fmt.Sprintf("Resolve #%s", item.ID)
+		title = fmt.Sprintf("Resolve #%s", item.Ref.Display)
 	}
 	// Check the branch back out, like every other consuming step. Relying on
 	// Open's guard instead would turn a worktree left on another item's branch
@@ -637,7 +650,7 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 		return err
 	}
 	ctx.Notify("", "pushing and opening pull request")
-	_, err = flow.Open(ctx.Context(), wt, base, title, body)
+	_, err = flow.Open(ctx.Context(), wt, flow.BranchName(base), title, body)
 	if err == nil {
 		return nil
 	}
@@ -671,7 +684,7 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 
 	// One retry.
 	ctx.Notify("", "retrying push after history rewrite")
-	_, err = flow.Open(ctx.Context(), wt, base, title, body)
+	_, err = flow.Open(ctx.Context(), wt, flow.BranchName(base), title, body)
 	if err == nil {
 		return nil
 	}
@@ -800,7 +813,7 @@ func (b *builder) recordOutstanding(ctx flow.StepCtx, wt flow.Worktree) error {
 // already does, and repeating it would make a second commit look like a second
 // resolution of the same item.
 func (b *builder) followUpCommitMessage(ctx flow.StepCtx) string {
-	return fmt.Sprintf("Review and coverage on #%s", ctx.Item().ID)
+	return fmt.Sprintf("Review and coverage on #%s", ctx.Item().Ref.Display)
 }
 
 // stepCloseBranch returns the worktree to the base branch.
@@ -826,7 +839,7 @@ func (b *builder) stepCloseBranch(ctx flow.StepCtx) error {
 	// rather than decoration: without it, a worktree missing the base branch
 	// silently gets a new branch of that name pointing at this item's tip, and
 	// every later item would be cut from the wrong place.
-	created, err := wt.Branch(ctx.Context(), base, "")
+	created, err := wt.Branch(ctx.Context(), flow.BranchName(base), "")
 	if err != nil {
 		return fmt.Errorf("close branch: checkout %s: %v: %w", base, err, flow.ErrTransient)
 	}
@@ -1166,12 +1179,12 @@ func (b *builder) answersFor(ctx flow.StepCtx) []Answer {
 // from a different issue, and — worst — the gate the request rests on measure
 // it. Nothing would notice: the request would be proposed carrying a
 // measurement of somebody else's change.
-func (b *builder) ensureBranch(ctx flow.StepCtx, wt flow.Worktree) (base string, created bool, err error) {
+func (b *builder) ensureBranch(ctx flow.StepCtx, wt flow.Worktree) (base flow.BranchName, created bool, err error) {
 	base, err = b.baseBranch(ctx.Context())
 	if err != nil {
 		return "", false, err
 	}
-	created, err = wt.Branch(ctx.Context(), b.branchName(ctx), base)
+	created, err = wt.Branch(ctx.Context(), flow.BranchName(b.branchName(ctx)), base)
 	if err != nil {
 		return "", false, err
 	}
@@ -1206,9 +1219,9 @@ func (b *builder) onClaimBranch(ctx flow.StepCtx) error {
 func (b *builder) commitMessage(ctx flow.StepCtx) string {
 	item := ctx.Item()
 	if item.Title == "" {
-		return fmt.Sprintf("Resolve #%s\n\n%s", item.ID, closesRef(item.ID))
+		return fmt.Sprintf("Resolve #%s\n\n%s", item.Ref.Display, closesRef(item.Ref.Display))
 	}
-	return fmt.Sprintf("%s\n\n%s", item.Title, closesRef(item.ID))
+	return fmt.Sprintf("%s\n\n%s", item.Title, closesRef(item.Ref.Display))
 }
 
 // closesRef renders GitHub's issue-closing reference.
@@ -1230,7 +1243,7 @@ func closesRef(id string) string {
 // The coupling is unfortunate but real: no interface exposes the backend's
 // naming, so the two are kept in the same format by hand.
 func (b *builder) branchName(ctx flow.StepCtx) string {
-	return "flow/issue-" + ctx.Item().ID
+	return "flow/issue-" + ctx.Item().Ref.Display
 }
 
 // pullRequestBody assembles the PR description from what the flow produced and
@@ -1270,7 +1283,7 @@ func (b *builder) pullRequestBody(ctx flow.StepCtx, verdict flow.GateVerdict) (s
 	// the verdict was computed from as well as the answer, so the verdict can be
 	// recomputed by whoever was not there.
 	sb.WriteString(gateSection(verdict))
-	fmt.Fprintln(&sb, closesRef(ctx.Item().ID))
+	fmt.Fprintln(&sb, closesRef(ctx.Item().Ref.Display))
 	return sb.String(), nil
 }
 
@@ -1314,11 +1327,39 @@ func gateSection(v flow.GateVerdict) string {
 // embedded in its message, so this reads the message rather than a separate
 // output channel. The TAIL is what matters: a build log's failure is at the
 // end, and the head is setup noise that would crowd out the actual error.
-func verifyTail(err error) string {
-	if err == nil {
-		return ""
+// verifyOutcomeError translates a verify run whose outcome is NOT a
+// measurement into the sentinel that says what a retry is worth.
+//
+// The three cases are not the same and used to be one `err != nil`:
+//
+//   - measured — it ran and reported. Exit 0 proceeds; a non-zero exit is a
+//     real result and costs the round it takes to fix. Not this function's
+//     business.
+//   - timed_out — the wait is the problem, not the change. ErrTransient, so the
+//     orchestrator parks WITHOUT burning an invocation: a lock that timed out
+//     is worth retrying unchanged.
+//   - could_not_start / died / broke_contract — re-running changes nothing a
+//     retry can fix. ErrRefused, so again no invocation is burned: charging a
+//     missing binary would drain the budget on identical no-op failures and
+//     then park on a budget message describing the clock rather than the cause.
+func verifyOutcomeError(run flow.CommandRun) error {
+	switch run.Outcome {
+	case flow.OutcomeMeasured:
+		return nil
+	case flow.OutcomeTimedOut:
+		return fmt.Errorf("the verify command timed out (%s): %w", run.Detail, flow.ErrTransient)
+	default:
+		return fmt.Errorf("the verify command reported %s and produced no measurement (%s): %w",
+			run.Outcome, run.Detail, flow.ErrRefused)
 	}
-	lines := strings.Split(strings.TrimRight(err.Error(), "\n"), "\n")
+}
+
+// verifyTail is the last few lines of what verify printed, for a re-prompt.
+func verifyTail(run flow.CommandRun) string {
+	if len(run.Stdout) == 0 {
+		return run.Detail
+	}
+	lines := strings.Split(strings.TrimRight(string(run.Stdout), "\n"), "\n")
 	if len(lines) > verifyTailLines {
 		lines = lines[len(lines)-verifyTailLines:]
 	}

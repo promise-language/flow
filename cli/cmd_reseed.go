@@ -18,7 +18,7 @@ func (app *App) cmdReseed(ctx context.Context, args []string) int {
 		return app.usageError("reseed: unexpected argument %q (this command takes no arguments)", fs.Arg(0))
 	}
 
-	claim, err := app.Backend.LookupActiveClaim(ctx, app.Owner)
+	claim, err := app.Orchestrator.LookupActiveClaim(ctx)
 	if err != nil {
 		fmt.Fprintln(app.Err, "reseed:", err)
 		return 1
@@ -34,9 +34,9 @@ func (app *App) cmdReseed(ctx context.Context, args []string) int {
 		return 1
 	}
 
-	if err := app.Backend.ResetSeed(ctx, *claim); err != nil {
-		if errors.Is(err, flow.ErrResetSeedUnsupported) {
-			fmt.Fprintf(app.Err, "reseed: backend %q does not support reseed\n", app.Backend.Name())
+	if err := app.Orchestrator.ResetSeed(ctx, claim.ItemRef); err != nil {
+		if errors.Is(err, flow.ErrUnsupported) {
+			fmt.Fprintf(app.Err, "reseed: backend %q does not support reseed\n", app.Orchestrator.Name())
 			return 1
 		}
 		fmt.Fprintln(app.Err, "reseed:", err)

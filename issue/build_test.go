@@ -21,8 +21,8 @@ func TestCarryThroughContributorRefused(t *testing.T) {
 		CarryThrough: true,
 	}
 	deps := Deps{
-		Backend: &buildTestBackend{role: RoleContributor},
-		Agent:   &scriptedAgent{},
+		Orchestrator: &buildTestBackend{role: RoleContributor},
+		Agent:        &scriptedAgent{},
 	}
 
 	_, err := BuildApp(context.Background(), cfg, deps)
@@ -45,8 +45,8 @@ func TestCarryThroughMaintainerAccepted(t *testing.T) {
 		CarryThrough: true,
 	}
 	deps := Deps{
-		Backend: &buildTestBackend{role: RoleMaintainer},
-		Agent:   &scriptedAgent{},
+		Orchestrator: &buildTestBackend{role: RoleMaintainer},
+		Agent:        &scriptedAgent{},
 	}
 
 	app, err := BuildApp(context.Background(), cfg, deps)
@@ -66,8 +66,8 @@ func TestCarryThroughFlowComposition(t *testing.T) {
 		CarryThrough: true,
 	}
 	deps := Deps{
-		Backend: &buildTestBackend{role: RoleMaintainer},
-		Agent:   &scriptedAgent{},
+		Orchestrator: &buildTestBackend{role: RoleMaintainer},
+		Agent:        &scriptedAgent{},
 	}
 
 	app, err := BuildApp(context.Background(), cfg, deps)
@@ -121,7 +121,7 @@ type buildTestBackend struct {
 	role Role
 }
 
-func (b *buildTestBackend) Name() string { return "stub" }
+func (b *buildTestBackend) Name() flow.OrchestratorName { return "stub" }
 func (b *buildTestBackend) SupportedSignals() []flow.SignalDef {
 	return []flow.SignalDef{
 		flow.Signal("pr-open", "pull request is open"),
@@ -141,39 +141,89 @@ func (b *buildTestBackend) SupportedArtifacts() []flow.ArtifactDef {
 		flow.Artifact("merge-commit", flow.ArtifactCommitHash),
 	}
 }
-func (b *buildTestBackend) ListEligible(context.Context) ([]flow.ItemRef, error) { return nil, nil }
-func (b *buildTestBackend) Claim(context.Context, flow.ItemRef, string, []flow.ClaimOverride) (flow.Claim, error) {
+func (b *buildTestBackend) ListAutoSelectable(context.Context, []flow.TagId) ([]flow.ItemRef, error) {
+	return nil, nil
+}
+func (b *buildTestBackend) Claim(context.Context, flow.ItemRef, []flow.ClaimOverride) (flow.Claim, error) {
 	return flow.Claim{}, nil
 }
-func (b *buildTestBackend) Release(context.Context, flow.Claim) error { return nil }
+func (b *buildTestBackend) Release(context.Context, flow.ItemRef) error { return nil }
 func (b *buildTestBackend) LookupClaim(context.Context, flow.ItemRef) (*flow.ClaimInfo, error) {
 	return nil, nil
 }
-func (b *buildTestBackend) LookupActiveClaim(context.Context, string) (*flow.Claim, error) {
+func (b *buildTestBackend) LookupActiveClaim(context.Context) (*flow.Claim, error) {
 	return nil, nil
 }
-func (b *buildTestBackend) LoadState(context.Context, flow.Claim) (*flow.ItemState, error) {
+func (b *buildTestBackend) Load(context.Context, flow.ItemRef) (*flow.Item, error) {
 	return nil, nil
 }
-func (b *buildTestBackend) SeedState(context.Context, flow.Claim, []flow.ArtifactSpec) error {
+func (b *buildTestBackend) SeedState(context.Context, flow.ItemRef, []flow.ArtifactSpec) error {
 	return nil
 }
-func (b *buildTestBackend) ResetSeed(context.Context, flow.Claim) error { return nil }
-func (b *buildTestBackend) ResolveArtifact(context.Context, flow.Claim, flow.ArtifactId, flow.ArtifactBody) error {
+func (b *buildTestBackend) ResetSeed(context.Context, flow.ItemRef) error { return nil }
+func (b *buildTestBackend) ResolveArtifact(context.Context, flow.ItemRef, flow.ArtifactId, flow.ArtifactBody) error {
 	return nil
 }
-func (b *buildTestBackend) MarkStale(context.Context, flow.Claim, flow.ArtifactId) error { return nil }
-func (b *buildTestBackend) BumpInvocations(context.Context, flow.Claim, string) error    { return nil }
-func (b *buildTestBackend) BumpPrompts(context.Context, flow.Claim, string) error        { return nil }
-func (b *buildTestBackend) AddCost(context.Context, flow.Claim, string, float64) error   { return nil }
-func (b *buildTestBackend) AddDuration(context.Context, flow.Claim, string, time.Duration) error {
+func (b *buildTestBackend) MarkStale(context.Context, flow.ItemRef, flow.ArtifactId) error {
 	return nil
 }
-func (b *buildTestBackend) Grant(context.Context, flow.Claim, string, flow.Grant) error { return nil }
-func (b *buildTestBackend) Park(context.Context, flow.Claim, flow.ParkRequest) error    { return nil }
-func (b *buildTestBackend) AskQuestions(context.Context, flow.Claim, []flow.AgentQuestion) ([]flow.Question, error) {
+func (b *buildTestBackend) BumpInvocations(context.Context, flow.ItemRef, flow.ArtifactId) error {
+	return nil
+}
+func (b *buildTestBackend) BumpPrompts(context.Context, flow.ItemRef, flow.ArtifactId) error {
+	return nil
+}
+func (b *buildTestBackend) AddCost(context.Context, flow.ItemRef, flow.ArtifactId, float64) error {
+	return nil
+}
+func (b *buildTestBackend) AddDuration(context.Context, flow.ItemRef, flow.ArtifactId, time.Duration) error {
+	return nil
+}
+func (b *buildTestBackend) Grant(context.Context, flow.ItemRef, flow.ArtifactId, flow.Grant) error {
+	return nil
+}
+func (b *buildTestBackend) Park(context.Context, flow.ItemRef, flow.ParkRequest) error { return nil }
+func (b *buildTestBackend) AskQuestion(context.Context, flow.ItemRef, flow.AgentQuestion) (flow.Question, error) {
+	return flow.Question{}, nil
+}
+func (b *buildTestBackend) Worktree(context.Context, flow.ItemRef) (flow.Worktree, error) {
 	return nil, nil
 }
-func (b *buildTestBackend) Worktree(context.Context, flow.Claim) (flow.Worktree, error) {
+
+// There are no optional capabilities, so a double is the WHOLE surface or it is
+// not an orchestrator at all. These refuse rather than pretend: ErrUnsupported
+// says "never here", which is an answer a caller can act on.
+func (b *buildTestBackend) SaveWorkInProgress(context.Context, flow.ItemRef, flow.StepId, string) error {
+	return flow.ErrUnsupported
+}
+func (b *buildTestBackend) LoadWorkInProgress(context.Context, flow.ItemRef, flow.StepId) (string, error) {
+	return "", nil
+}
+func (b *buildTestBackend) ClearWorkInProgress(context.Context, flow.ItemRef, flow.StepId) error {
+	return nil
+}
+func (b *buildTestBackend) PostAnswer(context.Context, flow.ItemRef, flow.QuestionId, string) error {
+	return flow.ErrUnsupported
+}
+func (b *buildTestBackend) Finalize(context.Context, flow.ItemRef) error { return nil }
+func (b *buildTestBackend) Get(context.Context, flow.ItemRef, flow.BinaryName, func(flow.ItemType) bool) (*flow.ItemInfo, error) {
+	return nil, flow.ErrUnsupported
+}
+func (b *buildTestBackend) List(context.Context, flow.ItemScope, flow.BinaryName, func(flow.ItemType) bool) ([]flow.ItemInfo, error) {
 	return nil, nil
 }
+func (b *buildTestBackend) Edit(context.Context, flow.ItemRef) (flow.ItemEditor, error) {
+	return nil, flow.ErrUnsupported
+}
+func (b *buildTestBackend) SupportedGates() []flow.GateDef {
+	return []flow.GateDef{flow.Gate(flow.GateIntegration, true), flow.Gate(flow.GateFit, true)}
+}
+func (b *buildTestBackend) SupportedCommands() []flow.CommandDef {
+	return []flow.CommandDef{flow.Command(flow.CommandVerify)}
+}
+
+func (b *buildTestBackend) ResolveRef(_ context.Context, input string) (flow.ItemRef, error) {
+	return flow.ItemRef{OrchestratorName: b.Name(), Display: input}, nil
+}
+
+var _ flow.Orchestrator = (*buildTestBackend)(nil)

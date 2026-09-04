@@ -4,18 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/promise-language/flow"
-	"github.com/promise-language/flow/pkg/backend/fake"
+	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
 
 // refResolverBackend wraps the fake backend with a flow.RefResolver fast path
 // and records whether (and with what id) it was consulted.
 type refResolverBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	called bool
 	gotID  string
 }
@@ -23,15 +24,15 @@ type refResolverBackend struct {
 func (r *refResolverBackend) ResolveRef(ctx context.Context, id string) (flow.ItemRef, error) {
 	r.called = true
 	r.gotID = id
-	return flow.ItemRef{BackendName: "fake", Display: id, Ref: json.RawMessage(`"` + id + `"`)}, nil
+	return flow.ItemRef{OrchestratorName: "fake", Display: id, Ref: json.RawMessage(`"` + id + `"`)}, nil
 }
 
 // When the backend implements RefResolver, resolveClaimRef uses it directly and
 // never calls ListEligible — proven here by adding NO items to the fake yet
 // still resolving a ref.
 func TestResolveClaimRef_UsesRefResolver(t *testing.T) {
-	be := &refResolverBackend{Backend: fake.New()}
-	app := &App{Backend: be}
+	be := &refResolverBackend{Orchestrator: fake.New()}
+	app := &App{Orchestrator: be}
 
 	ref, err := app.resolveClaimRef(context.Background(), "T0435")
 	if err != nil {
@@ -52,8 +53,8 @@ func TestResolveClaimRef_UsesRefResolver(t *testing.T) {
 // matching the display string.
 func TestResolveClaimRef_FallsBackToListMatch(t *testing.T) {
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "T0435", Type: "task", Title: "T0435"})
-	app := &App{Backend: be}
+	be.AddItem("T0435", flow.Item{Type: "task", Title: "T0435"})
+	app := &App{Orchestrator: be}
 
 	ref, err := app.resolveClaimRef(context.Background(), "T0435")
 	if err != nil {
@@ -64,27 +65,39 @@ func TestResolveClaimRef_FallsBackToListMatch(t *testing.T) {
 	}
 }
 
-// The fallback path errors when no eligible item matches the id.
-func TestResolveClaimRef_FallbackNoMatch(t *testing.T) {
-	be := fake.New()
-	app := &App{Backend: be}
+// ResolveRef is the ONE place a value enters the contract before it is an
+// identity, so its refusal is the only way a bad id is caught. Matching on
+// Display would resolve by substring and first match — AN item rather than THE
+// item — which is why that path no longer exists.
+func TestResolveClaimRef_ReportsTheOrchestratorsRefusal(t *testing.T) {
+	app := &App{Orchestrator: refusingRefBackend{fake.New()}}
 
-	if _, err := app.resolveClaimRef(context.Background(), "T9999"); err == nil {
-		t.Error("expected error when no eligible item matches")
+	_, err := app.resolveClaimRef(context.Background(), "T9999")
+	if err == nil {
+		t.Fatal("expected the orchestrator's refusal to reach the caller")
 	}
+	if !strings.Contains(err.Error(), "T9999") {
+		t.Errorf("err = %v, want it to name the input that could not be resolved", err)
+	}
+}
+
+type refusingRefBackend struct{ *fake.Orchestrator }
+
+func (b refusingRefBackend) ResolveRef(_ context.Context, input string) (flow.ItemRef, error) {
+	return flow.ItemRef{}, fmt.Errorf("no item named %q", input)
 }
 
 // recordingClaimBackend captures the overrides passed to Claim so the
 // flag-after-positional test can assert that the flag is actually
 // parsed (and not silently dropped).
 type recordingClaimBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	lastOverrides []flow.ClaimOverride
 }
 
-func (r *recordingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
+func (r *recordingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, overrides []flow.ClaimOverride) (flow.Claim, error) {
 	r.lastOverrides = overrides
-	return r.Backend.Claim(ctx, ref, owner, overrides)
+	return r.Orchestrator.Claim(ctx, ref, overrides)
 }
 
 // T0484: `claim <id> --force` (bool flag after the positional) must parse and
@@ -93,14 +106,13 @@ func (r *recordingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, own
 // "unexpected argument".
 func TestCmdClaim_ForceAfterPositional(t *testing.T) {
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "T0001", Type: "task", Title: "T0001"})
-	wrapped := &recordingClaimBackend{Backend: be}
+	be.AddItem("T0001", flow.Item{Type: "task", Title: "T0001"})
+	wrapped := &recordingClaimBackend{Orchestrator: be}
 
 	app := &App{
-		Backend: wrapped,
-		Owner:   "alice",
-		Out:     newDiscardWriter(),
-		Err:     newDiscardWriter(),
+		Orchestrator: wrapped,
+		Out:          newDiscardWriter(),
+		Err:          newDiscardWriter(),
 	}
 
 	code := app.cmdClaim(context.Background(), []string{"T0001", "--force"})
@@ -121,14 +133,13 @@ func TestCmdClaim_ForceAfterPositional(t *testing.T) {
 // --force-unadmitted must pass OverrideUnadmitted to Backend.Claim.
 func TestCmdClaim_ForceUnadmittedFlag(t *testing.T) {
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "T0001", Type: "task", Title: "T0001"})
-	wrapped := &recordingClaimBackend{Backend: be}
+	be.AddItem("T0001", flow.Item{Type: "task", Title: "T0001"})
+	wrapped := &recordingClaimBackend{Orchestrator: be}
 
 	app := &App{
-		Backend: wrapped,
-		Owner:   "alice",
-		Out:     newDiscardWriter(),
-		Err:     newDiscardWriter(),
+		Orchestrator: wrapped,
+		Out:          newDiscardWriter(),
+		Err:          newDiscardWriter(),
 	}
 
 	code := app.cmdClaim(context.Background(), []string{"T0001", "--force-unadmitted"})
@@ -146,22 +157,22 @@ func TestCmdClaim_ForceUnadmittedFlag(t *testing.T) {
 
 // refusingClaimBackend always returns an ErrClaimRefused from Claim.
 type refusingClaimBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	refusal flow.ErrClaimRefused
 }
 
-func (b *refusingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
+func (b *refusingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, overrides []flow.ClaimOverride) (flow.Claim, error) {
 	return flow.Claim{}, b.refusal
 }
 
 // cmdClaim must render a typed refusal via formatClaimRefusal and exit 1.
 func TestCmdClaim_RefusalRendering(t *testing.T) {
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "T0001", Type: "task", Title: "T0001"})
+	be.AddItem("T0001", flow.Item{Type: "task", Title: "T0001"})
 	errBuf := &bytes.Buffer{}
 	app := &App{
-		Backend: &refusingClaimBackend{
-			Backend: be,
+		Orchestrator: &refusingClaimBackend{
+			Orchestrator: be,
 			refusal: flow.ErrClaimRefused{
 				Code:     "not-admitted",
 				Reason:   "arena not admitted",
@@ -170,9 +181,8 @@ func TestCmdClaim_RefusalRendering(t *testing.T) {
 				Override: "force-unadmitted",
 			},
 		},
-		Owner: "alice",
-		Out:   newDiscardWriter(),
-		Err:   errBuf,
+		Out: newDiscardWriter(),
+		Err: errBuf,
 	}
 
 	code := app.cmdClaim(context.Background(), []string{"T0001"})

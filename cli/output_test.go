@@ -75,11 +75,11 @@ func decode(t *testing.T, b *bytes.Buffer) map[string]any {
 
 func TestStatusJSON_Schema(t *testing.T) {
 	env := newParkGrantEnv(t)
-	if err := env.be.ResolveArtifact(context.Background(), env.claim, "plan",
+	if err := env.be.ResolveArtifact(context.Background(), env.claim.ItemRef, "plan",
 		flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "done"}); err != nil {
 		t.Fatalf("ResolveArtifact: %v", err)
 	}
-	if err := env.be.BumpInvocations(context.Background(), env.claim, "commit"); err != nil {
+	if err := env.be.BumpInvocations(context.Background(), env.claim.ItemRef, "commit"); err != nil {
 		t.Fatalf("BumpInvocations: %v", err)
 	}
 	env.park(t, budgetExhausted("commit", flow.AxisInvocations))
@@ -166,7 +166,7 @@ func TestStatusHuman_IDFirstChecklist(t *testing.T) {
 func TestGrantJSON_Schema(t *testing.T) {
 	env := newParkGrantEnv(t)
 	for range 3 {
-		if err := env.be.BumpInvocations(context.Background(), env.claim, "plan"); err != nil {
+		if err := env.be.BumpInvocations(context.Background(), env.claim.ItemRef, "plan"); err != nil {
 			t.Fatalf("BumpInvocations: %v", err)
 		}
 	}
@@ -222,13 +222,14 @@ func TestListJSON_Schema(t *testing.T) {
 		t.Fatalf("items = %v, want one", items)
 	}
 	it, _ := items[0].(map[string]any)
-	for _, key := range []string{"display", "owner", "backend"} {
+	for _, key := range []string{"display", "owner", "orchestrator"} {
 		if _, ok := it[key]; !ok {
 			t.Errorf("item missing %q: %v", key, it)
 		}
 	}
-	if it["owner"] != "alice" {
-		t.Errorf("owner = %v, want alice", it["owner"])
+	// The holder is the account the arena acts as — ambient, never supplied.
+	if it["owner"] == "" || it["owner"] == nil {
+		t.Errorf("owner = %v, want the holding account", it["owner"])
 	}
 }
 
@@ -242,9 +243,9 @@ func TestListJSON_EmptyIsArray(t *testing.T) {
 	out := &bytes.Buffer{}
 	app.Out, app.Err = out, &bytes.Buffer{}
 	app.Output = OutputJSON
-	// The fake lists the one registered item; drop it by pointing the app at a
-	// backend whose item set is empty.
-	app.Backend = emptyListBackend{app.Backend}
+	// The fake lists the one registered item; drop it by pointing the app at an
+	// orchestrator whose item set is empty.
+	app.Orchestrator = emptyListBackend{app.Orchestrator}
 
 	if code := app.cmdList(context.Background(), nil); code != 0 {
 		t.Fatalf("cmdList = %d", code)
@@ -255,9 +256,15 @@ func TestListJSON_EmptyIsArray(t *testing.T) {
 }
 
 // emptyListBackend is the wrapped backend with nothing eligible.
-type emptyListBackend struct{ flow.Backend }
+type emptyListBackend struct{ flow.Orchestrator }
 
-func (emptyListBackend) ListEligible(context.Context) ([]flow.ItemRef, error) { return nil, nil }
+func (emptyListBackend) List(context.Context, flow.ItemScope, flow.BinaryName, func(flow.ItemType) bool) ([]flow.ItemInfo, error) {
+	return nil, nil
+}
+
+func (emptyListBackend) ListAutoSelectable(context.Context, []flow.TagId) ([]flow.ItemRef, error) {
+	return nil, nil
+}
 
 // A typo in FLOW_OUTPUT must not silently pick the opposite mode.
 func TestResolveOutput_UnknownEnvWarns(t *testing.T) {
