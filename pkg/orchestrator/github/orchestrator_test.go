@@ -223,6 +223,30 @@ func (m *ghMock) server() *httptest.Server {
 func (m *ghMock) handleIssue(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// PATCH is how the editor lands title, body and labels — the three
+	// together, in one request, which is what makes them atomic. Applying it
+	// here is what lets a test assert that a refused edit wrote NOTHING: a mock
+	// that ignored the write would report an unchanged issue either way.
+	if r.Method == http.MethodPatch {
+		var doc struct {
+			Title  *string   `json:"title"`
+			Body   *string   `json:"body"`
+			Labels *[]string `json:"labels"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&doc); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		if doc.Title != nil {
+			m.issueTitle = *doc.Title
+		}
+		if doc.Body != nil {
+			m.issueBody = *doc.Body
+		}
+		if doc.Labels != nil {
+			m.issueLabels = append([]string(nil), *doc.Labels...)
+		}
+	}
 	writeJSON(w, map[string]any{
 		"number":     m.issueNum,
 		"title":      m.issueTitle,
