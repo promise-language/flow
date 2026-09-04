@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -188,6 +189,39 @@ func TestRunGate_ClassifiesWhatItObserved(t *testing.T) {
 	}
 }
 
+// "Absence and truncation are one case" is a TOTAL claim, and the table above
+// samples it at one point: a stop after a comma. The runner reaches it from a
+// single signal — the parse error being io.EOF or io.ErrUnexpectedEOF — so the
+// claim holds exactly as far as that signal reaches, and a truncation point it
+// misses is reported broke_contract, which hands a dead machine to the gate's
+// author.
+//
+// Every prefix is a place a writer can stop, and the envelope below carries
+// each JSON value kind so the prefixes cover stopping mid-key, mid-string,
+// mid-number, mid-literal, inside a nested object and inside an array. The
+// empty prefix is the absence end of the same case.
+//
+// Only this direction is checked here. The other one — that the signal does not
+// spread to a gate that FINISHED printing something else, which would report a
+// gate's own defect as a dead host — is what the broke_contract rows of the
+// table above already pin, end to end.
+func TestParseEnvelope_TruncationAnywhereIsEOFShaped(t *testing.T) {
+	const envelope = `{"gate":"tested","ok":true,"n":12.5,"list":[1,2],"sub":{"k":"v"},"s":"abc"}`
+
+	for i := 0; i < len(envelope); i++ {
+		prefix := envelope[:i]
+		err := parseEnvelope([]byte(prefix))
+		if err == nil {
+			t.Errorf("parseEnvelope(%q) = nil — a prefix of an envelope is not an envelope", prefix)
+			continue
+		}
+		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Errorf("parseEnvelope(%q) = %v, which is not EOF-shaped: the runner reads it as "+
+				"broke_contract and sends a dead host to the gate's author", prefix, err)
+		}
+	}
+}
+
 // A gate the host killed has not reported, whatever it managed to print first.
 // The signal is the runner's observation; the envelope would be the gate's
 // claim, and the gate was not alive to finish making it.
@@ -211,6 +245,35 @@ func TestRunGate_ASignalIsDeathEvenWithAnEnvelopeOnStdout(t *testing.T) {
 	// runner exists to report and an exit code cannot.
 	if run.ExitCode != -1 {
 		t.Errorf("ExitCode = %d, want -1 — a killed process chose no exit code", run.ExitCode)
+	}
+}
+
+// The declared timeout outranks stdout too, and it lands somewhere else than a
+// signal does. A gate killed at the timeout mid-write leaves a truncated
+// envelope behind — the runner's signal for died — but the runner knows why
+// this one stopped, and only timed_out is worth retrying unchanged. Classifying
+// it from the stdout would report a sick host for a gate that needed longer,
+// and the retry that would have fixed it never happens.
+//
+// The timeout tests print nothing, so there the deadline and the parse agree on
+// the answer and either order passes. This is the case where they disagree, and
+// it is the one a literal reading of "absence and truncation are one case"
+// breaks.
+func TestRunGate_TheDeclaredTimeoutOutranksTheTruncationItCaused(t *testing.T) {
+	requireRealProcesses(t)
+
+	// exec replaces the shell and flushes first, so the half-envelope is on the
+	// pipe before the kill.
+	w, _ := gateWorktree(t, "printf '{\"gate\":\"tes'\nexec sleep 60", 200*time.Millisecond)
+	run, err := w.RunGate(context.Background(), flow.GateIntegration)
+	if err != nil {
+		t.Fatalf("RunGate: %v", err)
+	}
+	if !strings.Contains(string(run.Stdout), `{"gate":"tes`) {
+		t.Fatalf("Stdout = %q, want the half-envelope — without it this is not the case under test", run.Stdout)
+	}
+	if run.Outcome != flow.OutcomeTimedOut {
+		t.Errorf("outcome = %q, want %q (detail: %s)", run.Outcome, flow.OutcomeTimedOut, run.Detail)
 	}
 }
 

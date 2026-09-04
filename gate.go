@@ -40,16 +40,26 @@ const (
 	OutcomeCouldNotStart Outcome = "could_not_start"
 
 	// OutcomeDied — killed by a signal, or exited without printing a readable
-	// envelope. The problem is the host. Silence is absence, not a malformed
-	// envelope, so a truncated envelope lands here and not on
-	// OutcomeBrokeContract.
+	// envelope. The problem is the host, not the gate's own code.
+	//
+	// The envelope is written whole, so ABSENCE AND TRUNCATION are one case and
+	// both land here: silence is absence, not a malformed envelope, and a
+	// truncated envelope is a stream that stopped because its writer stopped
+	// existing. Neither is OutcomeBrokeContract, which — of the things a gate
+	// prints — is what a gate that finished printing chose to print, and which a
+	// gate also reaches by modifying what it measured, whatever it printed.
 	OutcomeDied Outcome = "died"
 
 	// OutcomeBrokeContract — the gate broke the protocol it runs under: it
-	// printed something that is not an envelope, or it MODIFIED WHAT IT
-	// MEASURED. The problem is in the gate's own code, which is a different
-	// repository from an absent program and a different one again from the
-	// change under measurement.
+	// finished printing something that is still not an envelope, or it MODIFIED
+	// WHAT IT MEASURED. The problem is in the gate's own code, which is a
+	// different repository from an absent program and a different one again from
+	// the change under measurement.
+	//
+	// A truncated envelope is NOT this case, though it is also not an envelope:
+	// a stream that stops mid-value is a writer that stopped existing, which is
+	// the host's failure and lands on OutcomeDied. Attributing it here hands a
+	// dead machine to the gate's author.
 	//
 	// A gate that modifies is a protocol violation, not a gate with a side
 	// effect: the state it reported on no longer exists, so nothing can
