@@ -45,8 +45,9 @@ const (
 	// The envelope is written whole, so ABSENCE AND TRUNCATION are one case and
 	// both land here: silence is absence, not a malformed envelope, and a
 	// truncated envelope is a stream that stopped because its writer stopped
-	// existing. Neither is OutcomeBrokeContract, which is what a gate that
-	// finished printing chose to print.
+	// existing. Neither is OutcomeBrokeContract, which — of the things a gate
+	// prints — is what a gate that finished printing chose to print, and which a
+	// gate also reaches by modifying what it measured, whatever it printed.
 	OutcomeDied Outcome = "died"
 
 	// OutcomeBrokeContract — the gate broke the protocol it runs under: it
