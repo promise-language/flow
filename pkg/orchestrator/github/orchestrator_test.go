@@ -41,6 +41,13 @@ type ghMock struct {
 	// POST that landed). "stripped": deleted on read (another actor removed it).
 	claimTokenRead string
 
+	// strictLabelRemoval answers a DELETE of a label the issue does not carry
+	// with 404, the way GitHub does. Off by default because the removal is
+	// lenient here for every caller that removes a label it is unsure of; a
+	// test asserting what happens to a removal that FAILS has to turn it on,
+	// since a mock that says 200 either way cannot express the failure.
+	strictLabelRemoval bool
+
 	// blockers this issue waits on, served by the dependency endpoint
 	blockedBy []ghMockBlocker
 
@@ -394,6 +401,12 @@ func (m *ghMock) handleIssueLabels(w http.ResponseWriter, r *http.Request) {
 func (m *ghMock) handleRemoveLabel(w http.ResponseWriter, r *http.Request, name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.strictLabelRemoval && !contains(m.issueLabels, name) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Label does not exist"}`))
+		return
+	}
 	out := m.issueLabels[:0]
 	for _, lbl := range m.issueLabels {
 		if lbl != name {
