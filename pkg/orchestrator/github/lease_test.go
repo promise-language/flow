@@ -202,10 +202,27 @@ func TestBackend_Claim_ZeroContenderRefusalDoesNotOrphanItsToken(t *testing.T) {
 				t.Error("ItemScoped = false; the refusal is about this item, and another may still succeed")
 			}
 
+			// The removal has to be ASKED FOR, not merely absent afterwards.
+			// Under "stripped" the token is gone from the issue whether or not
+			// the attempt removed it, so only the request the attempt sent
+			// distinguishes cleaning up from walking away.
+			mock.mu.Lock()
+			tape := append([]string(nil), mock.mutations...)
+			mock.mu.Unlock()
+			removed := false
+			for _, m := range tape {
+				if strings.HasPrefix(m, "DELETE ") && strings.Contains(m, "/labels/"+b.labels.ClaimPrefix()) {
+					removed = true
+				}
+			}
+			if !removed {
+				t.Errorf("requests = %v, want a DELETE of the %s* label — the refused attempt walked away from its token",
+					tape, b.labels.ClaimPrefix())
+			}
 			for _, l := range mock.labelNames() {
-				if strings.HasPrefix(l, "flow:claim:") {
-					t.Errorf("labels = %v, want no flow:claim:* — the refused attempt orphaned its token",
-						mock.labelNames())
+				if strings.HasPrefix(l, b.labels.ClaimPrefix()) {
+					t.Errorf("labels = %v, want no %s* — the refused attempt orphaned its token",
+						mock.labelNames(), b.labels.ClaimPrefix())
 				}
 			}
 			// And it took no lease on the way out.
