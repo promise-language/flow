@@ -185,14 +185,16 @@ func discoverAPIBase() (string, string) {
 		}
 	}
 
-	// Try running `claude config get apiBaseUrl` to discover from the binary.
-	if out, err := exec.Command("claude", "config", "get", "apiBaseUrl").Output(); err == nil {
-		s := strings.TrimSpace(string(out))
-		if s != "" && strings.HasPrefix(s, "http") {
-			return strings.TrimSuffix(s, "/"), ""
-		}
-	}
-
+	// Nothing here invokes the agent binary. `claude config get apiBaseUrl` used
+	// to run at this point: `config` is not a subcommand, so the whole argv was
+	// taken as a PROMPT and every caller spawned a full agent turn — unbounded,
+	// untimed, billed, and reached from `go test`, which is what made the gate's
+	// runtime a function of account state rather than of the tree.
+	//
+	// Correcting the arguments would not be the fix. A tool must never be able
+	// to emit a prompt, so discovery reads configuration and stops: settings on
+	// disk above, this default otherwise. Anything that cannot be learned by
+	// reading is not learned here.
 	return "https://api.anthropic.com", ""
 }
 

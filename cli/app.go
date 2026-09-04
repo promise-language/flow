@@ -64,6 +64,20 @@ type App struct {
 	// own canonicalization (e.g., github uses the authenticated gh login).
 	Owner string
 
+	// Quota reads the subscription windows `resolve` paces against. **Nil means
+	// no pacing**, and that is what makes pacing safe to have at all: it reaches
+	// live account state, so a caller that has not asked for it does not get it.
+	//
+	// A test must never set this. Pacing sleeps for as long as the account says,
+	// so a test that paced would take a length of time nobody chose and would
+	// make the gate's result a function of usage rather than of the tree — which
+	// is what once took bin/verify past its ten-minute package timeout with the
+	// tree perfectly sound.
+	//
+	// Run installs the real reader when it is nil, so the binary paces and a
+	// unit test calling a command directly does not.
+	Quota func() ([]windowUsage, error)
+
 	// VerifyCmd is the project's verify command (e.g. "bin/verify --wasm" or
 	// "make check"). It is the single source of truth a flow binary configures
 	// once, here, instead of hardcoding it in each step handler and prompt:
@@ -114,6 +128,9 @@ func RunWithArgs(app App, args []string) int {
 	}
 	if app.Owner == "" {
 		app.Owner = deriveOwner()
+	}
+	if app.Quota == nil {
+		app.Quota = readQuota
 	}
 	if err := app.validate(); err != nil {
 		fmt.Fprintln(app.Err, "startup error:", err)

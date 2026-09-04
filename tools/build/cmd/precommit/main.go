@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/promise-language/flow/tools/build/common"
@@ -17,8 +18,9 @@ Usage:
   precommit [-h | -help]
 
 Normally invoked by .githooks/pre-commit, not by hand. Rejects staged
-binaries under bin/ and any commit whose author or committer email is not a
-@users.noreply.github.com address.`
+binaries under bin/, any commit whose author or committer email is not a
+@users.noreply.github.com address, and any agent invocation from a test or
+from outside the claude package.`
 
 func main() {
 	common.MaybeHelp(os.Args[1:], usage)
@@ -30,6 +32,9 @@ func main() {
 	// 'go run'), never a commit, so blocking here is a speed bump, not a trap.
 	common.CheckStale(repoRoot, sourceHash)
 	if err := common.RunPrecommit(repoRoot); err != nil {
+		// Say why. A gate that refuses a commit and prints nothing is a gate
+		// the developer works around instead of satisfying.
+		fmt.Fprintln(os.Stderr, "pre-commit:", err)
 		os.Exit(1)
 	}
 }

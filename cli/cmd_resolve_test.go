@@ -1577,6 +1577,13 @@ func TestCmdResolve_RunnerSuppressesDisplayButNotPacing(t *testing.T) {
 	be := fake.New()
 	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestApp(t, be)
+	// Injected and failing: this asserts pacing is attempted even under a
+	// runner, and the warning is the evidence it was. Reaching the real reader
+	// would make the assertion depend on whether this machine happens to hold
+	// credentials, and would sleep when it does.
+	app.Quota = func() ([]windowUsage, error) {
+		return nil, fmt.Errorf("no credentials (injected)")
+	}
 
 	code := app.cmdResolve(context.Background(), nil)
 	if code != 0 {
@@ -1628,10 +1635,19 @@ func TestCmdResolve_QuotaUnreadableWarnedOnce(t *testing.T) {
 	t.Setenv(dispatchedByRunnerEnv, "")
 	be := fake.New()
 	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
-	// Default pacing targets are non-zero, so readQuota is called on every
-	// loop iteration. With an empty config dir it always fails. The loop
-	// runs at least twice (step + finalize), so the dedup guard is exercised.
+	// The warning is what this test is about, so the reader is injected and
+	// fails. It used to rely on an empty CLAUDE_CONFIG_DIR making the real
+	// reader fail — but that reader also searches the macOS Keychain, which no
+	// environment variable controls, so on a machine with credentials it
+	// SUCCEEDED, paced, and slept for as long as the account said. That is what
+	// hung this package for ten minutes with the tree sound.
+	//
+	// The loop runs at least twice (step + finalize), so the dedup guard is
+	// still exercised.
 	app, _, errBuf := resolveTestApp(t, be)
+	app.Quota = func() ([]windowUsage, error) {
+		return nil, fmt.Errorf("no credentials (injected)")
+	}
 
 	code := app.cmdResolve(context.Background(), nil)
 	if code != 0 {

@@ -235,8 +235,8 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	for range maxResolveSteps {
 		// Pace against subscription quota. The check is before dispatch so the
 		// delay costs nothing that is in flight.
-		if targets.FiveHour > 0 || targets.SevenDay > 0 {
-			if usage, qerr := readQuota(); qerr == nil {
+		if app.Quota != nil && (targets.FiveHour > 0 || targets.SevenDay > 0) {
+			if usage, qerr := app.Quota(); qerr == nil {
 				if d := paceDelay(usage, targets, time.Now()); d > 0 {
 					fmt.Fprintf(app.Err, "resolve: pacing — waiting %s for quota headroom\n", formatDurationCompact(d))
 					select {
