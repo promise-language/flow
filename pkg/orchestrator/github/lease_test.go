@@ -164,6 +164,176 @@ func TestBackend_Claim_NamesTheArenaItBinds(t *testing.T) {
 	}
 }
 
+// A claim attempt that loses reports that it lost; IT DOES NOT PARTIALLY APPLY
+// (docs/resolution-standalone.md, "Claiming without a lease service"). The
+// zero-contender branch returned its refusal while leaving the flow:claim:<hex>
+// it had just posted on the issue — a token on an item no process holds, which
+// `labels.Maintained` will not let ItemEditor.RemoveTag delete and `release`
+// does not touch, so the next claimer whose random token sorts larger loses to
+// nobody.
+//
+// The branch fires on either of two events the read cannot tell apart, so both
+// are exercised: a read too stale to show a POST that landed, and a token
+// another actor genuinely stripped.
+func TestBackend_Claim_ZeroContenderRefusalDoesNotOrphanItsToken(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		claimTokenRead string
+	}{
+		{"stale read", "hidden"},
+		{"stripped by another actor", "stripped"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := newGHMock(t)
+			mock.claimTokenRead = tc.claimTokenRead
+			srv := mock.server()
+			t.Cleanup(srv.Close)
+			b := newMockedOrchestrator(t, mock, srv)
+
+			_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+			var refused flow.ErrClaimRefused
+			if !errors.As(err, &refused) {
+				t.Fatalf("Claim error = %v, want ErrClaimRefused — a token absent on re-read is a loss", err)
+			}
+			if refused.Code != "claim-race" {
+				t.Errorf("Code = %q, want claim-race", refused.Code)
+			}
+			if !refused.ItemScoped {
+				t.Error("ItemScoped = false; the refusal is about this item, and another may still succeed")
+			}
+
+			// The removal has to be ASKED FOR, not merely absent afterwards.
+			// Under "stripped" the token is gone from the issue whether or not
+			// the attempt removed it, so only the request the attempt sent
+			// distinguishes cleaning up from walking away.
+			mock.mu.Lock()
+			tape := append([]string(nil), mock.mutations...)
+			mock.mu.Unlock()
+			removed := false
+			for _, m := range tape {
+				if strings.HasPrefix(m, "DELETE ") && strings.Contains(m, "/labels/"+b.labels.ClaimPrefix()) {
+					removed = true
+				}
+			}
+			if !removed {
+				t.Errorf("requests = %v, want a DELETE of the %s* label — the refused attempt walked away from its token",
+					tape, b.labels.ClaimPrefix())
+			}
+			for _, l := range mock.labelNames() {
+				if strings.HasPrefix(l, b.labels.ClaimPrefix()) {
+					t.Errorf("labels = %v, want no %s* — the refused attempt orphaned its token",
+						mock.labelNames(), b.labels.ClaimPrefix())
+				}
+			}
+			// And it took no lease on the way out.
+			if contains(mock.labelNames(), "flow:owner:alice") {
+				t.Errorf("labels = %v, want no owner label — the attempt lost", mock.labelNames())
+			}
+			mock.mu.Lock()
+			assignees := append([]string(nil), mock.assignees...)
+			mock.mu.Unlock()
+			if len(assignees) != 0 {
+				t.Errorf("assignees = %v, want none — the attempt lost", assignees)
+			}
+		})
+	}
+}
+
+// The cleanup on this path is BEST-EFFORT, and has to be. One of the two events
+// that fires the branch — another actor stripped our token — leaves nothing to
+// remove, so GitHub answers the DELETE with 404. That 404 must not become the
+// caller's error: `cmdResolve`'s auto-select loop moves to the next item on an
+// item-scoped ErrClaimRefused and exits 1 on anything else, so a surfaced
+// removal failure would end a whole resolve run over a lost race.
+func TestBackend_Claim_ZeroContenderRefusalSurvivesA404OnItsOwnRemoval(t *testing.T) {
+	mock := newGHMock(t)
+	mock.claimTokenRead = "stripped" // the token is gone by the time we DELETE it
+	mock.strictLabelRemoval = true   // and GitHub says so, rather than shrugging
+	srv := mock.server()
+	t.Cleanup(srv.Close)
+	b := newMockedOrchestrator(t, mock, srv)
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("Claim error = %v, want ErrClaimRefused — a 404 on the cleanup is not a failure to claim", err)
+	}
+	if refused.Code != "claim-race" {
+		t.Errorf("Code = %q, want claim-race", refused.Code)
+	}
+	if !refused.ItemScoped {
+		t.Error("ItemScoped = false; a caller would stop resolving instead of trying the next item")
+	}
+
+	// The 404 has to have HAPPENED for the assertion above to mean anything: an
+	// attempt that never sent the DELETE would satisfy it without ever meeting
+	// the failure this test is about.
+	mock.mu.Lock()
+	tape := append([]string(nil), mock.mutations...)
+	mock.mu.Unlock()
+	sentRemoval := false
+	for _, m := range tape {
+		if strings.HasPrefix(m, "DELETE ") && strings.Contains(m, "/labels/"+b.labels.ClaimPrefix()) {
+			sentRemoval = true
+		}
+	}
+	if !sentRemoval {
+		t.Fatalf("requests = %v, want the DELETE this test exists to see fail", tape)
+	}
+}
+
+// The rule the branch above was brought in line with is general — every attempt
+// that returns without becoming the winner removes its own claim label first
+// (docs/github-schema.md, "Claiming") — and the sibling exit, a loss to a
+// smaller token, had no test either. It removes OUR token and only ours: a
+// loser that swept the flow:claim:* labels it can see would take the token of
+// the claimer about to win, whose own re-read would then show no contender and
+// refuse too, leaving an item both were racing for claimed by neither.
+func TestBackend_Claim_LosingToASmallerTokenRemovesItsOwnAndOnlyItsOwn(t *testing.T) {
+	// Below any random 128-bit token, so the rival wins the sort.
+	const rivalToken = "00000000000000000000000000000001"
+	const rivalLabel = "flow:claim:" + rivalToken
+
+	mock := newGHMock(t)
+	mock.issueLabels = []string{rivalLabel} // a second claimer, mid-race
+	srv := mock.server()
+	t.Cleanup(srv.Close)
+	b := newMockedOrchestrator(t, mock, srv)
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("Claim error = %v, want ErrClaimRefused", err)
+	}
+	// Which branch refused is otherwise unobservable — both losses carry
+	// claim-race — and the two clean up under different conditions, so the
+	// refusal has to be the one that saw a winner and say who won.
+	if !strings.Contains(refused.Reason, rivalToken) {
+		t.Errorf("Reason = %q, want the token it lost to (%s)", refused.Reason, rivalToken)
+	}
+
+	if !contains(mock.labelNames(), rivalLabel) {
+		t.Errorf("labels = %v, want the rival's token untouched — the loser took the winner's token with its own",
+			mock.labelNames())
+	}
+	for _, l := range mock.labelNames() {
+		if strings.HasPrefix(l, b.labels.ClaimPrefix()) && l != rivalLabel {
+			t.Errorf("labels = %v, want no token but the rival's — the loser walked away from its own",
+				mock.labelNames())
+		}
+	}
+	// And it took no lease on the way out.
+	if contains(mock.labelNames(), "flow:owner:alice") {
+		t.Errorf("labels = %v, want no owner label — the attempt lost", mock.labelNames())
+	}
+	mock.mu.Lock()
+	assignees := append([]string(nil), mock.assignees...)
+	mock.mu.Unlock()
+	if len(assignees) != 0 {
+		t.Errorf("assignees = %v, want none — the attempt lost", assignees)
+	}
+}
+
 // Finalize REFUSES an item that is not terminal. Finalizing does not MAKE one
 // terminal — nothing here closes an issue — so a finalized item still open
 // would claim the work is over while the orchestrator says it is not.

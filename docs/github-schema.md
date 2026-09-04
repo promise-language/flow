@@ -199,7 +199,7 @@ Claiming uses a label-based race to achieve exclusivity without server-side lock
 
 1. **Post** a random claim label `flow:claim:<hex>` (128-bit random token).
 2. **Re-fetch** the issue's labels. If multiple `flow:claim:*` labels are present, the **lexicographically smallest** hex wins.
-3. **Losers** remove their own claim label and return `ErrClaimRefused`.
+3. **Losers** remove their own claim label and return `ErrClaimRefused`. A re-fetch showing **no** `flow:claim:*` label at all is also a loss: the read cannot distinguish a token another actor stripped from one it is too stale to show. Every attempt that returns without becoming the winner removes its own claim label first.
 4. **Winner**: adds self as assignee, posts `flow:owner:<login>`, removes the transient `flow:claim:<hex>` label.
 
 Preflight checks before posting the claim label refuse items that are disabled, owned by another binary, or held by another user (unless `OverrideAlreadyHeld` is passed).

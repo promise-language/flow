@@ -35,6 +35,19 @@ type ghMock struct {
 	issueLabels []string
 	assignees   []string
 
+	// claimTokenRead models what a read of the issue does with the transient
+	// flow:claim:* labels — the two events Claim's zero-contender branch cannot
+	// tell apart. "hidden": stored but not served (a read too stale to show a
+	// POST that landed). "stripped": deleted on read (another actor removed it).
+	claimTokenRead string
+
+	// strictLabelRemoval answers a DELETE of a label the issue does not carry
+	// with 404, the way GitHub does. Off by default because the removal is
+	// lenient here for every caller that removes a label it is unsure of; a
+	// test asserting what happens to a removal that FAILS has to turn it on,
+	// since a mock that says 200 either way cannot express the failure.
+	strictLabelRemoval bool
+
 	// blockers this issue waits on, served by the dependency endpoint
 	blockedBy []ghMockBlocker
 
@@ -247,16 +260,37 @@ func (m *ghMock) handleIssue(w http.ResponseWriter, r *http.Request) {
 			m.issueLabels = append([]string(nil), *doc.Labels...)
 		}
 	}
+	served := m.issueLabels
+	switch m.claimTokenRead {
+	case "hidden":
+		served = withoutClaimTokens(served)
+	case "stripped":
+		m.issueLabels = withoutClaimTokens(m.issueLabels)
+		served = m.issueLabels
+	}
 	writeJSON(w, map[string]any{
 		"number":     m.issueNum,
 		"title":      m.issueTitle,
 		"body":       m.issueBody,
 		"state":      m.issueState,
 		"html_url":   fmt.Sprintf("https://github.com/%s/%s/issues/%d", m.owner, m.repo, m.issueNum),
-		"labels":     toLabelObjs(m.issueLabels),
+		"labels":     toLabelObjs(served),
 		"assignees":  toLoginObjs(m.assignees),
 		"updated_at": time.Now().UTC().Format(time.RFC3339),
 	})
+}
+
+// withoutClaimTokens returns names with every flow:claim:* label dropped, in a
+// fresh slice so the caller can serve it without disturbing what is stored.
+func withoutClaimTokens(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if strings.HasPrefix(n, "flow:claim:") {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 // handleOtherIssue serves a minimal open issue for a number in otherIssues.
@@ -367,6 +401,12 @@ func (m *ghMock) handleIssueLabels(w http.ResponseWriter, r *http.Request) {
 func (m *ghMock) handleRemoveLabel(w http.ResponseWriter, r *http.Request, name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.strictLabelRemoval && !contains(m.issueLabels, name) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Label does not exist"}`))
+		return
+	}
 	out := m.issueLabels[:0]
 	for _, lbl := range m.issueLabels {
 		if lbl != name {
