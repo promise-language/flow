@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/promise-language/flow"
@@ -66,7 +68,13 @@ func (app *App) cmdDoctor(ctx context.Context, args []string) int {
 		return 2
 	}
 
-	checks := []check{app.checkOrchestrator(ctx), app.checkAgent(ctx)}
+	checks := []check{
+		app.checkOrchestrator(ctx),
+		app.checkAgent(ctx),
+		app.checkCommands(),
+		app.checkGates(),
+		checkDocs(),
+	}
 
 	// The whole report is one list, so it goes to one stream. docs/cli.md
 	// § "One-shot reports" puts doctor's report on stdout.
@@ -139,23 +147,112 @@ func (app *App) checkAgent(ctx context.Context) check {
 		"%s can be invoked (checked without a turn; credentials and quota are not)", app.Agent.Name())}
 }
 
-// reportCapabilities prints what this orchestrator declares.
+// checkCommands and checkGates ask the orchestrator what it can run.
 //
-// There is nothing here about OPTIONAL capabilities any more: every method is
-// required, so the only thing worth reporting is what it says it can run.
-func (app *App) reportCapabilities() {
-	gates := app.Orchestrator.SupportedGates()
-	names := make([]string, 0, len(gates))
-	for _, g := range gates {
+// A step finishes its work and goes to verify it; a gate is asked for a
+// measurement. Either failing on "there is no such thing here" costs the whole
+// step that reached it, and the report names which one is absent rather than
+// leaving an operator to infer it from a mid-item error.
+//
+// THE DECLARED LIST IS THE CHECK, and it is not a static claim: an orchestrator
+// derives what it can run from the machine it runs on — listing the command
+// binaries it finds, asking the gate entry point which gates it supports. So
+// `verify` missing from SupportedCommands() IS "the verify command is not on
+// this machine", and `fit` missing from SupportedGates() IS "the gate entry
+// point is absent, or could not say". The SDK does not need to know where
+// either lives to check that both are there, and a second copy of paths only
+// the orchestrator knows is exactly the thing that goes stale.
+//
+// It is also why `doctor` does not run either one. What running would add over
+// the declaration is a machine-level fact the orchestrator has already
+// established — and the verify command may modify the tree, which doctor must
+// not do on a machine that is mid-item.
+func (app *App) checkCommands() check {
+	const name = "commands"
+	declared := app.Orchestrator.SupportedCommands()
+	var missing []string
+	for _, want := range flow.RequiredCommands() {
+		if !flow.HasCommand(declared, want) {
+			missing = append(missing, string(want))
+		}
+	}
+	if len(missing) > 0 {
+		return check{name: name, status: checkFail, detail: fmt.Sprintf(
+			"%s does not declare the required command(s): %s",
+			app.Orchestrator.Name(), strings.Join(missing, ", "))}
+	}
+	names := make([]string, 0, len(declared))
+	for _, c := range declared {
+		names = append(names, string(c.Name))
+	}
+	return check{name: name, detail: strings.Join(names, ", ")}
+}
+
+func (app *App) checkGates() check {
+	const name = "gates"
+	declared := app.Orchestrator.SupportedGates()
+	var missing []string
+	for _, want := range flow.RequiredGates() {
+		if !flow.HasGate(declared, want) {
+			missing = append(missing, string(want))
+		}
+	}
+	if len(missing) > 0 {
+		return check{name: name, status: checkFail, detail: fmt.Sprintf(
+			"%s does not declare the required gate(s): %s",
+			app.Orchestrator.Name(), strings.Join(missing, ", "))}
+	}
+	names := make([]string, 0, len(declared))
+	for _, g := range declared {
 		names = append(names, string(g.Name))
 	}
-	fmt.Fprintf(app.Out, "  gates: %s\n", strings.Join(names, ", "))
-	cmds := app.Orchestrator.SupportedCommands()
-	cnames := make([]string, 0, len(cmds))
-	for _, c := range cmds {
-		cnames = append(cnames, string(c.Name))
+	return check{name: name, detail: strings.Join(names, ", ")}
+}
+
+// checkDocs checks that the project's normative documentation is present: a
+// `docs/` directory, in the arena, holding at least one document.
+//
+// The arena is the directory the process runs in — that is what an arena IS in
+// this contract, so no orchestrator has to report it and no claim is needed to
+// look.
+//
+// It is the one row of doctor's set that nothing else can answer. What an
+// orchestrator declares is what it can RUN; what a gate measures is the tree's
+// soundness. Neither notices that an agent is about to work on a project whose
+// definition of correct it cannot read — and that failure is invisible until
+// review, because what comes back is plausible rather than wrong.
+func checkDocs() check {
+	const name = "normative docs"
+	dir, err := os.Getwd()
+	if err != nil {
+		return check{name: name, status: checkSkip,
+			detail: fmt.Sprintf("cannot read the arena's directory: %s", err)}
 	}
-	fmt.Fprintf(app.Out, "  commands: %s\n", strings.Join(cnames, ", "))
+	docs := filepath.Join(dir, "docs")
+	entries, err := os.ReadDir(docs)
+	if err != nil {
+		return check{name: name, status: checkFail, detail: fmt.Sprintf("cannot read %s: %s", docs, err)}
+	}
+	count := 0
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+			count++
+		}
+	}
+	if count == 0 {
+		return check{name: name, status: checkFail,
+			detail: fmt.Sprintf("%s holds no document (no top-level *.md)", docs)}
+	}
+	return check{name: name, detail: fmt.Sprintf("%s holds %d document(s)", docs, count)}
+}
+
+// reportCapabilities prints what does not belong on a check line: a mode this
+// binary was started in, which is neither pass nor fail.
+//
+// The gate and command lists used to be printed here. They are checks now — the
+// same facts, but with a verdict attached — and printing them twice would leave
+// a reader deciding which copy to believe.
+func (app *App) reportCapabilities() {
 	if app.CarryThrough {
 		fmt.Fprintf(app.Out, "  carry-through: enabled — carries to merge (not independent review)\n")
 	}

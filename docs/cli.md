@@ -289,14 +289,14 @@ It checks exactly these things:
 |---|---|
 | The orchestrator is reachable and usable | Work is claimed against a store that cannot be read or written |
 | The agent can be invoked — established **without spending a turn** | Every step dies on its first turn, reported as an agent fault rather than a broken environment |
-| The verify command exists and is executable | A step finishes its work, goes to verify it, and fails on a missing command |
-| The gate entry point exists and is executable | Every gate reports `could not start`, on every retry, after the budget is spent |
+| The verify command is available — the orchestrator declares it in `SupportedCommands()` | A step finishes its work, goes to verify it, and fails on a missing command |
+| The gates are available — the orchestrator declares them in `SupportedGates()`, `fit` and `integration` included | Every gate reports `could not start`, on every retry, after the budget is spent |
 | Normative documentation is present — `docs/` exists and holds at least one document | An agent works without access to what the project defines as correct, and produces something plausible instead of something right |
-| The `fit` gate reports clear | The machine runs out of what the project's work requires part-way through an item, and the failure is read as a defect in the change |
-
 The set is closed. A check is added only when its failure is one an operator would otherwise diagnose from a mid-item symptom — which is the same rule [environment.md](environment.md) closes the wider set with, because these five are the SDK's half of it.
 
-**The last row is the seam, and it is why the other five stay closed.** A project extends what fitness means for it by extending its own `fit` gate and its own thresholds — never by adding a check here, which every other project would then have to understand. What `doctor` does with the result is what it does with the rest: report it.
+**Availability is asked of the orchestrator, never resolved by the SDK.** An orchestrator derives what it can run from the machine it runs on — listing the command binaries present, asking the gate entry point which gates it supports — so a declared list is a fact about this environment and not a claim about intentions. `verify` missing from `SupportedCommands()` *is* "the verify command is not on this machine"; `fit` missing from `SupportedGates()` *is* "the gate entry point is absent, or could not answer". The SDK holds no second copy of paths only the orchestrator knows, and there is nothing to go stale.
+
+**`fit` is the seam, and it is why the set stays closed.** A project extends what fitness means for it by extending its own `fit` gate and its own thresholds — never by adding a check here, which every other project would then have to understand. Whether the machine is *currently* fit is measured where it matters, immediately before a claim: `resolve` runs the gate and waits while the answer is no (§ Resolve). `doctor` reports that the gate is there to be run.
 
 **`doctor` spends nothing.** Not a capped turn, not a tool-free one-word turn — nothing. It is mechanical: it runs before every item, in CI, and on every machine an operator touches, with nobody asking for work, so a turn on that path is a standing charge. And the charge is not the worst of it — a preflight that bills the account is one an operator turns off, and a preflight nobody runs prevents nothing. This is [agent.md](agent.md) § Nothing mechanical may spend, and it is enforced by the commit gate, not by convention.
 
@@ -314,6 +314,8 @@ Running the verify command can modify the tree — formatting and other auto-fix
 
 `doctor` checks that the verify command exists and is executable. It does not run it, precisely because running it may mutate, and `doctor` must stay safe to run on a machine that is mid-item.
 
-### `fit` is run; the code gates are not
+### `doctor` runs no gate and no command
 
-`fit` is the only gate `doctor` runs, and the line is not about cost. A gate modifies nothing, so running any of them would be safe — but `formatted`, `tested` and the rest answer *is this tree sound*, which is a question about the change and none of `doctor`'s business. `fit` answers *is this machine fit to be given an item*, which is `doctor`'s only question. Checking that the gate entry point is executable and then not asking it the one thing `doctor` exists to ask would report a machine fit on the strength of never having looked.
+A gate modifies nothing, so running one would be safe — but `formatted`, `tested` and the rest answer *is this tree sound*, which is a question about the change and none of `doctor`'s business. The verify command is not even safe: it repairs before it measures.
+
+`fit` is the one gate whose question is `doctor`'s own, and it is still not run here, because running it would add nothing to what the orchestrator has already established by declaring it. The measurement is taken where it can act on the answer — `resolve`, immediately before the claim, waiting while the machine is unfit rather than reporting a number nobody can use.

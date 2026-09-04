@@ -123,7 +123,10 @@ func TestVerifySteps_GoProjectHasExpectedSteps(t *testing.T) {
 	}
 
 	steps := verifySteps(root)
-	want := []string{"format", "vet", "build", "test"}
+	// The spend ratchet runs first and costs milliseconds: a commit can be
+	// waved through with --no-verify, so this gate is the last thing between
+	// an unapproved agent turn and trunk. See agentturns.go.
+	want := []string{"agent turns", "format", "vet", "build", "test"}
 	if len(steps) != len(want) {
 		t.Fatalf("got %d steps, want %d", len(steps), len(want))
 	}
