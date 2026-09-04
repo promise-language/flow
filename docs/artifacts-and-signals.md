@@ -8,11 +8,11 @@ A step produces exactly one result. That result is either an **artifact** or a *
 
 | | Artifact | Signal |
 |---|---|---|
-| **Written by** | A handler, via `ctx.Resolve*` | The backend, via side effect or poll |
+| **Written by** | A handler, via `ctx.Resolve*` | The orchestrator, via side effect or poll |
 | **Payload** | Typed value (one of six shapes) | Boolean — set or unset, no payload |
 | **Identity** | `ArtifactId` (named string) | `SignalId` (independent namespace) |
 
-A handler **never** writes a signal. The backend writes signals by observing external state (a pull request merged, a review approved) or as a side effect of a worktree operation (a PR opened). This asymmetry is load-bearing: a signal that a handler could set would be indistinguishable from an artifact with no payload, and the distinction between "the handler says it happened" and "the backend observed it happen" would be lost.
+A handler **never** writes a signal. The orchestrator writes signals by observing external state (a pull request merged, a review approved) or as a side effect of a worktree operation (a PR opened). This asymmetry is load-bearing: a signal that a handler could set would be indistinguishable from an artifact with no payload, and the distinction between "the handler says it happened" and "the orchestrator observed it happen" would be lost.
 
 ## Artifacts
 
@@ -37,7 +37,7 @@ Calling the wrong `Resolve*` for a step's declared type returns `ErrTypeMismatch
 
 ### Declaration
 
-`ArtifactDef` declares an artifact's identity and type. `Doc` is a one-line description of the artifact's purpose; authoritative on the backend's `SupportedArtifacts` entries.
+`ArtifactDef` declares an artifact's identity and type. `Doc` is a one-line description of the artifact's purpose; authoritative on the orchestrator's `SupportedArtifacts` entries.
 
 ```go
 flow.Artifact("plan", flow.ArtifactMarkdown).WithDoc("Implementation plan.")
@@ -45,9 +45,9 @@ flow.Artifact("plan", flow.ArtifactMarkdown).WithDoc("Implementation plan.")
 
 ### The artifact body
 
-`ArtifactBody` is the union written by `Backend.ResolveArtifact`. Exactly one field is populated; which one is determined by the matching `ArtifactType`.
+`ArtifactBody` is the union written by `Orchestrator.ResolveArtifact`. Exactly one field is populated; which one is determined by the matching `ArtifactType`.
 
-An empty body is a legal call. It is the side-effect pattern: the content was already attached out-of-band (a runner-captured patch, a commit) and the handler is saying "resolved — record me as done." A backend that stores such content elsewhere decides emptiness itself: it verifies the side effect happened and fails with a message naming what is missing.
+An empty body is a legal call. It is the side-effect pattern: the content was already attached out-of-band (a runner-captured patch, a commit) and the handler is saying "resolved — record me as done." An orchestrator that stores such content elsewhere decides emptiness itself: it verifies the side effect happened and fails with a message naming what is missing.
 
 ### The artifact record
 
@@ -63,7 +63,7 @@ An empty body is a legal call. It is the side-effect pattern: the content was al
 
 Steps are **required by default**. `StepConfig.Optional` opts out. An optional artifact does not block `IsDone` — the flow completes without it.
 
-An operator may also remove a required artifact from the checklist after seeding. When the backend surfaces an `ArtifactRecord` with `Required=false` and the artifact is not yet resolved, the step is skipped: `DeriveNext` moves past it rather than dispatching a handler against an item the operator marked as not-required.
+An operator may also remove a required artifact from the checklist after seeding. When the orchestrator surfaces an `ArtifactRecord` with `Required=false` and the artifact is not yet resolved, the step is skipped: `DeriveNext` moves past it rather than dispatching a handler against an item the operator marked as not-required.
 
 ## Signals
 
@@ -81,26 +81,26 @@ flow.Signal("pr-merged", "The pull request was merged")
 
 ### State
 
-`SignalState` records whether a signal is set, when it was observed, and by whom (backend-specific principal; display-only).
+`SignalState` records whether a signal is set, when it was observed, and by whom (orchestrator-specific principal; display-only).
 
 ### Never handler-writable
 
-A handler cannot write a signal. The backend writes signals through two paths:
+A handler cannot write a signal. The orchestrator writes signals through two paths:
 
-1. **Side effect** — a worktree operation triggers it. Opening a PR sets `pr-open`; the backend records `ObservedVia: "side-effect"`.
-2. **Poll** — `LoadState` refreshes signals by querying external state. The GitHub backend polls PR state and records `ObservedVia: "poll"`.
+1. **Side effect** — a worktree operation triggers it. Opening a PR sets `pr-open`; the orchestrator records `ObservedVia: "side-effect"`.
+2. **Poll** — `Load` refreshes signals by querying external state. The GitHub orchestrator polls PR state and records `ObservedVia: "poll"`.
 
 A handler that calls any `Resolve*` on a signal step receives `ErrSignalNotWritable`.
 
-### Backend declares supported signals
+### The orchestrator declares supported signals
 
-The backend declares which signals it can observe via `SupportedSignals()`. The SDK validates every signal reference against this list at startup: a flow that references a signal this backend cannot observe is refused at startup (exit 2) rather than stalling at runtime.
+The orchestrator declares which signals it can observe via `SupportedSignals()`. The SDK validates every signal reference against this list at startup: a flow that references a signal this orchestrator cannot observe is refused at startup (exit 2) rather than stalling at runtime.
 
 ## Questions
 
 Questions are the third kind of item-scoped durable state, distinct from both artifacts and signals.
 
-An `AgentQuestion` is emitted via `ctx.AskQuestions`. The backend persists it; the flow parks until at least one is answered. Questions carry a presentation format (`text`, `yes_no`, `choice`) and optional structured options, but the user can always reply with free text regardless of format.
+An `AgentQuestion` is emitted via `ctx.AskQuestions`, which records each through `AskQuestion`. The orchestrator persists them; the flow parks until at least one is answered. Questions carry a presentation format (`text`, `yes_no`, `choice`) and optional structured options, but the user can always reply with free text regardless of format.
 
 Answering does not resume the item. Resumption is a separate deliberate act — see [resolution.md](resolution.md).
 

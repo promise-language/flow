@@ -8,15 +8,15 @@ import (
 	"testing"
 
 	"github.com/promise-language/flow"
-	"github.com/promise-language/flow/pkg/backend/fake"
+	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
 
 func TestCmdDoctor_OKGlyph(t *testing.T) {
 	be := fake.New()
 	app := App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flows: []*flow.Flow{
 			newDummyFlow("x"),
 		},
@@ -38,12 +38,12 @@ func TestCmdDoctor_OKGlyph(t *testing.T) {
 }
 
 func TestCmdDoctor_FailGlyph(t *testing.T) {
-	be := &failingBackend{Backend: fake.New(), err: errors.New("simulated")}
+	be := &failingBackend{Orchestrator: fake.New(), err: errors.New("simulated")}
 	app := App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:     []*flow.Flow{newDummyFlow("x")},
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:        []*flow.Flow{newDummyFlow("x")},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -67,15 +67,15 @@ func newDummyFlow(name string) *flow.Flow {
 	return f
 }
 
-// The doctor command must report whether the backend supports StateInspector.
-// The fake backend does not implement it, so doctor should print "unavailable".
-func TestCmdDoctor_ReportsStateInspectorUnavailable(t *testing.T) {
-	be := fake.New()
+// doctor reports the gates and commands the orchestrator declares. They are
+// what startup validation checked, and an operator asking why a run refused
+// needs to see the same list the check saw.
+func TestCmdDoctor_ReportsDeclaredGatesAndCommands(t *testing.T) {
 	app := App{
-		Backend:   bareBackend{be},
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:     []*flow.Flow{newDummyFlow("x")},
+		Orchestrator: fake.New(),
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:        []*flow.Flow{newDummyFlow("x")},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -84,54 +84,22 @@ func TestCmdDoctor_ReportsStateInspectorUnavailable(t *testing.T) {
 	app.Out = out
 	app.Err = &bytes.Buffer{}
 
-	code := app.cmdDoctor(context.Background(), nil)
-	if code != 0 {
+	if code := app.cmdDoctor(context.Background(), nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
-	if !strings.Contains(out.String(), "unavailable") {
-		t.Errorf("doctor output should report StateInspector as unavailable; got %q", out.String())
+	// The two required gates and the required command, by name.
+	for _, want := range []string{"integration", "fit", "verify"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("doctor output does not name %q; got %q", want, out.String())
+		}
 	}
-}
-
-// When the backend implements StateInspector, doctor should report "available".
-func TestCmdDoctor_ReportsStateInspectorAvailable(t *testing.T) {
-	be := &inspectingBackend{Backend: fake.New()}
-	app := App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:     []*flow.Flow{newDummyFlow("x")},
-	}
-	if err := app.validate(); err != nil {
-		t.Fatalf("validate: %v", err)
-	}
-	out := &bytes.Buffer{}
-	app.Out = out
-	app.Err = &bytes.Buffer{}
-
-	code := app.cmdDoctor(context.Background(), nil)
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-	if !strings.Contains(out.String(), "available (backend supports StateInspector)") {
-		t.Errorf("doctor output should report StateInspector as available; got %q", out.String())
-	}
-}
-
-// inspectingBackend wraps the fake backend and adds a stub StateInspector.
-type inspectingBackend struct {
-	*fake.Backend
-}
-
-func (b *inspectingBackend) LoadStateByRef(ctx context.Context, ref flow.ItemRef) (*flow.ItemState, error) {
-	return &flow.ItemState{}, nil
 }
 
 // When CarryThrough is set, doctor should print the carry-through caveat.
 func TestCmdDoctor_ReportsCarryThrough(t *testing.T) {
 	be := fake.New()
 	app := App{
-		Backend:      be,
+		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flows:        []*flow.Flow{newDummyFlow("x")},
@@ -160,10 +128,10 @@ func TestCmdDoctor_ReportsCarryThrough(t *testing.T) {
 func TestCmdDoctor_OmitsCarryThroughWhenDisabled(t *testing.T) {
 	be := fake.New()
 	app := App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:     []*flow.Flow{newDummyFlow("x")},
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:        []*flow.Flow{newDummyFlow("x")},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -184,10 +152,10 @@ func TestCmdDoctor_OmitsCarryThroughWhenDisabled(t *testing.T) {
 // failingBackend wraps the fake backend and forces ListEligible to error so
 // cmdDoctor's fallback probe fails.
 type failingBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	err error
 }
 
-func (b *failingBackend) ListEligible(ctx context.Context) ([]flow.ItemRef, error) {
+func (b *failingBackend) ListAutoSelectable(ctx context.Context, _ []flow.TagId) ([]flow.ItemRef, error) {
 	return nil, b.err
 }

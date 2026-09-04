@@ -8,13 +8,13 @@ import (
 	"testing"
 
 	"github.com/promise-language/flow"
-	"github.com/promise-language/flow/pkg/backend/fake"
+	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
 
 // staleTestEnv builds an App with a single "plan" artifact step, seeds it, and
 // optionally resolves it. Returns the app (with captured stdout/stderr), the
 // backend, and the claim.
-func staleTestEnv(t *testing.T, resolve bool) (*App, *fake.Backend, flow.Claim, *bytes.Buffer, *bytes.Buffer) {
+func staleTestEnv(t *testing.T, resolve bool) (*App, *fake.Orchestrator, flow.Claim, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	a := &stubAgent{name: "stub"}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
@@ -24,13 +24,13 @@ func staleTestEnv(t *testing.T, resolve bool) (*App, *fake.Backend, flow.Claim, 
 	}, a)
 
 	ctx := context.Background()
-	if err := be.SeedState(ctx, claim, []flow.ArtifactSpec{
+	if err := be.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
 	}); err != nil {
 		t.Fatalf("SeedState: %v", err)
 	}
 	if resolve {
-		if err := be.ResolveArtifact(ctx, claim, "plan", flow.ArtifactBody{
+		if err := be.ResolveArtifact(ctx, claim.ItemRef, "plan", flow.ArtifactBody{
 			Type: flow.ArtifactMarkdown, Markdown: "the plan",
 		}); err != nil {
 			t.Fatalf("ResolveArtifact: %v", err)
@@ -54,9 +54,9 @@ func TestCmdStale_HappyPath(t *testing.T) {
 		t.Errorf("stdout = %q, want contains 'marked \"plan\" stale'", out.String())
 	}
 	// Verify the backend state was actually updated.
-	state, err := be.LoadState(context.Background(), claim)
+	state, err := be.Load(context.Background(), claim.ItemRef)
 	if err != nil {
-		t.Fatalf("LoadState: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 	rec := state.Artifact("plan")
 	if !rec.Stale {
@@ -68,7 +68,7 @@ func TestCmdStale_AlreadyStale(t *testing.T) {
 	app, be, claim, out, _ := staleTestEnv(t, true)
 
 	// Mark stale once via backend directly.
-	if err := be.MarkStale(context.Background(), claim, "plan"); err != nil {
+	if err := be.MarkStale(context.Background(), claim.ItemRef, "plan"); err != nil {
 		t.Fatalf("MarkStale: %v", err)
 	}
 
@@ -102,7 +102,7 @@ func TestCmdStale_Skipped(t *testing.T) {
 	}, a)
 
 	ctx := context.Background()
-	if err := be.SeedState(ctx, claim, []flow.ArtifactSpec{
+	if err := be.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactMarkdown, Required: false, Budget: flow.DefaultStepBudget()},
 	}); err != nil {
 		t.Fatalf("SeedState: %v", err)
@@ -148,7 +148,7 @@ func TestCmdStale_SignalStep(t *testing.T) {
 	}, a)
 
 	ctx := context.Background()
-	if err := be.SeedState(ctx, claim, []flow.ArtifactSpec{
+	if err := be.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
 	}); err != nil {
 		t.Fatalf("SeedState: %v", err)
@@ -212,7 +212,7 @@ func TestCmdStale_NoActiveClaim(t *testing.T) {
 	}, a)
 
 	// Release the claim so there is no active one.
-	if err := be.Release(context.Background(), claim); err != nil {
+	if err := be.Release(context.Background(), claim.ItemRef); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 
@@ -275,7 +275,7 @@ func TestCmdStale_JSONOutput(t *testing.T) {
 func TestCmdStale_JSONAlreadyStale(t *testing.T) {
 	app, be, claim, out, _ := staleTestEnv(t, true)
 
-	if err := be.MarkStale(context.Background(), claim, "plan"); err != nil {
+	if err := be.MarkStale(context.Background(), claim.ItemRef, "plan"); err != nil {
 		t.Fatalf("MarkStale: %v", err)
 	}
 
@@ -297,10 +297,10 @@ func TestCmdStale_WarningBudgetExhausted(t *testing.T) {
 
 	ctx := context.Background()
 	// Exhaust invocations by bumping to meet the granted amount.
-	state, _ := be.LoadState(ctx, claim)
+	state, _ := be.Load(ctx, claim.ItemRef)
 	rec := state.Artifact("plan")
 	for i := 0; i < rec.GrantedInvocations; i++ {
-		_ = be.BumpInvocations(ctx, claim, "plan")
+		_ = be.BumpInvocations(ctx, claim.ItemRef, "plan")
 	}
 
 	code := app.cmdStale(context.Background(), []string{"plan"})
@@ -316,7 +316,7 @@ func TestCmdStale_WarningItemParked(t *testing.T) {
 	app, be, claim, _, errBuf := staleTestEnv(t, true)
 
 	ctx := context.Background()
-	_ = be.Park(ctx, claim, flow.ParkRequest{
+	_ = be.Park(ctx, claim.ItemRef, flow.ParkRequest{
 		Kind: flow.ParkQuestion,
 		Step: "plan",
 	})
@@ -334,11 +334,11 @@ func TestCmdStale_WarningPendingQuestions(t *testing.T) {
 	app, be, claim, _, errBuf := staleTestEnv(t, true)
 
 	ctx := context.Background()
-	_, err := be.AskQuestions(ctx, claim, []flow.AgentQuestion{
+	_, err := askAll(be, ctx, claim, []flow.AgentQuestion{
 		{Text: "should we proceed?"},
 	})
 	if err != nil {
-		t.Fatalf("AskQuestions: %v", err)
+		t.Fatalf("AskQuestion: %v", err)
 	}
 
 	code := app.cmdStale(context.Background(), []string{"plan"})
@@ -362,13 +362,13 @@ func TestCmdStale_SeededButNotInFlow(t *testing.T) {
 
 	ctx := context.Background()
 	// Seed an artifact "old-step" that does not correspond to any step in the flow.
-	if err := be.SeedState(ctx, claim, []flow.ArtifactSpec{
+	if err := be.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
 		{Id: "old-step", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
 	}); err != nil {
 		t.Fatalf("SeedState: %v", err)
 	}
-	if err := be.ResolveArtifact(ctx, claim, "old-step", flow.ArtifactBody{
+	if err := be.ResolveArtifact(ctx, claim.ItemRef, "old-step", flow.ArtifactBody{
 		Type: flow.ArtifactMarkdown, Markdown: "stale data",
 	}); err != nil {
 		t.Fatalf("ResolveArtifact: %v", err)
@@ -386,9 +386,9 @@ func TestCmdStale_SeededButNotInFlow(t *testing.T) {
 		t.Errorf("stderr = %q, want contains 'no longer part of flow'", errBuf.String())
 	}
 	// Should still mark stale despite the warning.
-	state, err := be.LoadState(ctx, claim)
+	state, err := be.Load(ctx, claim.ItemRef)
 	if err != nil {
-		t.Fatalf("LoadState: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 	rec := state.Artifact("old-step")
 	if !rec.Stale {
@@ -401,11 +401,11 @@ func TestCmdStale_JSONOutputIncludesWarnings(t *testing.T) {
 
 	ctx := context.Background()
 	// Create a pending question to trigger the warning.
-	_, err := be.AskQuestions(ctx, claim, []flow.AgentQuestion{
+	_, err := askAll(be, ctx, claim, []flow.AgentQuestion{
 		{Text: "should we proceed?"},
 	})
 	if err != nil {
-		t.Fatalf("AskQuestions: %v", err)
+		t.Fatalf("AskQuestion: %v", err)
 	}
 
 	code := app.cmdStale(context.Background(), []string{"--json", "plan"})

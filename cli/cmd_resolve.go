@@ -80,31 +80,11 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		resolveOverrides = append(resolveOverrides, flow.OverrideUnadmitted)
 	}
 
-	// Pre-claim fitness check: an unfit machine should not take an item at
-	// all. Standalone drives its own lifecycle and holds
-	// (docs/environment.md): the wait is bounded and re-measures rather
-	// than assuming the condition persists.
-	// Fail-open: err != nil proceeds (cannot check → do not refuse).
-	if fc, ok := app.Backend.(flow.FitnessChecker); ok {
-		for fitnessWaits := 0; ; fitnessWaits++ {
-			verdict, err := fc.CheckFit(ctx)
-			if err != nil || verdict.Acceptable {
-				break // fit (or cannot check → fail-open)
-			}
-			if fitnessWaits >= maxFitnessWaits {
-				fmt.Fprintf(app.Err, "resolve: machine unfit — %s\n", verdict.Detail)
-				return 1
-			}
-			fmt.Fprintf(app.Err, "resolve: machine unfit (%d/%d) — %s — waiting…\n",
-				fitnessWaits+1, maxFitnessWaits, verdict.Detail)
-			select {
-			case <-time.After(fitnessWaitInterval):
-			case <-ctx.Done():
-				fmt.Fprintln(app.Err, "resolve: interrupted while waiting for fitness")
-				return 1
-			}
-		}
-	}
+	// fitnessWaits is ONE counter for the whole run — the pre-claim wait below
+	// and the mid-run wait further down share it. Two counters let a fit gate
+	// that fails on every call loop until the runaway guard, because each site
+	// kept resetting the other's budget.
+	fitnessWaits := 0
 
 	var claim *flow.Claim
 	if fs.NArg() == 1 {
@@ -113,7 +93,14 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			fmt.Fprintln(app.Err, "resolve:", err)
 			return 1
 		}
-		c, err := app.Backend.Claim(ctx, ref, app.Owner, resolveOverrides)
+		// Pre-claim fitness: an unfit machine must not take an item at all — a
+		// fitness answer that arrives after the work started is the failure
+		// `fit` exists to prevent. No gate requires a claim, so this runs on the
+		// item's worktree before the lease is taken.
+		if code, ok := app.awaitFit(ctx, ref, &fitnessWaits); !ok {
+			return code
+		}
+		c, err := app.Orchestrator.Claim(ctx, ref, resolveOverrides)
 		if err != nil {
 			var refused flow.ErrClaimRefused
 			if errors.As(err, &refused) {
@@ -125,7 +112,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		}
 		claim = &c
 	} else {
-		c, err := app.Backend.LookupActiveClaim(ctx, app.Owner)
+		c, err := app.Orchestrator.LookupActiveClaim(ctx)
 		if err != nil {
 			fmt.Fprintln(app.Err, "resolve:", err)
 			return 1
@@ -136,21 +123,15 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			// selection policy (see doc comment above) — the CLI just
 			// claims whatever it returns first.
 			//
-			// When --tag is specified, use the TagFilterer interface to
-			// narrow the eligible set server-side. Without TagFilterer,
-			// --tag is refused.
-			var refs []flow.ItemRef
-			var err error
-			if len(tags) > 0 {
-				tf, ok := app.Backend.(flow.TagFilterer)
-				if !ok {
-					fmt.Fprintln(app.Err, "resolve: this backend does not support --tag (no TagFilterer capability)")
-					return 1
-				}
-				refs, err = tf.ListEligibleWithTags(ctx, tags)
-			} else {
-				refs, err = app.Backend.ListEligible(ctx)
+			// Tag filtering belongs in the orchestrator: tags live there and
+			// ItemRef does not carry them, so a caller has nothing to filter on.
+			// The comparison it applies is flow.TagsMatch — the same one `list`
+			// uses — which is what makes the two commands symmetrical.
+			want, ok := app.tagFilter("resolve", tags)
+			if !ok {
+				return 1
 			}
+			refs, err := app.Orchestrator.ListAutoSelectable(ctx, want)
 			if err != nil {
 				fmt.Fprintln(app.Err, "resolve:", err)
 				return 1
@@ -179,7 +160,10 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			claimed := false
 			for i, ref := range refs {
 				fmt.Fprintf(app.Err, "resolve: no active claim — auto-selecting %s (%d/%d)\n", ref.Display, i+1, len(refs))
-				c, err := app.Backend.Claim(ctx, ref, app.Owner, resolveOverrides)
+				if code, fitOK := app.awaitFit(ctx, ref, &fitnessWaits); !fitOK {
+					return code
+				}
+				c, err := app.Orchestrator.Claim(ctx, ref, resolveOverrides)
 				if err == nil {
 					newClaim = c
 					claimed = true
@@ -230,7 +214,6 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	}
 
 	enc := json.NewEncoder(app.Out)
-	fitnessWaits := 0
 	quotaWarned := false
 	for range maxResolveSteps {
 		// Pace against subscription quota. The check is before dispatch so the
@@ -258,10 +241,10 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		// We name the step rather than number it: a positional counter ("[step
 		// 1]") collides with the flow's own named steps (plan/implement/…) and
 		// misreads as "flow step 1" when it really means "resolve iteration 1".
-		if st, serr := app.Backend.LoadState(ctx, *claim); serr == nil {
+		if st, serr := app.Orchestrator.Load(ctx, claim.ItemRef); serr == nil {
 			if f, next := SelectFlow(app, st); f != nil {
 				fmt.Fprintf(app.Err, "resolve: running %q…\n", next)
-			} else if !st.Item.Finalized && flowForType(app, st.Item.Type) == nil {
+			} else if !st.Finalized && flowForType(app, st.Type) == nil {
 				// No flow accepts the type, so RunOne will block rather than
 				// finalize. Announcing "finalizing…" here would tell the
 				// operator the run is completing right before it reports that
@@ -328,26 +311,16 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			// A block that did NOT come from fitness (e.g. ErrBlocked, a
 			// preflight gate only a human can clear) exits immediately — looping
 			// would re-run it to the runaway guard.
-			if strings.Contains(res.Reason, flow.ErrUnfit.Error()) {
-				if fc, ok := app.Backend.(flow.FitnessChecker); ok && fitnessWaits < maxFitnessWaits {
-					v, ferr := fc.CheckFit(ctx)
-					if ferr == nil && !v.Acceptable {
-						fitnessWaits++
-						fmt.Fprintf(app.Err, "resolve: machine unfit (%d/%d) — %s — waiting…\n",
-							fitnessWaits, maxFitnessWaits, v.Detail)
-						select {
-						case <-time.After(fitnessWaitInterval):
-						case <-ctx.Done():
-							fmt.Fprintln(app.Err, "resolve: interrupted while waiting for fitness")
-							return 1
-						}
-						continue
-					}
-					// Machine recovered — retry the step.
-					fmt.Fprintln(app.Err, "resolve: machine fit again — retrying…")
-					fitnessWaits = 0
-					continue
+			if strings.Contains(res.Reason, flow.ErrUnfit.Error()) && fitnessWaits < maxFitnessWaits {
+				// The SAME helper and the SAME counter as the pre-claim site.
+				// One implementation, so the two cannot disagree about what
+				// counts as fit, and one bound, so a persistently broken gate
+				// terminates here rather than at the runaway guard.
+				if code, ok := app.awaitFit(ctx, claim.ItemRef, &fitnessWaits); !ok {
+					return code
 				}
+				fmt.Fprintln(app.Err, "resolve: machine fit again — retrying…")
+				continue
 			}
 			// A gate only a human can clear, or the fitness wait exhausted.
 			fmt.Fprintf(app.Err, "resolve: %s is blocked — %s\n", claim.ItemRef.Display, res.Reason)
@@ -384,17 +357,13 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	return 1
 }
 
-// finalTotalSuffix loads the item's state and computes the total duration and
-// cost across all artifacts. Returns "" when no figures are available.
+// finalTotalSuffix loads the item and computes the total duration and cost
+// across all artifacts. Returns "" when no figures are available.
 //
-// Uses StateInspector.LoadStateByRef (no claim needed) because Finalize has
-// already been called and may have released the claim.
+// Addressed by ref because Finalize has already been called and may have
+// released the claim — and because reading an item is not a privileged act.
 func finalTotalSuffix(ctx context.Context, app *App, claim flow.Claim) string {
-	si, ok := app.Backend.(flow.StateInspector)
-	if !ok {
-		return ""
-	}
-	state, err := si.LoadStateByRef(ctx, claim.ItemRef)
+	state, err := app.Orchestrator.Load(ctx, claim.ItemRef)
 	if err != nil {
 		return "" // best-effort; finalization already succeeded
 	}
@@ -417,4 +386,50 @@ func finalTotalSuffix(ctx context.Context, app *App, claim flow.Claim) string {
 		return fmt.Sprintf(" (≥%s, ≥%s)", dur, cost)
 	}
 	return fmt.Sprintf(" (%s, %s)", dur, cost)
+}
+
+// awaitFit measures whether this machine may be given work, and waits while it
+// may not.
+//
+// It IS the fit path — both call sites go through it, so there is one rule and
+// one wait counter. It FAILS CLOSED: flow.CheckFit reports unfit for a RunGate
+// error, for every outcome that is not a measurement, and for a Judge error,
+// because no outcome is not a passing outcome. The earlier reading — "cannot
+// check → do not refuse" — treated an erroring fit gate as a fit machine, which
+// is the exact state `fit` exists to stop anyone proceeding from.
+//
+// Waiting rather than refusing is what docs/environment.md asks for: unfitness
+// is a condition that ends on its own, and the item is left unparked and
+// unmodified while the machine recovers. The wait is BOUNDED — an item held
+// indefinitely on a machine nobody is fixing is one no other machine can take —
+// and exhausting the bound is still "unfit", never a verdict about the change.
+//
+// Returns (exitCode, false) when the caller should stop, (0, true) when the
+// machine is fit and work may proceed.
+func (app *App) awaitFit(ctx context.Context, ref flow.ItemRef, waits *int) (int, bool) {
+	wt, err := app.Orchestrator.Worktree(ctx, ref)
+	if err != nil {
+		// No worktree, no measurement — and no measurement is not a pass.
+		fmt.Fprintf(app.Err, "resolve: cannot reach a worktree to measure machine fitness: %s\n", err)
+		return 1, false
+	}
+	for {
+		fitErr := flow.CheckFit(ctx, wt)
+		if fitErr == nil {
+			return 0, true
+		}
+		if *waits >= maxFitnessWaits {
+			fmt.Fprintf(app.Err, "resolve: machine unfit — %s\n", fitErr)
+			return 1, false
+		}
+		*waits++
+		fmt.Fprintf(app.Err, "resolve: machine unfit (%d/%d) — %s — waiting…\n",
+			*waits, maxFitnessWaits, fitErr)
+		select {
+		case <-time.After(fitnessWaitInterval):
+		case <-ctx.Done():
+			fmt.Fprintln(app.Err, "resolve: interrupted while waiting for fitness")
+			return 1, false
+		}
+	}
 }

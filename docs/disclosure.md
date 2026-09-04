@@ -24,6 +24,8 @@ The set is closed: a disclosure is persisted public state, and a write not on th
 | **The diff** | The change itself, published by the push |
 | **Labels** | Names the flow constructs, including claim identifiers |
 | **Assignees** | A login the flow chose to publish — the claim owner, visible on the issue |
+| **The item's own request** | Title and body, rewritten through `ItemEditor` |
+| **Item dependencies** | Which items this one waits on |
 
 Commit messages, the diff, and labels are the ones most easily forgotten, because they reach the public surface through git rather than through an API call. They are disclosures all the same: a push is a publication.
 
@@ -66,13 +68,13 @@ The guard is asked one question, by whatever is about to publish:
 
 > **(the text, where the text came from) → allow or refuse**
 
-**The flow declares that seam and cannot fill it.** It is a shape — an interface — and the thing that actually enforces anything is supplied from outside and injected, the same way a backend and an agent are.
+**The flow declares that seam and cannot fill it.** It is a shape — an interface — and the thing that actually enforces anything is supplied from outside and injected, the same way an orchestrator and an agent are.
 
 That is not an implementation preference; it is what the authorship rule requires. A concrete implementation living in the flow would be code inside a tree that agents edit, rebuildable by the party it refuses. A shape the flow declares and something else fills means the flow can state *that* every write is checked without owning *what* the check permits. **The guarded project has no control over it**, which is the whole requirement, and it is satisfied by the dependency direction rather than by anyone's discipline.
 
 Three things about the signature carry the rest of the design.
 
-**The caller supplies the origin. The guard never infers it.** This is what makes a definitive answer possible without a model and without guesswork. Provenance is not a property of text — a paragraph about another project's architecture reads exactly like a paragraph about this one — but it *is* known to whoever is about to publish. A backend writing an artifact knows it came from an agent turn in this worktree. A pre-tool hook knows which repository the command is running in. The party that has the fact states it, and the guard decides from it.
+**The caller supplies the origin. The guard never infers it.** This is what makes a definitive answer possible without a model and without guesswork. Provenance is not a property of text — a paragraph about another project's architecture reads exactly like a paragraph about this one — but it *is* known to whoever is about to publish. An orchestrator writing an artifact knows it came from an agent turn in this worktree. A pre-tool hook knows which repository the command is running in. The party that has the fact states it, and the guard decides from it.
 
 **The set of origins is closed.**
 
@@ -127,10 +129,10 @@ Text reaches GitHub by two paths, and the guard stands on both. It is **one guar
 
 | Path | Position | Who is writing |
 |---|---|---|
-| The SDK's own writes | The seam between the github backend and GitHub | A resolution step |
+| The SDK's own writes | The seam between the github orchestrator and GitHub | A resolution step |
 | **A tool call** | The pre-tool hook | **Any agent with a terminal — including one working with a person** |
 
-**The first: one seam, not a check per call site.** Every outward write goes through the github backend — the API calls that create and edit comments and labels, the `gh` invocations that open a pull request, the git operations that push a branch. That seam is the one place a byte is both **final** and **not yet sent**, which are the two properties the guard needs. Anywhere earlier is too early: the text is still being assembled, and a template is not what gets published. A guard installed at six call sites is a guard absent from the seventh.
+**The first: one seam, not a check per call site.** Every outward write goes through the github orchestrator — the API calls that create and edit comments and labels, the `gh` invocations that open a pull request, the git operations that push a branch. That seam is the one place a byte is both **final** and **not yet sent**, which are the two properties the guard needs. Anywhere earlier is too early: the text is still being assembled, and a template is not what gets published. A guard installed at six call sites is a guard absent from the seventh.
 
 **The second is the path that is easy to forget, because it is not the flow.** An agent at a terminal running `gh issue create`, `gh pr comment` or `git push` publishes exactly as permanently as a resolution does, and reaches none of the SDK's code to do it. It does pass the pre-tool hook — so the same guard applies there, and an agent working alongside a person is bound by it too.
 

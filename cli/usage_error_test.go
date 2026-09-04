@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/promise-language/flow"
-	"github.com/promise-language/flow/pkg/backend/fake"
+	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
 
 // Every malformed invocation prints exactly two lines on stderr: what was
@@ -311,15 +311,14 @@ func TestUsageError_OperatorTextIsNotAFormatString(t *testing.T) {
 // after the action would still exit 2 and pass every message assertion.
 func TestUnknownFlag_ClaimsNothing(t *testing.T) {
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "42", Type: "task", Title: "42"})
+	be.AddItem("42", flow.Item{Type: "task", Title: "42"})
 	app := &App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:     []*flow.Flow{newDummyFlow("x")},
-		Owner:     "alice",
-		Out:       &bytes.Buffer{},
-		Err:       &bytes.Buffer{},
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:        []*flow.Flow{newDummyFlow("x")},
+		Out:          &bytes.Buffer{},
+		Err:          &bytes.Buffer{},
 	}
 	out, errBuf := app.Out.(*bytes.Buffer), app.Err.(*bytes.Buffer)
 
@@ -327,7 +326,7 @@ func TestUnknownFlag_ClaimsNothing(t *testing.T) {
 	checkUsageError(t, "claim 42 --bogus", out.String(), errBuf.String(), code,
 		"claim: use of unknown flag --bogus")
 
-	claim, err := be.LookupActiveClaim(context.Background(), "alice")
+	claim, err := be.LookupActiveClaim(context.Background())
 	if err != nil {
 		t.Fatalf("LookupActiveClaim: %v", err)
 	}

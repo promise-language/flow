@@ -6,23 +6,23 @@ Everything in `resolution.md` applies. This document states only what is specifi
 
 ## What "standalone" means
 
-The binary is the entire system. There is no scheduler, no dispatcher, no lease service. An operator — or a timer — invokes the binary, and the binary decides what to do next by reading durable state from the backend.
+The binary is the entire system. There is no scheduler, no dispatcher, no lease service. An operator — or a timer — invokes the binary, and the binary decides what to do next by reading durable state from the orchestrator.
 
-All state lives **in the backend's own artifacts**. There is no separate store to consult, and nothing to reconcile against: the item is the record.
+All state lives **in the orchestrator's own artifacts**. There is no separate store to consult, and nothing to reconcile against: the item is the record.
 
-This is what makes the model resumable across machines with no coordination. Any worktree that can reach the backend and hold a claim derives the same next step.
+This is what makes the model resumable across machines with no coordination. Any worktree that can reach the orchestrator and hold a claim derives the same next step.
 
 ## Claiming without a lease service
 
-Exclusivity is asserted **in the backend's own data** — the claim is visible to anyone looking at the item, and is what another worktree observes before deciding it cannot take it.
+Exclusivity is asserted **in the orchestrator's own data** — the claim is visible to anyone looking at the item, and is what another worktree observes before deciding it cannot take it.
 
-Because there is no arbiter, claiming is a race, and the race is resolved by the backend's own consistency rather than by a lock. A claim attempt that loses reports that it lost; it does not partially apply.
+Because there is no arbiter, claiming is a race, and the race is resolved by the orchestrator's own consistency rather than by a lock. A claim attempt that loses reports that it lost; it does not partially apply.
 
 A claim never takes an item away from another person. An item already owned or assigned elsewhere is refused unless the operator explicitly overrides, and the override is recorded.
 
 ## Ownership is shared with humans
 
-The backend is a system people use directly. The same item carries human activity — comments, assignment, labels — and the flow's own bookkeeping.
+The orchestrator is a system people use directly. The same item carries human activity — comments, assignment, labels — and the flow's own bookkeeping.
 
 Two requirements follow:
 

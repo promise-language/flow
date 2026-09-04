@@ -25,14 +25,14 @@ import (
 var ErrBlocked = errors.New("blocked: needs human action")
 
 // PreflightFunc is an optional cross-flow gate run by cli.RunOne on every
-// dispatch, AFTER Backend.LoadState and the terminal-done short-circuit
+// dispatch, AFTER Orchestrator.Load and the terminal-done short-circuit
 // (so a completed item still retires) and BEFORE seed / handler dispatch.
 // Non-nil error short-circuits the invocation with
 // InvocationResult{Status: "skipped"} and the error as reason; no handler
 // runs, no budget is consumed.
 //
 // Use Preflight for preconditions common to every flow in a binary that
-// may change between Backend.ListEligible (which filters at scheduling
+// may change between Orchestrator.ListAutoSelectable (which filters at scheduling
 // time) and RunOne dispatch:
 //
 //   - per-item "manual" / "do not auto-process" flags flipped by an
@@ -54,19 +54,19 @@ var ErrBlocked = errors.New("blocked: needs human action")
 // returns nil lets SelectFlow's existing terminal check run; a preflight
 // that returns an error marks the invocation skipped, leaving the item
 // available for the next eligibility cycle.
-type PreflightFunc func(ctx context.Context, state *ItemState) error
+type PreflightFunc func(ctx context.Context, item *Item) error
 
 // ChainPreflight composes multiple preflights into one. Returns the first
 // non-nil error; nil if all checks pass. nil entries in the chain are
 // skipped, so callers can compose conditionally without rebuilding the
 // slice.
 func ChainPreflight(checks ...PreflightFunc) PreflightFunc {
-	return func(ctx context.Context, state *ItemState) error {
+	return func(ctx context.Context, item *Item) error {
 		for _, c := range checks {
 			if c == nil {
 				continue
 			}
-			if err := c(ctx, state); err != nil {
+			if err := c(ctx, item); err != nil {
 				return err
 			}
 		}

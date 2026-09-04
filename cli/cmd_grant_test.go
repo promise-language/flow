@@ -23,7 +23,7 @@ func grantTestSetup(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer, func() fl
 
 	}, a)
 
-	if err := be.SeedState(context.Background(), claim, []flow.ArtifactSpec{
+	if err := be.SeedState(context.Background(), claim.ItemRef, []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactMarkdown},
 	}); err != nil {
 		t.Fatalf("SeedState: %v", err)
@@ -34,9 +34,9 @@ func grantTestSetup(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer, func() fl
 	app.Err = &errBuf
 
 	read := func() flow.ArtifactRecord {
-		st, err := be.LoadState(context.Background(), claim)
+		st, err := be.Load(context.Background(), claim.ItemRef)
 		if err != nil {
-			t.Fatalf("LoadState: %v", err)
+			t.Fatalf("Load: %v", err)
 		}
 		return st.Artifact("plan")
 	}
@@ -167,7 +167,7 @@ func TestCmdGrant_NoPark_RefusesWithRemedy(t *testing.T) {
 func TestCmdGrant_UnmatchedTypeExitsOne(t *testing.T) {
 	a := &stubAgent{name: "stub"}
 	app, be, claim := testAppItem(t,
-		flow.Item{ID: "1", Type: "chore", Title: "chore#1"},
+		flow.Item{Ref: itemRefFor("1"), Type: "chore", Title: "chore#1"},
 		[]flow.ItemType{"task"}, // flow accepts only "task"
 		func(f *flow.Flow) {
 			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
@@ -175,7 +175,7 @@ func TestCmdGrant_UnmatchedTypeExitsOne(t *testing.T) {
 			}, flow.StepConfig{})
 		}, a)
 
-	if err := be.SeedState(context.Background(), claim, []flow.ArtifactSpec{
+	if err := be.SeedState(context.Background(), claim.ItemRef, []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactMarkdown},
 	}); err != nil {
 		t.Fatalf("SeedState: %v", err)

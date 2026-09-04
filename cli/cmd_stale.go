@@ -32,7 +32,7 @@ func (app *App) cmdStale(ctx context.Context, args []string) int {
 		return app.usageError("stale: requires exactly one step id, got %d", fs.NArg())
 	}
 
-	claim, err := app.Backend.LookupActiveClaim(ctx, app.Owner)
+	claim, err := app.Orchestrator.LookupActiveClaim(ctx)
 	if err != nil {
 		fmt.Fprintln(app.Err, "stale:", err)
 		return 1
@@ -42,14 +42,14 @@ func (app *App) cmdStale(ctx context.Context, args []string) int {
 		return 1
 	}
 
-	state, err := app.Backend.LoadState(ctx, *claim)
+	state, err := app.Orchestrator.Load(ctx, claim.ItemRef)
 	if err != nil {
 		fmt.Fprintln(app.Err, "stale:", err)
 		return 1
 	}
-	f := flowForType(app, state.Item.Type)
+	f := flowForType(app, state.Type)
 	if f == nil {
-		fmt.Fprintf(app.Err, "stale: no flow in this binary handles item type %q\n", state.Item.Type)
+		fmt.Fprintf(app.Err, "stale: no flow in this binary handles item type %q\n", state.Type)
 		return 1
 	}
 
@@ -59,12 +59,12 @@ func (app *App) cmdStale(ctx context.Context, args []string) int {
 	}
 
 	// Check artifact state.
-	switch artifactState(state, flow.ArtifactId(stepID)) {
+	switch artifactState(state, stepID) {
 	case stateResolved:
 		// proceed
 	case stateStale:
 		payload := stalePayload{
-			StepID:       stepID,
+			StepID:       string(stepID),
 			Item:         claim.ItemRef.Display,
 			AlreadyStale: true,
 		}
@@ -98,13 +98,13 @@ func (app *App) cmdStale(ctx context.Context, args []string) int {
 		warnings = append(warnings, w)
 	}
 
-	if err := app.Backend.MarkStale(ctx, *claim, flow.ArtifactId(stepID)); err != nil {
+	if err := app.Orchestrator.MarkStale(ctx, claim.ItemRef, stepID); err != nil {
 		fmt.Fprintln(app.Err, "stale:", err)
 		return 1
 	}
 
 	payload := stalePayload{
-		StepID:   stepID,
+		StepID:   string(stepID),
 		Item:     claim.ItemRef.Display,
 		Warnings: warnings,
 	}
@@ -115,8 +115,8 @@ func (app *App) cmdStale(ctx context.Context, args []string) int {
 
 // resolveStaleTarget turns an operator-supplied argument into a step id for
 // the stale command, or refuses with a message that names the legal ids.
-func (app *App) resolveStaleTarget(f *flow.Flow, state *flow.ItemState, arg string) (string, bool) {
-	if li, ok := f.ItemByResult(arg); ok {
+func (app *App) resolveStaleTarget(f *flow.Flow, state *flow.Item, arg string) (flow.ArtifactId, bool) {
+	if li, ok := f.ItemByResult(flow.StepId(arg)); ok {
 		switch li.Kind {
 		case flow.LifecycleSignal, flow.LifecycleAwait:
 			fmt.Fprintf(app.Err, "stale: %q is a signal step and cannot be marked stale\n", arg)
@@ -126,7 +126,7 @@ func (app *App) resolveStaleTarget(f *flow.Flow, state *flow.ItemState, arg stri
 			fmt.Fprintf(app.Err, "stale: item not seeded — no artifact record for %q (run `run-step` once first)\n", arg)
 			return "", false
 		}
-		return arg, true
+		return li.ArtifactId, true
 	}
 	// The human label is NOT an identity. Say so, and name the id.
 	if li, ok := f.Item(arg); ok {
@@ -136,7 +136,7 @@ func (app *App) resolveStaleTarget(f *flow.Flow, state *flow.ItemState, arg stri
 	// Seeded but no longer in the flow.
 	if _, seeded := state.Artifacts[flow.ArtifactId(arg)]; seeded {
 		fmt.Fprintf(app.Err, "stale: warning — %q is seeded on this item but no longer part of flow %q; marking stale anyway\n", arg, f.Name())
-		return arg, true
+		return flow.ArtifactId(arg), true
 	}
 	ids := grantableIDs(f)
 	fmt.Fprintf(app.Err, "stale: unknown step id %q\n", arg)

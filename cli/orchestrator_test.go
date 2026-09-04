@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -12,9 +11,15 @@ import (
 	"time"
 
 	"github.com/promise-language/flow"
-	"github.com/promise-language/flow/pkg/backend/fake"
 	"github.com/promise-language/flow/pkg/clistate"
+	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
+
+// itemRefFor is the ref the fake mints for an id — the address every
+// Orchestrator method now takes, in place of the store id Item used to carry.
+func itemRefFor(id string) flow.ItemRef {
+	return fake.New().Ref(id)
+}
 
 // ---------------------------------------------------------------------------
 // Write-contract gate tests
@@ -95,7 +100,7 @@ func TestWriteContract_DirtyTreeViolation(t *testing.T) {
 	// handler. We need to set it after the worktree is created but before
 	// the check runs. The fake's Worktree() creates the fakeWorktree lazily;
 	// we pre-create it by fetching once, then set dirty.
-	wt, _ := be.Worktree(context.Background(), claim)
+	wt, _ := be.Worktree(context.Background(), claim.ItemRef)
 	_ = wt
 	be.SetDirty(true)
 
@@ -206,7 +211,7 @@ func TestWriteContract_ViolationChargesInvocation(t *testing.T) {
 	}
 
 	// Invocation must have been charged.
-	state, _ := be.LoadState(context.Background(), claim)
+	state, _ := be.Load(context.Background(), claim.ItemRef)
 	rec := state.Artifact("plan")
 	if rec.Invocations != 1 {
 		t.Errorf("Invocations = %d, want 1 (violation must charge)", rec.Invocations)
@@ -310,7 +315,7 @@ func TestWriteContract_AllowedDirtyTree(t *testing.T) {
 		}, flow.StepConfig{Writes: flow.WriteContract{MayEditTree: true}})
 	}, &stubAgent{name: "stub"})
 
-	wt, _ := be.Worktree(context.Background(), claim)
+	wt, _ := be.Worktree(context.Background(), claim.ItemRef)
 	_ = wt
 	be.SetDirty(true)
 
@@ -417,22 +422,22 @@ func (a *stubAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Agent
 
 // testApp builds a minimal App with the fake backend pre-populated with one
 // item and a single-flow registration.
-func testApp(t *testing.T, configure func(*flow.Flow), agent flow.Agent) (*App, *fake.Backend, flow.Claim) {
+func testApp(t *testing.T, configure func(*flow.Flow), agent flow.Agent) (*App, *fake.Orchestrator, flow.Claim) {
 	t.Helper()
-	return testAppItem(t, flow.Item{ID: "1", Type: "task", Title: "test#1"}, []flow.ItemType{"task"}, configure, agent)
+	return testAppItem(t, flow.Item{Ref: itemRefFor("1"), Type: "task", Title: "test#1"}, []flow.ItemType{"task"}, configure, agent)
 }
 
 // testAppItem is testApp over a caller-supplied item and flow type set. The
 // item's type is what routes flow selection, so a test about a type no flow
 // accepts has to set both ends; every other test takes the task/task default.
-func testAppItem(t *testing.T, item flow.Item, types []flow.ItemType, configure func(*flow.Flow), agent flow.Agent) (*App, *fake.Backend, flow.Claim) {
+func testAppItem(t *testing.T, item flow.Item, types []flow.ItemType, configure func(*flow.Flow), agent flow.Agent) (*App, *fake.Orchestrator, flow.Claim) {
 	t.Helper()
 	be := fake.New(flow.Signal("pr-open", "test"))
-	be.AddItem(item)
+	be.AddItem(item.Ref.Display, item)
 
 	app := &App{
-		Backend: be,
-		Agent:   agent,
+		Orchestrator: be,
+		Agent:        agent,
 		Artifacts: []flow.ArtifactDef{
 			flow.Artifact("plan", flow.ArtifactMarkdown),
 			flow.Artifact("commit", flow.ArtifactCommitHash),
@@ -448,15 +453,12 @@ func testAppItem(t *testing.T, item flow.Item, types []flow.ItemType, configure 
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	app.Owner = "alice"
-
 	// Capture stdout/stderr.
 	app.Out = newDiscardWriter()
 	app.Err = newDiscardWriter()
 
 	ctx := context.Background()
-	ref := flow.ItemRef{BackendName: "fake", Display: item.ID, Ref: json.RawMessage(`"` + item.ID + `"`)}
-	claim, err := be.Claim(ctx, ref, "alice", nil)
+	claim, err := be.Claim(ctx, item.Ref, nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
@@ -467,7 +469,7 @@ func testAppItem(t *testing.T, item flow.Item, types []flow.ItemType, configure 
 // all optional interfaces the concrete type may implement — StateInspector,
 // QuestionAnswerer, etc. Used by tests that need to verify "not supported"
 // paths.
-type bareBackend struct{ flow.Backend }
+type bareBackend struct{ flow.Orchestrator }
 
 type discardWriter struct{}
 
@@ -492,7 +494,7 @@ func TestRunOne_SeedsAndDispatchesFirstStep(t *testing.T) {
 		t.Errorf("res = %+v, want step=plan status=done", res)
 	}
 
-	state, _ := be.LoadState(context.Background(), claim)
+	state, _ := be.Load(context.Background(), claim.ItemRef)
 	rec := state.Artifact("plan")
 	if !rec.Resolved || rec.Markdown != "the plan" {
 		t.Errorf("plan artifact = %+v, want resolved markdown 'the plan'", rec)
@@ -616,17 +618,17 @@ func TestRunOne_WritesAndClearsRunningRecord(t *testing.T) {
 
 // seedFailBackend forces SeedState to fail — modeling a transport/tracker
 // error while declaring the checklist.
-type seedFailBackend struct{ *fake.Backend }
+type seedFailBackend struct{ *fake.Orchestrator }
 
-func (b seedFailBackend) SeedState(ctx context.Context, claim flow.Claim, specs []flow.ArtifactSpec) error {
+func (b seedFailBackend) SeedState(ctx context.Context, ref flow.ItemRef, specs []flow.ArtifactSpec) error {
 	return errors.New("boom: seed unavailable")
 }
 
 // noopSeedBackend models the pre-fix bug: SeedState silently no-ops, leaving
 // the item with no required-artifact checklist.
-type noopSeedBackend struct{ *fake.Backend }
+type noopSeedBackend struct{ *fake.Orchestrator }
 
-func (b noopSeedBackend) SeedState(ctx context.Context, claim flow.Claim, specs []flow.ArtifactSpec) error {
+func (b noopSeedBackend) SeedState(ctx context.Context, ref flow.ItemRef, specs []flow.ArtifactSpec) error {
 	return nil
 }
 
@@ -641,7 +643,7 @@ func TestRunOne_SeedFailureErrorsOutNoStep(t *testing.T) {
 		}, flow.StepConfig{})
 
 	}, a)
-	app.Backend = seedFailBackend{Backend: be}
+	app.Orchestrator = seedFailBackend{Orchestrator: be}
 
 	_, err := RunOne(context.Background(), app, claim)
 	if err == nil {
@@ -664,7 +666,7 @@ func TestRunOne_UnseededAfterNoopSeedErrorsOut(t *testing.T) {
 		}, flow.StepConfig{})
 
 	}, a)
-	app.Backend = noopSeedBackend{Backend: be}
+	app.Orchestrator = noopSeedBackend{Orchestrator: be}
 
 	_, err := RunOne(context.Background(), app, claim)
 	if err == nil {
@@ -685,7 +687,7 @@ func TestRunOne_PreflightSkipsBeforeFlowSelection(t *testing.T) {
 
 	}, &stubAgent{name: "stub"})
 
-	app.Preflight = func(ctx context.Context, state *flow.ItemState) error {
+	app.Preflight = func(ctx context.Context, state *flow.Item) error {
 		return errors.New("manual flag set")
 	}
 
@@ -706,7 +708,7 @@ func TestRunOne_PreflightSkipsBeforeFlowSelection(t *testing.T) {
 	// Budget must NOT have been consumed — the artifact isn't seeded yet
 	// (seed only happens after preflight passes), so Invocations stays 0
 	// after re-loading state.
-	state, _ := be.LoadState(context.Background(), claim)
+	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if rec := state.Artifact("plan"); rec.Invocations != 0 {
 		t.Errorf("Invocations = %d, want 0 (preflight skip must not consume budget)", rec.Invocations)
 	}
@@ -721,7 +723,7 @@ func TestRunOne_PreflightPassThrough(t *testing.T) {
 	}, &stubAgent{name: "stub"})
 
 	called := 0
-	app.Preflight = func(ctx context.Context, state *flow.ItemState) error {
+	app.Preflight = func(ctx context.Context, state *flow.Item) error {
 		called++
 		return nil
 	}
@@ -740,18 +742,18 @@ func TestRunOne_PreflightPassThrough(t *testing.T) {
 
 func TestChainPreflight(t *testing.T) {
 	ctx := context.Background()
-	state := &flow.ItemState{Item: flow.Item{ID: "x"}}
+	state := &flow.Item{Ref: itemRefFor("x")}
 
 	calls := []string{}
-	a := flow.PreflightFunc(func(context.Context, *flow.ItemState) error {
+	a := flow.PreflightFunc(func(context.Context, *flow.Item) error {
 		calls = append(calls, "a")
 		return nil
 	})
-	b := flow.PreflightFunc(func(context.Context, *flow.ItemState) error {
+	b := flow.PreflightFunc(func(context.Context, *flow.Item) error {
 		calls = append(calls, "b")
 		return errors.New("b refused")
 	})
-	c := flow.PreflightFunc(func(context.Context, *flow.ItemState) error {
+	c := flow.PreflightFunc(func(context.Context, *flow.Item) error {
 		calls = append(calls, "c")
 		return nil
 	})
@@ -954,9 +956,9 @@ func TestRunOne_CostCapFailureParksOnCost(t *testing.T) {
 	}
 	// The stopped turn still bills: a park that forgot the spend would let the
 	// next dispatch re-run the same turn against a meter that never moved.
-	st, err := be.LoadState(ctx, claim)
+	st, err := be.Load(ctx, claim.ItemRef)
 	if err != nil {
-		t.Fatalf("LoadState: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 	if got := st.Artifact("plan").CostUSDSpent; got != 21.868663 {
 		t.Errorf("CostUSDSpent = %v, want 21.868663", got)
@@ -974,10 +976,10 @@ func TestRunOne_CostCapFailureParksOnCost(t *testing.T) {
 
 // zeroCostGrantBackend hands back state whose cost axis carries no grant —
 // the shape a backend that does not meter cost produces.
-type zeroCostGrantBackend struct{ *fake.Backend }
+type zeroCostGrantBackend struct{ *fake.Orchestrator }
 
-func (b zeroCostGrantBackend) LoadState(ctx context.Context, claim flow.Claim) (*flow.ItemState, error) {
-	st, err := b.Backend.LoadState(ctx, claim)
+func (b zeroCostGrantBackend) Load(ctx context.Context, ref flow.ItemRef) (*flow.Item, error) {
+	st, err := b.Orchestrator.Load(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -1007,7 +1009,7 @@ func TestRunOne_CostCapWithoutAGrantIsAPlainFailure(t *testing.T) {
 			return ctx.ResolveMarkdown("never reached")
 		}, flow.StepConfig{})
 	}, a)
-	app.Backend = zeroCostGrantBackend{Backend: be}
+	app.Orchestrator = zeroCostGrantBackend{Orchestrator: be}
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -1049,7 +1051,7 @@ func TestRunOne_NoCostGrantLeavesTheHandlerCeilingAlone(t *testing.T) {
 			return ctx.ResolveMarkdown("the plan")
 		}, flow.StepConfig{})
 	}, a)
-	app.Backend = zeroCostGrantBackend{Backend: be}
+	app.Orchestrator = zeroCostGrantBackend{Orchestrator: be}
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -1131,12 +1133,12 @@ func TestRunOne_ParksOnTimeout(t *testing.T) {
 // countingPatchBackend hands out worktrees that count CapturePatch calls, so a
 // test can assert the park path never captures.
 type countingPatchBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	wt *countingPatchWorktree
 }
 
-func (b *countingPatchBackend) Worktree(ctx context.Context, claim flow.Claim) (flow.Worktree, error) {
-	inner, err := b.Backend.Worktree(ctx, claim)
+func (b *countingPatchBackend) Worktree(ctx context.Context, ref flow.ItemRef) (flow.Worktree, error) {
+	inner, err := b.Orchestrator.Worktree(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -1176,8 +1178,8 @@ func TestRunOne_TimeoutParkDoesNotCapturePatch(t *testing.T) {
 		}, flow.StepConfig{Budget: flow.StepBudget{Timeout: 50 * time.Millisecond}})
 	}, &stubAgent{name: "stub"})
 
-	counting := &countingPatchBackend{Backend: be, wt: &countingPatchWorktree{}}
-	app.Backend = counting
+	counting := &countingPatchBackend{Orchestrator: be, wt: &countingPatchWorktree{}}
+	app.Orchestrator = counting
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -1189,7 +1191,7 @@ func TestRunOne_TimeoutParkDoesNotCapturePatch(t *testing.T) {
 	if counting.wt.captures != 0 {
 		t.Errorf("CapturePatch called %d times on a timeout park, want 0", counting.wt.captures)
 	}
-	state, _ := be.LoadState(context.Background(), claim)
+	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if rec := state.Artifact("plan"); rec.Invocations != 1 {
 		t.Errorf("Invocations = %d, want 1 (timeout still counts as an invocation)", rec.Invocations)
 	}
@@ -1214,7 +1216,7 @@ func TestRunOne_SignalStepAwaitsSignal(t *testing.T) {
 	if res.Status != "done" {
 		t.Errorf("first run = %+v, want done", res)
 	}
-	state, _ := be.LoadState(context.Background(), claim)
+	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if state.SignalSet("pr-open") {
 		t.Fatalf("signal should not be set yet")
 	}
@@ -1268,7 +1270,7 @@ func TestRunOne_QuestionsPersistedAndPark(t *testing.T) {
 	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkQuestion {
 		t.Errorf("res = %+v, want parked kind=question", res)
 	}
-	state, _ := be.LoadState(context.Background(), claim)
+	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if len(state.Questions) != 2 {
 		t.Errorf("Questions persisted = %d, want 2", len(state.Questions))
 	}
@@ -1314,10 +1316,10 @@ func TestApp_Validate_RejectsUnknownArtifact(t *testing.T) {
 	f := flow.NewFlow("x", nil)
 	f.AddStep("step", "missing-artifact", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
 	app := App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:     []*flow.Flow{f},
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flows:        []*flow.Flow{f},
 	}
 	if err := app.validate(); err == nil {
 		t.Errorf("expected validation error for unknown artifact")
@@ -1332,8 +1334,8 @@ func TestApp_Validate_RejectsUnsupportedArtifact(t *testing.T) {
 	f.AddStep("plan", "plan", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
 	f.AddStep("report", "report", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
 	app := App{
-		Backend: be,
-		Agent:   &stubAgent{name: "stub"},
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
 		Artifacts: []flow.ArtifactDef{
 			flow.Artifact("plan", flow.ArtifactMarkdown),
 			flow.Artifact("report", flow.ArtifactMarkdown),
@@ -1354,10 +1356,10 @@ func TestApp_Validate_RejectsArtifactTypeMismatch(t *testing.T) {
 	f := flow.NewFlow("x", []flow.ItemType{"task"})
 	f.AddStep("plan", "plan", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
 	app := App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactJSON)},
-		Flows:     []*flow.Flow{f},
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactJSON)},
+		Flows:        []*flow.Flow{f},
 	}
 	if err := app.validate(); err == nil {
 		t.Errorf("expected validation error for artifact declared with a type the backend cannot record")
@@ -1369,11 +1371,11 @@ func TestApp_Validate_RejectsUnsupportedSignal(t *testing.T) {
 	f := flow.NewFlow("x", nil)
 	f.AddSignalStep("sig", "pr-open", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
 	app := App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Signals:   []flow.SignalDef{flow.Signal("pr-open", "x")},
-		Flows:     []*flow.Flow{f},
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Signals:      []flow.SignalDef{flow.Signal("pr-open", "x")},
+		Flows:        []*flow.Flow{f},
 	}
 	if err := app.validate(); err == nil {
 		t.Errorf("expected validation error for signal not in SupportedSignals")
@@ -1389,18 +1391,18 @@ func TestSelectFlow_RequireSignalGate(t *testing.T) {
 	b.AddStep("merge", "commit", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
 
 	app := &App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown), flow.Artifact("commit", flow.ArtifactCommitHash)},
-		Signals:   []flow.SignalDef{flow.Signal("pr-open", "x")},
-		Flows:     []*flow.Flow{a, b},
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown), flow.Artifact("commit", flow.ArtifactCommitHash)},
+		Signals:      []flow.SignalDef{flow.Signal("pr-open", "x")},
+		Flows:        []*flow.Flow{a, b},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
 
-	state := &flow.ItemState{
-		Item:      flow.Item{ID: "1", Type: "task"},
+	state := &flow.Item{
+		Ref: itemRefFor("1"), Type: "task",
 		Artifacts: map[flow.ArtifactId]flow.ArtifactRecord{},
 		Signals:   map[flow.SignalId]flow.SignalState{},
 	}
@@ -1424,16 +1426,16 @@ func TestSelectFlow_RequireSignalGate(t *testing.T) {
 	}
 }
 
-// pendingArtifactBackend wraps fake.Backend so LoadState reports a required-
+// pendingArtifactBackend wraps fake.Orchestrator so Load reports a required-
 // but-unresolved artifact on the loaded state — modelling a status=done item
 // whose finalization (summary / inspection) hasn't completed yet. T0481.
 type pendingArtifactBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	pending flow.ArtifactId
 }
 
-func (b *pendingArtifactBackend) LoadState(ctx context.Context, claim flow.Claim) (*flow.ItemState, error) {
-	state, err := b.Backend.LoadState(ctx, claim)
+func (b *pendingArtifactBackend) Load(ctx context.Context, ref flow.ItemRef) (*flow.Item, error) {
+	state, err := b.Orchestrator.Load(ctx, ref)
 	if err != nil {
 		return state, err
 	}
@@ -1448,14 +1450,14 @@ func (b *pendingArtifactBackend) LoadState(ctx context.Context, claim flow.Claim
 	return state, nil
 }
 
-// finalizingBackend wraps fake.Backend and counts Finalize calls so tests can
+// finalizingBackend wraps fake.Orchestrator and counts Finalize calls so tests can
 // distinguish the premature-finalize regression from the happy path.
 type finalizingBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	finalizeCalls int
 }
 
-func (b *finalizingBackend) Finalize(ctx context.Context, claim flow.Claim) error {
+func (b *finalizingBackend) Finalize(ctx context.Context, ref flow.ItemRef) error {
 	b.finalizeCalls++
 	return nil
 }
@@ -1478,9 +1480,9 @@ func TestRunOne_RefusesFinalizeWhenRequiredArtifactPending(t *testing.T) {
 		}, flow.StepConfig{})
 
 	}, a)
-	wrapped := &finalizingBackend{Backend: be}
-	app.Backend = &pendingArtifactBackend{Backend: be, pending: "summary"}
-	// Compose: the outer pendingArtifactBackend's LoadState is what RunOne
+	wrapped := &finalizingBackend{Orchestrator: be}
+	app.Orchestrator = &pendingArtifactBackend{Orchestrator: be, pending: "summary"}
+	// Compose: the outer pendingArtifactBackend's Load is what RunOne
 	// sees; the finalizing wrapper is only used to PROVE Finalize is NOT
 	// called. Swap in the finalizing one as the concrete Finalizer the type
 	// assertion picks up.
@@ -1505,7 +1507,7 @@ func TestRunOne_RefusesFinalizeWhenRequiredArtifactPending(t *testing.T) {
 // item typed "chore" — the shape of an ordinary GitHub issue carrying no
 // type:* label against a binary that registers task/bug flows. The step handler
 // fails the test: nothing may run for an item no flow accepts.
-func unmatchedTypeApp(t *testing.T, item flow.Item) (*App, *fake.Backend, flow.Claim) {
+func unmatchedTypeApp(t *testing.T, item flow.Item) (*App, *fake.Orchestrator, flow.Claim) {
 	t.Helper()
 	return testAppItem(t, item, []flow.ItemType{"task", "bug"}, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
@@ -1521,9 +1523,9 @@ func unmatchedTypeApp(t *testing.T, item flow.Item) (*App, *fake.Backend, flow.C
 // terminally. It is blocked, with a reason naming the item's type, the
 // registered types, and both ways a person can clear it.
 func TestRunOne_BlocksWhenNoFlowAcceptsItemType(t *testing.T) {
-	app, be, claim := unmatchedTypeApp(t, flow.Item{ID: "1", Type: "chore", Title: "test#1"})
-	wrapped := &finalizingBackend{Backend: be}
-	app.Backend = wrapped
+	app, be, claim := unmatchedTypeApp(t, flow.Item{Ref: itemRefFor("1"), Type: "chore", Title: "test#1"})
+	wrapped := &finalizingBackend{Orchestrator: be}
+	app.Orchestrator = wrapped
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -1542,9 +1544,9 @@ func TestRunOne_BlocksWhenNoFlowAcceptsItemType(t *testing.T) {
 	}
 	// And nothing was seeded: the blind spot in the pending-artifact guard is
 	// exactly that an unmatched item has no records for it to iterate.
-	state, err := be.LoadState(context.Background(), claim)
+	state, err := be.Load(context.Background(), claim.ItemRef)
 	if err != nil {
-		t.Fatalf("LoadState: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 	if len(state.Artifacts) != 0 {
 		t.Errorf("artifacts = %+v, want none seeded", state.Artifacts)
@@ -1556,8 +1558,8 @@ func TestRunOne_BlocksWhenNoFlowAcceptsItemType(t *testing.T) {
 // that WAS seeded (by an earlier run, or a since-changed type) and now matches
 // nothing reports the mismatch, not "required artifact still pending".
 func TestRunOne_BlocksUnmatchedTypeEvenWhenSeeded(t *testing.T) {
-	app, be, claim := unmatchedTypeApp(t, flow.Item{ID: "1", Type: "chore", Title: "test#1"})
-	app.Backend = &pendingArtifactBackend{Backend: be, pending: "summary"}
+	app, be, claim := unmatchedTypeApp(t, flow.Item{Ref: itemRefFor("1"), Type: "chore", Title: "test#1"})
+	app.Orchestrator = &pendingArtifactBackend{Orchestrator: be, pending: "summary"}
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -1576,9 +1578,9 @@ func TestRunOne_BlocksUnmatchedTypeEvenWhenSeeded(t *testing.T) {
 // including one finalized by this very defect before it was fixed — and
 // blocking it would strand it with no route onward.
 func TestRunOne_FinalizedItemWithUnmatchedTypeStaysDone(t *testing.T) {
-	app, be, claim := unmatchedTypeApp(t, flow.Item{ID: "1", Type: "chore", Title: "test#1", Finalized: true})
-	wrapped := &finalizingBackend{Backend: be}
-	app.Backend = wrapped
+	app, be, claim := unmatchedTypeApp(t, flow.Item{Ref: itemRefFor("1"), Type: "chore", Title: "test#1", Finalized: true})
+	wrapped := &finalizingBackend{Orchestrator: be}
+	app.Orchestrator = wrapped
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -1598,9 +1600,9 @@ func TestRunOne_FinalizedItemWithUnmatchedTypeStaysDone(t *testing.T) {
 // other, not a wildcard and not a licence to finalize, and the reason renders it
 // so the operator can see that the item carries no type at all.
 func TestRunOne_BlocksWhenItemTypeIsEmpty(t *testing.T) {
-	app, be, claim := unmatchedTypeApp(t, flow.Item{ID: "1", Type: "", Title: "test#1"})
-	wrapped := &finalizingBackend{Backend: be}
-	app.Backend = wrapped
+	app, be, claim := unmatchedTypeApp(t, flow.Item{Ref: itemRefFor("1"), Type: "", Title: "test#1"})
+	wrapped := &finalizingBackend{Orchestrator: be}
+	app.Orchestrator = wrapped
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -1624,7 +1626,7 @@ func TestRunOne_BlocksWhenItemTypeIsEmpty(t *testing.T) {
 // guard on the very configuration it is meant to leave alone.
 func TestRunOne_UniversalFlowIsNotATypeMismatch(t *testing.T) {
 	app, be, claim := testAppItem(t,
-		flow.Item{ID: "1", Type: "chore", Title: "test#1"},
+		flow.Item{Ref: itemRefFor("1"), Type: "chore", Title: "test#1"},
 		nil, // universal flow: declares no types, accepts all of them
 		func(f *flow.Flow) {
 			// RequireSignal never set, so SelectFlow returns nil and RunOne
@@ -1635,8 +1637,8 @@ func TestRunOne_UniversalFlowIsNotATypeMismatch(t *testing.T) {
 				return ctx.ResolveMarkdown("ignored")
 			}, flow.StepConfig{})
 		}, &stubAgent{name: "stub"})
-	wrapped := &finalizingBackend{Backend: be}
-	app.Backend = wrapped
+	wrapped := &finalizingBackend{Orchestrator: be}
+	app.Orchestrator = wrapped
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -1697,8 +1699,8 @@ func TestRunOne_FinalizesWhenAllRequiredArtifactsResolved(t *testing.T) {
 
 	}, a)
 	// Backend with Finalize implemented, no pending artifacts injected.
-	wrapped := &finalizingBackend{Backend: be}
-	app.Backend = wrapped
+	wrapped := &finalizingBackend{Orchestrator: be}
+	app.Orchestrator = wrapped
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -1745,7 +1747,7 @@ func TestRunOne_GrantedTimeoutOverridesStepBudget(t *testing.T) {
 	}
 
 	// Grant a second of extra wall-clock, as `do grant --timeout 1` does.
-	if err := be.Grant(ctx, claim, "plan", flow.Grant{TimeoutAdd: 1}); err != nil {
+	if err := be.Grant(ctx, claim.ItemRef, "plan", flow.Grant{TimeoutAdd: 1}); err != nil {
 		t.Fatalf("Grant: %v", err)
 	}
 
@@ -1794,9 +1796,9 @@ func TestRunOne_BareGrantRecoversAStepOutOfTimeAndInvocations(t *testing.T) {
 		t.Fatalf("first run = %+v, want parked/timeout", res)
 	}
 	// The kill consumed the step's only invocation, so both axes are flat.
-	st, err := be.LoadState(ctx, claim)
+	st, err := be.Load(ctx, claim.ItemRef)
 	if err != nil {
-		t.Fatalf("LoadState: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 	if rec := st.Artifact("plan"); rec.Invocations != rec.GrantedInvocations {
 		t.Fatalf("invocations = %d/%d, want the axis exhausted by the timeout kill",
@@ -1825,19 +1827,19 @@ func TestRunOne_BareGrantRecoversAStepOutOfTimeAndInvocations(t *testing.T) {
 // there instead of writing body content. `evidence` says whether the
 // out-of-band attachment happened.
 type outOfBandPatchBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	evidence bool
 }
 
-func (b *outOfBandPatchBackend) ResolveArtifact(ctx context.Context, claim flow.Claim, id flow.ArtifactId, body flow.ArtifactBody) error {
+func (b *outOfBandPatchBackend) ResolveArtifact(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId, body flow.ArtifactBody) error {
 	if body.Type == flow.ArtifactPatch && !b.evidence {
 		return fmt.Errorf("backend: ResolveArtifact %q: no implementation evidence on item", id)
 	}
-	return b.Backend.ResolveArtifact(ctx, claim, id, body)
+	return b.Orchestrator.ResolveArtifact(ctx, ref, id, body)
 }
 
-func (b *outOfBandPatchBackend) Worktree(ctx context.Context, claim flow.Claim) (flow.Worktree, error) {
-	inner, err := b.Backend.Worktree(ctx, claim)
+func (b *outOfBandPatchBackend) Worktree(ctx context.Context, ref flow.ItemRef) (flow.Worktree, error) {
+	inner, err := b.Orchestrator.Worktree(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -1876,7 +1878,7 @@ func TestResolvePatch_EmptyBodyResolvesForOutOfBandBackend(t *testing.T) {
 			return resolveErr
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
-	app.Backend = &outOfBandPatchBackend{Backend: be, evidence: true}
+	app.Orchestrator = &outOfBandPatchBackend{Orchestrator: be, evidence: true}
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -1888,7 +1890,7 @@ func TestResolvePatch_EmptyBodyResolvesForOutOfBandBackend(t *testing.T) {
 	if res.Status != "done" {
 		t.Fatalf("res = %+v, want done", res)
 	}
-	state, _ := be.LoadState(context.Background(), claim)
+	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if rec := state.Artifact("implementation"); !rec.Resolved {
 		t.Errorf("implementation artifact = %+v, want resolved", rec)
 	}
@@ -1904,7 +1906,7 @@ func TestResolvePatch_BackendRejectsMissingEvidence(t *testing.T) {
 			return resolveErr
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
-	app.Backend = &outOfBandPatchBackend{Backend: be, evidence: false}
+	app.Orchestrator = &outOfBandPatchBackend{Orchestrator: be, evidence: false}
 
 	if _, err := RunOne(context.Background(), app, claim); err != nil {
 		t.Fatalf("RunOne: %v", err)
@@ -1912,7 +1914,7 @@ func TestResolvePatch_BackendRejectsMissingEvidence(t *testing.T) {
 	if resolveErr == nil || !strings.Contains(resolveErr.Error(), "no implementation evidence") {
 		t.Fatalf("ResolvePatch error = %v, want the backend's own evidence message", resolveErr)
 	}
-	state, _ := be.LoadState(context.Background(), claim)
+	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if rec := state.Artifact("implementation"); rec.Resolved {
 		t.Errorf("implementation artifact = %+v, want unresolved", rec)
 	}
@@ -1933,7 +1935,7 @@ func TestResolvePatch_AcceptsNonEmptyDiff(t *testing.T) {
 	if res.Status != "done" {
 		t.Fatalf("res = %+v, want done", res)
 	}
-	state, _ := be.LoadState(context.Background(), claim)
+	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if rec := state.Artifact("implementation"); !rec.Resolved || len(rec.Patch.Diff) == 0 {
 		t.Errorf("implementation artifact = %+v, want resolved with a non-empty diff", rec)
 	}
@@ -1950,7 +1952,7 @@ func TestRunOne_PreflightErrBlockedReportsBlocked(t *testing.T) {
 			return nil
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
-	app.Preflight = func(context.Context, *flow.ItemState) error {
+	app.Preflight = func(context.Context, *flow.Item) error {
 		return fmt.Errorf("answer needed on %q: %w", "plan", flow.ErrBlocked)
 	}
 
@@ -1972,7 +1974,7 @@ func TestRunOne_PlainPreflightErrorStillSkips(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("never runs", "plan", func(ctx flow.StepCtx) error { return nil }, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
-	app.Preflight = func(context.Context, *flow.ItemState) error {
+	app.Preflight = func(context.Context, *flow.Item) error {
 		return errors.New("operator set the manual flag")
 	}
 
@@ -2009,27 +2011,27 @@ func TestQuestionReason_FallsBackToTextWithoutHeader(t *testing.T) {
 	}
 }
 
-// emptyAskBackend records nothing: AskQuestions reports success and returns no
-// questions. That is the shape that produced the reported defect — a question
+// emptyAskBackend records nothing: AskQuestion reports success and returns a
+// question carrying no id. That is the shape that produced the reported defect — a question
 // park whose recovery path (`answer`) has no registered question to name.
 type emptyAskBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	parks int
 }
 
-func (b *emptyAskBackend) AskQuestions(context.Context, flow.Claim, []flow.AgentQuestion) ([]flow.Question, error) {
-	return nil, nil
+func (b *emptyAskBackend) AskQuestion(context.Context, flow.ItemRef, flow.AgentQuestion) (flow.Question, error) {
+	return flow.Question{}, nil
 }
 
-func (b *emptyAskBackend) Park(ctx context.Context, claim flow.Claim, req flow.ParkRequest) error {
+func (b *emptyAskBackend) Park(ctx context.Context, ref flow.ItemRef, req flow.ParkRequest) error {
 	b.parks++
-	return b.Backend.Park(ctx, claim, req)
+	return b.Orchestrator.Park(ctx, ref, req)
 }
 
-// A backend that registers none of the questions must fail the step, not park
-// on them: an item parked on a question nothing recorded cannot be answered,
-// and nothing else clears that park.
-func TestRunOne_AskQuestionsRecordingNothingFailsInsteadOfParking(t *testing.T) {
+// An orchestrator that hands back a question with no id has registered nothing
+// an operator can name. The step must fail rather than park: an item parked on
+// a question `answer --question <id>` cannot reach is one nothing clears.
+func TestRunOne_AskQuestionWithoutAnIdFailsInsteadOfParking(t *testing.T) {
 	var handlerErr error
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("asks", "plan", func(ctx flow.StepCtx) error {
@@ -2037,8 +2039,8 @@ func TestRunOne_AskQuestionsRecordingNothingFailsInsteadOfParking(t *testing.T) 
 			return handlerErr
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
-	backend := &emptyAskBackend{Backend: be}
-	app.Backend = backend
+	backend := &emptyAskBackend{Orchestrator: be}
+	app.Orchestrator = backend
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -2054,13 +2056,13 @@ func TestRunOne_AskQuestionsRecordingNothingFailsInsteadOfParking(t *testing.T) 
 	if errors.As(handlerErr, &question) {
 		t.Errorf("ctx.AskQuestions returned ErrQuestion %+v; want a plain error, so nothing parks", question)
 	}
-	if !strings.Contains(handlerErr.Error(), "recorded none") {
-		t.Errorf("err = %v, want it to say the backend recorded none of the questions", handlerErr)
+	if !strings.Contains(handlerErr.Error(), "without a question id") {
+		t.Errorf("err = %v, want it to say the question came back without an id", handlerErr)
 	}
 	if backend.parks != 0 {
 		t.Errorf("Park called %d times, want 0", backend.parks)
 	}
-	if state, _ := be.LoadState(context.Background(), claim); state.Parked() {
+	if state, _ := be.Load(context.Background(), claim.ItemRef); state.Parked() {
 		t.Errorf("item parked on %+v, want no park", state.Park)
 	}
 }
@@ -2137,7 +2139,7 @@ func TestRunOne_ErrRefusedParksWithoutBurningBudget(t *testing.T) {
 	}
 
 	// The invocation must NOT have been counted.
-	state, _ := be.LoadState(context.Background(), claim)
+	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if rec := state.Artifact("plan"); rec.Invocations != 0 {
 		t.Errorf("Invocations = %d, want 0 (ErrRefused must not burn budget)", rec.Invocations)
 	}
@@ -2169,7 +2171,7 @@ func TestRunOne_PlainErrorStillBumpsInvocations(t *testing.T) {
 	if res.Status != "failed" {
 		t.Fatalf("status = %q, want failed", res.Status)
 	}
-	state, _ := be.LoadState(context.Background(), claim)
+	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if rec := state.Artifact("plan"); rec.Invocations != 1 {
 		t.Errorf("Invocations = %d, want 1 (plain error must consume budget)", rec.Invocations)
 	}
@@ -2191,16 +2193,16 @@ func TestRunOne_ErrTransientStillParksInfraTransient(t *testing.T) {
 	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkInfraTransient {
 		t.Fatalf("res = %+v, want parked/infra-transient", res)
 	}
-	state, _ := be.LoadState(context.Background(), claim)
+	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if rec := state.Artifact("plan"); rec.Invocations != 0 {
 		t.Errorf("Invocations = %d, want 0 (ErrTransient must not burn budget)", rec.Invocations)
 	}
 }
 
-// clearMarkerBackend wraps a fake.Backend and records ClearQuestionMarker
+// clearMarkerBackend wraps a fake.Orchestrator and records ClearQuestionMarker
 // calls so tests can observe the gate-path label clearing.
 type clearMarkerBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	cleared []flow.ItemRef
 	mu      sync.Mutex
 }
@@ -2215,45 +2217,6 @@ func (b *clearMarkerBackend) wasCleared() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return len(b.cleared) > 0
-}
-
-// TestRunOne_GatePathClearsQuestionMarker verifies that when RunOne dispatches
-// an item parked on ParkQuestion and the preflight passes (meaning an answer
-// exists), ClearQuestionMarker is called before handler dispatch.
-func TestRunOne_GatePathClearsQuestionMarker(t *testing.T) {
-	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
-	}, &stubAgent{name: "stub"})
-
-	// Park on a question.
-	if err := be.Park(context.Background(), claim, flow.ParkRequest{
-		Kind: flow.ParkQuestion,
-		Step: "plan",
-	}); err != nil {
-		t.Fatalf("Park: %v", err)
-	}
-
-	// Wrap the backend to track ClearQuestionMarker.
-	wrapped := &clearMarkerBackend{Backend: be}
-	app.Backend = wrapped
-
-	// The preflight passes (no gate installed), simulating a state where an
-	// answer was posted out-of-band. The park record still shows ParkQuestion
-	// because answering does not clear the park record — only step resolution
-	// does.
-	res, err := RunOne(context.Background(), app, claim)
-	if err != nil {
-		t.Fatalf("RunOne: %v", err)
-	}
-	// The step should have dispatched and resolved.
-	if res.Status != string(flow.StatusDone) {
-		t.Fatalf("status = %q, want done", res.Status)
-	}
-	if !wrapped.wasCleared() {
-		t.Error("ClearQuestionMarker was not called; gate-path label clearing did not fire")
-	}
 }
 
 // TestRunOne_BudgetParkDoesNotClearQuestionMarker verifies that the gate-path
@@ -2282,14 +2245,14 @@ func TestRunOne_BudgetParkDoesNotClearQuestionMarker(t *testing.T) {
 	}
 
 	// Grant budget so the step can proceed on the next dispatch.
-	if err := be.Grant(context.Background(), claim, "plan", flow.Grant{
+	if err := be.Grant(context.Background(), claim.ItemRef, "plan", flow.Grant{
 		Invocations: 5,
 	}); err != nil {
 		t.Fatalf("Grant: %v", err)
 	}
 
-	wrapped := &clearMarkerBackend{Backend: be}
-	app.Backend = wrapped
+	wrapped := &clearMarkerBackend{Orchestrator: be}
+	app.Orchestrator = wrapped
 
 	res, err = RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -2384,7 +2347,7 @@ func TestRunOne_ErrUnfitBlocksWithoutParkOrBudget(t *testing.T) {
 	if !strings.Contains(res.Reason, "12 MB free") {
 		t.Errorf("Reason = %q, want it to contain the handler's message", res.Reason)
 	}
-	state, _ := be.LoadState(context.Background(), claim)
+	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if rec := state.Artifact("plan"); rec.Invocations != 0 {
 		t.Errorf("Invocations = %d, want 0 (ErrUnfit must not burn budget)", rec.Invocations)
 	}
@@ -2413,7 +2376,7 @@ func TestRunOne_PlainErrorOnUnfitMachineReportsBlocked(t *testing.T) {
 	if res.Park != nil {
 		t.Fatalf("Park = %+v, want nil (unfit catch-all must not park)", res.Park)
 	}
-	state, _ := be.LoadState(context.Background(), claim)
+	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if rec := state.Artifact("plan"); rec.Invocations != 0 {
 		t.Errorf("Invocations = %d, want 0 (unfit catch-all must not burn budget)", rec.Invocations)
 	}
@@ -2436,7 +2399,7 @@ func TestRunOne_PlainErrorOnFitMachineStillFails(t *testing.T) {
 	if res.Status != "failed" {
 		t.Fatalf("status = %q, want failed", res.Status)
 	}
-	state, _ := be.LoadState(context.Background(), claim)
+	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if rec := state.Artifact("plan"); rec.Invocations != 1 {
 		t.Errorf("Invocations = %d, want 1 (plain error on fit machine must consume budget)", rec.Invocations)
 	}
@@ -2462,7 +2425,7 @@ func TestRunOne_PlainErrorNoWorktreeOnUnfitMachineStillFails(t *testing.T) {
 	if res.Status != "failed" {
 		t.Fatalf("status = %q, want failed (no worktree → catch-all does not fire)", res.Status)
 	}
-	state, _ := be.LoadState(context.Background(), claim)
+	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if rec := state.Artifact("plan"); rec.Invocations != 1 {
 		t.Errorf("Invocations = %d, want 1 (no catch-all → budget consumed)", rec.Invocations)
 	}

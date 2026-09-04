@@ -32,29 +32,18 @@ func (app *App) cmdAnswer(ctx context.Context, args []string) int {
 		return app.usageError("answer: unexpected argument %q (answer takes <item-id> <text>)", fs.Arg(2))
 	}
 
-	answerer, ok := app.Backend.(flow.QuestionAnswerer)
-	if !ok {
-		fmt.Fprintln(app.Err, "answer: this backend does not support answering questions")
-		return 1
-	}
-	inspector, ok := app.Backend.(flow.StateInspector)
-	if !ok {
-		fmt.Fprintln(app.Err, "answer: this backend cannot inspect an item by id without a claim")
-		return 1
-	}
-
 	ref, err := app.resolveClaimRef(ctx, fs.Arg(0))
 	if err != nil {
 		fmt.Fprintln(app.Err, "answer:", err)
 		return 1
 	}
-	state, err := inspector.LoadStateByRef(ctx, ref)
+	item, err := app.Orchestrator.Load(ctx, ref)
 	if err != nil {
 		fmt.Fprintln(app.Err, "answer:", err)
 		return 1
 	}
 
-	pending := state.PendingQuestions()
+	pending := item.PendingQuestions()
 	if len(pending) == 0 {
 		fmt.Fprintf(app.Err, "answer: no outstanding questions on %s\n", ref.Display)
 		return 1
@@ -65,7 +54,7 @@ func (app *App) cmdAnswer(ctx context.Context, args []string) int {
 	case *question != "":
 		found := false
 		for _, q := range pending {
-			if q.ID == *question {
+			if q.ID == flow.QuestionId(*question) {
 				target = q
 				found = true
 				break
@@ -80,21 +69,25 @@ func (app *App) cmdAnswer(ctx context.Context, args []string) int {
 	default:
 		var ids []string
 		for _, q := range pending {
-			ids = append(ids, q.ID)
+			ids = append(ids, string(q.ID))
 		}
 		fmt.Fprintf(app.Err, "answer: %d outstanding questions on %s — use --question to name one: %s\n",
 			len(pending), ref.Display, strings.Join(ids, ", "))
 		return 1
 	}
 
-	if err := answerer.PostAnswer(ctx, ref, fs.Arg(1)); err != nil {
+	// The id is passed THROUGH, not merely selected for the output line. It is
+	// what the answer is recorded against, which is what makes the question stop
+	// being pending — and what lets the outstanding-question marker clear only
+	// when no pending question remains, rather than on the first of several.
+	if err := app.Orchestrator.PostAnswer(ctx, ref, target.ID, fs.Arg(1)); err != nil {
 		fmt.Fprintln(app.Err, "answer:", err)
 		return 1
 	}
 
 	payload := answerPayload{
 		Item:       ref.Display,
-		QuestionID: target.ID,
+		QuestionID: string(target.ID),
 		Answered:   true,
 	}
 	return app.emit(mode, payload, func() {

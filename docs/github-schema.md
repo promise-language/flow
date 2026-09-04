@@ -164,6 +164,7 @@ All labels use a configurable prefix (default `flow:`). The label set is closed:
 | `flow:blocked` | The item is parked (generic block or deterministic refusal). |
 | `flow:needs-answer` | The item is parked waiting for a human answer. |
 | `flow:disabled` | The item is excluded from processing. Claim is refused. |
+| `flow:manual` | An operator has taken hand control (`ItemEditor.SetManual`). Nothing dispatches the item underneath the person driving it. |
 | `flow:infra-transient` | The item is parked due to infrastructure failure. |
 | `flow:stale:<id>` | The artifact `<id>` has been marked stale. |
 | `flow:budget-exhausted:<id>` | The step producing `<id>` exhausted its budget. |

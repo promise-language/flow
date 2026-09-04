@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/promise-language/flow"
-	ghbackend "github.com/promise-language/flow/pkg/backend/github"
+	ghbackend "github.com/promise-language/flow/pkg/orchestrator/github"
 )
 
 // ---------------------------------------------------------------------------
@@ -39,25 +39,25 @@ func TestRoleFromPermissions(t *testing.T) {
 	}
 }
 
-// stubBackend implements just enough of flow.Backend to be passed around; the
+// stubBackend implements just enough of flow.Orchestrator to be passed around; the
 // capability interfaces are what the tests actually exercise.
 type stubBackend struct {
-	flow.Backend // nil — these tests never call the base methods
-	perms        flow.RepoPermissions
-	permsErr     error
-	branch       string
-	branchErr    error
-	answers      []flow.Answer
-	answersErr   error
-	sawSince     time.Time
-	sawSelf      string
+	flow.Orchestrator // nil — these tests never call the base methods
+	perms             flow.RepoPermissions
+	permsErr          error
+	branch            string
+	branchErr         error
+	answers           []flow.Answer
+	answersErr        error
+	sawSince          time.Time
+	sawSelf           string
 }
 
 func (s *stubBackend) RepoPermissions(context.Context) (flow.RepoPermissions, error) {
 	return s.perms, s.permsErr
 }
-func (s *stubBackend) DefaultBranch(context.Context) (string, error) {
-	return s.branch, s.branchErr
+func (s *stubBackend) DefaultBranch(context.Context) (flow.BranchName, error) {
+	return flow.BranchName(s.branch), s.branchErr
 }
 func (s *stubBackend) ReadAnswers(_ context.Context, _ flow.Item, since time.Time, self string) ([]flow.Answer, error) {
 	s.sawSince, s.sawSelf = since, self
@@ -65,7 +65,7 @@ func (s *stubBackend) ReadAnswers(_ context.Context, _ flow.Item, since time.Tim
 }
 
 // bareBackend implements none of the optional capabilities.
-type bareBackend struct{ flow.Backend }
+type bareBackend struct{ flow.Orchestrator }
 
 func TestResolveRole_ExplicitConfigWins(t *testing.T) {
 	// A maintainer deliberately running their own change through the
@@ -269,18 +269,18 @@ func TestQuestionAskedAt_MissingMarkerIsZero(t *testing.T) {
 func TestAnswerGate_IgnoresNonQuestionParks(t *testing.T) {
 	gate := answerGate(&stubBackend{}, self("flowbot"))
 	// A budget park is the budget system's business; this gate must not touch it.
-	state := &flow.ItemState{Park: &flow.ParkRequest{Kind: flow.ParkBudgetExhausted, Step: "plan"}}
+	state := &flow.Item{Park: &flow.ParkRequest{Kind: flow.ParkBudgetExhausted, Step: "plan"}}
 	if err := gate(context.Background(), state); err != nil {
 		t.Errorf("gate returned %v on a budget park, want nil", err)
 	}
-	if err := gate(context.Background(), &flow.ItemState{}); err != nil {
+	if err := gate(context.Background(), &flow.Item{}); err != nil {
 		t.Errorf("gate returned %v on an unparked item, want nil", err)
 	}
 }
 
 func TestAnswerGate_BlocksWhenUnanswered(t *testing.T) {
 	gate := answerGate(&stubBackend{answers: nil}, self("flowbot"))
-	state := &flow.ItemState{Park: &flow.ParkRequest{
+	state := &flow.Item{Park: &flow.ParkRequest{
 		Kind: flow.ParkQuestion, Step: "plan", Reason: "which database?",
 	}}
 	err := gate(context.Background(), state)
@@ -301,7 +301,7 @@ func TestAnswerGate_PassesOnceAnswered(t *testing.T) {
 	be := &stubBackend{answers: []flow.Answer{{Answer: "postgres", Author: "maintainer"}}}
 	gate := answerGate(be, self("flowbot"))
 	asked := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
-	state := &flow.ItemState{Park: &flow.ParkRequest{
+	state := &flow.Item{Park: &flow.ParkRequest{
 		Kind: flow.ParkQuestion, Step: "plan", Details: MarkQuestionAsked(asked),
 	}}
 	if err := gate(context.Background(), state); err != nil {
@@ -320,7 +320,7 @@ func TestAnswerGate_BlocksWhenAnswersUnreadable(t *testing.T) {
 	// somebody already answered, "answered" burns an invocation re-asking.
 	be := &stubBackend{answersErr: errors.New("api down")}
 	gate := answerGate(be, self("flowbot"))
-	state := &flow.ItemState{Park: &flow.ParkRequest{Kind: flow.ParkQuestion, Step: "plan"}}
+	state := &flow.Item{Park: &flow.ParkRequest{Kind: flow.ParkQuestion, Step: "plan"}}
 	err := gate(context.Background(), state)
 	if err == nil || !errors.Is(err, flow.ErrBlocked) {
 		t.Fatalf("err = %v, want a blocked refusal", err)
@@ -344,7 +344,7 @@ func TestAnswerGate_NilWhenBackendCannotRead(t *testing.T) {
 // the spend-before-terminal-check fix.
 func TestAnswerGate_BlocksWhenParkClearedButQuestionsRemain(t *testing.T) {
 	gate := answerGate(&stubBackend{}, self("flowbot"))
-	state := &flow.ItemState{
+	state := &flow.Item{
 		// Park is nil — cleared by a manual takeover or backend resolution.
 		Questions: []flow.Question{
 			{ID: "q1", AgentQuestion: flow.AgentQuestion{Text: "cache or store?"}},
@@ -366,7 +366,7 @@ func TestAnswerGate_BlocksWhenParkClearedButQuestionsRemain(t *testing.T) {
 // questions from an earlier run remain unanswered.
 func TestAnswerGate_BlocksWhenNonQuestionParkButQuestionsRemain(t *testing.T) {
 	gate := answerGate(&stubBackend{}, self("flowbot"))
-	state := &flow.ItemState{
+	state := &flow.Item{
 		Park: &flow.ParkRequest{Kind: flow.ParkBudgetExhausted, Step: "plan"},
 		Questions: []flow.Question{
 			{ID: "q1", AgentQuestion: flow.AgentQuestion{Text: "cache or store?"}},
@@ -384,7 +384,7 @@ func TestAnswerGate_BlocksWhenNonQuestionParkButQuestionsRemain(t *testing.T) {
 // An item with no park and no pending questions passes cleanly.
 func TestAnswerGate_PassesWhenNoParkAndNoQuestions(t *testing.T) {
 	gate := answerGate(&stubBackend{}, self("flowbot"))
-	if err := gate(context.Background(), &flow.ItemState{}); err != nil {
+	if err := gate(context.Background(), &flow.Item{}); err != nil {
 		t.Errorf("gate = %v, want nil for a clean item", err)
 	}
 }
@@ -392,7 +392,7 @@ func TestAnswerGate_PassesWhenNoParkAndNoQuestions(t *testing.T) {
 // Answered questions (Answer field populated) do not block.
 func TestAnswerGate_PassesWhenAllQuestionsAnswered(t *testing.T) {
 	gate := answerGate(&stubBackend{}, self("flowbot"))
-	state := &flow.ItemState{
+	state := &flow.Item{
 		Questions: []flow.Question{
 			{ID: "q1", AgentQuestion: flow.AgentQuestion{Text: "which db?"}, UserAnswer: flow.UserAnswer{Answer: "postgres"}},
 		},
@@ -406,7 +406,7 @@ func TestAnswerGate_PassesWhenAllQuestionsAnswered(t *testing.T) {
 // filters to the unanswered subset, and even one remaining blocks.
 func TestAnswerGate_BlocksOnMixedQuestionsWithNoPark(t *testing.T) {
 	gate := answerGate(&stubBackend{}, self("flowbot"))
-	state := &flow.ItemState{
+	state := &flow.Item{
 		Questions: []flow.Question{
 			{ID: "q1", AgentQuestion: flow.AgentQuestion{Text: "which db?"}, UserAnswer: flow.UserAnswer{Answer: "postgres"}},
 			{ID: "q2", AgentQuestion: flow.AgentQuestion{Text: "cache layer?"}},
@@ -435,7 +435,7 @@ func TestVerifyTail_KeepsTheEnd(t *testing.T) {
 	for i := 0; i < verifyTailLines*2; i++ {
 		fmt.Fprintf(&b, "line %d\n", i)
 	}
-	got := verifyTail(errors.New(b.String()))
+	got := verifyTail(flow.CommandRun{Stdout: []byte(b.String())})
 	lines := strings.Split(got, "\n")
 	if len(lines) != verifyTailLines {
 		t.Fatalf("kept %d lines, want %d", len(lines), verifyTailLines)
@@ -446,11 +446,13 @@ func TestVerifyTail_KeepsTheEnd(t *testing.T) {
 }
 
 func TestVerifyTail_ShortOutputUnchanged(t *testing.T) {
-	if got := verifyTail(errors.New("boom")); got != "boom" {
+	if got := verifyTail(flow.CommandRun{Stdout: []byte("boom")}); got != "boom" {
 		t.Errorf("got %q, want %q", got, "boom")
 	}
-	if got := verifyTail(nil); got != "" {
-		t.Errorf("got %q, want empty for a nil error", got)
+	// A run that printed nothing falls back to the runner's own account, which
+	// is the only thing there is to say about a command that never reported.
+	if got := verifyTail(flow.CommandRun{Detail: "bin/verify: no such file"}); got != "bin/verify: no such file" {
+		t.Errorf("got %q, want the runner's detail when the command printed nothing", got)
 	}
 }
 
@@ -462,7 +464,7 @@ func TestBuildApp_RequiresVerifyCmd(t *testing.T) {
 	// Without a gate the implement step's loop has nothing to loop against,
 	// which quietly turns it back into a one-shot draft.
 	_, err := BuildApp(context.Background(), Config{Role: RoleContributor, BaseBranch: "main"},
-		Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
+		Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
 	if err == nil || !strings.Contains(err.Error(), "VerifyCmd") {
 		t.Errorf("err = %v, want a refusal naming VerifyCmd", err)
 	}
@@ -474,7 +476,7 @@ func TestBuildApp_RequiresVerifyCmd(t *testing.T) {
 func TestBuildApp_MaintainerBuildsButRefusesOnDispatch(t *testing.T) {
 	app, err := BuildApp(context.Background(), Config{
 		Role: RoleMaintainer, BaseBranch: "main", VerifyCmd: []string{"true"},
-	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
+	}, Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
 	if err != nil {
 		t.Fatalf("BuildApp = %v, want an app that still serves read-only commands", err)
 	}
@@ -499,7 +501,7 @@ func TestBuildApp_ContributorSliceWiresUp(t *testing.T) {
 		VerifyCmd:  []string{"bin/verify", "--wasm"},
 		Role:       RoleContributor,
 		BaseBranch: "main",
-	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
+	}, Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
 	if err != nil {
 		t.Fatalf("BuildApp: %v", err)
 	}
@@ -546,7 +548,7 @@ func TestContributorStepSetMatchesTheDocument(t *testing.T) {
 	app, err := BuildApp(context.Background(), Config{
 		BinaryName: "issue", VerifyCmd: []string{"true"},
 		Role: RoleContributor, BaseBranch: "main",
-	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
+	}, Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
 	if err != nil {
 		t.Fatalf("BuildApp: %v", err)
 	}
@@ -597,7 +599,7 @@ func TestEveryPromptSlotBelongsToARegisteredStep(t *testing.T) {
 	app, err := BuildApp(context.Background(), Config{
 		BinaryName: "issue", VerifyCmd: []string{"true"},
 		Role: RoleContributor, BaseBranch: "main",
-	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
+	}, Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
 	if err != nil {
 		t.Fatalf("BuildApp: %v", err)
 	}
@@ -633,7 +635,7 @@ func TestEveryPromptSlotBelongsToARegisteredStep(t *testing.T) {
 // sees and no test does.
 func TestContributorArtifactsAreInTheGitHubBackendsSchema(t *testing.T) {
 	recordable := map[flow.ArtifactId]flow.ArtifactDef{}
-	for _, def := range (*ghbackend.Backend)(nil).SupportedArtifacts() {
+	for _, def := range (*ghbackend.Orchestrator)(nil).SupportedArtifacts() {
 		recordable[def.Id] = def
 	}
 	for _, declared := range contributorArtifacts() {
@@ -875,7 +877,7 @@ func TestAskAndGateComposeEndToEnd(t *testing.T) {
 
 	// Unanswered: blocked, and the question travels with the refusal.
 	gate := answerGate(&stubBackend{}, self("flowbot"))
-	err := gate(context.Background(), &flow.ItemState{Park: park})
+	err := gate(context.Background(), &flow.Item{Park: park})
 	if !errors.Is(err, flow.ErrBlocked) {
 		t.Fatalf("err = %v, want blocked", err)
 	}
@@ -885,7 +887,7 @@ func TestAskAndGateComposeEndToEnd(t *testing.T) {
 
 	// Answered: passes, and the reader is scoped to after the ask.
 	be := &stubBackend{answers: []flow.Answer{{Answer: "amend the doc", Author: "reporter"}}}
-	if err := answerGate(be, self("flowbot"))(context.Background(), &flow.ItemState{Park: park}); err != nil {
+	if err := answerGate(be, self("flowbot"))(context.Background(), &flow.Item{Park: park}); err != nil {
 		t.Fatalf("gate = %v, want nil once answered", err)
 	}
 	if !be.sawSince.Equal(asked) {
@@ -1140,7 +1142,7 @@ func TestClosesRefUsesGitHubSyntax(t *testing.T) {
 func TestMaintainerStandInDoesNotSeed(t *testing.T) {
 	app, err := BuildApp(context.Background(), Config{
 		Role: RoleMaintainer, BaseBranch: "main", VerifyCmd: []string{"true"},
-	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
+	}, Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
 	if err != nil {
 		t.Fatalf("BuildApp: %v", err)
 	}
@@ -1159,7 +1161,7 @@ func TestBuildApp_RejectsUnknownPromptKey(t *testing.T) {
 	_, err := BuildApp(context.Background(), Config{
 		Role: RoleContributor, BaseBranch: "main", VerifyCmd: []string{"true"},
 		Prompts: map[PromptID]string{"implementaion": "oops"},
-	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
+	}, Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
 	if err == nil || !strings.Contains(err.Error(), "implementaion") {
 		t.Errorf("err = %v, want a refusal naming the bad key", err)
 	}
@@ -1173,7 +1175,7 @@ func TestBuildApp_AcceptsEveryRealPromptKey(t *testing.T) {
 	if _, err := BuildApp(context.Background(), Config{
 		Role: RoleContributor, BaseBranch: "main", VerifyCmd: []string{"true"},
 		Prompts: prompts,
-	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}}); err != nil {
+	}, Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}}); err != nil {
 		t.Errorf("BuildApp = %v, want every real slot accepted", err)
 	}
 }
@@ -1457,7 +1459,7 @@ func TestBuildApp_RejectsOverrideThatBreaksWithFragments(t *testing.T) {
 		Prompts: map[PromptID]string{
 			PromptImplement: "body with bad template {{ .Nonexistent | bad_func }}",
 		},
-	}, Deps{Backend: &stubBackend{}, Agent: stubAgent{}})
+	}, Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
 	if err == nil || !strings.Contains(err.Error(), string(PromptImplement)) {
 		t.Errorf("err = %v, want a parse error naming the slot", err)
 	}

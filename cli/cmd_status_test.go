@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/promise-language/flow"
-	"github.com/promise-language/flow/pkg/backend/fake"
 	"github.com/promise-language/flow/pkg/clistate"
+	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
 
 // statusFlowLine is the source of the "flow:" status line. The key invariant
@@ -86,8 +86,8 @@ func TestStatusFlowLine(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			state := &flow.ItemState{
-				Item:      flow.Item{Finalized: tt.finalized},
+			state := &flow.Item{
+				Finalized: tt.finalized,
 				Artifacts: tt.artifacts,
 			}
 			got := statusFlowLine(state, tt.eligible, tt.typeFlow)
@@ -147,11 +147,11 @@ func TestTitleLine_ClipsRunesNotBytes(t *testing.T) {
 // JSON keeps both verbatim, so nothing that needs the block loses it.
 func TestStatusHuman_QuestionLineShowsTheQuestionNotTheEvidence(t *testing.T) {
 	env := newParkGrantEnv(t)
-	if _, err := env.be.AskQuestions(context.Background(), env.claim, []flow.AgentQuestion{
+	if _, err := askAll(env.be, context.Background(), env.claim, []flow.AgentQuestion{
 		flow.AskText("should docs/release.md be amended?",
 			"§11 step 1 says \"`--yes` skips\".\n\nRecommendation: amend."),
 	}); err != nil {
-		t.Fatalf("AskQuestions: %v", err)
+		t.Fatalf("AskQuestion: %v", err)
 	}
 
 	if code := env.app.cmdStatus(context.Background(), []string{"--human"}); code != 0 {
@@ -195,10 +195,10 @@ func TestStatusHuman_QuestionLineShowsTheQuestionNotTheEvidence(t *testing.T) {
 // still cannot break the listing.
 func TestStatusHuman_QuestionLineBoundsAHeaderlessQuestion(t *testing.T) {
 	env := newParkGrantEnv(t)
-	if _, err := env.be.AskQuestions(context.Background(), env.claim, []flow.AgentQuestion{
+	if _, err := askAll(env.be, context.Background(), env.claim, []flow.AgentQuestion{
 		{Text: "which base branch?\nmain, or the release branch?"},
 	}); err != nil {
-		t.Fatalf("AskQuestions: %v", err)
+		t.Fatalf("AskQuestion: %v", err)
 	}
 
 	if code := env.app.cmdStatus(context.Background(), []string{"--human"}); code != 0 {
@@ -216,10 +216,10 @@ func TestStatusHuman_QuestionLineBoundsAHeaderlessQuestion(t *testing.T) {
 // tool reading `.questions[].header` never has to tell absent from empty.
 func TestStatusJSON_QuestionKeySet(t *testing.T) {
 	env := newParkGrantEnv(t)
-	if _, err := env.be.AskQuestions(context.Background(), env.claim, []flow.AgentQuestion{
+	if _, err := askAll(env.be, context.Background(), env.claim, []flow.AgentQuestion{
 		{Text: "which base branch?"},
 	}); err != nil {
-		t.Fatalf("AskQuestions: %v", err)
+		t.Fatalf("AskQuestion: %v", err)
 	}
 
 	if code := env.app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
@@ -273,9 +273,9 @@ func TestStatusHuman_OmitsEmptyTitle(t *testing.T) {
 	// record — claim included — so re-claim it, or status finds no active
 	// claim and never reaches the header.
 	ctx := context.Background()
-	env.be.AddItem(flow.Item{ID: "1", Type: "task"})
-	ref := flow.ItemRef{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)}
-	if _, err := env.be.Claim(ctx, ref, "alice", nil); err != nil {
+	env.be.AddItem("1", flow.Item{Type: "task"})
+	ref := flow.ItemRef{OrchestratorName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)}
+	if _, err := env.be.Claim(ctx, ref, nil); err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
 	env.out.Reset()
@@ -288,72 +288,45 @@ func TestStatusHuman_OmitsEmptyTitle(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// cmdStatus <id> — the StateInspector path introduced by this change
+// cmdStatus <id> — reading an item without claiming it
 // ---------------------------------------------------------------------------
-
-// When the backend does NOT implement StateInspector, `status <id>` must
-// refuse (exit 1) and tell the user to claim first — not panic, not silently
-// succeed.
-func TestCmdStatus_WithoutStateInspector_RefusesById(t *testing.T) {
-	app, _, _ := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{Budget: flow.DefaultStepBudget()})
-	}, &stubAgent{name: "stub"})
-
-	// Hide StateInspector so the by-id path refuses.
-	app.Backend = bareBackend{app.Backend}
-
-	out := &bytes.Buffer{}
-	errBuf := &bytes.Buffer{}
-	app.Out, app.Err = out, errBuf
-
-	code := app.cmdStatus(context.Background(), []string{"1"})
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
-	}
-	if !strings.Contains(errBuf.String(), "cannot inspect") {
-		t.Errorf("stderr should explain why; got %q", errBuf.String())
-	}
-}
 
 // statusInspectBackend wraps the fake backend and implements StateInspector
 // and RefResolver — mirroring the github backend where the ref IS the id and
 // state is resolvable from just the ref.
 type statusInspectBackend struct {
-	*fake.Backend
-	claim *flow.Claim // set after Claim so LoadStateByRef can delegate
+	*fake.Orchestrator
+	claim *flow.Claim // set after Claim so Load can delegate
 }
 
-func (b *statusInspectBackend) LoadStateByRef(ctx context.Context, ref flow.ItemRef) (*flow.ItemState, error) {
+func (b *statusInspectBackend) Load(ctx context.Context, ref flow.ItemRef) (*flow.Item, error) {
 	if b.claim == nil {
-		return &flow.ItemState{Item: flow.Item{Type: "task"}}, nil
+		return &flow.Item{Type: "task"}, nil
 	}
-	return b.Backend.LoadState(ctx, *b.claim)
+	return b.Orchestrator.Load(ctx, b.claim.ItemRef)
 }
 
 func (b *statusInspectBackend) ResolveRef(ctx context.Context, id string) (flow.ItemRef, error) {
-	return flow.ItemRef{BackendName: "fake", Display: id, Ref: json.RawMessage(`"` + id + `"`)}, nil
+	return flow.ItemRef{OrchestratorName: "fake", Display: id, Ref: json.RawMessage(`"` + id + `"`)}, nil
 }
 
 // When the backend DOES implement StateInspector, `status <id>` must succeed
 // (exit 0) and render the state — without claiming. This is the feature the
 // change enables.
-func TestCmdStatus_WithStateInspector_InspectsById(t *testing.T) {
+func TestCmdStatus_InspectsById(t *testing.T) {
 	be := fake.New(flow.Signal("pr-open", "test"))
-	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "inspect me"})
+	be.AddItem("1", flow.Item{Type: "task", Title: "inspect me"})
 
-	sib := &statusInspectBackend{Backend: be}
+	sib := &statusInspectBackend{Orchestrator: be}
 	app := &App{
-		Backend: sib,
-		Agent:   &stubAgent{name: "stub"},
+		Orchestrator: sib,
+		Agent:        &stubAgent{name: "stub"},
 		Artifacts: []flow.ArtifactDef{
 			flow.Artifact("plan", flow.ArtifactMarkdown),
 		},
 		Signals: []flow.SignalDef{
 			flow.Signal("pr-open", "test"),
 		},
-		Owner: "alice",
 	}
 	f := flow.NewFlow("implement", []flow.ItemType{"task"})
 	f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
@@ -367,17 +340,17 @@ func TestCmdStatus_WithStateInspector_InspectsById(t *testing.T) {
 		t.Fatalf("validate: %v", err)
 	}
 
-	// Claim and seed via the underlying fake so LoadStateByRef has state to
+	// Claim and seed via the underlying fake so Load has state to
 	// return, but the claim is NOT the app's active claim — the point is that
 	// `status <id>` must NOT need an active claim.
 	ctx := context.Background()
-	ref := flow.ItemRef{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)}
-	claim, err := be.Claim(ctx, ref, "bob", nil)
+	ref := flow.ItemRef{OrchestratorName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)}
+	claim, err := be.Claim(ctx, ref, nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
 	sib.claim = &claim
-	if err := be.SeedState(ctx, claim, []flow.ArtifactSpec{
+	if err := be.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
 		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
 	}); err != nil {
 		t.Fatalf("SeedState: %v", err)
@@ -397,13 +370,13 @@ func TestCmdStatus_WithStateInspector_InspectsById(t *testing.T) {
 	if !strings.Contains(output, "inspect me") {
 		t.Errorf("output should contain the item title; got:\n%s", output)
 	}
-	// Must show the owner from LookupClaim, not "(unclaimed)".
-	if !strings.Contains(output, "bob") {
-		t.Errorf("output should show the claim owner 'bob'; got:\n%s", output)
+	// Must show the holder from LookupClaim, not "(unclaimed)".
+	if !strings.Contains(output, "fake-account") {
+		t.Errorf("output should show the holding account; got:\n%s", output)
 	}
-	// Must NOT have claimed via Alice (the app's Owner).
-	if strings.Contains(output, "alice") {
-		t.Errorf("output should not mention alice (no claim taken); got:\n%s", output)
+	// And it must have read the item rather than claiming it.
+	if strings.Contains(output, "(unclaimed)") {
+		t.Errorf("output reports the item unclaimed; got:\n%s", output)
 	}
 }
 
@@ -414,12 +387,12 @@ func TestCmdStatus_WithStateInspector_InspectsById(t *testing.T) {
 // overridesClaimBackend wraps a fake backend and patches the claim returned
 // by LookupActiveClaim to carry overrides.
 type overridesClaimBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	overrides []string
 }
 
-func (b *overridesClaimBackend) LookupActiveClaim(ctx context.Context, owner string) (*flow.Claim, error) {
-	claim, err := b.Backend.LookupActiveClaim(ctx, owner)
+func (b *overridesClaimBackend) LookupActiveClaim(ctx context.Context) (*flow.Claim, error) {
+	claim, err := b.Orchestrator.LookupActiveClaim(ctx)
 	if claim != nil {
 		claim.Overrides = b.overrides
 	}
@@ -429,10 +402,10 @@ func (b *overridesClaimBackend) LookupActiveClaim(ctx context.Context, owner str
 func TestStatusHuman_ShowsOverrides(t *testing.T) {
 	env := newParkGrantEnv(t)
 	wrapped := &overridesClaimBackend{
-		Backend:   env.be,
-		overrides: []string{"unadmitted", "dirty-tree"},
+		Orchestrator: env.be,
+		overrides:    []string{"unadmitted", "dirty-tree"},
 	}
-	env.app.Backend = wrapped
+	env.app.Orchestrator = wrapped
 	env.out.Reset()
 
 	if code := env.app.cmdStatus(context.Background(), []string{"--human"}); code != 0 {
@@ -690,7 +663,7 @@ func TestStatusRunningDoesNotOverrideResolved(t *testing.T) {
 	}
 	// Resolve the "plan" artifact so its state is "resolved".
 	ctx := context.Background()
-	if err := env.be.ResolveArtifact(ctx, env.claim, "plan", flow.ArtifactBody{
+	if err := env.be.ResolveArtifact(ctx, env.claim.ItemRef, "plan", flow.ArtifactBody{
 		Type:     flow.ArtifactMarkdown,
 		Markdown: "the plan",
 	}); err != nil {

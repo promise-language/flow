@@ -2,8 +2,8 @@ package flow
 
 import "slices"
 
-// GateOutcome is what a RUNNER observed of one gate process. It is not a
-// verdict and not a number the gate chose: the gate measures, the runner
+// Outcome is what a RUNNER observed of one gate or command process. It is not
+// a verdict and not a number the gate chose: the gate measures, the runner
 // spawns it and watches what became of it, and something else judges the
 // measurement against thresholds the gate cannot reach.
 //
@@ -16,19 +16,19 @@ import "slices"
 // all recur — but they stay distinct anyway, because they are owned by three
 // different people and collapsing them attributes a failure to the wrong
 // repository.
-type GateOutcome string
+type Outcome string
 
 const (
 	// OutcomeMeasured — the process completed and printed a valid envelope.
 	// Nobody's problem yet: whether the numbers are acceptable is a question
 	// for whoever holds the thresholds, and neither the gate nor the runner
 	// holds them.
-	OutcomeMeasured GateOutcome = "measured"
+	OutcomeMeasured Outcome = "measured"
 
 	// OutcomeTimedOut — killed at the declared timeout. The problem is the
 	// wait, or the host. It is not the change, and it is the one outcome a
 	// retry can resolve.
-	OutcomeTimedOut GateOutcome = "timed_out"
+	OutcomeTimedOut Outcome = "timed_out"
 
 	// OutcomeCouldNotStart — the program the exec line names is absent or not
 	// executable, so nothing ran. The problem belongs to whoever declared the
@@ -37,38 +37,45 @@ const (
 	// This must never fold into OutcomeDied, which carries "retry is correct":
 	// a retry loop pointed at a missing binary never terminates and reads as a
 	// flaky host for as long as anyone lets it run.
-	OutcomeCouldNotStart GateOutcome = "could_not_start"
+	OutcomeCouldNotStart Outcome = "could_not_start"
 
 	// OutcomeDied — killed by a signal, or exited without printing a readable
 	// envelope. The problem is the host. Silence is absence, not a malformed
 	// envelope, so a truncated envelope lands here and not on
 	// OutcomeBrokeContract.
-	OutcomeDied GateOutcome = "died"
+	OutcomeDied Outcome = "died"
 
-	// OutcomeBrokeContract — the gate printed something that is not an
-	// envelope. The problem is in the gate's own code, which is a different
+	// OutcomeBrokeContract — the gate broke the protocol it runs under: it
+	// printed something that is not an envelope, or it MODIFIED WHAT IT
+	// MEASURED. The problem is in the gate's own code, which is a different
 	// repository from an absent program and a different one again from the
 	// change under measurement.
-	OutcomeBrokeContract GateOutcome = "broke_contract"
+	//
+	// A gate that modifies is a protocol violation, not a gate with a side
+	// effect: the state it reported on no longer exists, so nothing can
+	// reproduce the answer and no decision may rest on it. The result is not a
+	// poor measurement, it is NO measurement — which is why it lands here and
+	// is never judged.
+	OutcomeBrokeContract Outcome = "broke_contract"
 )
 
-// AllGateOutcomes returns every declared outcome, in declaration order.
+// AllOutcomes returns every declared outcome, in declaration order.
 //
 // A consumer enumerates it rather than mirroring the set, which is how two
 // copies of one vocabulary drift — the same reason AllOrigins and
-// AllDisclosureActs exist. A backend proving it refuses every unjudgeable
+// AllDisclosureActs exist. An orchestrator proving it refuses every unjudgeable
 // outcome, or a runner proving it has an answer for each, should be able to
 // ask rather than restate: a hand-written list is the thing that goes stale
 // when a member is added, and it goes stale silently.
-func AllGateOutcomes() []GateOutcome {
-	return []GateOutcome{
+func AllOutcomes() []Outcome {
+	return []Outcome{
 		OutcomeMeasured, OutcomeTimedOut, OutcomeCouldNotStart, OutcomeDied, OutcomeBrokeContract,
 	}
 }
 
 // Valid reports whether o is a declared outcome. The empty string is not one:
 // a run with no outcome is a run the runner never classified.
-func (o GateOutcome) Valid() bool { return slices.Contains(AllGateOutcomes(), o) }
+func (o Outcome) Valid() bool { return slices.Contains(AllOutcomes(), o) }
 
 // GateRun is a runner's account of one gate process: what it observed, plus
 // the raw diagnostics a person debugging the gate wants.
@@ -82,7 +89,7 @@ type GateRun struct {
 
 	// Outcome is what the runner observed. Always set when the runner returned
 	// no error.
-	Outcome GateOutcome
+	Outcome Outcome
 
 	// ExitCode is the gate's own exit status, kept as a raw diagnostic and
 	// decided on by nothing. It is -1 exactly where the kernel has no number to

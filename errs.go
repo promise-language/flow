@@ -5,23 +5,30 @@ import (
 	"fmt"
 )
 
-// ErrRequestNotSupported — returned by flow.Open / flow.Merge when the
-// backend's Worktree.Request() returns nil. Handlers that prefer a typed
-// error over a panic on misuse call those nil-safe helpers; this is the
-// sentinel they should errors.Is against.
-var ErrRequestNotSupported = errors.New("flow: backend does not support pull request operations")
+// ErrUnsupported and ErrUnavailable are the two refusals an orchestrator has.
+//
+// Required does not mean always possible. Every method on the Orchestrator
+// interface must exist and must answer; none of them must succeed. What being
+// required forbids is SILENCE — an absent method leaves a caller nothing to
+// call and no way to ask why, and a method that quietly succeeds while doing
+// nothing gives a false answer, which is worse than either.
+//
+// The pair is two answers and not one because a caller acts differently on
+// each: the first is permanent and the second is worth retrying. Collapsing
+// them turns a missing capability into a retry loop that never terminates, and
+// a rate limit into a permanent verdict.
+var (
+	// ErrUnsupported — this orchestrator cannot do this AT ALL. Never here, no
+	// configuration changes it, and retrying is pointless. Returned by
+	// flow.Open / flow.Merge / flow.FindPR when Worktree.Request() is nil, and
+	// by any method whose capability the orchestrator simply lacks.
+	ErrUnsupported = errors.New("flow: orchestrator does not support this operation")
 
-// ErrResetSeedUnsupported — returned by Backend.ResetSeed when the backend
-// has no separable seed concept (e.g. a read-only backend). Callers
-// invoking ResetSeed should errors.Is against this to distinguish
-// "intentionally not supported" from a transient failure.
-var ErrResetSeedUnsupported = errors.New("flow: backend does not support ResetSeed")
-
-// ErrWorkInProgressUnsupported — the backend has no work-in-progress store, so
-// there is nowhere for a step to leave what it worked out. Reads report absence
-// instead; only a WRITE says so, because a caller that believed it stashed
-// something and did not is the case worth naming.
-var ErrWorkInProgressUnsupported = errors.New("flow: backend does not support work in progress")
+	// ErrUnavailable — this orchestrator cannot do it RIGHT NOW. A service is
+	// down, a lease is held elsewhere, a rate limit is in force. Retrying is
+	// what a caller should do.
+	ErrUnavailable = errors.New("flow: orchestrator cannot do this right now")
+)
 
 // ErrTransient — handler-returned sentinel for infrastructure failures
 // observed by the handler (e.g. a Worktree HTTP call against a remote

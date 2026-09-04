@@ -32,13 +32,13 @@ import (
 	"github.com/promise-language/flow/claude"
 	"github.com/promise-language/flow/cli"
 	"github.com/promise-language/flow/issue"
-	ghbackend "github.com/promise-language/flow/pkg/backend/github"
+	ghorch "github.com/promise-language/flow/pkg/orchestrator/github"
 )
 
 func main() {
 	ctx := context.Background()
 
-	backend, err := ghbackend.NewBackend(ghbackend.Config{
+	backend, err := ghorch.New(ghorch.Config{
 		BinaryName:  "issue",
 		VerifyCmd:   verifyCmd,
 		DefaultType: "task",
@@ -79,8 +79,8 @@ func main() {
 		// is right for any repo whose default branch is the merge target. Set
 		// it only when cutting from something else.
 	}, issue.Deps{
-		Backend: backend,
-		Agent:   claude.New(),
+		Orchestrator: backend,
+		Agent:        claude.New(),
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "issue:", err)

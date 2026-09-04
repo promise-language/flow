@@ -98,7 +98,7 @@ func TestDeriveNext_FirstUnresolved(t *testing.T) {
 	f.AddStep("implement", "impl", noopHandler, StepConfig{})
 	f.AddStep("review", "review", noopHandler, StepConfig{})
 
-	state := &ItemState{
+	state := &Item{
 		Artifacts: map[ArtifactId]ArtifactRecord{
 			"plan": resolvedArtifact("plan", ArtifactMarkdown),
 			// "impl" unresolved
@@ -114,7 +114,7 @@ func TestDeriveNext_StaleArtifactIsPending(t *testing.T) {
 	f := NewFlow("x", nil)
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
 
-	state := &ItemState{
+	state := &Item{
 		Artifacts: map[ArtifactId]ArtifactRecord{
 			"plan": {Id: "plan", Type: ArtifactMarkdown, Required: true, Resolved: true, Stale: true},
 		},
@@ -130,7 +130,7 @@ func TestDeriveNext_AllResolvedReturnsFalse(t *testing.T) {
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
 	f.AddStep("implement", "impl", noopHandler, StepConfig{})
 
-	state := &ItemState{
+	state := &Item{
 		Artifacts: map[ArtifactId]ArtifactRecord{
 			"plan": resolvedArtifact("plan", ArtifactMarkdown),
 			"impl": resolvedArtifact("impl", ArtifactPatch),
@@ -146,7 +146,7 @@ func TestDeriveNext_SignalStepPendingUntilSet(t *testing.T) {
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
 	f.AddSignalStep("create pr", "pr-open", noopHandler, StepConfig{})
 
-	state := &ItemState{
+	state := &Item{
 		Artifacts: map[ArtifactId]ArtifactRecord{
 			"plan": resolvedArtifact("plan", ArtifactMarkdown),
 		},
@@ -168,7 +168,7 @@ func TestAwaitSignal_PendingUntilSet(t *testing.T) {
 	f := NewFlow("observe", nil)
 	f.AwaitSignal("await merge", "pr-merged", StepConfig{})
 
-	state := &ItemState{Signals: map[SignalId]SignalState{}}
+	state := &Item{Signals: map[SignalId]SignalState{}}
 	next, ok := f.DeriveNext(state)
 	if !ok || next != "await merge" {
 		t.Errorf("await should be pending; got (%q, %v)", next, ok)
@@ -185,7 +185,7 @@ func TestIsReady_RequireSignal(t *testing.T) {
 	f.RequireSignal("pr-open")
 	f.AddStep("merge-step", "merge-commit", noopHandler, StepConfig{})
 
-	state := &ItemState{Signals: map[SignalId]SignalState{}}
+	state := &Item{Signals: map[SignalId]SignalState{}}
 	if f.IsReady(state) {
 		t.Errorf("IsReady should be false when precondition signal unset")
 	}
@@ -200,7 +200,7 @@ func TestIsDone_AllRequiredResolved(t *testing.T) {
 	f.AddStep("required", "req", noopHandler, StepConfig{})
 	f.AddStep("optional", "opt", noopHandler, StepConfig{Optional: true})
 
-	state := &ItemState{Artifacts: map[ArtifactId]ArtifactRecord{}}
+	state := &Item{Artifacts: map[ArtifactId]ArtifactRecord{}}
 	if f.IsDone(state) {
 		t.Errorf("IsDone should be false with required unresolved")
 	}
@@ -263,7 +263,7 @@ func TestTerminalReason(t *testing.T) {
 	f.RequireSignal("pr-open")
 	f.AddStep("merge-step", "merge-commit", noopHandler, StepConfig{})
 
-	state := &ItemState{Signals: map[SignalId]SignalState{}}
+	state := &Item{Signals: map[SignalId]SignalState{}}
 	if r := f.TerminalReason(state); r != "awaiting-preconditions" {
 		t.Errorf("TerminalReason = %q, want awaiting-preconditions", r)
 	}

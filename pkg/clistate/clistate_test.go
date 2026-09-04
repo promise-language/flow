@@ -21,12 +21,13 @@ func TestActiveClaimRoundTrip(t *testing.T) {
 	}
 
 	claim := flow.Claim{
-		BackendName: "fake",
-		Owner:       "alice",
+		OrchestratorName: "fake",
+		Arena:            flow.Arena{Host: "build01", Id: "/w/one"},
+		Account:          "alice",
 		ItemRef: flow.ItemRef{
-			BackendName: "fake",
-			Display:     "test#1",
-			Ref:         json.RawMessage(`"1"`),
+			OrchestratorName: "fake",
+			Display:          "test#1",
+			Ref:              json.RawMessage(`"1"`),
 		},
 	}
 	if err := clistate.Save(claim); err != nil {
@@ -36,8 +37,11 @@ func TestActiveClaimRoundTrip(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("Load: (%v, %v)", got, err)
 	}
-	if got.Owner != "alice" {
-		t.Errorf("Owner = %q, want alice", got.Owner)
+	if got.Account != "alice" {
+		t.Errorf("Account = %q, want alice", got.Account)
+	}
+	if got.Arena != (flow.Arena{Host: "build01", Id: "/w/one"}) {
+		t.Errorf("Arena = %+v, want build01 /w/one", got.Arena)
 	}
 	if err := clistate.Clear(); err != nil {
 		t.Fatalf("Clear: %v", err)
@@ -168,7 +172,7 @@ func TestClearRemovesEveryWorkRecord(t *testing.T) {
 	flowDir := filepath.Join(dir, ".flow")
 	t.Setenv("FLOW_DIR", flowDir)
 
-	if err := clistate.Save(flow.Claim{BackendName: "fake", Owner: "alice"}); err != nil {
+	if err := clistate.Save(flow.Claim{OrchestratorName: "fake", Account: "alice"}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	for _, w := range []struct{ item, step string }{{"42", "plan"}, {"42", "review"}, {"43", "plan"}} {
@@ -254,7 +258,7 @@ func TestClear_RemovesRunning(t *testing.T) {
 	flowDir := filepath.Join(dir, ".flow")
 	t.Setenv("FLOW_DIR", flowDir)
 
-	if err := clistate.Save(flow.Claim{BackendName: "fake", Owner: "alice"}); err != nil {
+	if err := clistate.Save(flow.Claim{OrchestratorName: "fake", Account: "alice"}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	if err := clistate.SaveRunning(clistate.RunningRecord{Item: "1", Step: "plan", PID: 99, Exe: "/bin/flow"}); err != nil {

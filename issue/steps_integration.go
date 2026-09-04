@@ -34,25 +34,27 @@ func (b *builder) stepVerifyMerge(ctx flow.StepCtx) error {
 
 	ctx.Notify("", "this binary carries through to merge — this is not independent review")
 
-	// If the worktree supports merge-result simulation, prepare it so the gate
-	// measures the merge result rather than just the branch.
-	if prep, ok := wt.(flow.MergeResultPreparer); ok {
-		if err := prep.PrepareMergeResult(ctx.Context(), base); err != nil {
+	// Prepare the merge result so the gate measures what will actually land
+	// rather than the branch in isolation. These are direct calls now: the two
+	// type assertions they used to go through tested for interfaces that no
+	// longer exist — PrepareMergeResult, RevertMergePrep and RebuildTools are
+	// part of the one RequestManager capability, so an orchestrator that lands
+	// through pull requests has all of them or none.
+	if rq := wt.Request(); rq != nil {
+		if err := rq.PrepareMergeResult(ctx.Context(), flow.BranchName(base)); err != nil {
 			return fmt.Errorf("could not simulate merge result against %s: %w", base, err)
 		}
 		defer func() {
-			if rerr := prep.RevertMergePrep(ctx.Context()); rerr != nil {
+			if rerr := rq.RevertMergePrep(ctx.Context()); rerr != nil {
 				ctx.Notify("", "could not revert merge simulation: "+rerr.Error())
 			}
 		}()
 
 		// The merge brought main's tree into the worktree — tool source may
-		// have changed, making compiled binaries stale.  Rebuild before
-		// running the gate so the staleness check does not refuse to measure.
-		if rb, ok := wt.(flow.ToolsRebuilder); ok {
-			if err := rb.RebuildTools(ctx.Context()); err != nil {
-				return fmt.Errorf("could not rebuild tools against the merge result: %w", err)
-			}
+		// have changed, making compiled binaries stale. Rebuild before running
+		// the gate so the staleness check does not refuse to measure.
+		if err := rq.RebuildTools(ctx.Context()); err != nil {
+			return fmt.Errorf("could not rebuild tools against the merge result: %w", err)
 		}
 	}
 
@@ -94,5 +96,5 @@ func (b *builder) stepRecordMerge(ctx flow.StepCtx) error {
 				"but CI has not finished; the next LoadState cycle will refresh the pr-merged signal",
 			info.URL)
 	}
-	return ctx.ResolveCommitHash(info.MergeCommitSHA)
+	return ctx.ResolveCommitHash(string(info.MergeCommitSHA))
 }

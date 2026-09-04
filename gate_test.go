@@ -14,9 +14,9 @@ import (
 //
 // Pinning the set as well as the values: a sixth outcome is not an addition, it
 // is a change to a vocabulary something else reads.
-func TestGateOutcomes_AreTheDeclaredWireSpelling(t *testing.T) {
+func TestOutcomes_AreTheDeclaredWireSpelling(t *testing.T) {
 	for _, c := range []struct {
-		outcome GateOutcome
+		outcome Outcome
 		wire    string
 	}{
 		{OutcomeMeasured, "measured"},
@@ -76,7 +76,7 @@ func TestGateVerdict_ZeroValueIsNotAVerdictAboutAMeasuredRun(t *testing.T) {
 // A count would not do: it passes the moment someone adds one and removes
 // another. Adding a name here is meant to be the deliberate act of changing a
 // vocabulary another repository reads, not a side effect of adding a constant.
-func TestGateOutcomes_TheSetIsClosed(t *testing.T) {
+func TestOutcomes_TheSetIsClosed(t *testing.T) {
 	register := map[string]bool{
 		"OutcomeMeasured":      true,
 		"OutcomeTimedOut":      true,
@@ -98,7 +98,7 @@ func TestGateOutcomes_TheSetIsClosed(t *testing.T) {
 			return true
 		}
 		id, ok := spec.Type.(*ast.Ident)
-		if !ok || id.Name != "GateOutcome" {
+		if !ok || id.Name != "Outcome" {
 			return true
 		}
 		for _, name := range spec.Names {
@@ -107,12 +107,12 @@ func TestGateOutcomes_TheSetIsClosed(t *testing.T) {
 		return true
 	})
 	if len(declared) == 0 {
-		t.Fatal("parsed no GateOutcome constants — the probe is broken, not the code")
+		t.Fatal("parsed no Outcome constants — the probe is broken, not the code")
 	}
 
 	for name := range declared {
 		if !register[name] {
-			t.Errorf("%s is a GateOutcome the wire contract does not name — "+
+			t.Errorf("%s is an Outcome the wire contract does not name — "+
 				"base reads this vocabulary and has never heard of it", name)
 		}
 	}
@@ -128,8 +128,8 @@ func TestGateOutcomes_TheSetIsClosed(t *testing.T) {
 // is what goes stale when a member is added — silently, because a stale list
 // still compiles and still passes every test that uses it. This parses the
 // declarations and compares, so adding a sixth outcome without adding it to
-// AllGateOutcomes fails here rather than somewhere downstream months later.
-func TestAllGateOutcomesMatchesTheDeclaredConstants(t *testing.T) {
+// AllOutcomes fails here rather than somewhere downstream months later.
+func TestAllOutcomesMatchesTheDeclaredConstants(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "gate.go", nil, 0)
 	if err != nil {
@@ -142,25 +142,25 @@ func TestAllGateOutcomesMatchesTheDeclaredConstants(t *testing.T) {
 			return true
 		}
 		id, ok := vs.Type.(*ast.Ident)
-		if !ok || id.Name != "GateOutcome" {
+		if !ok || id.Name != "Outcome" {
 			return true
 		}
 		declared = append(declared, vs.Names[0].Name)
 		return true
 	})
 	if len(declared) == 0 {
-		t.Fatal("found no GateOutcome constants; the parse is wrong, not the code")
+		t.Fatal("found no Outcome constants; the parse is wrong, not the code")
 	}
-	if len(declared) != len(AllGateOutcomes()) {
-		t.Errorf("gate.go declares %d outcomes (%v) but AllGateOutcomes returns %d",
-			len(declared), declared, len(AllGateOutcomes()))
+	if len(declared) != len(AllOutcomes()) {
+		t.Errorf("gate.go declares %d outcomes (%v) but AllOutcomes returns %d",
+			len(declared), declared, len(AllOutcomes()))
 	}
-	for _, o := range AllGateOutcomes() {
+	for _, o := range AllOutcomes() {
 		if !o.Valid() {
-			t.Errorf("AllGateOutcomes returned %q, which Valid rejects", o)
+			t.Errorf("AllOutcomes returned %q, which Valid rejects", o)
 		}
 	}
-	if GateOutcome("").Valid() {
+	if Outcome("").Valid() {
 		t.Error("the empty outcome is valid; a run the runner never classified would pass")
 	}
 }

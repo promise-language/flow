@@ -2,28 +2,28 @@
 
 A Go SDK for **declarative, stateless-per-step automation against
 task-tracking systems.** You write a flow as an ordinary Go binary; the SDK
-turns each invocation into *one* advance-the-state step against a backend
-item (a GitHub Issue out of the box, or any backend you plug in).
+turns each invocation into *one* advance-the-state step against an orchestrator
+item (a GitHub Issue out of the box, or any orchestrator you plug in).
 
 - **No server.** A flow binary is a single static `main()` that imports the
   SDK and calls `cli.Run(app)`. End users install the binary, authenticate
-  their backend once, and run it.
-- **Backends are pluggable.** This repo ships the reference GitHub Issues
-  backend (`pkg/backend/github`). Implement `flow.Backend` to target any
+  their orchestrator once, and run it.
+- **Orchestrators are pluggable.** This repo ships the reference GitHub Issues
+  orchestrator (`pkg/orchestrator/github`). Implement `flow.Orchestrator` to target any
   store — a server-backed tracker, a database, a queue. The flow-author API
   never changes.
 - **Agents are pluggable.** The reference impl drives the [`claude`][claude]
   CLI via stream-json. Any other LLM CLI slots in by implementing
   `flow.Agent`.
 - **Stateless per step.** Each `run-step` reads durable state from the
-  backend, runs exactly one step, writes one durable artifact, and exits.
-  All progress lives in the backend; the process keeps nothing. This is what
+  orchestrator, runs exactly one step, writes one durable artifact, and exits.
+  All progress lives in the orchestrator; the process keeps nothing. This is what
   makes the model survive restarts, crashes, and host churn.
 
 [claude]: https://docs.anthropic.com/en/docs/claude-code
 
 ```
-$ ./issue doctor             # verify backend prerequisites
+$ ./issue doctor             # verify orchestrator prerequisites
 $ ./issue list               # list items this flow can process
 $ ./issue claim 42           # acquire a claim on item #42
 $ ./issue run-step           # advance ONE lifecycle item (one prompt → one durable artifact)
@@ -48,7 +48,7 @@ Architecture docs: [docs/](docs/).
 3. [Build a flow for a new project](#build-a-flow-for-a-new-project)
 4. [The flow-author API](#the-flow-author-api) — `Flow`, `StepCtx`, artifacts, signals, budgets, questions
 5. [Blueprint: a reliable working flow](#blueprint-a-reliable-working-flow) — the do-task lifecycle, validation gates, the commit↔push loop, parking, failure-loud invariants
-6. [Implement a custom backend](#implement-a-custom-backend) — the `Backend` interface and optional capabilities
+6. [Implement a custom orchestrator](#implement-a-custom-orchestrator) — the `Orchestrator` interface, whose every method is required
 7. [Build the binary with forge](#build-the-binary-with-forge)
 8. [CLI surface](#cli-surface)
 9. [Repo layout](#repo-layout)
@@ -61,7 +61,7 @@ Architecture docs: [docs/](docs/).
 Requires:
 
 - Go 1.26+
-- For the reference GitHub backend: the [`gh` CLI](https://cli.github.com/)
+- For the reference GitHub orchestrator: the [`gh` CLI](https://cli.github.com/)
   authenticated against the target repository, and `git` on PATH for
   worktree ops
 - Optional: `claude` CLI on PATH for any flow that calls `ctx.Agent()`
@@ -73,7 +73,7 @@ import (
     "github.com/promise-language/flow"
     "github.com/promise-language/flow/claude"
     "github.com/promise-language/flow/cli"
-    ghbackend "github.com/promise-language/flow/pkg/backend/github"
+    ghorch "github.com/promise-language/flow/pkg/orchestrator/github"
 )
 ```
 
@@ -87,14 +87,14 @@ of most bugs.
 
 | Entity | Lifetime | What it is |
 |---|---|---|
-| **Item** | persistent | The unit of work (a GitHub Issue, a tracker task). Carries a `Type` (routes flow selection), a title/body, durable **artifacts**, **signals**, and questions. The backend supplies it; it is opaque to the SDK beyond these fields. |
+| **Item** | persistent | The unit of work (a GitHub Issue, a tracker task). Carries a `Type` (routes flow selection), a title/body, durable **artifacts**, **signals**, and questions. The orchestrator supplies it; it is opaque to the SDK beyond these fields. |
 | **Flow** | code | An ordered list of **lifecycle items** (steps) selected for an item by its `Type` and `RequireSignal` preconditions. The binary *is* the source of truth — no YAML. |
-| **Step / lifecycle item** | code | One entry in a flow. Three kinds: an **artifact step** (`AddStep`, runs a handler that produces one artifact), a **signal step** (`AddSignalStep`, runs a handler whose side effect makes the backend set a signal), or a **pure wait** (`AwaitSignal`, no handler). |
+| **Step / lifecycle item** | code | One entry in a flow. Three kinds: an **artifact step** (`AddStep`, runs a handler that produces one artifact), a **signal step** (`AddSignalStep`, runs a handler whose side effect makes the orchestrator set a signal), or a **pure wait** (`AwaitSignal`, no handler). |
 | **Artifact** | persistent | A durable product of one step — a plan, a patch, a commit hash, a review summary. The handler calls `ctx.Resolve*`. A flow is *complete* when every required artifact is attached. |
-| **Signal** | persistent | A backend-*observed* boolean (`pr-open`, `pr-merged`). Never handler-writable — the backend sets it from a side effect or a poll. |
+| **Signal** | persistent | An orchestrator-*observed* boolean (`pr-open`, `pr-merged`). Never handler-writable — the orchestrator sets it from a side effect or a poll. |
 | **Claim (lease)** | persistent | An exclusive binding **item ↔ arena**. "This item's work lives in this worktree." One arena holds at most one claim; one item is claimed by at most one arena. |
-| **Arena** | long-lived | A worktree plus a stable identity. Where work physically happens. Must survive at least one item's full lifecycle (across any restarts), then may be reclaimed. For the GitHub backend the arena is simply the local checkout; `.flow/active.json` records the claim. |
-| **Runner** | transient | (Server-backed backends only.) The process serving an arena. URL/port/PID churn on every restart; **resolve it from the backend every time** — never store it durably. The GitHub backend has no runner: the flow binary is self-contained. |
+| **Arena** | long-lived | A worktree plus a stable identity. Where work physically happens. Must survive at least one item's full lifecycle (across any restarts), then may be reclaimed. For the GitHub orchestrator the arena is simply the local checkout; `.flow/active.json` records the claim. |
+| **Runner** | transient | (Server-backed orchestrators only.) The process serving an arena. URL/port/PID churn on every restart; **resolve it from the orchestrator every time** — never store it durably. The GitHub orchestrator has no runner: the flow binary is self-contained. |
 | **Agent** | per-call | The SDK's metered handle on an LLM CLI (`ctx.Agent()`). The single spend chokepoint. |
 | **Budget** | persistent | Per-step caps on four axes (invocations, prompts/invocation, cost, timeout). Seeded once; only `grant` mutates them. |
 
@@ -109,21 +109,21 @@ of most bugs.
   lives in the tree.
 - **The runner is transient — resolve it live.** Nothing durable stores a
   runner URL/port/token. A claim survives any number of runner restarts.
-- **State lives in the backend, not the process.** Every `run-step` re-derives
-  what to do next from `Backend.LoadState`. There is no in-memory step
+- **State lives in the orchestrator, not the process.** Every `run-step` re-derives
+  what to do next from `Orchestrator.LoadState`. There is no in-memory step
   machine to lose.
 
 ### Three orthogonal item flags — don't conflate them
 
-- **`status`** (backend domain state: `open` / `done` / `wontfix` / …) is the
+- **`status`** (orchestrator domain state: `open` / `done` / `wontfix` / …) is the
   *outcome* of the work. It does **not** mean "no more flow work needed."
 - **`finalized`** (`Item.Finalized`) is the single authoritative "this item is
   fully resolved, no more work of any kind." A finalized item is ineligible
   for all work; **running a flow on a finalized item is an error.** It is set
   exactly two ways: (1) a flow runs to completion — every required artifact
   attached — or (2) the item is abandoned (`wontfix`/`not_feasible`/…). Set
-  via the optional `Finalizer.Finalize` backend capability.
-- **`manual`** (backend-specific) means "not eligible for *automatic*
+  via `Orchestrator.Finalize`, which every orchestrator implements.
+- **`manual`** (orchestrator-specific) means "not eligible for *automatic*
   dispatch, but a human may still run flows by hand."
 
 > **The key decoupling:** "done for good" is the **`finalized` flag**, *not*
@@ -135,7 +135,7 @@ of most bugs.
 
 ## Build a flow for a new project
 
-A flow binary is ~100 lines: pick a backend, declare your artifacts, register
+A flow binary is ~100 lines: pick an orchestrator, declare your artifacts, register
 your steps as handlers, and hand the whole thing to `cli.Run`.
 
 ### 1. The smallest possible flow
@@ -149,11 +149,11 @@ import (
     "github.com/promise-language/flow"
     "github.com/promise-language/flow/claude"
     "github.com/promise-language/flow/cli"
-    ghbackend "github.com/promise-language/flow/pkg/backend/github"
+    ghorch "github.com/promise-language/flow/pkg/orchestrator/github"
 )
 
 func main() {
-    backend, err := ghbackend.NewBackend(ghbackend.Config{
+    orch, err := ghorch.New(ghorch.Config{
         BinaryName: "issue",
         VerifyCmd:  []string{"bin/verify"}, // your project's gate
         // Guard is what lets this publish anything at all. With none, reads
@@ -177,7 +177,7 @@ func main() {
 
     os.Exit(cli.Run(cli.App{
         Name:      "issue",
-        Backend:   backend,
+        Orchestrator: orch,
         Agent:     claude.New(),
         Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
         Flows:     []*flow.Flow{f},
@@ -194,7 +194,7 @@ after it — refuses until a guard is injected above.
 ```go
 type App struct {
     Name      string             // binary name (defaults from os.Args[0])
-    Backend   flow.Backend       // REQUIRED — storage + worktree boundary
+    Orchestrator flow.Orchestrator // REQUIRED — the leasing, state and worktree boundary
     Agent     flow.Agent         // REQUIRED — what ctx.Agent() returns
     Artifacts []flow.ArtifactDef // REQUIRED — every artifact id a step resolves
     Signals   []flow.SignalDef   // optional — every signal id a step references
@@ -209,27 +209,27 @@ func Run(app App) int // os.Exit(cli.Run(app))
 ```
 
 `cli.Run` validates the whole wiring at startup and refuses to start (named
-error, non-zero exit) on: nil `Backend`/`Agent`; empty `Flows`/`Artifacts`;
+error, non-zero exit) on: nil `Orchestrator`/`Agent`; empty `Flows`/`Artifacts`;
 a flow with zero steps; duplicate artifact/signal ids; an `AddStep`
 referencing an unknown `ArtifactId`; an
 `AddSignalStep`/`AwaitSignal`/`RequireSignal` referencing a signal not in
-`Backend.SupportedSignals()`; or two flows that would ambiguously shadow each
+`Orchestrator.SupportedSignals()`; or two flows that would ambiguously shadow each
 other.
 
 ### 3. How a step is dispatched (`run-step` → `RunOne`)
 
 Every `run-step` runs the same orchestrator (`cli/cmd_run.go` → `RunOne`):
 
-1. **Resolve the active claim** via `Backend.LookupActiveClaim(owner)` — the
+1. **Resolve the active claim** via `Orchestrator.LookupActiveClaim(owner)` — the
    single source of truth for "what am I working on." Never a local cache.
 2. **`LoadState`** — artifacts + signals + questions in one snapshot
-   (signals refreshed by backend polling).
+   (signals refreshed by orchestrator-internal polling).
 3. **Preflight** (if configured) — a non-nil error short-circuits the
    invocation as `skipped`, no budget spent.
 4. **Select the flow** — the first flow whose `Types()` match `Item.Type`,
    whose `RequireSignal` preconditions are all set, and that has a pending
    step. No pending step anywhere → **finalize** (via `Finalizer`, if the
-   backend implements it) and report `done`.
+   the orchestrator can finalize it) and report `done`.
 5. **Seed once** — on an item with no artifacts yet, `SeedState` pre-loads
    the artifact set and per-step budget caps. Frozen thereafter (see
    [budgets](#step-budgets)).
@@ -254,12 +254,12 @@ func NewFlow(name string, types []flow.ItemType) *flow.Flow
 // Artifact step: handler MUST call the matching ctx.Resolve* before returning nil.
 func (f *Flow) AddStep(name string, result flow.ArtifactId, do StepHandler, opts ...StepOption)
 
-// Signal step: handler does a side effect; the backend sets `signal`. Handler
+// Signal step: handler does a side effect; the orchestrator sets `signal`. Handler
 // MUST NOT call Resolve*. Step completes when the signal is observed set.
 func (f *Flow) AddSignalStep(name string, signal flow.SignalId, do StepHandler, opts ...StepOption)
 
 // Pure wait: no handler. Completes when `signal` is set by any means
-// (another flow's signal step, or an external event the backend observes).
+// (another flow's signal step, or an external event the orchestrator observes).
 func (f *Flow) AwaitSignal(name string, signal flow.SignalId, opts ...StepOption)
 
 // Eligibility precondition (NOT a lifecycle item): this flow is only selected
@@ -303,16 +303,16 @@ ctx.MarkStale(id)                // force a prior artifact to re-run
 // Work in progress — what THIS step keeps when it stops without completing,
 // so the next dispatch continues rather than restarts. Scaffolding, not a
 // result: it resolves nothing, no other step reads it, it is never published,
-// and it is cleared when the step resolves. Needs a backend implementing
+// and it is cleared when the step resolves. Needs an orchestrator implementing
 // WorkInProgress; without one, reads are empty and the write returns
-// ErrWorkInProgressUnsupported.
+// ErrUnsupported.
 ctx.WorkInProgress()             // (body, error) — "" when nothing was stashed
 ctx.RecordWorkInProgress(body)   // stash it for the next invocation
 
 ctx.Agent()          // the metered LLM handle — the ONLY spend chokepoint
 ctx.Worktree()       // lazily-acquired git surface for this claim
 ctx.Notify(step, detail) // progress telemetry (NOT a liveness signal)
-ctx.Claim()          // the active claim (read-only; pass to backend extras)
+ctx.Claim()          // the active claim (read-only; read-only)
 ctx.RefreshItem()    // re-pull item state mid-handler
 ```
 
@@ -344,7 +344,7 @@ flow.Artifact("plan", flow.ArtifactMarkdown)   // ArtifactDef constructor
 flow.Signal("pr-open", "a pull request for this item is open")
 ```
 
-Signals are boolean, backend-observed, and read-only to handlers. A backend
+Signals are boolean, orchestrator-observed, and read-only to handlers. An orchestrator
 declares the set it can observe in `SupportedSignals()`; `cli.Run` validates
 every signal reference against it at startup.
 
@@ -377,9 +377,9 @@ or HEAD changes). Unspecified axes inherit the package defaults
 `{3, 50, $20, 30m}` (`flow.DefaultStepBudget()`).
 
 A park records the step by its **result id** (`plan`), not its label (`"write
-plan"`), and `Backend.LoadState` surfaces it as `ItemState.Park` — that is what
+plan"`), and `Orchestrator.LoadState` surfaces it as `ItemState.Park` — that is what
 lets `grant` with no arguments top up exactly the axis that parked the step.
-`Backend.Grant` must clear a budget park once the grant gives that axis
+`Orchestrator.Grant` must clear a budget park once the grant gives that axis
 headroom (see `flow.GrantClearsPark`); a grant too small to clear the cap
 leaves the park in place and says so.
 
@@ -407,7 +407,7 @@ return ctx.AskQuestions(
 
 Constructors: `AskText`, `AskYesNo`, `AskChoice`, `AskMultiChoice` (format and
 options are presentation hints; the user can always reply free-text). The SDK
-forwards them to `Backend.AskQuestions`, which assigns ids and persists them;
+forwards them to `Orchestrator.AskQuestions`, which assigns ids and persists them;
 the flow parks until at least one is answered, then the step is **re-run from
 scratch** with the answer available in `ItemState.Questions`. Because the step
 re-runs from the top, **ask early** — before doing expensive work a re-run
@@ -519,22 +519,22 @@ definition, logged when it fires, and surfaced in error messages by name.
 Prefer waiting for work to finish over killing it: a false-positive kill that
 strands a multi-wave pipeline is worse than a slow completion. The SDK follows
 this — the step `Timeout` is an explicit per-step budget axis, captured as a
-patch before parking — and your backend should too.
+patch before parking — and your orchestrator should too.
 
 ---
 
-## Implement a custom backend
+## Implement a custom orchestrator
 
-A backend is the pluggable storage + worktree boundary. Implement
-`flow.Backend` and the SDK gives you the entire CLI, the orchestrator, budget
-enforcement, and the flow-author API for free. Both the GitHub backend
-(`pkg/backend/github`) and the proprietary tracker backend satisfy the same
+An orchestrator is the pluggable storage + worktree boundary. Implement
+`flow.Orchestrator` and the SDK gives you the entire CLI, the orchestrator, budget
+enforcement, and the flow-author API for free. Both the GitHub orchestrator
+(`pkg/orchestrator/github`) and the proprietary tracker orchestrator satisfy the same
 interface.
 
 ### The required interface
 
 ```go
-type Backend interface {
+type Orchestrator interface {
     Name() string
     SupportedSignals() []SignalDef               // validated against signal refs at startup
 
@@ -570,15 +570,15 @@ type Backend interface {
 Key contracts:
 
 - **`Item.Type` must be non-empty** on every item you return — `cli.Run`
-  selects the flow by it. (The GitHub backend derives it from a `type:<x>`
+  selects the flow by it. (The GitHub orchestrator derives it from a `type:<x>`
   label convention.)
 - **`LookupActiveClaim` is authoritative.** The CLI never falls back to a
   local cache. If your store is offline, return an error rather than a stale
   read — that's what keeps "released stays released."
 - **`SeedState` runs exactly once.** Refuse a second seed for the same item;
   mid-flight items are frozen against later flow-source changes. `ResetSeed`
-  is the only operator-initiated escape (a backend with no seed concept may
-  return `ErrResetSeedUnsupported`).
+  is the only operator-initiated escape (an orchestrator with no seed concept may
+  return `ErrUnsupported`).
 - **Signals are never handler-written.** Set them from a worktree side effect
   (e.g. opening a PR sets `pr-open`) or from a poll inside `LoadState`.
 
@@ -601,19 +601,19 @@ type RequestManager interface { // pull-request operations
 }
 ```
 
-Backends with no pull-request concept (e.g. one that commits straight to
+Orchestrators with no pull-request concept (e.g. one that commits straight to
 main) return `nil` from `Request()`. Handlers use the nil-safe helpers
 `flow.Open(ctx, wt, …)` / `flow.Merge(ctx, wt, …)`, which return
-`ErrRequestNotSupported` instead of panicking.
+`ErrUnsupported` instead of panicking.
 
 `CapturePatch` is called by handlers only — the orchestrator never captures a
 patch when a step's deadline fires, so a timeout park writes no patch artifact
 (the spent work stays in the worktree for the rerun). Returning **no bytes is
-legal**: a backend whose patches live server-side attaches the diff out-of-band
+legal**: an orchestrator whose patches live server-side attaches the diff out-of-band
 and has nothing client-side to return, and a tree whose work is already
 committed has an empty `git diff HEAD` by definition. Those handlers still
 resolve their patch artifact, passing an **empty `PatchBody`** — the SDK hands
-it straight to `Backend.ResolveArtifact`, which verifies the evidence wherever
+it straight to `Orchestrator.ResolveArtifact`, which verifies the evidence wherever
 it actually lives and fails with its own message when it is missing. `cli`
 never second-guesses an empty body.
 
@@ -653,9 +653,9 @@ and the terminal-done check, before seed/dispatch; a non-nil error marks the
 invocation `skipped` with no budget spent. It is **not** the place to decide
 "this item is terminal" — that's owned by flow selection.
 
-### A reference: the fake backend
+### A reference: the fake orchestrator
 
-`pkg/backend/fake` is an in-memory `Backend` used by the SDK's own tests. Read
+`pkg/orchestrator/fake` is an in-memory `Orchestrator` used by the SDK's own tests. Read
 it as the minimal, correct implementation before writing your own.
 
 ---
@@ -689,7 +689,7 @@ The pattern, and why it fits flow:
    overhead on repeat runs. After scaffolding, the project owns every line —
    forge is not a runtime dependency unless you import its `primitives/`
    helper lib.
-3. **`bin/verify` is the gate your flow already calls.** Point the backend's
+3. **`bin/verify` is the gate your flow already calls.** Point the orchestrator's
    `VerifyCmd` at it (`[]string{"bin/verify"}`) so the flow's `Validate` step
    and your pre-commit hook run the *same* check. forge's verify ratchets
    committed quality baselines (test count, coverage, leak count in
@@ -712,7 +712,7 @@ See the forge [blueprint][forge-blueprint] for the full file layout
 
 | command | behavior |
 |---|---|
-| `doctor` | verify backend prerequisites (e.g. `gh` auth + repo push permissions); ✅ / ❌ |
+| `doctor` | verify orchestrator prerequisites (e.g. `gh` auth + repo push permissions); ✅ / ❌ |
 | `list` | list items this flow can process |
 | `claim <id>` (alias `lease`) | acquire an exclusive claim; resolves the ref via `RefResolver` or a `ListEligible` substring match |
 | `run-step` | advance ONE lifecycle item; emit an `InvocationResult` JSON. Re-run until `done` |
@@ -772,7 +772,8 @@ usage and exits 0 without running it.
 ├── stepctx.go              StepCtx interface — typed read/Resolve* surface, Agent(), Worktree(), AskQuestions
 ├── artifact.go             ArtifactDef/ArtifactType (the six types), ArtifactRecord, PatchBody/FileBody
 ├── signal.go               SignalDef + SignalState
-├── backend.go              Backend, Worktree, RequestManager, Item, Claim, ItemRef, ItemState; RefResolver/StateInspector/Finalizer/WorkInProgress
+├── orchestrator.go         Orchestrator, ItemEditor, Worktree, RequestManager, Item, ItemInfo, Claim, ItemRef
+├── identity.go             AccountId, HostId, ArenaId, StepId, QuestionId, TagId, CommandName, BranchName, Revision, CommitSha, …
 ├── budget.go               StepBudget + defaults {3, 50, $20, 30m}
 ├── agent.go                Agent interface + AgentRequest/Response/Failure
 ├── preflight.go            PreflightFunc + ChainPreflight
@@ -780,14 +781,14 @@ usage and exits 0 without running it.
 ├── telemetry.go            Telemetry sink for ctx.Notify
 ├── cli/                    program CLI (app.go, cmd_claim/run/status/grant/release/doctor/list) + RunOne orchestrator
 ├── claude/                 reference Agent impl: spawns the claude CLI via stream-json
-├── pkg/backend/fake/       in-memory backend for SDK tests (read this first when writing your own)
-├── pkg/backend/github/     GitHub-Issues backend: state-comment index, claim race-lock, worktree, signal polling, orphan-branch artifact spillover
+├── pkg/orchestrator/fake/       in-memory orchestrator for SDK tests (read this first when writing your own)
+├── pkg/orchestrator/github/ GitHub-Issues orchestrator: state-comment index, claim race-lock, worktree, signal polling, orphan-branch artifact spillover
 ├── examples/verify/        minimal one-step "run go test" flow
 ├── examples/issue/         contributor (fix) + maintainer (merge) flows on one issue
 └── docs/                   architecture docs
 ```
 
-The reference **GitHub backend** stores all item state in comments (a single
+The reference **GitHub orchestrator** stores all item state in comments (a single
 machine-managed state comment carrying a YAML index, plus one append-only
 comment per artifact), spills large artifacts to a `flow-artifacts` orphan
 branch, and races claims via a two-phase label lock — no server, no body

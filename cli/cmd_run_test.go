@@ -12,25 +12,53 @@ import (
 	"time"
 
 	"github.com/promise-language/flow"
-	"github.com/promise-language/flow/pkg/backend/fake"
+	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
 
-// takeoverBackend wraps fake.Backend to count and steer MarkManualTakeover
+// takeoverBackend wraps fake.Orchestrator to count and steer MarkManualTakeover
 // calls — the test asserts on whether/when the cli's manual-takeover hook
 // fires depending on the FLOW_DISPATCHED_BY_RUNNER env. T0481.
 type takeoverBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	calls    int
 	failWith error
 }
 
-func (b *takeoverBackend) MarkManualTakeover(ctx context.Context, claim flow.Claim) error {
-	b.calls++
-	return b.failWith
+// Edit hands back an editor that counts a committed SetManual(true). Manual
+// control is set through the editor now — there is no separate capability for
+// it — so what a test can observe is the edit landing, not a method being
+// called.
+func (b *takeoverBackend) Edit(ctx context.Context, ref flow.ItemRef) (flow.ItemEditor, error) {
+	inner, err := b.Orchestrator.Edit(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	return &takeoverEditor{ItemEditor: inner, be: b}, nil
 }
 
-// Compile-time assert: takeoverBackend implements flow.ManualTakeover.
-var _ flow.ManualTakeover = (*takeoverBackend)(nil)
+type takeoverEditor struct {
+	flow.ItemEditor
+	be     *takeoverBackend
+	manual bool
+}
+
+func (e *takeoverEditor) SetManual(m bool) {
+	e.manual = m
+	e.ItemEditor.SetManual(m)
+}
+
+func (e *takeoverEditor) Commit(ctx context.Context) error {
+	if e.manual {
+		e.be.calls++
+	}
+	if e.be.failWith != nil {
+		return e.be.failWith
+	}
+	return e.ItemEditor.Commit(ctx)
+}
+
+// Compile-time assert: takeoverBackend is a whole orchestrator.
+var _ flow.Orchestrator = (*takeoverBackend)(nil)
 
 // TestCmdRun_ManualSetsManualAndClearsPark (T0481): when the binary is run
 // by hand (FLOW_DISPATCHED_BY_RUNNER unset), cli.cmdRun MUST call the
@@ -44,8 +72,8 @@ func TestCmdRun_ManualSetsManualAndClearsPark(t *testing.T) {
 		}, flow.StepConfig{})
 
 	}, a)
-	wrapped := &takeoverBackend{Backend: be}
-	app.Backend = wrapped
+	wrapped := &takeoverBackend{Orchestrator: be}
+	app.Orchestrator = wrapped
 
 	// Belt-and-braces: ensure the env var is NOT set for this case (the runner
 	// would set it; an operator-typed run-step has no such pre-export).
@@ -56,7 +84,7 @@ func TestCmdRun_ManualSetsManualAndClearsPark(t *testing.T) {
 		t.Fatalf("cmdRun = %d, want 0", code)
 	}
 	if wrapped.calls != 1 {
-		t.Errorf("MarkManualTakeover calls = %d, want 1 (operator-driven run-step)", wrapped.calls)
+		t.Errorf("manual-takeover edits = %d, want 1 (operator-driven run-step)", wrapped.calls)
 	}
 }
 
@@ -73,8 +101,8 @@ func TestCmdRun_OrchestratedSkipsTakeover(t *testing.T) {
 		}, flow.StepConfig{})
 
 	}, a)
-	wrapped := &takeoverBackend{Backend: be}
-	app.Backend = wrapped
+	wrapped := &takeoverBackend{Orchestrator: be}
+	app.Orchestrator = wrapped
 
 	t.Setenv(dispatchedByRunnerEnv, "1")
 
@@ -83,7 +111,7 @@ func TestCmdRun_OrchestratedSkipsTakeover(t *testing.T) {
 		t.Fatalf("cmdRun = %d, want 0", code)
 	}
 	if wrapped.calls != 0 {
-		t.Errorf("MarkManualTakeover calls = %d, want 0 (orchestrator-spawned run-step)", wrapped.calls)
+		t.Errorf("manual-takeover edits = %d, want 0 (orchestrator-spawned run-step)", wrapped.calls)
 	}
 }
 
@@ -98,8 +126,8 @@ func TestCmdRun_TakeoverFailureDoesNotBlockStep(t *testing.T) {
 		}, flow.StepConfig{})
 
 	}, a)
-	wrapped := &takeoverBackend{Backend: be, failWith: errors.New("tracker unreachable")}
-	app.Backend = wrapped
+	wrapped := &takeoverBackend{Orchestrator: be, failWith: errors.New("tracker unreachable")}
+	app.Orchestrator = wrapped
 
 	t.Setenv(dispatchedByRunnerEnv, "")
 
@@ -108,7 +136,7 @@ func TestCmdRun_TakeoverFailureDoesNotBlockStep(t *testing.T) {
 		t.Fatalf("cmdRun = %d, want 0 (takeover failure must not abort the step)", code)
 	}
 	if wrapped.calls != 1 {
-		t.Errorf("MarkManualTakeover calls = %d, want 1 (failure path still calls)", wrapped.calls)
+		t.Errorf("manual-takeover edits = %d, want 1 (failure path still calls)", wrapped.calls)
 	}
 }
 
@@ -191,7 +219,7 @@ func TestCmdRun_HumanModeWithReason(t *testing.T) {
 	}, &stubAgent{name: "stub"})
 
 	// Use a preflight that returns ErrBlocked to produce a reason.
-	app.Preflight = func(ctx context.Context, state *flow.ItemState) error {
+	app.Preflight = func(ctx context.Context, state *flow.Item) error {
 		return fmt.Errorf("answer needed: %w", flow.ErrBlocked)
 	}
 
@@ -351,7 +379,7 @@ func TestCmdRun_BudgetParkNarratesAxes(t *testing.T) {
 	// Now run-step: next dispatch parks on budget.
 	out := &bytes.Buffer{}
 	app.Out = out
-	app.Backend = be
+	app.Orchestrator = be
 
 	code := app.cmdRun(context.Background(), []string{"--human"})
 	if code != 0 {

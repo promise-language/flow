@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/promise-language/flow"
-	"github.com/promise-language/flow/pkg/backend/fake"
+	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
 
 // resolveTestApp builds an App with a single-step "write plan" flow over the
@@ -21,7 +21,7 @@ import (
 // un-leased arena) and lets the caller swap in a wrapping backend (e.g. one
 // that fails ListEligible). The step resolves its artifact, so the run
 // advances and then finalizes.
-func resolveTestApp(t *testing.T, be flow.Backend) (*App, *bytes.Buffer, *bytes.Buffer) {
+func resolveTestApp(t *testing.T, be flow.Orchestrator) (*App, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	return resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
 		return ctx.ResolveMarkdown("the plan")
@@ -32,7 +32,7 @@ func resolveTestApp(t *testing.T, be flow.Backend) (*App, *bytes.Buffer, *bytes.
 // single "write plan" step — the lever for driving the loop to an outcome
 // other than done (return nil without resolving to park it, return an error to
 // fail it).
-func resolveTestAppStep(t *testing.T, be flow.Backend, step func(flow.StepCtx) error) (*App, *bytes.Buffer, *bytes.Buffer) {
+func resolveTestAppStep(t *testing.T, be flow.Orchestrator, step func(flow.StepCtx) error) (*App, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	// Isolate from real credential discovery (Keychain, claude binary) so
 	// reportQuota's exec calls don't hang or hit the network.
@@ -41,12 +41,11 @@ func resolveTestAppStep(t *testing.T, be flow.Backend, step func(flow.StepCtx) e
 	out := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}
 	app := &App{
-		Backend:   be,
-		Agent:     &stubAgent{name: "stub"},
-		Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Out:       out,
-		Err:       errBuf,
-		Owner:     "alice",
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Out:          out,
+		Err:          errBuf,
 	}
 	f := flow.NewFlow("implement", []flow.ItemType{"task"})
 	f.AddStep("write plan", "plan", step, flow.StepConfig{})
@@ -62,11 +61,11 @@ func resolveTestAppStep(t *testing.T, be flow.Backend, step func(flow.StepCtx) e
 // Used to prove a code path doesn't touch ListEligible — if it does, the
 // surrounding test fails.
 type failingListBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	err error
 }
 
-func (b *failingListBackend) ListEligible(ctx context.Context) ([]flow.ItemRef, error) {
+func (b *failingListBackend) ListAutoSelectable(ctx context.Context, _ []flow.TagId) ([]flow.ItemRef, error) {
 	return nil, b.err
 }
 
@@ -74,11 +73,11 @@ func (b *failingListBackend) ListEligible(ctx context.Context) ([]flow.ItemRef, 
 // can exercise the no-arg / LookupActiveClaim error branch added by this
 // change.
 type failingLookupActiveClaimBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	err error
 }
 
-func (b *failingLookupActiveClaimBackend) LookupActiveClaim(ctx context.Context, owner string) (*flow.Claim, error) {
+func (b *failingLookupActiveClaimBackend) LookupActiveClaim(ctx context.Context) (*flow.Claim, error) {
 	return nil, b.err
 }
 
@@ -86,11 +85,11 @@ func (b *failingLookupActiveClaimBackend) LookupActiveClaim(ctx context.Context,
 // Claim call to fail — exercises the auto-select branch's "Claim failed on
 // the chosen ref" error path.
 type failingClaimBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	claimErr error
 }
 
-func (b *failingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
+func (b *failingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, overrides []flow.ClaimOverride) (flow.Claim, error) {
 	return flow.Claim{}, b.claimErr
 }
 
@@ -99,21 +98,21 @@ func (b *failingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, owner
 // ListEligible to error — together they prove the explicit-id branch of
 // cmdResolve never calls ListEligible.
 type resolvingFailingListBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	listErr error
 }
 
-func (b *resolvingFailingListBackend) ListEligible(ctx context.Context) ([]flow.ItemRef, error) {
+func (b *resolvingFailingListBackend) ListAutoSelectable(ctx context.Context, _ []flow.TagId) ([]flow.ItemRef, error) {
 	return nil, b.listErr
 }
 
 func (b *resolvingFailingListBackend) ResolveRef(ctx context.Context, id string) (flow.ItemRef, error) {
-	return flow.ItemRef{BackendName: "fake", Display: id, Ref: json.RawMessage(`"` + id + `"`)}, nil
+	return flow.ItemRef{OrchestratorName: "fake", Display: id, Ref: json.RawMessage(`"` + id + `"`)}, nil
 }
 
 func TestCmdResolve_AutoSelectsWhenUnleased(t *testing.T) {
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), nil)
@@ -124,22 +123,22 @@ func TestCmdResolve_AutoSelectsWhenUnleased(t *testing.T) {
 		t.Errorf("expected Err to mention auto-selecting; got %q", errBuf.String())
 	}
 
-	// Item must now be claimed by app.Owner.
-	ref := flow.ItemRef{BackendName: "fake", Ref: json.RawMessage(`"1"`)}
+	// The item must now be held, credited to the account the arena acts as.
+	ref := flow.ItemRef{OrchestratorName: "fake", Ref: json.RawMessage(`"1"`)}
 	info, err := be.LookupClaim(context.Background(), ref)
 	if err != nil {
 		t.Fatalf("LookupClaim: %v", err)
 	}
-	if info == nil || info.Owner != "alice" {
-		t.Errorf("LookupClaim = %+v, want owner=alice", info)
+	if info == nil || info.Account != be.Account() {
+		t.Errorf("LookupClaim = %+v, want the arena's own account %q", info, be.Account())
 	}
 
 	// Plan artifact must have been resolved (proves the loop actually ran
 	// the step, not just claimed).
-	claim := flow.Claim{BackendName: "fake", ItemRef: ref, Owner: "alice", Token: json.RawMessage(`{}`)}
-	state, err := be.LoadState(context.Background(), claim)
+	claim := flow.Claim{OrchestratorName: "fake", ItemRef: ref, Account: be.Account(), Token: json.RawMessage(`{}`)}
+	state, err := be.Load(context.Background(), claim.ItemRef)
 	if err != nil {
-		t.Fatalf("LoadState: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 	rec := state.Artifact("plan")
 	if !rec.Resolved || rec.Markdown != "the plan" {
@@ -149,14 +148,14 @@ func TestCmdResolve_AutoSelectsWhenUnleased(t *testing.T) {
 
 func TestCmdResolve_ResumesActiveClaim(t *testing.T) {
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	// Pre-claim as app.Owner — cmdResolve must resume this claim via
 	// LookupActiveClaim and never touch ListEligible (which fails here).
-	ref := flow.ItemRef{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)}
-	if _, err := inner.Claim(context.Background(), ref, "alice", nil); err != nil {
+	ref := flow.ItemRef{OrchestratorName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)}
+	if _, err := inner.Claim(context.Background(), ref, nil); err != nil {
 		t.Fatalf("pre-claim: %v", err)
 	}
-	be := &failingListBackend{Backend: inner, err: errors.New("ListEligible must not be called on resume path")}
+	be := &failingListBackend{Orchestrator: inner, err: errors.New("ListEligible must not be called on resume path")}
 	app, _, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), nil)
@@ -190,7 +189,7 @@ func TestCmdResolve_EmptyEligibleExitsClean(t *testing.T) {
 // precedes it.
 func TestCmdResolve_UnmatchedTypeBlocks(t *testing.T) {
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "1", Type: "chore", Title: "1"})
+	be.AddItem("1", flow.Item{Type: "chore", Title: "1"})
 	app, _, errBuf := resolveTestApp(t, be) // flow accepts "task" only
 
 	code := app.cmdResolve(context.Background(), nil)
@@ -231,7 +230,7 @@ func TestCmdResolve_UnmatchedTypeBlocks(t *testing.T) {
 // this item's type" for it is the same misreport inverted.
 func TestCmdResolve_FinalizedUnmatchedTypeNarratesFinalize(t *testing.T) {
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "1", Type: "chore", Title: "1", Finalized: true})
+	be.AddItem("1", flow.Item{Type: "chore", Title: "1", Finalized: true})
 	app, _, errBuf := resolveTestApp(t, be) // flow accepts "task" only
 
 	code := app.cmdResolve(context.Background(), []string{"1"})
@@ -248,7 +247,7 @@ func TestCmdResolve_FinalizedUnmatchedTypeNarratesFinalize(t *testing.T) {
 
 func TestCmdResolve_ListEligibleError(t *testing.T) {
 	inner := fake.New()
-	be := &failingListBackend{Backend: inner, err: errors.New("boom")}
+	be := &failingListBackend{Orchestrator: inner, err: errors.New("boom")}
 	app, _, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), nil)
@@ -262,8 +261,8 @@ func TestCmdResolve_ListEligibleError(t *testing.T) {
 
 func TestCmdResolve_LookupActiveClaimError(t *testing.T) {
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
-	be := &failingLookupActiveClaimBackend{Backend: inner, err: errors.New("lookup boom")}
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be := &failingLookupActiveClaimBackend{Orchestrator: inner, err: errors.New("lookup boom")}
 	app, _, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), nil)
@@ -277,8 +276,8 @@ func TestCmdResolve_LookupActiveClaimError(t *testing.T) {
 
 func TestCmdResolve_AutoSelectClaimError(t *testing.T) {
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
-	be := &failingClaimBackend{Backend: inner, claimErr: errors.New("claim boom")}
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be := &failingClaimBackend{Orchestrator: inner, claimErr: errors.New("claim boom")}
 	app, _, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), nil)
@@ -301,7 +300,7 @@ func TestCmdResolve_AutoSelectClaimError(t *testing.T) {
 // conflictRefs, and otherwise delegates to the inner fake backend. Lets us
 // drive the auto-select iteration-on-conflict path deterministically.
 type conflictThenOkBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	refs          []flow.ItemRef
 	conflictRefs  map[string]bool
 	claimAttempts []string
@@ -309,14 +308,14 @@ type conflictThenOkBackend struct {
 	nonConflict   error // if set, every Claim returns this error instead
 }
 
-func (b *conflictThenOkBackend) ListEligible(ctx context.Context) ([]flow.ItemRef, error) {
+func (b *conflictThenOkBackend) ListAutoSelectable(ctx context.Context, _ []flow.TagId) ([]flow.ItemRef, error) {
 	if b.listErr != nil {
 		return nil, b.listErr
 	}
 	return b.refs, nil
 }
 
-func (b *conflictThenOkBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
+func (b *conflictThenOkBackend) Claim(ctx context.Context, ref flow.ItemRef, overrides []flow.ClaimOverride) (flow.Claim, error) {
 	id := string(ref.Ref)
 	b.claimAttempts = append(b.claimAttempts, id)
 	if b.nonConflict != nil {
@@ -329,19 +328,19 @@ func (b *conflictThenOkBackend) Claim(ctx context.Context, ref flow.ItemRef, own
 			Reason:     fmt.Sprintf("item %s already leased to arena \"other\"", id),
 		}
 	}
-	return b.Backend.Claim(ctx, ref, owner, overrides)
+	return b.Orchestrator.Claim(ctx, ref, overrides)
 }
 
 func TestCmdResolve_AutoSelectIteratesOnLeaseConflict(t *testing.T) {
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "3", Type: "task", Title: "3"})
+	inner.AddItem("3", flow.Item{Type: "task", Title: "3"})
 	refs := []flow.ItemRef{
-		{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
-		{BackendName: "fake", Display: "2", Ref: json.RawMessage(`"2"`)},
-		{BackendName: "fake", Display: "3", Ref: json.RawMessage(`"3"`)},
+		{OrchestratorName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
+		{OrchestratorName: "fake", Display: "2", Ref: json.RawMessage(`"2"`)},
+		{OrchestratorName: "fake", Display: "3", Ref: json.RawMessage(`"3"`)},
 	}
 	be := &conflictThenOkBackend{
-		Backend:      inner,
+		Orchestrator: inner,
 		refs:         refs,
 		conflictRefs: map[string]bool{`"1"`: true, `"2"`: true},
 	}
@@ -361,10 +360,10 @@ func TestCmdResolve_AutoSelectIteratesOnLeaseConflict(t *testing.T) {
 		t.Errorf("expected ref 2 conflict-skip line; got %q", errBuf.String())
 	}
 	// Ref 3 must actually be claimed and driven through the step.
-	claim := flow.Claim{BackendName: "fake", ItemRef: refs[2], Owner: "alice", Token: json.RawMessage(`{}`)}
-	state, err := inner.LoadState(context.Background(), claim)
+	claim := flow.Claim{OrchestratorName: "fake", ItemRef: refs[2], Account: "alice", Token: json.RawMessage(`{}`)}
+	state, err := inner.Load(context.Background(), claim.ItemRef)
 	if err != nil {
-		t.Fatalf("LoadState: %v", err)
+		t.Fatalf("Load: %v", err)
 	}
 	if rec := state.Artifact("plan"); !rec.Resolved {
 		t.Errorf("expected plan artifact resolved on ref 3, got %+v", rec)
@@ -374,11 +373,11 @@ func TestCmdResolve_AutoSelectIteratesOnLeaseConflict(t *testing.T) {
 func TestCmdResolve_AutoSelectAllRefsConflictExitsZero(t *testing.T) {
 	inner := fake.New()
 	refs := []flow.ItemRef{
-		{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
-		{BackendName: "fake", Display: "2", Ref: json.RawMessage(`"2"`)},
+		{OrchestratorName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
+		{OrchestratorName: "fake", Display: "2", Ref: json.RawMessage(`"2"`)},
 	}
 	be := &conflictThenOkBackend{
-		Backend:      inner,
+		Orchestrator: inner,
 		refs:         refs,
 		conflictRefs: map[string]bool{`"1"`: true, `"2"`: true},
 	}
@@ -396,13 +395,13 @@ func TestCmdResolve_AutoSelectAllRefsConflictExitsZero(t *testing.T) {
 func TestCmdResolve_AutoSelectNonConflictErrorExitsOne(t *testing.T) {
 	inner := fake.New()
 	refs := []flow.ItemRef{
-		{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
-		{BackendName: "fake", Display: "2", Ref: json.RawMessage(`"2"`)},
+		{OrchestratorName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
+		{OrchestratorName: "fake", Display: "2", Ref: json.RawMessage(`"2"`)},
 	}
 	be := &conflictThenOkBackend{
-		Backend:     inner,
-		refs:        refs,
-		nonConflict: errors.New("dial tcp: connection refused"),
+		Orchestrator: inner,
+		refs:         refs,
+		nonConflict:  errors.New("dial tcp: connection refused"),
 	}
 	app, _, errBuf := resolveTestApp(t, be)
 
@@ -450,15 +449,15 @@ func TestAutoSelectRefusalBranching(t *testing.T) {
 // instead of trying the next ref.
 func TestCmdResolve_AutoSelectStopsOnArenaScopedRefusal(t *testing.T) {
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
-	inner.AddItem(flow.Item{ID: "2", Type: "task", Title: "2"})
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	inner.AddItem("2", flow.Item{Type: "task", Title: "2"})
 	refs := []flow.ItemRef{
-		{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
-		{BackendName: "fake", Display: "2", Ref: json.RawMessage(`"2"`)},
+		{OrchestratorName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
+		{OrchestratorName: "fake", Display: "2", Ref: json.RawMessage(`"2"`)},
 	}
 	be := &arenaScopedRefusalBackend{
-		Backend: inner,
-		refs:    refs,
+		Orchestrator: inner,
+		refs:         refs,
 	}
 	app, _, errBuf := resolveTestApp(t, be)
 
@@ -477,16 +476,16 @@ func TestCmdResolve_AutoSelectStopsOnArenaScopedRefusal(t *testing.T) {
 // arenaScopedRefusalBackend returns an arena-scoped (ItemScoped=false) refusal
 // from every Claim call.
 type arenaScopedRefusalBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	refs          []flow.ItemRef
 	claimAttempts int
 }
 
-func (b *arenaScopedRefusalBackend) ListEligible(ctx context.Context) ([]flow.ItemRef, error) {
+func (b *arenaScopedRefusalBackend) ListAutoSelectable(ctx context.Context, _ []flow.TagId) ([]flow.ItemRef, error) {
 	return b.refs, nil
 }
 
-func (b *arenaScopedRefusalBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
+func (b *arenaScopedRefusalBackend) Claim(ctx context.Context, ref flow.ItemRef, overrides []flow.ClaimOverride) (flow.Claim, error) {
 	b.claimAttempts++
 	return flow.Claim{}, flow.ErrClaimRefused{
 		Code:   "not-admitted",
@@ -525,7 +524,7 @@ func decodeResultStream(t *testing.T, s string) []flow.InvocationResult {
 func TestCmdResolve_HumanModeWritesNothingToStdout(t *testing.T) {
 	t.Setenv(outputEnv, "")
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	// The fixture injects a bytes.Buffer for Out, which resolveOutput reads as
 	// human — the same mode a terminal gets.
 	app, out, errBuf := resolveTestApp(t, be)
@@ -546,7 +545,7 @@ func TestCmdResolve_HumanModeWritesNothingToStdout(t *testing.T) {
 func TestCmdResolve_ExplicitHumanFlagWritesNothingToStdout(t *testing.T) {
 	t.Setenv(outputEnv, "json") // --human must win over the environment
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, out, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), []string{"--human"})
@@ -561,7 +560,7 @@ func TestCmdResolve_ExplicitHumanFlagWritesNothingToStdout(t *testing.T) {
 func TestCmdResolve_JSONFlagStreamsResultsAndStillNarrates(t *testing.T) {
 	t.Setenv(outputEnv, "")
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, out, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), []string{"--json"})
@@ -592,7 +591,7 @@ func TestCmdResolve_JSONFlagStreamsResultsAndStillNarrates(t *testing.T) {
 func TestCmdResolve_FlowOutputEnvSelectsJSON(t *testing.T) {
 	t.Setenv(outputEnv, "json")
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, out, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), nil)
@@ -609,8 +608,8 @@ func TestCmdResolve_FlowOutputEnvSelectsJSON(t *testing.T) {
 // the check ever moved after the claim work the exit code would be 1.
 func TestCmdResolve_JSONAndHumanExitsTwoBeforeClaiming(t *testing.T) {
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
-	be := &failingLookupActiveClaimBackend{Backend: inner, err: errors.New("lookup boom")}
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be := &failingLookupActiveClaimBackend{Orchestrator: inner, err: errors.New("lookup boom")}
 	app, out, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), []string{"--json", "--human"})
@@ -634,7 +633,7 @@ func TestCmdResolve_JSONFlagEitherSideOfPositional(t *testing.T) {
 	t.Setenv(outputEnv, "")
 	for _, args := range [][]string{{"--json", "1"}, {"1", "--json"}} {
 		be := fake.New()
-		be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+		be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 		app, out, errBuf := resolveTestApp(t, be)
 
 		code := app.cmdResolve(context.Background(), args)
@@ -649,7 +648,7 @@ func TestCmdResolve_JSONFlagEitherSideOfPositional(t *testing.T) {
 
 func TestCmdResolve_UnknownFlagExitsTwo(t *testing.T) {
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, out, _ := resolveTestApp(t, be)
 
 	if code := app.cmdResolve(context.Background(), []string{"--nope"}); code != 2 {
@@ -665,8 +664,8 @@ func TestCmdResolve_UnknownFlagExitsTwo(t *testing.T) {
 // branch is only reached when no id is given and no claim is held).
 func TestCmdResolve_ExplicitIdStillClaimsWithoutListEligible(t *testing.T) {
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
-	be := &resolvingFailingListBackend{Backend: inner, listErr: errors.New("ListEligible must not be called on explicit-id path")}
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be := &resolvingFailingListBackend{Orchestrator: inner, listErr: errors.New("ListEligible must not be called on explicit-id path")}
 	app, _, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), []string{"1"})
@@ -674,26 +673,26 @@ func TestCmdResolve_ExplicitIdStillClaimsWithoutListEligible(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
 	}
 
-	// Item must be claimed by app.Owner.
-	ref := flow.ItemRef{BackendName: "fake", Ref: json.RawMessage(`"1"`)}
+	// The item must be held, credited to the account the arena acts as.
+	ref := flow.ItemRef{OrchestratorName: "fake", Ref: json.RawMessage(`"1"`)}
 	info, err := inner.LookupClaim(context.Background(), ref)
 	if err != nil {
 		t.Fatalf("LookupClaim: %v", err)
 	}
-	if info == nil || info.Owner != "alice" {
-		t.Errorf("LookupClaim = %+v, want owner=alice", info)
+	if info == nil || info.Account != be.Account() {
+		t.Errorf("LookupClaim = %+v, want the arena's own account %q", info, be.Account())
 	}
 }
 
-// failingLoadStateBackend forces LoadState to error. Both the progress peek
+// failingLoadStateBackend forces Load to error. Both the progress peek
 // and RunOne read state, so this drives the loop's RunOne-error branch — the
 // one exit that leaves the loop without an InvocationResult to report.
 type failingLoadStateBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	err error
 }
 
-func (b *failingLoadStateBackend) LoadState(ctx context.Context, claim flow.Claim) (*flow.ItemState, error) {
+func (b *failingLoadStateBackend) Load(ctx context.Context, ref flow.ItemRef) (*flow.Item, error) {
 	return nil, b.err
 }
 
@@ -717,7 +716,7 @@ func TestCmdResolve_ModeSplitHoldsOnEveryTerminalOutcome(t *testing.T) {
 		t.Run(c.name+"/json", func(t *testing.T) {
 			t.Setenv(outputEnv, "")
 			be := fake.New()
-			be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+			be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 			app, out, errBuf := resolveTestAppStep(t, be, c.step)
 
 			code := app.cmdResolve(context.Background(), []string{"--json"})
@@ -735,7 +734,7 @@ func TestCmdResolve_ModeSplitHoldsOnEveryTerminalOutcome(t *testing.T) {
 		t.Run(c.name+"/human", func(t *testing.T) {
 			t.Setenv(outputEnv, "")
 			be := fake.New()
-			be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+			be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 			app, out, errBuf := resolveTestAppStep(t, be, c.step)
 
 			code := app.cmdResolve(context.Background(), []string{"--human"})
@@ -759,8 +758,8 @@ func TestCmdResolve_ModeSplitHoldsOnEveryTerminalOutcome(t *testing.T) {
 // from an InvocationResult.
 func TestCmdResolve_RunOneErrorKeepsStdoutClean(t *testing.T) {
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
-	be := &failingLoadStateBackend{Backend: inner, err: errors.New("state boom")}
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be := &failingLoadStateBackend{Orchestrator: inner, err: errors.New("state boom")}
 	app, out, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), []string{"--json"})
@@ -781,25 +780,25 @@ func TestCmdResolve_RunOneErrorKeepsStdoutClean(t *testing.T) {
 
 // tagFilterBackend wraps fake and implements TagFilterer.
 type tagFilterBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	taggedRefs []flow.ItemRef
-	calledTags []string
+	calledTags []flow.TagId
 }
 
-func (b *tagFilterBackend) ListEligibleWithTags(ctx context.Context, tags []string) ([]flow.ItemRef, error) {
+func (b *tagFilterBackend) ListAutoSelectable(ctx context.Context, tags []flow.TagId) ([]flow.ItemRef, error) {
 	b.calledTags = tags
 	return b.taggedRefs, nil
 }
 
-// TestCmdResolve_TagFilterSelectsFromTaggedSet verifies that --tag uses
-// TagFilterer and not ListEligible.
+// --tag reaches the orchestrator: filtering belongs there, because tags live
+// in the orchestrator and ItemRef does not carry them.
 func TestCmdResolve_TagFilterSelectsFromTaggedSet(t *testing.T) {
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	be := &tagFilterBackend{
-		Backend: inner,
+		Orchestrator: inner,
 		taggedRefs: []flow.ItemRef{
-			{BackendName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
+			{OrchestratorName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
 		},
 	}
 	app, _, errBuf := resolveTestApp(t, be)
@@ -809,14 +808,14 @@ func TestCmdResolve_TagFilterSelectsFromTaggedSet(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
 	}
 	if len(be.calledTags) != 1 || be.calledTags[0] != "priority:high" {
-		t.Errorf("TagFilterer called with %v, want [priority:high]", be.calledTags)
+		t.Errorf("ListAutoSelectable called with %v, want [priority:high]", be.calledTags)
 	}
 }
 
 // TestCmdResolve_TagAndIdMutuallyExclusive verifies the usage error.
 func TestCmdResolve_TagAndIdMutuallyExclusive(t *testing.T) {
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), []string{"--tag", "x", "42"})
@@ -833,8 +832,8 @@ func TestCmdResolve_TagAndIdMutuallyExclusive(t *testing.T) {
 func TestCmdResolve_TagEmptySetExitsClean(t *testing.T) {
 	inner := fake.New()
 	be := &tagFilterBackend{
-		Backend:    inner,
-		taggedRefs: nil, // empty
+		Orchestrator: inner,
+		taggedRefs:   nil, // empty
 	}
 	app, _, errBuf := resolveTestApp(t, be)
 
@@ -847,21 +846,6 @@ func TestCmdResolve_TagEmptySetExitsClean(t *testing.T) {
 	}
 }
 
-// TestCmdResolve_TagWithoutTagFiltererRefused verifies that --tag is refused
-// when the backend doesn't implement TagFilterer.
-func TestCmdResolve_TagWithoutTagFiltererRefused(t *testing.T) {
-	be := fake.New() // no TagFilterer
-	app, _, errBuf := resolveTestApp(t, be)
-
-	code := app.cmdResolve(context.Background(), []string{"--tag", "x"})
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
-	}
-	if !strings.Contains(errBuf.String(), "does not support --tag") {
-		t.Errorf("expected TagFilterer-not-supported message; got %q", errBuf.String())
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Invariant: resolve's auto-select NEVER calls Discover.
 // ---------------------------------------------------------------------------
@@ -870,10 +854,10 @@ func TestCmdResolve_TagWithoutTagFiltererRefused(t *testing.T) {
 // proves the invariant stated in the Discoverer interface doc: resolve's
 // auto-select path must never call Discover.
 type discoverPanicBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 }
 
-func (b *discoverPanicBackend) Discover(ctx context.Context, scope flow.DiscoveryScope, binaryName string, acceptsType func(flow.ItemType) bool) ([]flow.DiscoveryItem, error) {
+func (b *discoverPanicBackend) List(ctx context.Context, scope flow.ItemScope, binaryName flow.BinaryName, acceptsType func(flow.ItemType) bool) ([]flow.ItemInfo, error) {
 	panic("INVARIANT VIOLATION: resolve's auto-select called Discover")
 }
 
@@ -881,8 +865,8 @@ func (b *discoverPanicBackend) Discover(ctx context.Context, scope flow.Discover
 // item 2 of issue #6.
 func TestCmdResolve_AutoSelectNeverCallsDiscover(t *testing.T) {
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
-	be := &discoverPanicBackend{Backend: inner}
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be := &discoverPanicBackend{Orchestrator: inner}
 	app, _, errBuf := resolveTestApp(t, be)
 
 	// If cmdResolve ever calls Discover, the panic will fail this test.
@@ -900,23 +884,23 @@ func TestCmdResolve_AutoSelectNeverCallsDiscover(t *testing.T) {
 // refusingResolveBackend refuses Claim with a typed ErrClaimRefused and
 // implements RefResolver so the explicit-id path can resolve the ref.
 type refusingResolveBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	refusal flow.ErrClaimRefused
 }
 
 func (b *refusingResolveBackend) ResolveRef(ctx context.Context, id string) (flow.ItemRef, error) {
-	return flow.ItemRef{BackendName: "fake", Display: id, Ref: json.RawMessage(`"` + id + `"`)}, nil
+	return flow.ItemRef{OrchestratorName: "fake", Display: id, Ref: json.RawMessage(`"` + id + `"`)}, nil
 }
 
-func (b *refusingResolveBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
+func (b *refusingResolveBackend) Claim(ctx context.Context, ref flow.ItemRef, overrides []flow.ClaimOverride) (flow.Claim, error) {
 	return flow.Claim{}, b.refusal
 }
 
 func TestCmdResolve_ExplicitIdRefusalRendering(t *testing.T) {
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	be := &refusingResolveBackend{
-		Backend: inner,
+		Orchestrator: inner,
 		refusal: flow.ErrClaimRefused{
 			Code:     "not-admitted",
 			Reason:   "arena not admitted",
@@ -949,23 +933,23 @@ func TestCmdResolve_ExplicitIdRefusalRendering(t *testing.T) {
 // overrideRecordingResolveBackend records which overrides Claim receives,
 // implements RefResolver for the explicit-id path, and delegates to fake.
 type overrideRecordingResolveBackend struct {
-	*fake.Backend
+	*fake.Orchestrator
 	lastOverrides []flow.ClaimOverride
 }
 
 func (b *overrideRecordingResolveBackend) ResolveRef(ctx context.Context, id string) (flow.ItemRef, error) {
-	return flow.ItemRef{BackendName: "fake", Display: id, Ref: json.RawMessage(`"` + id + `"`)}, nil
+	return flow.ItemRef{OrchestratorName: "fake", Display: id, Ref: json.RawMessage(`"` + id + `"`)}, nil
 }
 
-func (b *overrideRecordingResolveBackend) Claim(ctx context.Context, ref flow.ItemRef, owner string, overrides []flow.ClaimOverride) (flow.Claim, error) {
+func (b *overrideRecordingResolveBackend) Claim(ctx context.Context, ref flow.ItemRef, overrides []flow.ClaimOverride) (flow.Claim, error) {
 	b.lastOverrides = overrides
-	return b.Backend.Claim(ctx, ref, owner, overrides)
+	return b.Orchestrator.Claim(ctx, ref, overrides)
 }
 
 func TestCmdResolve_ForceUnadmittedPassesOverride(t *testing.T) {
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
-	be := &overrideRecordingResolveBackend{Backend: inner}
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be := &overrideRecordingResolveBackend{Orchestrator: inner}
 	app, _, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), []string{"1", "--force-unadmitted"})
@@ -985,12 +969,12 @@ func TestCmdResolve_ForceUnadmittedPassesOverride(t *testing.T) {
 // StateInspector with a caller-supplied state, so finalTotalSuffix tests can
 // control exactly which artifacts and figures are returned.
 type totalSuffixInspectBackend struct {
-	*fake.Backend
-	state *flow.ItemState
+	*fake.Orchestrator
+	state *flow.Item
 	err   error
 }
 
-func (b *totalSuffixInspectBackend) LoadStateByRef(_ context.Context, _ flow.ItemRef) (*flow.ItemState, error) {
+func (b *totalSuffixInspectBackend) Load(_ context.Context, _ flow.ItemRef) (*flow.Item, error) {
 	if b.err != nil {
 		return nil, b.err
 	}
@@ -998,8 +982,8 @@ func (b *totalSuffixInspectBackend) LoadStateByRef(_ context.Context, _ flow.Ite
 }
 
 func TestFinalTotalSuffix_NoStateInspector(t *testing.T) {
-	// Plain fake.Backend does not implement StateInspector.
-	app := &App{Backend: fake.New()}
+	// Plain fake.Orchestrator does not implement StateInspector.
+	app := &App{Orchestrator: fake.New()}
 	claim := flow.Claim{}
 	got := finalTotalSuffix(context.Background(), app, claim)
 	if got != "" {
@@ -1009,26 +993,26 @@ func TestFinalTotalSuffix_NoStateInspector(t *testing.T) {
 
 func TestFinalTotalSuffix_LoadStateError(t *testing.T) {
 	be := &totalSuffixInspectBackend{
-		Backend: fake.New(),
-		err:     errors.New("state unavailable"),
+		Orchestrator: fake.New(),
+		err:          errors.New("state unavailable"),
 	}
-	app := &App{Backend: be}
+	app := &App{Orchestrator: be}
 	got := finalTotalSuffix(context.Background(), app, flow.Claim{})
 	if got != "" {
-		t.Errorf("expected empty string on LoadStateByRef error; got %q", got)
+		t.Errorf("expected empty string on Load error; got %q", got)
 	}
 }
 
 func TestFinalTotalSuffix_NoFigures(t *testing.T) {
 	be := &totalSuffixInspectBackend{
-		Backend: fake.New(),
-		state: &flow.ItemState{
+		Orchestrator: fake.New(),
+		state: &flow.Item{
 			Artifacts: map[flow.ArtifactId]flow.ArtifactRecord{
 				"plan": {}, // zero duration, zero cost
 			},
 		},
 	}
-	app := &App{Backend: be}
+	app := &App{Orchestrator: be}
 	got := finalTotalSuffix(context.Background(), app, flow.Claim{})
 	if got != "" {
 		t.Errorf("expected empty string when all figures are zero; got %q", got)
@@ -1037,15 +1021,15 @@ func TestFinalTotalSuffix_NoFigures(t *testing.T) {
 
 func TestFinalTotalSuffix_BothFigures(t *testing.T) {
 	be := &totalSuffixInspectBackend{
-		Backend: fake.New(),
-		state: &flow.ItemState{
+		Orchestrator: fake.New(),
+		state: &flow.Item{
 			Artifacts: map[flow.ArtifactId]flow.ArtifactRecord{
 				"plan":           {DurationWorked: 5 * time.Minute, CostUSDSpent: 1.20, Resolved: true},
 				"implementation": {DurationWorked: 9*time.Minute + 2*time.Second, CostUSDSpent: 1.51, Resolved: true},
 			},
 		},
 	}
-	app := &App{Backend: be}
+	app := &App{Orchestrator: be}
 	got := finalTotalSuffix(context.Background(), app, flow.Claim{})
 	if !strings.Contains(got, "14m02s") {
 		t.Errorf("expected total duration 14m02s; got %q", got)
@@ -1060,15 +1044,15 @@ func TestFinalTotalSuffix_BothFigures(t *testing.T) {
 
 func TestFinalTotalSuffix_LowerBound(t *testing.T) {
 	be := &totalSuffixInspectBackend{
-		Backend: fake.New(),
-		state: &flow.ItemState{
+		Orchestrator: fake.New(),
+		state: &flow.Item{
 			Artifacts: map[flow.ArtifactId]flow.ArtifactRecord{
 				"plan":   {DurationWorked: 5 * time.Minute, CostUSDSpent: 1.20, Resolved: true},
 				"legacy": {DurationWorked: 0, CostUSDSpent: 0.50, Resolved: true}, // resolved but no duration → lower bound
 			},
 		},
 	}
-	app := &App{Backend: be}
+	app := &App{Orchestrator: be}
 	got := finalTotalSuffix(context.Background(), app, flow.Claim{})
 	if !strings.Contains(got, "≥") {
 		t.Errorf("expected lower-bound prefix ≥; got %q", got)
@@ -1082,15 +1066,15 @@ func TestFinalTotalSuffix_UnresolvedZeroDurationNotLowerBound(t *testing.T) {
 	// An unresolved artifact with zero duration is not a lower bound —
 	// it just hasn't run yet.
 	be := &totalSuffixInspectBackend{
-		Backend: fake.New(),
-		state: &flow.ItemState{
+		Orchestrator: fake.New(),
+		state: &flow.Item{
 			Artifacts: map[flow.ArtifactId]flow.ArtifactRecord{
 				"plan":    {DurationWorked: 5 * time.Minute, CostUSDSpent: 1.20, Resolved: true},
 				"pending": {DurationWorked: 0, CostUSDSpent: 0, Resolved: false},
 			},
 		},
 	}
-	app := &App{Backend: be}
+	app := &App{Orchestrator: be}
 	got := finalTotalSuffix(context.Background(), app, flow.Claim{})
 	if strings.Contains(got, "≥") {
 		t.Errorf("unresolved artifact with zero duration must not trigger lower-bound; got %q", got)
@@ -1132,7 +1116,7 @@ func TestCmdResolve_BudgetParkNarratesAxes(t *testing.T) {
 	errBuf := &bytes.Buffer{}
 	app.Out = &bytes.Buffer{}
 	app.Err = errBuf
-	app.Backend = be // ensure it uses the same backend
+	app.Orchestrator = be // ensure it uses the same backend
 
 	code := app.cmdResolve(context.Background(), nil)
 	if code != 0 {
@@ -1149,7 +1133,7 @@ func TestCmdResolve_BudgetParkNarratesAxes(t *testing.T) {
 
 func TestCmdResolve_NonBudgetParkOmitsAxes(t *testing.T) {
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
 		return nil // returns without resolving → did-not-resolve park
 	})
@@ -1167,18 +1151,105 @@ func TestCmdResolve_NonBudgetParkOmitsAxes(t *testing.T) {
 // Pre-claim fitness gate
 // ---------------------------------------------------------------------------
 
-// unfitBackend wraps a fake backend and implements flow.FitnessChecker with
-// an unconditionally-unfit verdict.
-type unfitBackend struct {
-	*fake.Backend
+// fitGateBackend scripts the `fit` GATE, which is where fitness is decided
+// now: there is no CheckFit method, so a test says what the gate did by
+// answering as the worktree the gate would have run in.
+//
+// Each entry in `rounds` is one fit measurement. A nil entry means fit.
+type fitGateBackend struct {
+	*fake.Orchestrator
+	mu     sync.Mutex
+	calls  int
+	rounds []fitRound
 }
 
-func (b *unfitBackend) CheckFit(ctx context.Context) (flow.GateVerdict, error) {
-	return flow.GateVerdict{
-		Acceptable: false,
-		Detail:     "12 MB free, floor 2 GB",
-		Thresholds: []byte("{}"),
-	}, nil
+// fitRound is one scripted answer. runErr means the runner could not attempt
+// the gate; outcome other than measured means it measured nothing; judgeErr
+// means no verdict exists; detail is the refusal a measured run is judged to.
+type fitRound struct {
+	runErr   error
+	outcome  flow.Outcome
+	judgeErr error
+	unfit    string // non-empty: measured, and the judge refuses with this detail
+}
+
+func (b *fitGateBackend) next() fitRound {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls++
+	if len(b.rounds) == 0 {
+		return fitRound{}
+	}
+	if b.calls <= len(b.rounds) {
+		return b.rounds[b.calls-1]
+	}
+	return b.rounds[len(b.rounds)-1]
+}
+
+// setRounds rescripts the gate mid-run, so a test can make the machine go
+// unfit only after the step it is about to fail.
+func (b *fitGateBackend) setRounds(rounds []fitRound) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls = 0
+	b.rounds = rounds
+}
+
+// unfitFor scripts n unfit measurements followed by fit ones.
+func unfitFor(n int) []fitRound {
+	rounds := make([]fitRound, 0, n+1)
+	for range n {
+		rounds = append(rounds, fitRound{unfit: "12 MB free, floor 2 GB"})
+	}
+	return append(rounds, fitRound{})
+}
+
+func (b *fitGateBackend) fitCalls() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.calls
+}
+
+func (b *fitGateBackend) Worktree(ctx context.Context, ref flow.ItemRef) (flow.Worktree, error) {
+	inner, err := b.Orchestrator.Worktree(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	return &fitGateWorktree{Worktree: inner, be: b}, nil
+}
+
+type fitGateWorktree struct {
+	flow.Worktree
+	be   *fitGateBackend
+	last fitRound
+}
+
+func (w *fitGateWorktree) RunGate(ctx context.Context, name flow.GateName) (flow.GateRun, error) {
+	if name != flow.GateFit {
+		return w.Worktree.RunGate(ctx, name)
+	}
+	w.last = w.be.next()
+	if w.last.runErr != nil {
+		return flow.GateRun{}, w.last.runErr
+	}
+	outcome := w.last.outcome
+	if outcome == "" {
+		outcome = flow.OutcomeMeasured
+	}
+	return flow.GateRun{Gate: name, Outcome: outcome, Stdout: []byte(`{}`)}, nil
+}
+
+func (w *fitGateWorktree) Judge(ctx context.Context, run flow.GateRun) (flow.GateVerdict, error) {
+	if run.Gate != flow.GateFit {
+		return w.Worktree.Judge(ctx, run)
+	}
+	if w.last.judgeErr != nil {
+		return flow.GateVerdict{}, w.last.judgeErr
+	}
+	if w.last.unfit != "" {
+		return flow.GateVerdict{Run: run, Acceptable: false, Detail: w.last.unfit, Thresholds: []byte("{}")}, nil
+	}
+	return flow.GateVerdict{Run: run, Acceptable: true, Thresholds: []byte("{}")}, nil
 }
 
 // TestResolve_UnfitMachineExitsBeforeClaiming verifies that when the backend
@@ -1190,8 +1261,8 @@ func TestResolve_UnfitMachineExitsBeforeClaiming(t *testing.T) {
 	defer func() { fitnessWaitInterval = old }()
 
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
-	be := &unfitBackend{Backend: inner}
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be := &fitGateBackend{Orchestrator: inner, rounds: []fitRound{{unfit: "12 MB free, floor 2 GB"}}}
 	app, _, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), []string{"1"})
@@ -1202,7 +1273,7 @@ func TestResolve_UnfitMachineExitsBeforeClaiming(t *testing.T) {
 		t.Errorf("expected 'machine unfit' in stderr; got %q", errBuf.String())
 	}
 	// The item must NOT be claimed.
-	claim, err := be.LookupActiveClaim(context.Background(), "alice")
+	claim, err := be.LookupActiveClaim(context.Background())
 	if err != nil {
 		t.Fatalf("LookupActiveClaim: %v", err)
 	}
@@ -1211,22 +1282,12 @@ func TestResolve_UnfitMachineExitsBeforeClaiming(t *testing.T) {
 	}
 }
 
-// fitBackend wraps a fake backend and implements flow.FitnessChecker with an
-// unconditionally-fit verdict.
-type fitBackend struct {
-	*fake.Backend
-}
-
-func (b *fitBackend) CheckFit(ctx context.Context) (flow.GateVerdict, error) {
-	return flow.GateVerdict{Acceptable: true}, nil
-}
-
 // TestResolve_FitMachineProceeds verifies that a fit verdict lets resolve
 // proceed normally (item gets claimed and driven through the step).
 func TestResolve_FitMachineProceeds(t *testing.T) {
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
-	be := &fitBackend{Backend: inner}
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be := &fitGateBackend{Orchestrator: inner}
 	app, _, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), nil)
@@ -1234,7 +1295,7 @@ func TestResolve_FitMachineProceeds(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
 	}
 	// Item must be claimed.
-	claim, err := be.LookupActiveClaim(context.Background(), "alice")
+	claim, err := be.LookupActiveClaim(context.Background())
 	if err != nil {
 		t.Fatalf("LookupActiveClaim: %v", err)
 	}
@@ -1243,65 +1304,59 @@ func TestResolve_FitMachineProceeds(t *testing.T) {
 	}
 }
 
-// fitErrorBackend wraps a fake backend and implements flow.FitnessChecker
-// that always returns an error — exercises the fail-open path.
-type fitErrorBackend struct {
-	*fake.Backend
-}
+// NO OUTCOME IS NOT A PASSING OUTCOME. Every way the fit gate can fail to
+// produce a judged measurement means unfit — a gate that could not be run, one
+// that measured nothing, and one whose measurement could not be judged. Read
+// the other way round, an erroring fit check counted as fit, which is precisely
+// the state `fit` exists to stop anyone proceeding from.
+//
+// A gate that fails this way on EVERY call must terminate at the wait bound
+// rather than loop: the two wait sites share one counter, and when they did
+// not, each reset the other's budget and the run spun to the runaway guard.
+func TestResolve_FitCheckFailsClosed(t *testing.T) {
+	old := fitnessWaitInterval
+	fitnessWaitInterval = time.Millisecond
+	defer func() { fitnessWaitInterval = old }()
 
-func (b *fitErrorBackend) CheckFit(ctx context.Context) (flow.GateVerdict, error) {
-	return flow.GateVerdict{}, errors.New("gate broken")
-}
+	for name, round := range map[string]fitRound{
+		"the gate could not be run":       {runErr: errors.New("gate broken")},
+		"it timed out":                    {outcome: flow.OutcomeTimedOut},
+		"it could not start":              {outcome: flow.OutcomeCouldNotStart},
+		"it died":                         {outcome: flow.OutcomeDied},
+		"it broke its contract":           {outcome: flow.OutcomeBrokeContract},
+		"its measurement was unjudgeable": {judgeErr: errors.New("no thresholds")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			inner := fake.New()
+			inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+			be := &fitGateBackend{Orchestrator: inner, rounds: []fitRound{round}}
+			app, _, errBuf := resolveTestApp(t, be)
 
-// TestResolve_FitnessCheckErrorProceeds verifies that when CheckFit returns
-// an error, resolve proceeds (fail-open) rather than blocking.
-func TestResolve_FitnessCheckErrorProceeds(t *testing.T) {
-	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
-	be := &fitErrorBackend{Backend: inner}
-	app, _, errBuf := resolveTestApp(t, be)
-
-	code := app.cmdResolve(context.Background(), nil)
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0 (fail-open on gate error); err=%q", code, errBuf.String())
-	}
-	// Item must be claimed — the error did not block.
-	claim, err := be.LookupActiveClaim(context.Background(), "alice")
-	if err != nil {
-		t.Fatalf("LookupActiveClaim: %v", err)
-	}
-	if claim == nil {
-		t.Error("item should be claimed when CheckFit returns an error (fail-open)")
+			code := app.cmdResolve(context.Background(), []string{"1"})
+			if code != 1 {
+				t.Fatalf("exit code = %d, want 1 — no outcome is not a passing outcome; err=%q", code, errBuf.String())
+			}
+			// The claim is what must not be taken: work started on an unfit
+			// arena is the failure `fit` runs before the lease to prevent.
+			claim, err := be.LookupActiveClaim(context.Background())
+			if err != nil {
+				t.Fatalf("LookupActiveClaim: %v", err)
+			}
+			if claim != nil {
+				t.Errorf("the item was claimed on an unfit arena: %+v", claim)
+			}
+			// It stopped at the wait bound rather than spinning to the runaway
+			// guard, which is what a shared counter buys.
+			if strings.Contains(errBuf.String(), "runaway guard") {
+				t.Errorf("the fit wait ran to the runaway guard; err=%q", errBuf.String())
+			}
+		})
 	}
 }
 
 // ---------------------------------------------------------------------------
 // Mid-step fitness wait: standalone wait-and-retry on StatusBlocked
 // ---------------------------------------------------------------------------
-
-// transientUnfitBackend returns an unfit verdict for the first N CheckFit
-// calls, then switches to fit. It also allows the step handler to return
-// ErrUnfit on the first run by controlling the fake's gate verdict.
-type transientUnfitBackend struct {
-	*fake.Backend
-	mu          sync.Mutex
-	checkCalls  int
-	unfitRounds int // how many CheckFit calls return unfit before switching
-}
-
-func (b *transientUnfitBackend) CheckFit(ctx context.Context) (flow.GateVerdict, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.checkCalls++
-	if b.checkCalls <= b.unfitRounds {
-		return flow.GateVerdict{
-			Acceptable: false,
-			Detail:     "12 MB free, floor 2 GB",
-			Thresholds: []byte("{}"),
-		}, nil
-	}
-	return flow.GateVerdict{Acceptable: true}, nil
-}
 
 // TestResolve_FitnessWaitRetriesOnRecovery verifies that when a step returns
 // ErrUnfit and the machine subsequently recovers, cmdResolve waits and retries
@@ -1312,13 +1367,13 @@ func TestResolve_FitnessWaitRetriesOnRecovery(t *testing.T) {
 	defer func() { fitnessWaitInterval = old }()
 
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
 
 	stepCalls := 0
 	// The backend starts fit (unfitRounds: 0) so the pre-claim check passes.
 	// After the step returns ErrUnfit, the mid-step CheckFit also returns fit,
 	// so cmdResolve retries immediately.
-	be := &transientUnfitBackend{Backend: inner, unfitRounds: 0}
+	be := &fitGateBackend{Orchestrator: inner, rounds: unfitFor(0)}
 	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
 		stepCalls++
 		if stepCalls == 1 {
@@ -1348,21 +1403,18 @@ func TestResolve_FitnessWaitHoldsWhileUnfit(t *testing.T) {
 	defer func() { fitnessWaitInterval = old }()
 
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
 
 	stepCalls := 0
 	// Pre-claim CheckFit (call 1) is fit (unfitRounds=0 → always fit at that
 	// stage). Then the step returns ErrUnfit. The mid-step re-check (calls
 	// 2..4) returns unfit for 3 rounds, then fit on call 5.
-	be := &transientUnfitBackend{Backend: inner, unfitRounds: 0}
+	be := &fitGateBackend{Orchestrator: inner, rounds: unfitFor(0)}
 	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
 		stepCalls++
 		if stepCalls == 1 {
-			// After the step fails, make the next 3 CheckFit calls unfit.
-			be.mu.Lock()
-			be.checkCalls = 0
-			be.unfitRounds = 3
-			be.mu.Unlock()
+			// After the step fails, the next three fit measurements are unfit.
+			be.setRounds(unfitFor(3))
 			return fmt.Errorf("12 MB free, floor 2 GB: %w", flow.ErrUnfit)
 		}
 		return ctx.ResolveMarkdown("the plan")
@@ -1388,15 +1440,12 @@ func TestResolve_FitnessWaitExhaustedExits(t *testing.T) {
 	defer func() { fitnessWaitInterval = old }()
 
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
 
-	// Pre-claim: fit (unfitRounds=0). Mid-step: permanently unfit.
-	be := &transientUnfitBackend{Backend: inner, unfitRounds: 0}
+	// Pre-claim: fit. Mid-step: permanently unfit.
+	be := &fitGateBackend{Orchestrator: inner, rounds: unfitFor(0)}
 	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
-		be.mu.Lock()
-		be.checkCalls = 0
-		be.unfitRounds = maxFitnessWaits + 10
-		be.mu.Unlock()
+		be.setRounds(unfitFor(maxFitnessWaits + 10))
 		return fmt.Errorf("disk full: %w", flow.ErrUnfit)
 	})
 
@@ -1404,8 +1453,8 @@ func TestResolve_FitnessWaitExhaustedExits(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 (fitness wait exhausted); err=%q", code, errBuf.String())
 	}
-	if !strings.Contains(errBuf.String(), "is blocked") {
-		t.Errorf("expected 'is blocked' in stderr when wait exhausted; got %q", errBuf.String())
+	if !strings.Contains(errBuf.String(), "machine unfit") {
+		t.Errorf("expected the final unfit report in stderr when the wait was exhausted; got %q", errBuf.String())
 	}
 }
 
@@ -1417,15 +1466,12 @@ func TestResolve_FitnessWaitInterruptedExits(t *testing.T) {
 	defer func() { fitnessWaitInterval = old }()
 
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
 
-	// Pre-claim: fit (unfitRounds=0). Mid-step: permanently unfit.
-	be := &transientUnfitBackend{Backend: inner, unfitRounds: 0}
+	// Pre-claim: fit. Mid-step: permanently unfit.
+	be := &fitGateBackend{Orchestrator: inner, rounds: unfitFor(0)}
 	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
-		be.mu.Lock()
-		be.checkCalls = 0
-		be.unfitRounds = 999
-		be.mu.Unlock()
+		be.setRounds(unfitFor(999))
 		return fmt.Errorf("disk full: %w", flow.ErrUnfit)
 	})
 
@@ -1451,15 +1497,15 @@ func TestResolve_FitnessWaitInterruptedExits(t *testing.T) {
 // every block (e.g. ErrBlocked from a preflight) would be retried.
 func TestResolve_NonFitnessBlockExitsImmediately(t *testing.T) {
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
-	be := &fitBackend{Backend: inner}
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be := &fitGateBackend{Orchestrator: inner}
 	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
 		return ctx.ResolveMarkdown("the plan")
 	})
 
 	// A preflight that always returns ErrBlocked — produces StatusBlocked
 	// with a reason that has nothing to do with fitness.
-	app.Preflight = func(_ context.Context, _ *flow.ItemState) error {
+	app.Preflight = func(_ context.Context, _ *flow.Item) error {
 		return fmt.Errorf("answer needed on %q: %w", "plan", flow.ErrBlocked)
 	}
 
@@ -1484,9 +1530,9 @@ func TestResolve_PreClaimTransientUnfitnessProceeds(t *testing.T) {
 	defer func() { fitnessWaitInterval = old }()
 
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	// Unfit for 3 rounds, then fit.
-	be := &transientUnfitBackend{Backend: inner, unfitRounds: 3}
+	be := &fitGateBackend{Orchestrator: inner, rounds: unfitFor(3)}
 	app, _, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), []string{"1"})
@@ -1498,7 +1544,7 @@ func TestResolve_PreClaimTransientUnfitnessProceeds(t *testing.T) {
 		t.Errorf("expected 'waiting…' in stderr during pre-claim wait; got %q", errBuf.String())
 	}
 	// Item must be claimed.
-	claim, err := be.LookupActiveClaim(context.Background(), "alice")
+	claim, err := be.LookupActiveClaim(context.Background())
 	if err != nil {
 		t.Fatalf("LookupActiveClaim: %v", err)
 	}
@@ -1511,7 +1557,7 @@ func TestCmdResolve_QuotaPrintedAtStartAndFinalize(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv(dispatchedByRunnerEnv, "")
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), nil)
@@ -1530,7 +1576,7 @@ func TestCmdResolve_QuotaPrintedOnFailedStep(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv(dispatchedByRunnerEnv, "")
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
 		return errors.New("boom")
 	})
@@ -1554,7 +1600,7 @@ func TestCmdResolve_QuotaPrintedOnParked(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv(dispatchedByRunnerEnv, "")
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
 		// Return nil without resolving → parks the step.
 		return nil
@@ -1575,7 +1621,7 @@ func TestCmdResolve_RunnerSuppressesDisplayButNotPacing(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv(dispatchedByRunnerEnv, "1")
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestApp(t, be)
 	// Injected and failing: this asserts pacing is attempted even under a
 	// runner, and the warning is the evidence it was. Reaching the real reader
@@ -1605,13 +1651,13 @@ func TestCmdResolve_QuotaPrintedOnBlocked(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv(dispatchedByRunnerEnv, "")
 	inner := fake.New()
-	inner.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
-	be := &fitBackend{Backend: inner}
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be := &fitGateBackend{Orchestrator: inner}
 	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
 		return ctx.ResolveMarkdown("the plan")
 	})
 	// A preflight that always returns ErrBlocked — produces StatusBlocked.
-	app.Preflight = func(_ context.Context, _ *flow.ItemState) error {
+	app.Preflight = func(_ context.Context, _ *flow.Item) error {
 		return fmt.Errorf("gate blocked: %w", flow.ErrBlocked)
 	}
 
@@ -1634,7 +1680,7 @@ func TestCmdResolve_QuotaUnreadableWarnedOnce(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv(dispatchedByRunnerEnv, "")
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	// The warning is what this test is about, so the reader is injected and
 	// fails. It used to rely on an empty CLAUDE_CONFIG_DIR making the real
 	// reader fail — but that reader also searches the macOS Keychain, which no
@@ -1664,7 +1710,7 @@ func TestCmdResolve_PaceZeroSkipsPacing(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv(dispatchedByRunnerEnv, "")
 	be := fake.New()
-	be.AddItem(flow.Item{ID: "1", Type: "task", Title: "1"})
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestApp(t, be)
 
 	code := app.cmdResolve(context.Background(), []string{"--pace-five-hour", "0", "--pace-seven-day", "0"})

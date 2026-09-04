@@ -18,15 +18,15 @@ import (
 // given state: types contains item.Type (or is empty/universal), every
 // RequireSignal is set, and at least one lifecycle item is pending. Returns
 // (nil, "") when no flow is eligible (terminal state).
-func SelectFlow(app *App, state *flow.ItemState) (*flow.Flow, string) {
+func SelectFlow(app *App, item *flow.Item) (*flow.Flow, string) {
 	for _, f := range app.Flows {
-		if !f.AcceptsType(state.Item.Type) {
+		if !f.AcceptsType(item.Type) {
 			continue
 		}
-		if !f.IsReady(state) {
+		if !f.IsReady(item) {
 			continue
 		}
-		next, ok := f.DeriveNext(state)
+		next, ok := f.DeriveNext(item)
 		if !ok {
 			continue
 		}
@@ -41,9 +41,10 @@ func SelectFlow(app *App, state *flow.ItemState) (*flow.Flow, string) {
 // handlers, sentinel returns, and budget exhaustion all manifest as a
 // populated InvocationResult and nil err.
 func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationResult, error) {
-	state, err := app.Backend.LoadState(ctx, claim)
+	ref := claim.ItemRef
+	state, err := app.Orchestrator.Load(ctx, ref)
 	if err != nil {
-		return flow.InvocationResult{}, fmt.Errorf("load state: %w", err)
+		return flow.InvocationResult{}, fmt.Errorf("load item: %w", err)
 	}
 
 	// Select the flow first; we need it for seeding too. The terminal-done
@@ -71,13 +72,13 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		//
 		// An already-finalized item is exempt: its run really is over, and
 		// blocking one that this very defect finalized would strand it.
-		if !state.Item.Finalized && flowForType(app, state.Item.Type) == nil {
+		if !state.Finalized && flowForType(app, state.Type) == nil {
 			return flow.InvocationResult{
 				Item:   claim.ItemRef.Display,
 				Status: "blocked",
 				Reason: fmt.Sprintf(
 					"no flow accepts item type %q (registered: %s) — register a flow for this type, or correct the item's type",
-					state.Item.Type, registeredTypes(app)),
+					state.Type, registeredTypes(app)),
 			}, nil
 		}
 		// T0481: refuse to Finalize+release when any required artifact in the
@@ -101,22 +102,36 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		// Finalize + release the claim if the backend supports it, so a manual
 		// run closes the item and frees the arena the same way the orchestrator
 		// does on completion (instead of leaving it un-finalized + leased).
-		reason := "no eligible flow"
-		if fz, ok := app.Backend.(flow.Finalizer); ok {
-			if err := fz.Finalize(ctx, claim); err != nil {
+		reason := "no eligible flow — finalized + released"
+		finalized := true
+		if err := app.Orchestrator.Finalize(ctx, ref); err != nil {
+			// Finalize REFUSES an item the orchestrator does not yet consider
+			// finished, and that refusal is not a failure of this run: the flow
+			// has done everything it can, and the item reaches terminal by the
+			// orchestrator's own means (a merge that closes it, a person). It is
+			// typed ErrUnavailable precisely because asking again later is the
+			// right response, so reporting it as `failed` would send an operator
+			// hunting for a defect that is not there.
+			if !errors.Is(err, flow.ErrUnavailable) {
 				return flow.InvocationResult{
 					Item:   claim.ItemRef.Display,
 					Status: string(flow.StatusFailed),
 					Reason: "finalize: " + err.Error(),
 				}, nil
 			}
-			reason = "no eligible flow — finalized + released"
+			reason = "no eligible flow, and the item is not yet terminal — nothing finalized, claim kept"
+			// The flag is set here, beside the branch that decides it. Reading it
+			// back out of the reason would make prose the record of a state, and
+			// the reason is for a person: rewording it would silently flip the
+			// field.
+			finalized = false
 		}
 		return flow.InvocationResult{
-			Flow:   "",
-			Item:   claim.ItemRef.Display,
-			Status: string(flow.StatusDone),
-			Reason: reason,
+			Flow:      "",
+			Item:      claim.ItemRef.Display,
+			Status:    string(flow.StatusDone),
+			Reason:    reason,
+			Finalized: finalized,
 		}, nil
 	}
 
@@ -141,18 +156,6 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		}
 	}
 
-	// The answer gate passed for an item parked on a question — an answer
-	// exists (otherwise the gate would have returned ErrBlocked). Clear the
-	// needs-answer marker now rather than waiting for step resolution, since
-	// the condition it advertises is already false. Best-effort: a stale
-	// label is cosmetic, and failing the dispatch over it would block a step
-	// somebody already answered.
-	if state.Park != nil && state.Park.Kind == flow.ParkQuestion {
-		if qa, ok := app.Backend.(flow.QuestionAnswerer); ok {
-			qa.ClearQuestionMarker(ctx, claim.ItemRef)
-		}
-	}
-
 	// Mandatory seed gate. A flow that declares required artifacts runs steps
 	// ONLY against an item whose finalization checklist has been seeded (the
 	// required-artifact set). An item with no required artifact has not been
@@ -170,10 +173,10 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		}
 	}
 	if requiresSeed && !state.HasRequiredArtifacts() {
-		if err := app.Backend.SeedState(ctx, claim, seedSpecs); err != nil {
+		if err := app.Orchestrator.SeedState(ctx, ref, seedSpecs); err != nil {
 			return flow.InvocationResult{}, fmt.Errorf("seed state: %w", err)
 		}
-		state, err = app.Backend.LoadState(ctx, claim)
+		state, err = app.Orchestrator.Load(ctx, ref)
 		if err != nil {
 			return flow.InvocationResult{}, fmt.Errorf("reload after seed: %w", err)
 		}
@@ -199,7 +202,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		Flow:         f.Name(),
 		InvocationID: invocationID(),
 		Item:         claim.ItemRef.Display,
-		Step:         li.Result(),
+		Step:         string(li.Result()),
 	}
 
 	// AwaitSignal items have no handler; signal is checked by DeriveNext.
@@ -218,7 +221,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	art := state.Artifact(li.ArtifactId)
 	if li.Kind == flow.LifecycleArtifact {
 		if art.GrantedInvocations > 0 && art.Invocations >= art.GrantedInvocations {
-			return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
+			return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
 				Kind:   flow.ParkBudgetExhausted,
 				Step:   li.Result(),
 				Axis:   flow.AxisInvocations,
@@ -227,7 +230,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 			})
 		}
 		if art.GrantedCostUSD > 0 && art.CostUSDSpent >= art.GrantedCostUSD {
-			return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
+			return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
 				Kind:   flow.ParkBudgetExhausted,
 				Step:   li.Result(),
 				Axis:   flow.AxisCost,
@@ -248,14 +251,13 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	defer cancel()
 
 	// Build the per-invocation StepCtx.
-	budgetKey := li.Result()
 	sctx := newStepCtx(stepCtx, app, claim, f, li, state, timeout)
 
 	// Auto-emit step entry so every step transition reaches the tracker
 	// without each handler having to call ctx.Notify. Handlers that DO call
 	// ctx.Notify with richer detail will override this baseline.
 	if app.Telemetry != nil {
-		app.Telemetry.StepProgress(stepCtx, claim, li.Result(), "")
+		app.Telemetry.StepProgress(stepCtx, claim, string(li.Result()), "")
 	}
 
 	// Record the running step so `status` can report it. The record is
@@ -265,7 +267,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	absExe, _ := filepath.Abs(exe)
 	_ = clistate.SaveRunning(clistate.RunningRecord{
 		Item: claim.ItemRef.Display,
-		Step: li.Result(),
+		Step: string(li.Result()),
 		PID:  os.Getpid(),
 		Exe:  absExe,
 	})
@@ -286,11 +288,11 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		// patch carrying no diagnostic value at all. Park only; the work
 		// stays in the worktree where the rerun picks it up.
 		if li.Kind == flow.LifecycleArtifact {
-			if err := bumpInvocations(ctx, app, claim, state, li.ArtifactId, budgetKey); err != nil {
+			if err := bumpInvocations(ctx, app, ref, state, li.ArtifactId); err != nil {
 				return flow.InvocationResult{}, fmt.Errorf("bump invocations: %w", err)
 			}
 		}
-		return sctx.stampResult(parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
+		return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
 			Kind: flow.ParkBudgetExhausted,
 			Step: li.Result(),
 			Axis: flow.AxisTimeout,
@@ -318,7 +320,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// SKIP the BumpInvocations call — a flapping runner must not burn the
 	// step's invocation budget.
 	if handlerErr != nil && errors.Is(handlerErr, flow.ErrTransient) {
-		return sctx.stampResult(parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
+		return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
 			Kind:   flow.ParkInfraTransient,
 			Step:   li.Result(),
 			Reason: handlerErr.Error(),
@@ -331,7 +333,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// ErrTransient branch above. The park reason is the refusal's own
 	// message so the operator sees what was refused.
 	if handlerErr != nil && errors.Is(handlerErr, flow.ErrRefused) {
-		return sctx.stampResult(parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
+		return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
 			Kind:   flow.ParkRefused,
 			Step:   li.Result(),
 			Reason: handlerErr.Error(),
@@ -346,7 +348,12 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	if handlerErr != nil && sctx.worktree != nil {
 		if fitErr := flow.CheckFit(ctx, sctx.worktree); fitErr != nil {
 			result.Status = string(flow.StatusBlocked)
-			result.Reason = fitErr.Error()
+			// Both, and the handler's first. CheckFit fails CLOSED — a fit gate
+			// that could not run, timed out or died reports unfit — so this
+			// branch is also reached when the fit gate is the broken thing.
+			// Reporting the fitness verdict alone would then throw away the only
+			// account of what actually failed, and blame the machine for it.
+			result.Reason = fmt.Sprintf("%s (and the machine is unfit: %s)", handlerErr, fitErr)
 			return sctx.stampResult(result, nil)
 		}
 	}
@@ -359,11 +366,11 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	if sctx.writeSnap != nil {
 		if reason := checkWriteContract(ctx, sctx.worktree, sctx.writeSnap, li.Writes); reason != "" {
 			if li.Kind == flow.LifecycleArtifact {
-				if err := bumpInvocations(ctx, app, claim, state, li.ArtifactId, budgetKey); err != nil {
+				if err := bumpInvocations(ctx, app, ref, state, li.ArtifactId); err != nil {
 					return flow.InvocationResult{}, fmt.Errorf("bump invocations: %w", err)
 				}
 			}
-			return sctx.stampResult(parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
+			return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
 				Kind:   flow.ParkWriteContract,
 				Step:   li.Result(),
 				Reason: reason,
@@ -374,21 +381,21 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// Non-transient: the invocation produced a result (success, skip,
 	// park, or a real failure). Count it.
 	if li.Kind == flow.LifecycleArtifact {
-		if err := bumpInvocations(ctx, app, claim, state, li.ArtifactId, budgetKey); err != nil {
+		if err := bumpInvocations(ctx, app, ref, state, li.ArtifactId); err != nil {
 			return flow.InvocationResult{}, fmt.Errorf("bump invocations: %w", err)
 		}
 	}
 
-	return sctx.stampResult(translateHandlerError(ctx, app, claim, result, li, sctx, handlerErr))
+	return sctx.stampResult(translateHandlerError(ctx, app, ref, result, li, sctx, handlerErr))
 }
 
 // translateHandlerError converts the handler's return into an
-// InvocationResult, applying the appropriate Backend.Park / Backend.AskQuestions
+// InvocationResult, applying the appropriate Orchestrator.Park
 // as a side effect.
 func translateHandlerError(
 	ctx context.Context,
 	app *App,
-	claim flow.Claim,
+	ref flow.ItemRef,
 	result flow.InvocationResult,
 	li flow.LifecycleItem,
 	sctx *stepCtx,
@@ -398,7 +405,7 @@ func translateHandlerError(
 		// For artifact steps, the handler must have called Resolve* — the
 		// metered StepCtx tracked it.
 		if li.Kind == flow.LifecycleArtifact && !sctx.resolved {
-			return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
+			return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
 				Kind:   flow.ParkStepDidNotResolve,
 				Step:   li.Result(),
 				Reason: fmt.Sprintf("handler returned nil without calling ctx.Resolve* on %q", li.ArtifactId),
@@ -435,7 +442,7 @@ func translateHandlerError(
 			req.Details = strings.TrimPrefix(
 				strings.TrimSpace(req.Details+";"+flow.MarkQuestionAskedLocal(time.Now())), ";")
 		}
-		return parkAndReturn(ctx, app, claim, result, req)
+		return parkAndReturn(ctx, app, ref, result, req)
 	}
 	var question flow.ErrQuestion
 	if errors.As(handlerErr, &question) {
@@ -459,11 +466,11 @@ func translateHandlerError(
 			Reason:  questionReason(question.Questions),
 			Details: marker,
 		}
-		return parkAndReturn(ctx, app, claim, result, req)
+		return parkAndReturn(ctx, app, ref, result, req)
 	}
 	var budget flow.ErrBudgetExhausted
 	if errors.As(handlerErr, &budget) {
-		return parkAndReturn(ctx, app, claim, result, flow.ParkRequest{
+		return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
 			Kind:   flow.ParkBudgetExhausted,
 			Step:   li.Result(),
 			Axis:   budget.Axis,
@@ -535,8 +542,8 @@ func (sc *stepCtx) axisReports(timeout time.Duration) []flow.AxisReport {
 // snapshot their axes from it: a timeout park reporting the pre-bump count
 // would under-report the invocations axis, which is precisely the axis that
 // re-parks the step once the operator grants the time.
-func bumpInvocations(ctx context.Context, app *App, claim flow.Claim, state *flow.ItemState, id flow.ArtifactId, key string) error {
-	if err := app.Backend.BumpInvocations(ctx, claim, key); err != nil {
+func bumpInvocations(ctx context.Context, app *App, ref flow.ItemRef, state *flow.Item, id flow.ArtifactId) error {
+	if err := app.Orchestrator.BumpInvocations(ctx, ref, id); err != nil {
 		return err
 	}
 	rec := state.Artifact(id)
@@ -564,7 +571,7 @@ func checkWriteContract(ctx context.Context, wt flow.Worktree, snap *writeSnapsh
 	// independent commit, so the commit check is skipped when the branch
 	// legitimately changed.
 	if !wc.MayCommit && !(wc.MayBranch && branchChanged) {
-		sha, err := wt.RevParse(ctx, "HEAD")
+		sha, err := wt.RevParse(ctx, flow.HeadRevision)
 		if err == nil && sha != snap.commitSHA {
 			return fmt.Sprintf("commit moved: was %.12s, now %.12s", snap.commitSHA, sha)
 		}
@@ -581,12 +588,12 @@ func checkWriteContract(ctx context.Context, wt flow.Worktree, snap *writeSnapsh
 func parkAndReturn(
 	ctx context.Context,
 	app *App,
-	claim flow.Claim,
+	ref flow.ItemRef,
 	result flow.InvocationResult,
 	req flow.ParkRequest,
 ) (flow.InvocationResult, error) {
-	if err := app.Backend.Park(ctx, claim, req); err != nil {
-		return flow.InvocationResult{}, fmt.Errorf("backend.Park: %w", err)
+	if err := app.Orchestrator.Park(ctx, ref, req); err != nil {
+		return flow.InvocationResult{}, fmt.Errorf("orchestrator.Park: %w", err)
 	}
 	result.Status = string(flow.StatusParked)
 	result.Reason = req.Reason
@@ -640,8 +647,8 @@ func invocationID() string {
 // acquires it, before the handler runs. checkWriteContract compares against
 // it afterwards.
 type writeSnapshot struct {
-	branch    string
-	commitSHA string
+	branch    flow.BranchName
+	commitSHA flow.CommitSha
 }
 
 // stepCtx is the concrete StepCtx the orchestrator hands to handlers. Tracks
@@ -653,7 +660,7 @@ type stepCtx struct {
 	claim    flow.Claim
 	flow     *flow.Flow
 	li       flow.LifecycleItem
-	state    *flow.ItemState
+	state    *flow.Item
 	worktree flow.Worktree
 	wtErr    error
 	agent    *meteredAgent
@@ -673,7 +680,7 @@ type stepCtx struct {
 	writeSnap *writeSnapshot
 }
 
-func newStepCtx(ctx context.Context, app *App, claim flow.Claim, f *flow.Flow, li flow.LifecycleItem, state *flow.ItemState, timeout time.Duration) *stepCtx {
+func newStepCtx(ctx context.Context, app *App, claim flow.Claim, f *flow.Flow, li flow.LifecycleItem, state *flow.Item, timeout time.Duration) *stepCtx {
 	sc := &stepCtx{
 		ctx:       ctx,
 		app:       app,
@@ -686,7 +693,7 @@ func newStepCtx(ctx context.Context, app *App, claim flow.Claim, f *flow.Flow, l
 	}
 	sc.agent = &meteredAgent{
 		inner:   app.Agent,
-		backend: app.Backend,
+		orch:    app.Orchestrator,
 		claim:   claim,
 		stepCtx: sc,
 	}
@@ -706,7 +713,7 @@ func (s *stepCtx) stampResult(r flow.InvocationResult, err error) (flow.Invocati
 	cost := s.agent.costThisInvocation
 	r.CostUSD = &cost
 	if s.li.Kind == flow.LifecycleArtifact {
-		_ = s.app.Backend.AddDuration(s.ctx, s.claim, string(s.li.ArtifactId), elapsed)
+		_ = s.app.Orchestrator.AddDuration(s.ctx, s.claim.ItemRef, s.li.ArtifactId, elapsed)
 	}
 	return r, nil
 }
@@ -715,7 +722,7 @@ func (s *stepCtx) Context() context.Context { return s.ctx }
 func (s *stepCtx) Flow() string             { return s.flow.Name() }
 func (s *stepCtx) StepName() string         { return s.li.Name }
 func (s *stepCtx) Result() flow.ArtifactId  { return s.li.ArtifactId }
-func (s *stepCtx) Item() flow.Item          { return s.state.Item }
+func (s *stepCtx) Item() flow.Item          { return *s.state }
 func (s *stepCtx) Claim() flow.Claim        { return s.claim }
 func (s *stepCtx) VerifyCmd() string        { return s.app.VerifyCmd }
 
@@ -848,7 +855,7 @@ func (s *stepCtx) ResolvePatch(body flow.PatchBody) error {
 }
 
 func (s *stepCtx) writeResolve(body flow.ArtifactBody) error {
-	if err := s.app.Backend.ResolveArtifact(s.ctx, s.claim, s.li.ArtifactId, body); err != nil {
+	if err := s.app.Orchestrator.ResolveArtifact(s.ctx, s.claim.ItemRef, s.li.ArtifactId, body); err != nil {
 		return err
 	}
 	s.resolved = true
@@ -862,17 +869,15 @@ func (s *stepCtx) writeResolve(body flow.ArtifactBody) error {
 	// and a record that outlives its step is harmless anyway, because keying by
 	// (item, step) means the next dispatch of a resolved step never reads it.
 	// Keying is the correctness property; clearing is hygiene.
-	if store, ok := s.app.Backend.(flow.WorkInProgress); ok {
-		if err := store.ClearWorkInProgress(s.ctx, s.claim, s.li.Result()); err != nil {
-			s.Notify("", "could not clear work in progress: "+err.Error())
-		}
+	if err := s.app.Orchestrator.ClearWorkInProgress(s.ctx, s.claim.ItemRef, s.li.Result()); err != nil {
+		s.Notify("", "could not clear work in progress: "+err.Error())
 	}
 	return nil
 }
 
 func (s *stepCtx) Skip(reason string) error { return flow.ErrSkip{Reason: reason} }
 func (s *stepCtx) MarkStale(id flow.ArtifactId) error {
-	return s.app.Backend.MarkStale(s.ctx, s.claim, id)
+	return s.app.Orchestrator.MarkStale(s.ctx, s.claim.ItemRef, id)
 }
 
 func (s *stepCtx) Park(req flow.ParkRequest) error { return flow.ErrPark{Req: req} }
@@ -881,24 +886,33 @@ func (s *stepCtx) AskQuestions(qs ...flow.AgentQuestion) error {
 	if len(qs) == 0 {
 		return errors.New("ctx.AskQuestions called with no questions")
 	}
-	recorded, err := s.app.Backend.AskQuestions(s.ctx, s.claim, qs)
-	if err != nil {
-		// A disclosure refusal is returned as-is so the handler-level
-		// revision loop can catch it and re-prompt the agent.
-		var refused flow.ErrDisclosureRefused
-		if errors.As(err, &refused) {
-			return err
+	// One call per question. AskQuestion APPENDS — there is no replace — so a
+	// step asking three records three, and a partly-failed batch is not a state
+	// this loop can reach: it stops at the first failure and reports exactly
+	// what was recorded before it.
+	recorded := make([]flow.Question, 0, len(qs))
+	for _, q := range qs {
+		rec, err := s.app.Orchestrator.AskQuestion(s.ctx, s.claim.ItemRef, q)
+		if err != nil {
+			// A disclosure refusal is returned as-is so the handler-level
+			// revision loop can catch it and re-prompt the agent.
+			var refused flow.ErrDisclosureRefused
+			if errors.As(err, &refused) {
+				return err
+			}
+			return fmt.Errorf("orchestrator.AskQuestion: %w", err)
 		}
-		return fmt.Errorf("backend.AskQuestions: %w", err)
-	}
-	// A question park's entire recovery path is `answer`, which needs a
-	// registered question to name. Parking on questions the backend recorded
-	// none of leaves an item nothing can move forward, so fail the step here —
-	// where the ask route knows what was registered — rather than let the park
-	// be written and discovered later.
-	if len(recorded) == 0 {
-		return fmt.Errorf("backend.AskQuestions recorded none of %d question(s): "+
-			"parking on a question nothing registered leaves an item `answer` cannot clear", len(qs))
+		// A question park's entire recovery path is `answer --question <id>`,
+		// and THE RETURN IS WHERE A QuestionId COMES FROM. One that comes back
+		// without an id registered nothing an operator can name, so fail the
+		// step here — where the ask route can still see what was recorded —
+		// rather than let the park be written and discovered later, on an item
+		// nothing can move forward.
+		if rec.ID == "" {
+			return fmt.Errorf("orchestrator.AskQuestion recorded %q without a question id: "+
+				"parking on a question nothing registered leaves an item `answer` cannot clear", q.Header)
+		}
+		recorded = append(recorded, rec)
 	}
 	return flow.ErrQuestion{Questions: qs, Recorded: recorded}
 }
@@ -922,11 +936,14 @@ func (s *stepCtx) WorkInProgress() (string, error) {
 		return s.wip, s.wipErr
 	}
 	s.wipLoaded = true
-	store, ok := s.app.Backend.(flow.WorkInProgress)
-	if !ok {
-		return "", nil
+	s.wip, s.wipErr = s.app.Orchestrator.LoadWorkInProgress(s.ctx, s.claim.ItemRef, s.li.Result())
+	if s.wipErr != nil && errors.Is(s.wipErr, flow.ErrUnsupported) {
+		// An orchestrator with no store reads as ABSENCE rather than as an
+		// error: the record is optional, and a step that had to distinguish
+		// "nothing stashed" from "no store" to build its prompt would be a step
+		// no such orchestrator could run.
+		s.wip, s.wipErr = "", nil
 	}
-	s.wip, s.wipErr = store.LoadWorkInProgress(s.ctx, s.claim, s.li.Result())
 	return s.wip, s.wipErr
 }
 
@@ -938,11 +955,7 @@ func (s *stepCtx) WorkInProgress() (string, error) {
 // that was never written — which is the failure this whole surface exists to
 // stop, silently reintroduced.
 func (s *stepCtx) RecordWorkInProgress(body string) error {
-	store, ok := s.app.Backend.(flow.WorkInProgress)
-	if !ok {
-		return flow.ErrWorkInProgressUnsupported
-	}
-	if err := store.SaveWorkInProgress(s.ctx, s.claim, s.li.Result(), body); err != nil {
+	if err := s.app.Orchestrator.SaveWorkInProgress(s.ctx, s.claim.ItemRef, s.li.Result(), body); err != nil {
 		return err
 	}
 	// Keep the memo honest: a later read in this same invocation must see what
@@ -956,7 +969,7 @@ func (s *stepCtx) Notify(step, detail string) {
 		return
 	}
 	if step == "" {
-		step = s.li.Result()
+		step = string(s.li.Result())
 	}
 	s.app.Telemetry.StepProgress(s.ctx, s.claim, step, detail)
 }
@@ -967,7 +980,7 @@ func (s *stepCtx) Worktree() (flow.Worktree, error) {
 	if s.worktree != nil || s.wtErr != nil {
 		return s.worktree, s.wtErr
 	}
-	s.worktree, s.wtErr = s.app.Backend.Worktree(s.ctx, s.claim)
+	s.worktree, s.wtErr = s.app.Orchestrator.Worktree(s.ctx, s.claim.ItemRef)
 	if s.wtErr != nil {
 		return nil, s.wtErr
 	}
@@ -975,7 +988,7 @@ func (s *stepCtx) Worktree() (flow.Worktree, error) {
 	// fails, leave writeSnap nil — fail-open on infrastructure error,
 	// since the handler hasn't run yet.
 	branch, berr := s.worktree.CurrentBranch(s.ctx)
-	sha, serr := s.worktree.RevParse(s.ctx, "HEAD")
+	sha, serr := s.worktree.RevParse(s.ctx, flow.HeadRevision)
 	if berr == nil && serr == nil {
 		s.writeSnap = &writeSnapshot{branch: branch, commitSHA: sha}
 	}
@@ -983,7 +996,7 @@ func (s *stepCtx) Worktree() (flow.Worktree, error) {
 }
 
 func (s *stepCtx) RefreshItem() error {
-	state, err := s.app.Backend.LoadState(s.ctx, s.claim)
+	state, err := s.app.Orchestrator.Load(s.ctx, s.claim.ItemRef)
 	if err != nil {
 		return err
 	}
@@ -996,7 +1009,7 @@ func (s *stepCtx) RefreshItem() error {
 // translates to a parked InvocationResult.
 type meteredAgent struct {
 	inner   flow.Agent
-	backend flow.Backend
+	orch    flow.Orchestrator
 	claim   flow.Claim
 	stepCtx *stepCtx
 
@@ -1019,14 +1032,14 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 	// exactly what to pass to `grant`.
 	if art.GrantedPromptsPerInvocation > 0 && m.promptsThisInvocation >= art.GrantedPromptsPerInvocation {
 		return nil, flow.ErrBudgetExhausted{
-			Step: li.Result(),
+			Step: string(li.Result()),
 			Axis: flow.AxisPrompts,
 			Cap:  fmt.Sprintf("%d", art.GrantedPromptsPerInvocation),
 		}
 	}
 	if art.GrantedCostUSD > 0 && art.CostUSDSpent >= art.GrantedCostUSD {
 		return nil, flow.ErrBudgetExhausted{
-			Step: li.Result(),
+			Step: string(li.Result()),
 			Axis: flow.AxisCost,
 			Cap:  fmt.Sprintf("$%.2f", art.GrantedCostUSD),
 		}
@@ -1042,7 +1055,7 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 		(req.MaxCostUSD <= 0 || headroom < req.MaxCostUSD) {
 		req.MaxCostUSD = headroom
 	}
-	if err := m.backend.BumpPrompts(ctx, m.claim, string(li.ArtifactId)); err != nil {
+	if err := m.orch.BumpPrompts(ctx, m.claim.ItemRef, li.ArtifactId); err != nil {
 		return nil, fmt.Errorf("bump prompts: %w", err)
 	}
 	m.promptsThisInvocation++
@@ -1054,7 +1067,7 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 	// the invocations axis.
 	transient := resp != nil && resp.Failure != nil && resp.Failure.Transient
 	if err == nil && resp != nil && resp.CostUSD > 0 && !transient {
-		_ = m.backend.AddCost(ctx, m.claim, string(li.ArtifactId), resp.CostUSD)
+		_ = m.orch.AddCost(ctx, m.claim.ItemRef, li.ArtifactId, resp.CostUSD)
 		// Update local mirror so subsequent calls see fresh cost.
 		art.CostUSDSpent += resp.CostUSD
 		m.stepCtx.state.Artifacts[li.ArtifactId] = art
@@ -1069,7 +1082,7 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 	if err == nil && resp != nil && resp.Failure != nil &&
 		resp.Failure.Kind == flow.FailureCostCap && art.GrantedCostUSD > 0 {
 		return resp, flow.ErrBudgetExhausted{
-			Step: li.Result(),
+			Step: string(li.Result()),
 			Axis: flow.AxisCost,
 			Cap:  fmt.Sprintf("$%.2f", art.GrantedCostUSD),
 		}

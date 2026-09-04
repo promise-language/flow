@@ -22,11 +22,11 @@ import (
 	"github.com/promise-language/flow"
 	"github.com/promise-language/flow/claude"
 	"github.com/promise-language/flow/cli"
-	ghbackend "github.com/promise-language/flow/pkg/backend/github"
+	ghorch "github.com/promise-language/flow/pkg/orchestrator/github"
 )
 
 func main() {
-	backend, err := ghbackend.NewBackend(ghbackend.Config{
+	backend, err := ghorch.New(ghorch.Config{
 		BinaryName: "verify",
 		VerifyCmd:  []string{"go", "test", "./..."},
 		// No guard, so this binary publishes nothing: `doctor` and `list`
@@ -45,9 +45,9 @@ func main() {
 	})
 
 	os.Exit(cli.Run(cli.App{
-		Name:    "verify",
-		Backend: backend,
-		Agent:   claude.New(), // unused by this flow, but required by cli.App
+		Name:         "verify",
+		Orchestrator: backend,
+		Agent:        claude.New(), // unused by this flow, but required by cli.App
 		Artifacts: []flow.ArtifactDef{
 			flow.Artifact("test-output", flow.ArtifactMarkdown),
 		},
