@@ -103,6 +103,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		// run closes the item and frees the arena the same way the orchestrator
 		// does on completion (instead of leaving it un-finalized + leased).
 		reason := "no eligible flow — finalized + released"
+		finalized := true
 		if err := app.Orchestrator.Finalize(ctx, ref); err != nil {
 			// Finalize REFUSES an item the orchestrator does not yet consider
 			// finished, and that refusal is not a failure of this run: the flow
@@ -119,13 +120,18 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 				}, nil
 			}
 			reason = "no eligible flow, and the item is not yet terminal — nothing finalized, claim kept"
+			// The flag is set here, beside the branch that decides it. Reading it
+			// back out of the reason would make prose the record of a state, and
+			// the reason is for a person: rewording it would silently flip the
+			// field.
+			finalized = false
 		}
 		return flow.InvocationResult{
 			Flow:      "",
 			Item:      claim.ItemRef.Display,
 			Status:    string(flow.StatusDone),
 			Reason:    reason,
-			Finalized: !strings.Contains(reason, "not yet terminal"),
+			Finalized: finalized,
 		}, nil
 	}
 
@@ -342,7 +348,12 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	if handlerErr != nil && sctx.worktree != nil {
 		if fitErr := flow.CheckFit(ctx, sctx.worktree); fitErr != nil {
 			result.Status = string(flow.StatusBlocked)
-			result.Reason = fitErr.Error()
+			// Both, and the handler's first. CheckFit fails CLOSED — a fit gate
+			// that could not run, timed out or died reports unfit — so this
+			// branch is also reached when the fit gate is the broken thing.
+			// Reporting the fitness verdict alone would then throw away the only
+			// account of what actually failed, and blame the machine for it.
+			result.Reason = fmt.Sprintf("%s (and the machine is unfit: %s)", handlerErr, fitErr)
 			return sctx.stampResult(result, nil)
 		}
 	}

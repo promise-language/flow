@@ -78,11 +78,25 @@ func (e *editor) RemoveBlocker(ref flow.ItemRef) { e.delBlockers = append(e.delB
 // between, it refuses when a field it is changing has moved since Edit opened.
 func (e *editor) Commit(ctx context.Context) error {
 	touchesPatch := e.title != nil || e.body != nil || len(e.addTags) > 0 || len(e.delTags) > 0 || e.manual != nil
-	touchesBlockers := len(e.addBlockers) > 0 || len(e.delBlockers) > 0
+	blockerWrites := len(e.addBlockers) + len(e.delBlockers)
+	touchesBlockers := blockerWrites > 0
 	if touchesPatch && touchesBlockers {
 		return fmt.Errorf(
 			"github: this edit stages both item fields and blockers, which land through different endpoints "+
 				"and cannot be written together — split it into two edits: %w", flow.ErrUnsupported)
+	}
+	// Each dependency change is its own request, so two of them are two writes
+	// and the second can fail after the first has landed. That is the partial
+	// success the editor exists to prevent: a caller would be left asking which
+	// half of the edit took, which is exactly the question "all of them, or none
+	// of them" answers. One per edit is writable atomically; more is a
+	// combination this orchestrator cannot write together, and refusing is an
+	// answer where applying the part it can is not.
+	if blockerWrites > 1 {
+		return fmt.Errorf(
+			"github: this edit stages %d dependency changes, and each is a separate request — "+
+				"they cannot land together, so record them one edit at a time: %w",
+			blockerWrites, flow.ErrUnsupported)
 	}
 
 	for _, t := range slices.Concat(e.addTags, e.delTags) {

@@ -49,8 +49,10 @@ func gateWorktree(t *testing.T, script string, timeout time.Duration) (*worktree
 	// (stdout, stderr, error), which cannot express what a runner has to see.
 	b.git = &gitOps{dir: dir, runner: func(_ context.Context, _, name string, args ...string) ([]byte, []byte, error) {
 		for _, a := range args {
-			if a == "status" {
-				return nil, nil, nil // StatusPorcelain: appears clean
+			// The two halves of the pre/post snapshot. Both appear empty here:
+			// this tree is clean and the gates under test do not touch it.
+			if a == "status" || a == "diff" {
+				return nil, nil, nil
 			}
 		}
 		t.Errorf("a gate was spawned through the command runner (%s)", name)
@@ -500,6 +502,41 @@ func TestRunGate_DetectsTrackedFileDeletion(t *testing.T) {
 	}
 	if run.Outcome != flow.OutcomeBrokeContract {
 		t.Errorf("outcome = %q, want %q", run.Outcome, flow.OutcomeBrokeContract)
+	}
+	if !strings.Contains(run.Detail, "tracked") {
+		t.Errorf("Detail = %q, want it to name the file that was changed", run.Detail)
+	}
+}
+
+// A gate pointed at a tree that is ALREADY dirty, which then rewrites the file
+// that was already modified.
+//
+// This is the repairing gate — a format gate that fixes rather than reports —
+// and it is the case the check exists for: its numbers get better, feed a
+// ratchet, and raise a floor no honest run can meet. A dirty tree is not the
+// violation; a gate may be pointed at one and should be, because uncommitted
+// work is exactly what an operator often wants measured. The requirement is
+// that the tree is the SAME afterwards.
+//
+// The path list alone cannot see it — `tracked` reads ` M` before and after —
+// which is why docs/orchestrator.md names CapturePatch before and after as what
+// answers it properly.
+func TestRunGate_DetectsAModificationToAnAlreadyDirtyFile(t *testing.T) {
+	requireRealProcesses(t)
+
+	w, dir := gateWorktreeGit(t, `echo repaired > tracked; echo '{"g":1}'`, 30*time.Second)
+	// The operator's own uncommitted work, present before the gate runs.
+	if err := os.WriteFile(filepath.Join(dir, "tracked"), []byte("work in progress\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	run, err := w.RunGate(context.Background(), flow.GateIntegration)
+	if err != nil {
+		t.Fatalf("RunGate: %v", err)
+	}
+	if run.Outcome != flow.OutcomeBrokeContract {
+		t.Fatalf("outcome = %q, want %q — the gate rewrote the file it measured (detail: %s)",
+			run.Outcome, flow.OutcomeBrokeContract, run.Detail)
 	}
 	if !strings.Contains(run.Detail, "tracked") {
 		t.Errorf("Detail = %q, want it to name the file that was changed", run.Detail)

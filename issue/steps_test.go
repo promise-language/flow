@@ -14,10 +14,16 @@ import (
 
 // itemRefFor is the address every Orchestrator method takes, in place of the
 // store id Item used to carry.
+//
+// The display is github-SHAPED (`owner/repo#<n>`) rather than the bare id, and
+// that is the point: Item no longer carries a store id, so anything needing the
+// item's own number reads it back out of this. A display that WAS the number
+// would let a step spelling `flow/issue-<display>` or `Closes #<display>` pass
+// every test here and produce a branch the orchestrator never looks for.
 func itemRefFor(id string) flow.ItemRef {
 	return flow.ItemRef{
 		OrchestratorName: "fake",
-		Display:          id,
+		Display:          "owner/repo#" + id,
 		Ref:              json.RawMessage(fmt.Sprintf("%q", id)),
 	}
 }
@@ -1101,6 +1107,34 @@ func TestStepOpenPR_BodyCarriesTheCheckingStepsBriefings(t *testing.T) {
 // What the resolution's history says.
 // ---------------------------------------------------------------------------
 
+// Two strings this package writes are the ORCHESTRATOR's syntax, not flow's,
+// and both are the item's number alone: `flow/issue-<N>` is the only branch
+// github's Open will raise a pull request from, and `Closes #<N>` is the only
+// thing that closes the issue.
+//
+// Item carries no store id, so both are derived from a display that holds more
+// than the number. Handing either the whole display produces
+// `flow/issue-owner/repo#42` and `Closes #owner/repo#42` — a branch the
+// orchestrator never looks for, so every run fails at the last step, and a
+// reference GitHub does nothing with, so every issue is left open with no error
+// anywhere. Neither failure is visible in a fixture whose display IS the number.
+func TestBranchAndClosesReferenceCarryTheItemNumberAlone(t *testing.T) {
+	b := testBuilder(t)
+	ctx := ctxWithPlan(resumedWorktree(), &scriptedAgent{})
+
+	if ctx.item.Ref.Display == itemNumber(ctx.item) {
+		t.Fatalf("the fixture display %q IS the number — this test cannot see the failure it exists for",
+			ctx.item.Ref.Display)
+	}
+	if got := b.branchName(ctx); got != testBranch {
+		t.Errorf("branchName = %q, want %q — github's Open refuses every other branch", got, testBranch)
+	}
+	if got := b.commitMessage(ctx); !strings.Contains(got, "Closes #42\n") &&
+		!strings.HasSuffix(got, "Closes #42") {
+		t.Errorf("commitMessage = %q, want it to carry %q", got, "Closes #42")
+	}
+}
+
 // The commit subject is the CALLER's, which is why recordStepWork takes one
 // rather than building it. Exactly one commit in a resolution may carry the
 // closes-reference: GitHub acts on every occurrence, so a second one reads as a
@@ -1132,13 +1166,13 @@ func TestOnlyTheImplementCommitCarriesTheClosesReference(t *testing.T) {
 
 	var carrying []string
 	for _, msg := range wt.commitMsgs {
-		if strings.Contains(msg, closesRef(ctx.item.Ref.Display)) {
+		if strings.Contains(msg, closesRef(itemNumber(ctx.item))) {
 			carrying = append(carrying, msg)
 		}
 	}
 	if len(carrying) != 1 {
 		t.Fatalf("%d of %d commits carry %q, want exactly one:\n%s",
-			len(carrying), len(wt.commitMsgs), closesRef(ctx.item.Ref.Display),
+			len(carrying), len(wt.commitMsgs), closesRef(itemNumber(ctx.item)),
 			strings.Join(wt.commitMsgs, "\n---\n"))
 	}
 	// And it is the first one: the implement commit is the one the item is

@@ -1,13 +1,14 @@
 // Package clistate exposes the worktree-local active-claim file
-// (`.flow/active.json`) as a reusable helper for backends that choose to
-// store their lease state on local disk (e.g. the github backend).
+// (`.flow/active.json`) as a reusable helper for orchestrators that choose to
+// store their lease state on local disk (e.g. the github orchestrator).
 //
-// The flow.Backend is the authoritative owner of active-claim state — the
-// cli commands always go through Backend.LookupActiveClaim, never directly
-// through this package. Backends whose lease ledger lives off-host (e.g.
-// a tracker server) ignore these helpers entirely; backends whose lease
-// IS the local file (github) call them from Claim / LookupActiveClaim /
-// Release.
+// The flow.Orchestrator is the authoritative owner of active-claim state — the
+// cli commands always go through Orchestrator.LookupActiveClaim, never directly
+// through this package. An orchestrator whose lease ledger lives off-host (e.g.
+// a tracker service) ignores these helpers entirely; one whose lease IS the
+// local file (github) calls them from Claim / LookupActiveClaim / Release.
+// One file per checkout is what does the arena scoping a fleet-serving
+// orchestrator has to do explicitly.
 //
 // The same directory holds the other per-clone thing a claim owns: the
 // work-in-progress records a step leaves for its own next invocation

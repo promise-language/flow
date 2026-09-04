@@ -534,7 +534,7 @@ func (b *builder) commitWithRepair(ctx flow.StepCtx, wt flow.Worktree, msg strin
 func (b *builder) itemLabel(ctx flow.StepCtx) string {
 	item := ctx.Item()
 	if item.Title == "" {
-		return "#" + item.Ref.Display
+		return "#" + itemNumber(item)
 	}
 	return item.Title
 }
@@ -597,7 +597,7 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 	item := ctx.Item()
 	title := item.Title
 	if title == "" {
-		title = fmt.Sprintf("Resolve #%s", item.Ref.Display)
+		title = fmt.Sprintf("Resolve #%s", itemNumber(item))
 	}
 	// Check the branch back out, like every other consuming step. Relying on
 	// Open's guard instead would turn a worktree left on another item's branch
@@ -813,7 +813,7 @@ func (b *builder) recordOutstanding(ctx flow.StepCtx, wt flow.Worktree) error {
 // already does, and repeating it would make a second commit look like a second
 // resolution of the same item.
 func (b *builder) followUpCommitMessage(ctx flow.StepCtx) string {
-	return fmt.Sprintf("Review and coverage on #%s", ctx.Item().Ref.Display)
+	return fmt.Sprintf("Review and coverage on #%s", itemNumber(ctx.Item()))
 }
 
 // stepCloseBranch returns the worktree to the base branch.
@@ -1218,10 +1218,11 @@ func (b *builder) onClaimBranch(ctx flow.StepCtx) error {
 // commitMessage is the subject for the verified implementation commit.
 func (b *builder) commitMessage(ctx flow.StepCtx) string {
 	item := ctx.Item()
+	num := itemNumber(item)
 	if item.Title == "" {
-		return fmt.Sprintf("Resolve #%s\n\n%s", item.Ref.Display, closesRef(item.Ref.Display))
+		return fmt.Sprintf("Resolve #%s\n\n%s", num, closesRef(num))
 	}
-	return fmt.Sprintf("%s\n\n%s", item.Title, closesRef(item.Ref.Display))
+	return fmt.Sprintf("%s\n\n%s", item.Title, closesRef(num))
 }
 
 // closesRef renders GitHub's issue-closing reference.
@@ -1234,6 +1235,31 @@ func closesRef(id string) string {
 	return "Closes #" + id
 }
 
+// itemNumber is the orchestrator's own number for the item.
+//
+// Item carries no store id — docs/orchestrator.md removed it, because the
+// orchestrator's key IS a projection of ItemRef — so the number is read back
+// out of the display, which for the github orchestrator is `owner/repo#123`.
+// Reading a projection is not reconstructing a ref from one: nothing here
+// addresses the item with the result, it only spells it the way GitHub does.
+//
+// Two things this package writes are GitHub's syntax and not flow's, and both
+// need the bare number: the claim branch (`flow/issue-<N>`, which Open refuses
+// to raise a pull request from any other branch) and the closing reference
+// (`Closes #<N>`, the only thing that closes the issue). Handing either the
+// whole display produces `flow/issue-owner/repo#123` and `Closes
+// #owner/repo#123` — a branch the orchestrator never looks for, and a reference
+// GitHub does nothing with.
+//
+// A display carrying no "#" is used whole: that is already the item's own name.
+func itemNumber(item flow.Item) string {
+	d := item.Ref.Display
+	if i := strings.LastIndexByte(d, '#'); i >= 0 {
+		return d[i+1:]
+	}
+	return d
+}
+
 // branchName is the working branch for an item. Kept deterministic so a resumed
 // step lands on the branch its earlier invocation created.
 //
@@ -1243,7 +1269,7 @@ func closesRef(id string) string {
 // The coupling is unfortunate but real: no interface exposes the backend's
 // naming, so the two are kept in the same format by hand.
 func (b *builder) branchName(ctx flow.StepCtx) string {
-	return "flow/issue-" + ctx.Item().Ref.Display
+	return "flow/issue-" + itemNumber(ctx.Item())
 }
 
 // pullRequestBody assembles the PR description from what the flow produced and
@@ -1283,7 +1309,7 @@ func (b *builder) pullRequestBody(ctx flow.StepCtx, verdict flow.GateVerdict) (s
 	// the verdict was computed from as well as the answer, so the verdict can be
 	// recomputed by whoever was not there.
 	sb.WriteString(gateSection(verdict))
-	fmt.Fprintln(&sb, closesRef(ctx.Item().Ref.Display))
+	fmt.Fprintln(&sb, closesRef(itemNumber(ctx.Item())))
 	return sb.String(), nil
 }
 

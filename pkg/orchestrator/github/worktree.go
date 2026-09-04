@@ -221,7 +221,7 @@ func (w *worktree) RunGate(ctx context.Context, name flow.GateName) (flow.GateRu
 	// Capture tracked state before spawning so the runner can detect a gate
 	// that modified the worktree. See docs/gates-and-commands.md § "The
 	// non-modification rule is checked, not assumed".
-	before, err := w.b.git.StatusPorcelain(ctx)
+	before, err := w.b.snapshotTree(ctx)
 	if err != nil {
 		return flow.GateRun{}, fmt.Errorf("worktree.RunGate: cannot snapshot worktree before gate: %w", err)
 	}
@@ -239,7 +239,7 @@ func (w *worktree) RunGate(ctx context.Context, name flow.GateName) (flow.GateRu
 		return run, nil
 	}
 
-	after, err := w.b.git.StatusPorcelain(ctx)
+	after, err := w.b.snapshotTree(ctx)
 	if err != nil {
 		run.Outcome = flow.OutcomeBrokeContract
 		run.Detail = fmt.Sprintf("cannot verify worktree integrity after gate: %v", err)
@@ -248,11 +248,56 @@ func (w *worktree) RunGate(ctx context.Context, name flow.GateName) (flow.GateRu
 
 	if before != after {
 		run.Outcome = flow.OutcomeBrokeContract
-		run.Detail = "the gate modified the worktree:\n" + after
+		run.Detail = "the gate modified the worktree:\n" + after.describe()
 		return run, nil
 	}
 
 	return run, nil
+}
+
+// treeSnapshot is what a gate is forbidden to change: which paths carry a
+// change, AND the content of every tracked change.
+//
+// Both halves are needed and neither is enough. Porcelain names the paths but
+// not what is in them, so it reads identically before and after a gate that
+// rewrote a file the tree had ALREADY modified — which is the repairing gate
+// (a format gate that fixes rather than reports) this rule exists to catch, and
+// the case docs/orchestrator.md names when it says the check is a comparison
+// rather than a flag: "IsDirty alone only catches a gate that dirtied a clean
+// tree, and says nothing about one that changed a tree already dirty".
+// CapturePatch answers that, and cannot see an untracked file, which porcelain
+// does. A dirty tree is not the violation — a gate may be pointed at one and
+// should be; the requirement is that the tree is the SAME afterwards.
+type treeSnapshot struct {
+	status string // git status --porcelain, untracked included
+	patch  string // git diff HEAD — the content of every tracked change
+}
+
+// describe renders the snapshot for a person reading a broke_contract run. The
+// paths are what a reader acts on; the patch is already in the tree they can
+// look at, so repeating it here would bury the names.
+func (s treeSnapshot) describe() string {
+	if s.status != "" {
+		return s.status
+	}
+	// A content-only difference under paths that were already dirty: the
+	// porcelain is unchanged, so saying nothing would be worse than saying that.
+	return "(the same paths, with different content)"
+}
+
+// snapshotTree captures both halves. A failure is the CALLER's to classify:
+// before the spawn it means no gate ran, after it means the run cannot be
+// trusted.
+func (b *Orchestrator) snapshotTree(ctx context.Context) (treeSnapshot, error) {
+	status, err := b.git.StatusPorcelain(ctx)
+	if err != nil {
+		return treeSnapshot{}, err
+	}
+	patch, err := b.git.CapturePatch(ctx)
+	if err != nil {
+		return treeSnapshot{}, err
+	}
+	return treeSnapshot{status: status, patch: string(patch)}, nil
 }
 
 // Judge asks the project whether a measurement is acceptable, by exec'ing its

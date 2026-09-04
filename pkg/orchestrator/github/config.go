@@ -1,4 +1,4 @@
-// Package github implements flow.Backend against GitHub Issues + the
+// Package github implements flow.Orchestrator against GitHub Issues + the
 // project's own git repo, with no server to host. State lives in a single
 // "state comment" per issue (machine-managed YAML), per-artifact comments,
 // and an optional flow-artifacts orphan branch for large blobs. Auth piggy-

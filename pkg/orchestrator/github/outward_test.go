@@ -1880,3 +1880,66 @@ func f(perms map[string]bool) *github.IssueComment {
 		})
 	}
 }
+
+// The editor is the transaction: "applies every change made on this editor, or
+// none of them". Where this orchestrator cannot write a staged combination
+// together it REFUSES at Commit rather than applying the part it can — refusing
+// is an answer, a partial success is not, and a caller that got one would be
+// left asking which half of its edit took.
+//
+// Two combinations cannot land together, and both refuse with ErrUnsupported —
+// permanent here, so a caller knows to split the edit rather than retry it.
+func TestEditorRefusesAStageItCannotWriteAtomically(t *testing.T) {
+	b, mock, _ := newSeamBackend(t)
+	mock.mu.Lock()
+	mock.otherIssues = []int{43, 44}
+	mock.mu.Unlock()
+	ctx := context.Background()
+	ref := b.refFromIssue(mock.issueNum)
+	titleBefore := mock.issueTitle
+
+	for _, c := range []struct {
+		name  string
+		stage func(flow.ItemEditor)
+	}{{
+		// Fields go through PATCH, blockers through the dependency endpoint.
+		name: "item fields and a blocker",
+		stage: func(ed flow.ItemEditor) {
+			ed.SetTitle("a rewritten title")
+			ed.AddBlocker(b.refFromIssue(43))
+		},
+	}, {
+		// Each dependency change is its own request, so the second can fail
+		// after the first has landed.
+		name: "two blockers",
+		stage: func(ed flow.ItemEditor) {
+			ed.AddBlocker(b.refFromIssue(43))
+			ed.AddBlocker(b.refFromIssue(44))
+		},
+	}} {
+		t.Run(c.name, func(t *testing.T) {
+			ed, err := b.Edit(ctx, ref)
+			if err != nil {
+				t.Fatalf("Edit: %v", err)
+			}
+			c.stage(ed)
+			err = ed.Commit(ctx)
+			if err == nil {
+				t.Fatal("Commit succeeded; want a refusal — this stage cannot land as one write")
+			}
+			if !errors.Is(err, flow.ErrUnsupported) {
+				t.Errorf("error = %v, want ErrUnsupported — the combination is never writable here, "+
+					"so retrying it is pointless", err)
+			}
+		})
+	}
+
+	// And nothing was applied: a refusal that had already written the half it
+	// could would be the partial success the refusal exists to prevent.
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	if mock.issueTitle != titleBefore {
+		t.Errorf("issue title = %q, want it unchanged at %q — the refused edit wrote anyway",
+			mock.issueTitle, titleBefore)
+	}
+}
