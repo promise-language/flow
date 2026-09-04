@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os/exec"
@@ -56,6 +57,9 @@ func (c *Client) Name() string {
 }
 
 func (c *Client) Run(ctx context.Context, req flow.AgentRequest) (*flow.AgentResponse, error) {
+	if err := c.spawnable(); err != nil {
+		return nil, &startError{wrapped: err}
+	}
 	args := []string{
 		"--print",
 		"--verbose",
@@ -482,6 +486,32 @@ type resultEvent_ struct {
 	Result       string  `json:"result,omitempty"`
 	SessionID    string  `json:"session_id,omitempty"`
 	TotalCostUSD float64 `json:"total_cost_usd,omitempty"`
+}
+
+// spawnable refuses to start the real binary from a test process.
+//
+// The commit gate already refuses a test that names the binary (see
+// tools/build/common/precommit.go), but that is a pattern scan over source: it
+// cannot see a Client value that simply arrived with no stub installed, which
+// is the honest version of the same mistake and reads like every other fixture
+// until the bill arrives. A test that reaches the real agent spends money on
+// every run, on every machine and in CI, and makes the gate's runtime a
+// function of account state rather than of the tree.
+//
+// Tests substitute the spawn seam or use a stub flow.Agent. There is no
+// env-var escape: the whole value of this refusal is that nobody has to
+// remember it.
+//
+// Detection is the test binary's own flag registration — testing.Init installs
+// test.v before any test runs — rather than an import of testing, which would
+// put test flags into every production binary linking this package.
+func (c *Client) spawnable() error {
+	if c.spawn != nil || flag.Lookup("test.v") == nil {
+		return nil
+	}
+	return errors.New("refusing to spawn the real claude binary from a test: " +
+		"a test that reaches the agent spends real money on every run and depends on the machine's install. " +
+		"Use a stub flow.Agent, or (inside this package) install the spawn seam")
 }
 
 // spawnFunc / cmdHandle let tests stub out exec without an interface heap.

@@ -20,6 +20,40 @@ Concrete implementations live in subpackages (the reference is `flow/claude`). T
 
 `ctx.Agent()` is the **only** route to spend agent budget. Budget is metered here — cost, invocations, and prompts per invocation. There is no second path. A step that needs agent work calls `ctx.Agent().Run(...)` and nothing else.
 
+## Nothing mechanical may spend
+
+A turn happens **only where somebody asked for work**: a step of resolving an item, against a budget, producing an artifact. Every other path answers by reading, or does not answer.
+
+A mechanical command — `doctor`, `list`, `status` — must never spend. It runs before every item, in CI, and on every machine an operator touches, so a turn on one of those paths is a standing charge nobody asked for. And the charge is not the worst of it: a preflight that bills the account is one an operator turns off, and a preflight nobody runs prevents nothing. `doctor` carried exactly such a turn — one tool-free probe, capped at fifty cents, on every run, forever.
+
+This is enforced in three places, because the mistake arrives in three shapes:
+
+| Enforcement | Catches |
+|---|---|
+| The commit gate's approved list (`tools/build/common/agentturns.go`) | A new call site. The list is exact — file, function, and how many turns each asks for — and **adding an entry is the maintainer's decision**. Removing one when the call goes away is ordinary upkeep. |
+| `App.Agent` refuses `Run` (`cli`) | A turn requested at runtime from outside a step dispatch, in a binary built from a tree that never passed the gate. The field answers `Name()` and nothing else; the real agent is reached only by the dispatch that builds the metered chokepoint. |
+| The reference agent refuses to spawn from a test process (`claude`) | A test that reaches the real binary — which spends on every run, on every machine and in CI, and makes the gate's runtime a function of account state rather than of the tree. |
+
+None of the three is a proof. A request assembled through a helper slips past the scan, and an `Agent` implementation the SDK did not write can do what it likes. They catch the honest case, which is the one that keeps happening.
+
+## Checking the agent without spending
+
+`AgentDoctor` is an optional `Agent` capability: report whether the agent can be invoked, **without starting a turn**.
+
+```go
+type AgentDoctor interface {
+    Doctor(ctx context.Context) error
+}
+```
+
+It is what `doctor`'s agent check calls. The reference implementation spawns the binary and asks its version, which establishes that this SDK can start it — absent, unexecutable, wrong-architecture and too-old installs all fail here — and which costs nothing, because no model is called.
+
+What it does **not** establish is that a turn would succeed: credentials, quota and model availability are answered only by spending, and nothing mechanical may spend. An implementation must not close that gap by running a turn, and a report must not imply more than it checked.
+
+The reference implementation also enforces a **minimum version**: `--max-budget-usd` only stops a run at the cap from claude CLI v2.1.217. On anything older `AgentRequest.MaxCostUSD` is accepted and ignored, so a step's cost grant stops bounding the turn — a failure that is invisible until an overrun, which is precisely the kind a preflight exists to catch.
+
+An agent with no `AgentDoctor` is reported as **skipped**, not failed. The SDK cannot check a black-box `Agent` for free, and that is a fact about the interface rather than about the machine.
+
 ## AgentRequest
 
 `AgentRequest` is the spawn payload for one `Agent.Run` call:

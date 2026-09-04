@@ -64,6 +64,12 @@ func RunVerify(repoRoot string, args []string) error {
 func verifySteps(repoRoot string) []step {
 	if Exists(filepath.Join(repoRoot, "go.mod")) {
 		return []step{
+			// The spend ratchet runs here as well as in the commit hook: a
+			// commit can be waved through with --no-verify, and this gate is
+			// what a change passes before it is proposed. It costs
+			// milliseconds, and it is the last thing standing between an
+			// unapproved agent turn and trunk.
+			{"agent turns", checkApprovedAgentTurns},
 			{"format", checkFormatted},
 			{"vet", func(r string) error { return runAllModules(r, "vet") }},
 			{"build", func(r string) error { return runAllModules(r, "build") }},

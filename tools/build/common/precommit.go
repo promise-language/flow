@@ -28,6 +28,11 @@ func RunPrecommit(repoRoot string) error {
 	if err := checkNoAgentExec(repoRoot); err != nil {
 		return err
 	}
+	// One level up from checkNoAgentExec: not "who may spawn the binary", but
+	// "who may ask for a turn at all". See agentturns.go.
+	if err := checkApprovedAgentTurns(repoRoot); err != nil {
+		return err
+	}
 	return nil
 }
 
