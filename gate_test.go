@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"strings"
 	"testing"
 )
 
@@ -120,6 +121,64 @@ func TestOutcomes_TheSetIsClosed(t *testing.T) {
 		if !declared[name] {
 			t.Errorf("%s is named by the wire contract and is no longer declared — "+
 				"whatever base sends carrying it now has no meaning here", name)
+		}
+	}
+}
+
+// A truncated envelope is not an envelope, so both OutcomeDied and
+// OutcomeBrokeContract can be read as covering it — and a caller who reads only
+// the second sends a dead host to the gate's author. The runner classifies it as
+// died; what this pins is that BOTH comments say so, because a caller reads
+// whichever it reaches first and there is no third place to look.
+//
+// It asserts the pairing, not the prose: each of the two names the truncated
+// case and names the other constant, so neither reads as its sole home. Anyone
+// is free to rewrite either comment; what fails here is deleting the handoff
+// from one of them and leaving the rule in the other.
+func TestOutcomes_TruncationIsAttributedFromBothEnds(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "gate.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse gate.go: %v", err)
+	}
+
+	docs := map[string]string{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		spec, ok := n.(*ast.ValueSpec)
+		if !ok {
+			return true
+		}
+		id, ok := spec.Type.(*ast.Ident)
+		if !ok || id.Name != "Outcome" {
+			return true
+		}
+		for _, name := range spec.Names {
+			docs[name.Name] = spec.Doc.Text()
+		}
+		return true
+	})
+	if len(docs) == 0 {
+		t.Fatal("parsed no Outcome constants — the probe is broken, not the code")
+	}
+
+	for _, c := range []struct{ self, other string }{
+		{"OutcomeDied", "OutcomeBrokeContract"},
+		{"OutcomeBrokeContract", "OutcomeDied"},
+	} {
+		doc, ok := docs[c.self]
+		if !ok {
+			t.Fatalf("%s is not declared — the probe is broken, not the code", c.self)
+		}
+		if doc == "" {
+			t.Fatalf("%s has no doc comment; the two are the only place the rule lives", c.self)
+		}
+		if !strings.Contains(doc, "truncated") {
+			t.Errorf("%s does not say where a truncated envelope lands, so a caller "+
+				"reading it first cannot tell", c.self)
+		}
+		if !strings.Contains(doc, c.other) {
+			t.Errorf("%s does not name %s, so it reads as the sole home of the "+
+				"truncated case", c.self, c.other)
 		}
 	}
 }
