@@ -37,6 +37,16 @@ type Orchestrator struct {
 	// so the identity `claim` writes and the one `list` compares against are
 	// the same value by construction rather than by agreement.
 	account flow.AccountId
+
+	// What this machine can run, read once per orchestrator: see
+	// declarations.go. Cached per instance and not per process, so two
+	// orchestrators pointed at different worktrees answer about their own —
+	// and so a test's temporary worktree cannot fix the answer for every test
+	// after it.
+	commandsOnce sync.Once
+	commandsList []flow.CommandDef
+	gatesOnce    sync.Once
+	gatesList    []flow.GateDef
 }
 
 // New constructs a github Orchestrator. If cfg.Owner/Repo are empty, they
@@ -96,37 +106,8 @@ func (b *Orchestrator) SupportedSignals() []flow.SignalDef {
 	}
 }
 
-// githubSupportedGates is what this orchestrator declares it can run.
-//
-// `integration` and `fit` are required of every orchestrator and appear first.
-// The rest are the project's own concerns, reached through the same `bin/gate`
-// entry point — listing them is what makes integration's parts addressable, so
-// a step fixing one failing suite runs that suite instead of the whole set.
-var githubSupportedGates = []flow.GateDef{
-	flow.Gate(flow.GateIntegration, true),
-	flow.Gate(flow.GateFit, true),
-	flow.Gate(flow.GateFormatted, false),
-	flow.Gate(flow.GateBuilds, false),
-	flow.Gate(flow.GateChecked, false),
-	flow.Gate(flow.GateTested, false),
-	flow.Gate(flow.GateCovered, false),
-}
-
-// SupportedGates returns the gate set. cli.App validates every gate a flow
-// names against it at startup, so a flow naming a gate nothing can run fails
-// before an item is claimed rather than part-way through one.
-func (b *Orchestrator) SupportedGates() []flow.GateDef { return githubSupportedGates }
-
-// githubSupportedCommands is what this orchestrator declares it can run.
-// `verify` is required and configured through Config.VerifyCmd; setup and
-// cleanup have no configured command here, so they are not declared — an
-// orchestrator declares what it can actually run.
-var githubSupportedCommands = []flow.CommandDef{
-	flow.Command(flow.CommandVerify),
-}
-
-// SupportedCommands returns the command set.
-func (b *Orchestrator) SupportedCommands() []flow.CommandDef { return githubSupportedCommands }
+// What this orchestrator can RUN — gates and commands — is not written down
+// here. It is read from the machine at first ask: see declarations.go.
 
 // githubSupportedArtifacts is github's canonical artifact schema. github can
 // technically store any id (as a state-doc entry + comment, with

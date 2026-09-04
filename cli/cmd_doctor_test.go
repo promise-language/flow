@@ -31,7 +31,7 @@ func TestCmdDoctor_OKGlyph(t *testing.T) {
 	app.Out = out
 	app.Err = &bytes.Buffer{}
 
-	code := app.cmdDoctor(context.Background(), nil)
+	code := app.cmdDoctor(context.Background(), nil, nil)
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0", code)
 	}
@@ -56,7 +56,7 @@ func TestCmdDoctor_FailGlyph(t *testing.T) {
 	app.Out = out
 	app.Err = errBuf
 
-	code := app.cmdDoctor(context.Background(), nil)
+	code := app.cmdDoctor(context.Background(), nil, nil)
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1", code)
 	}
@@ -82,7 +82,7 @@ func TestCmdDoctor_AgentCheckSpendsNothing(t *testing.T) {
 	agent := &doctoringAgent{stubAgent: stubAgent{name: "stub"}}
 	app, out := doctorApp(t, fake.New(), agent)
 
-	if code := app.cmdDoctor(context.Background(), nil); code != 0 {
+	if code := app.cmdDoctor(context.Background(), nil, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0; output:\n%s", code, out.String())
 	}
 	if len(agent.reqs) != 0 {
@@ -123,7 +123,7 @@ func TestCmdDoctor_NoPathSpendsATurn(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			app, _ := doctorApp(t, tc.orch(), tc.agent(t))
-			app.cmdDoctor(context.Background(), nil) // the exit code is not this test's subject
+			app.cmdDoctor(context.Background(), nil, nil) // the exit code is not this test's subject
 		})
 	}
 }
@@ -139,7 +139,7 @@ func TestCmdDoctor_AgentDoctorFailureIsReported(t *testing.T) {
 	}
 	app, out := doctorApp(t, fake.New(), agent)
 
-	code := app.cmdDoctor(context.Background(), nil)
+	code := app.cmdDoctor(context.Background(), nil, nil)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; output:\n%s", code, out.String())
 	}
@@ -162,7 +162,7 @@ func TestCmdDoctor_AgentWithoutDoctorCapabilitySkips(t *testing.T) {
 	agent := &stubAgent{name: "opaque"}
 	app, out := doctorApp(t, fake.New(), agent)
 
-	code := app.cmdDoctor(context.Background(), nil)
+	code := app.cmdDoctor(context.Background(), nil, nil)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 — an unavailable check is not an unfit machine; output:\n%s",
 			code, out.String())
@@ -292,7 +292,7 @@ func TestCmdDoctor_ReportsDeclaredGatesAndCommands(t *testing.T) {
 	app.Out = out
 	app.Err = &bytes.Buffer{}
 
-	if code := app.cmdDoctor(context.Background(), nil); code != 0 {
+	if code := app.cmdDoctor(context.Background(), nil, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 	// The two required gates and the required command, by name.
@@ -321,7 +321,7 @@ func TestCmdDoctor_ReportsCarryThrough(t *testing.T) {
 	app.Out = out
 	app.Err = &bytes.Buffer{}
 
-	code := app.cmdDoctor(context.Background(), nil)
+	code := app.cmdDoctor(context.Background(), nil, nil)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
@@ -350,7 +350,7 @@ func TestCmdDoctor_OmitsCarryThroughWhenDisabled(t *testing.T) {
 	app.Out = out
 	app.Err = &bytes.Buffer{}
 
-	code := app.cmdDoctor(context.Background(), nil)
+	code := app.cmdDoctor(context.Background(), nil, nil)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
@@ -376,7 +376,7 @@ func (b *failingBackend) ListAutoSelectable(ctx context.Context, _ []flow.TagId)
 // notices until review.
 func TestCmdDoctor_NormativeDocs(t *testing.T) {
 	app, out := doctorApp(t, fake.New(), &stubAgent{name: "stub"})
-	if code := app.cmdDoctor(context.Background(), nil); code != 0 {
+	if code := app.cmdDoctor(context.Background(), nil, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0; output:\n%s", code, out.String())
 	}
 	if line := doctorLine(t, out.String(), "normative docs"); !strings.HasPrefix(line, glyphOK) {
@@ -409,7 +409,7 @@ func TestCmdDoctor_NormativeDocsMissing(t *testing.T) {
 			out := &bytes.Buffer{}
 			app.Out, app.Err = out, &bytes.Buffer{}
 
-			if code := app.cmdDoctor(context.Background(), nil); code != 1 {
+			if code := app.cmdDoctor(context.Background(), nil, nil); code != 1 {
 				t.Fatalf("exit code = %d, want 1; output:\n%s", code, out.String())
 			}
 			if line := doctorLine(t, out.String(), "normative docs"); !strings.HasPrefix(line, glyphFail) {
@@ -444,7 +444,7 @@ func TestCmdDoctor_MissingRequiredGateOrCommand(t *testing.T) {
 // why a run refused needs to see the same list the refusal saw.
 func TestCmdDoctor_ReportsWhatTheOrchestratorCanRun(t *testing.T) {
 	app, out := doctorApp(t, fake.New(), &stubAgent{name: "stub"})
-	if code := app.cmdDoctor(context.Background(), nil); code != 0 {
+	if code := app.cmdDoctor(context.Background(), nil, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0; output:\n%s", code, out.String())
 	}
 	if line := doctorLine(t, out.String(), "gates"); !strings.Contains(line, "fit") {
@@ -464,3 +464,58 @@ type declaringOrchestrator struct {
 
 func (o *declaringOrchestrator) SupportedGates() []flow.GateDef       { return o.gates }
 func (o *declaringOrchestrator) SupportedCommands() []flow.CommandDef { return o.commands }
+
+// doctor runs on a machine nothing else will start on. That is the whole point
+// of it: with declarations read off the environment, a checkout that has not
+// built its tools fails startup validation — and refusing to run the one
+// command whose job is explaining why would leave an operator with "the binary
+// will not start" and nothing else.
+func TestCmdDoctor_RunsAndReportsWhenStartupRefused(t *testing.T) {
+	app, out := doctorApp(t, fake.New(), &stubAgent{name: "stub"})
+	refusal := errors.New(`orchestrator "github" does not declare the required gate "fit"`)
+
+	code := app.cmdDoctor(context.Background(), nil, refusal)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; output:\n%s", code, out.String())
+	}
+	line := doctorLine(t, out.String(), "startup")
+	if !strings.HasPrefix(line, glyphFail) || !strings.Contains(line, "fit") {
+		t.Errorf("startup line should fail carrying the refusal; got %q", line)
+	}
+	// And the rest of the report is still produced — an operator fixing an
+	// unfit machine wants the whole list, not the first thing that went wrong.
+	for _, name := range []string{"orchestrator", "agent", "normative docs"} {
+		doctorLine(t, out.String(), name)
+	}
+}
+
+// A clean startup says so by starting. A line repeating it on every run is one
+// an operator learns to skip, and the check set docs/cli.md closes does not
+// include it.
+func TestCmdDoctor_SaysNothingAboutAStartupThatPassed(t *testing.T) {
+	app, out := doctorApp(t, fake.New(), &stubAgent{name: "stub"})
+	if code := app.cmdDoctor(context.Background(), nil, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0; output:\n%s", code, out.String())
+	}
+	if strings.Contains(out.String(), "startup") {
+		t.Errorf("a clean startup should not be a line; got:\n%s", out.String())
+	}
+}
+
+// An App so broken that validation never reached its fields still gets a
+// report, not a panic.
+func TestCmdDoctor_ReportsAnAppMissingItsParts(t *testing.T) {
+	arena(t)
+	app := &App{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}
+	out := app.Out.(*bytes.Buffer)
+
+	code := app.cmdDoctor(context.Background(), nil, errors.New("App.Orchestrator is required"))
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; output:\n%s", code, out.String())
+	}
+	for _, name := range []string{"startup", "orchestrator", "agent"} {
+		if line := doctorLine(t, out.String(), name); !strings.HasPrefix(line, glyphFail) {
+			t.Errorf("%s line should fail; got %q", name, line)
+		}
+	}
+}

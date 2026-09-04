@@ -395,11 +395,25 @@ type Orchestrator interface {
 	// Listing them is also what makes integration's parts addressable — it is
 	// assembled from smaller gates, and each is separately runnable only if a
 	// caller can discover what they are.
+	//
+	// IT REPORTS WHAT CAN ACTUALLY RUN, NOT WHAT SHOULD BE THERE. An
+	// orchestrator reads this off the machine — the github one asks its gate
+	// entry point which gates it has — so a checkout that never built its gates
+	// declares none, and every caller learns that at once instead of at the
+	// first measurement. A hardcoded list is a claim about intentions: it says
+	// `fit` on a machine with no gate entry point at all, and `doctor` then
+	// reports a machine fit on the strength of a list it printed back to
+	// itself.
 	SupportedGates() []GateDef
 
 	// SupportedCommands returns which of the three CommandNames this
 	// orchestrator can run. `verify` is required — a step should not fail over
 	// something verify would have fixed.
+	//
+	// Read off the machine for the same reason SupportedGates is: the github
+	// orchestrator lists the command binaries the project actually has. A
+	// declared command that is not there fails at the point of use, which is
+	// after a step has done the work it was about to check.
 	SupportedCommands() []CommandDef
 
 	// SupportedArtifacts returns this orchestrator's canonical artifact schema:

@@ -134,8 +134,16 @@ func RunWithArgs(app App, args []string) int {
 	if app.Quota == nil {
 		app.Quota = readQuota
 	}
-	if err := app.validate(); err != nil {
-		fmt.Fprintln(app.Err, "startup error:", err)
+	// A startup refusal stops every command but one. `doctor` is the diagnosis,
+	// and what startup now refuses on includes facts about the MACHINE: an
+	// orchestrator reads what it can run off the environment (a missing gate
+	// entry point declares no gates), so the checkout that has not built its
+	// tools fails validation. Refusing to run `doctor` there would withhold the
+	// one report that says why — the operator would be told the binary will not
+	// start, by the tool whose job is explaining exactly that.
+	startupErr := app.validate()
+	if startupErr != nil && (len(args) == 0 || args[0] != "doctor") {
+		fmt.Fprintln(app.Err, "startup error:", startupErr)
 		return 2
 	}
 
@@ -168,7 +176,7 @@ func RunWithArgs(app App, args []string) int {
 	ctx := context.Background()
 	switch cmd {
 	case "doctor":
-		return app.cmdDoctor(ctx, rest)
+		return app.cmdDoctor(ctx, rest, startupErr)
 	case "list":
 		return app.cmdList(ctx, rest)
 	case "claim":

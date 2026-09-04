@@ -37,6 +37,7 @@ func commandWorktree(t *testing.T, script string, timeout time.Duration) *worktr
 	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	declareCommand(t, dir, flow.CommandVerify)
 	if script != "" {
 		writeScript(t, dir, "verify", script, 0o755)
 	}
@@ -168,5 +169,20 @@ func TestRun_RefusesANameItCannotRun(t *testing.T) {
 				t.Errorf("error = %q, want it to say %q", err, c.mustSay)
 			}
 		})
+	}
+}
+
+// declareCommand makes an arena hold a command, the way this project holds one:
+// a main under tools/build/cmd/<name>. The orchestrator reads that directory to
+// answer SupportedCommands, so a fixture that skips it is an arena with no
+// commands — and Run refuses one it cannot find, correctly.
+func declareCommand(t *testing.T, root string, name flow.CommandName) {
+	t.Helper()
+	dir := filepath.Join(root, "tools", "build", "cmd", string(name))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("declare command %q: %v", name, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("declare command %q: %v", name, err)
 	}
 }

@@ -63,18 +63,39 @@ func (c check) glyph() string {
 // doctor runs before every item, in CI, and on machines that are mid-item, so a
 // check that bills the account or touches the tree is one an operator learns
 // not to run — and a preflight nobody runs prevents nothing.
-func (app *App) cmdDoctor(ctx context.Context, args []string) int {
+func (app *App) cmdDoctor(ctx context.Context, args []string, startupErr error) int {
 	if !app.rejectArgs("doctor", args) {
 		return 2
 	}
 
-	checks := []check{
-		app.checkOrchestrator(ctx),
-		app.checkAgent(ctx),
-		app.checkCommands(),
-		app.checkGates(),
-		checkDocs(),
+	// `doctor` runs on machines nothing else will start on — that is the point
+	// of it — so a startup refusal is reported as the first check rather than
+	// being the reason there is no report. It appears ONLY when there is one:
+	// a binary that started said so by starting, and a line repeating it on
+	// every clean run is a line an operator learns to skip. What follows it is whatever can
+	// still be asked: an App that failed validation may be missing the very
+	// things the other checks call, so each one that would dereference
+	// something absent says so instead.
+	var checks []check
+	if startupErr != nil {
+		checks = append(checks, check{name: "startup", status: checkFail, detail: startupErr.Error()})
 	}
+	if app.Orchestrator == nil {
+		checks = append(checks, check{name: "orchestrator", status: checkFail,
+			detail: "no orchestrator is configured (App.Orchestrator is nil)"})
+	} else {
+		checks = append(checks, app.checkOrchestrator(ctx))
+	}
+	if app.Agent == nil {
+		checks = append(checks, check{name: "agent", status: checkFail,
+			detail: "no agent is configured (App.Agent is nil)"})
+	} else {
+		checks = append(checks, app.checkAgent(ctx))
+	}
+	if app.Orchestrator != nil {
+		checks = append(checks, app.checkCommands(), app.checkGates())
+	}
+	checks = append(checks, checkDocs())
 
 	// The whole report is one list, so it goes to one stream. docs/cli.md
 	// § "One-shot reports" puts doctor's report on stdout.
