@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -262,18 +264,134 @@ func TestRunGate_ASignalIsDeathEvenWithAnEnvelopeOnStdout(t *testing.T) {
 func TestRunGate_TheDeclaredTimeoutOutranksTheTruncationItCaused(t *testing.T) {
 	requireRealProcesses(t)
 
-	// exec replaces the shell and flushes first, so the half-envelope is on the
-	// pipe before the kill.
-	w, _ := gateWorktree(t, "printf '{\"gate\":\"tes'\nexec sleep 60", 200*time.Millisecond)
-	run, err := w.RunGate(context.Background(), flow.GateIntegration)
+	// The two events this case needs — the half-envelope on the pipe, then the
+	// deadline firing while the gate is still alive — are ordered by a SIGNAL,
+	// not by a duration. A window wide enough on an idle machine collapses on a
+	// loaded one, and the gate would be killed before it was scheduled to
+	// write: see docs/org/engineering-guide.md § "Time is not a coordinate".
+	//
+	// The announcement comes from the EXEC'D program, never from a line in the
+	// same shell. The shell buffers the half-envelope and flushes it when exec
+	// replaces the image, so a `>&2` before the exec would announce a write
+	// whose bytes are still in the shell's buffer — and the kill discards
+	// those. This keeps the flush the case has always relied on and puts the
+	// signal strictly after it.
+	//
+	// An hour, not a short window: with the deadline fired by hand the declared
+	// timeout only reaches the Detail string, but a change that stopped
+	// consulting gateDeadline while keeping the var would kill the sleep on the
+	// clock and let this pass for the wrong reason. At an hour the sleep ends
+	// first and the outcome is died, so that bypass fails loudly.
+	w, _ := gateWorktree(t, "printf '{\"gate\":\"tes'\nexec sh -c 'echo ready >&2; exec sleep 60'", time.Hour)
+
+	// The signal rides the stderr the runner already hands straight to the
+	// child, so reading it is a real handshake with the gate rather than a
+	// poll. A pipe and not a temp file: the read blocks until the gate writes.
+	pr, pw, err := os.Pipe()
 	if err != nil {
-		t.Fatalf("RunGate: %v", err)
+		t.Fatal(err)
 	}
-	if !strings.Contains(string(run.Stdout), `{"gate":"tes`) {
-		t.Fatalf("Stdout = %q, want the half-envelope — without it this is not the case under test", run.Stdout)
+	restoreStderr := gateStderr
+	gateStderr = pw
+	t.Cleanup(func() {
+		gateStderr = restoreStderr
+		pw.Close()
+		pr.Close()
+	})
+
+	fired := make(chan struct{})
+	var once sync.Once
+	fire := func() { once.Do(func() { close(fired) }) }
+	restoreDeadline := gateDeadline
+	gateDeadline = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return firedDeadline{Context: parent, fired: fired}, func() {}
 	}
-	if run.Outcome != flow.OutcomeTimedOut {
-		t.Errorf("outcome = %q, want %q (detail: %s)", run.Outcome, flow.OutcomeTimedOut, run.Detail)
+	t.Cleanup(func() { gateDeadline = restoreDeadline })
+
+	type result struct {
+		run flow.GateRun
+		err error
+	}
+	// In flight, because the deadline has to be fired while the call is
+	// running.
+	results := make(chan result, 1)
+	var running sync.WaitGroup
+	running.Add(1)
+	go func() {
+		defer running.Done()
+		run, err := w.RunGate(context.Background(), flow.GateIntegration)
+		results <- result{run: run, err: err}
+	}()
+	// However this test ends, no sleep outlives it. Registered last, so it runs
+	// before the restores above.
+	t.Cleanup(func() {
+		fire()
+		running.Wait()
+	})
+
+	ready := make(chan error, 1)
+	go func() {
+		line, err := bufio.NewReader(pr).ReadString('\n')
+		if err != nil {
+			ready <- fmt.Errorf("reading the gate's stderr: %w", err)
+			return
+		}
+		if strings.TrimSpace(line) != "ready" {
+			ready <- fmt.Errorf("gate announced %q, want %q", strings.TrimSpace(line), "ready")
+			return
+		}
+		ready <- nil
+	}()
+
+	// A select and not a bare read: the runner holds the write end open, so a
+	// gate that died before announcing would never produce EOF and the read
+	// would hang until go test's own panic. Its outcome is the more useful
+	// failure.
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatalf("waiting for the gate to announce its write: %v", err)
+		}
+	case r := <-results:
+		t.Fatalf("the gate finished before it announced its write: outcome %q, err %v (detail: %s)",
+			r.run.Outcome, r.err, r.run.Detail)
+	}
+
+	// The half-envelope is on the pipe. Only now can the deadline fire.
+	fire()
+
+	r := <-results
+	if r.err != nil {
+		t.Fatalf("RunGate: %v", r.err)
+	}
+	if !strings.Contains(string(r.run.Stdout), `{"gate":"tes`) {
+		t.Fatalf("Stdout = %q, want the half-envelope — without it this is not the case under test", r.run.Stdout)
+	}
+	if r.run.Outcome != flow.OutcomeTimedOut {
+		t.Errorf("outcome = %q, want %q (detail: %s)", r.run.Outcome, flow.OutcomeTimedOut, r.run.Detail)
+	}
+}
+
+// firedDeadline is a deadline the test fires by hand. Err defers to the parent
+// first: a caller that went away is the parent's failure and is NOT this
+// deadline, which is the distinction runGate reads to tell an error from an
+// outcome.
+type firedDeadline struct {
+	context.Context
+	fired <-chan struct{}
+}
+
+func (d firedDeadline) Done() <-chan struct{} { return d.fired }
+
+func (d firedDeadline) Err() error {
+	if err := d.Context.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-d.fired:
+		return context.DeadlineExceeded
+	default:
+		return nil
 	}
 }
 
