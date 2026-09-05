@@ -1,5 +1,8 @@
 # Gates and commands a project provides
 
+> **Tag:** `gates-and-commands` — remaining work to complete this document: the query named in
+> [`docs/index.md`](index.md).
+
 **Normative.** What a project must supply for a flow to run against it, and the names for the things it supplies.
 
 `docs/resolution.md` defines what gates and commands *are*. This document says which ones a flow expects to find.

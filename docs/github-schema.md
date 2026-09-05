@@ -1,5 +1,8 @@
 # GitHub storage schema
 
+> **Tag:** `github-schema` — remaining work to complete this document: the query named in
+> [`docs/index.md`](index.md).
+
 **Normative.** This document defines how state, artifacts, and history are stored on a GitHub issue by the GitHub backend. It is written for readers who have no SDK — the wire format is the contract.
 
 ## State comment

@@ -1,5 +1,8 @@
 # Orchestrator contract
 
+> **Tag:** `orchestrator` — remaining work to complete this document: the query named in
+> [`docs/index.md`](index.md).
+
 **Normative.** This document defines the boundary between the SDK and an orchestrator: what an orchestrator must implement, and what it may refuse.
 
 **must** and **must not** state conformance: an orchestrator that does otherwise is not one. **may** marks a decision this contract deliberately leaves open — both choices conform, and a caller has to tolerate either, which is why so little here is a `may`.

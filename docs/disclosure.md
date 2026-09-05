@@ -1,5 +1,8 @@
 # Disclosure
 
+> **Tag:** `disclosure` — remaining work to complete this document: the query named in
+> [`docs/index.md`](index.md).
+
 **Normative.** What the flow sends outward, and what stands in its way.
 
 A resolution reads a private machine and writes to a public place. `docs/resolution.md` governs what a step may change; this document governs what a step may **publish**, which is a different question with a different failure: a bad change is caught by review, and a disclosure is permanent the moment it is made.

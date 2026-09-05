@@ -1,5 +1,8 @@
 # Agent integration
 
+> **Tag:** `agent` — remaining work to complete this document: the query named in
+> [`docs/index.md`](index.md).
+
 **Normative.** This document defines the agent interface, the metered chokepoint, permission modes, and failure kinds. Every statement is a requirement. This is the normative home for the per-step permission requirement described in [#19](https://github.com/promise-language/flow/issues/19).
 
 ## The interface

@@ -1,5 +1,8 @@
 # Flow registration
 
+> **Tag:** `flow-registration` — remaining work to complete this document: the query named in
+> [`docs/index.md`](index.md).
+
 **Normative.** This document defines how a flow declares its steps, the item types it handles, and its signal preconditions. Every statement is a requirement.
 
 ## What a flow is

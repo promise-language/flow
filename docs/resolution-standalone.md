@@ -1,5 +1,8 @@
 # Standalone resolution
 
+> **Tag:** `resolution-standalone` — remaining work to complete this document: the query named in
+> [`docs/index.md`](index.md).
+
 **Normative.** How an item is resolved when **no server exists** and the flow binary drives the whole lifecycle itself.
 
 Everything in `resolution.md` applies. This document states only what is specific to the standalone model; a statement true of both drive models belongs there, not here.

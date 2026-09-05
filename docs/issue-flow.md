@@ -1,5 +1,8 @@
 # The issue flow
 
+> **Tag:** `issue-flow` — remaining work to complete this document: the query named in
+> [`docs/index.md`](index.md).
+
 **Normative.** The step set this repository ships for resolving issues, and what each step must do.
 
 `docs/resolution.md` defines the process, boundaries and responsibilities common to any resolution. `docs/resolution-standalone.md` defines the model this flow runs under. This document defines **these steps** — a different flow may hold every property in those documents with a different step set.
