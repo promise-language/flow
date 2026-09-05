@@ -46,6 +46,18 @@ var gateStderr *os.File = os.Stderr
 // failure a declared timeout exists to close.
 var gateWaitDelay = 5 * time.Second
 
+// gateDeadline builds the runner's own deadline from the caller's context. It
+// is context.WithTimeout and nothing else; a variable only so a test can hand
+// the runner a deadline it fires from a SIGNAL instead of from the clock.
+//
+// The cases that need it are the ones where a gate must be killed at the
+// deadline AFTER it has printed something. Those two events cannot be ordered
+// by choosing a duration: the write is a process waiting to be scheduled, so a
+// window that holds on an idle machine collapses on a loaded one and no amount
+// of lengthening closes it. See docs/org/engineering-guide.md § "Time is not a
+// coordinate".
+var gateDeadline = context.WithTimeout
+
 // runGate spawns one gate and reports what it observed. It is the runner: it
 // never consults the gate's exit code to decide, and it never looks inside the
 // envelope — the SDK does not read a project's measurements, it runs the gate
@@ -60,7 +72,7 @@ func runGate(ctx context.Context, dir string, name flow.GateName, argv []string,
 		return flow.GateRun{}, fmt.Errorf("gate %s: caller went away before the gate was spawned: %w", name, err)
 	}
 
-	gateCtx, cancel := context.WithTimeout(ctx, timeout)
+	gateCtx, cancel := gateDeadline(ctx, timeout)
 	defer cancel()
 
 	// argv[0] contains a separator, so os/exec performs no PATH lookup and the
