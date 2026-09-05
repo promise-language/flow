@@ -47,4 +47,7 @@ bin/
 /.claude/settings.local.json
 
 # written by `workspace setup` — per-host/per-clone, never committed
+/.mcp.json
+
+# written by `workspace setup` — per-host/per-clone, never committed
 /.workspace/
