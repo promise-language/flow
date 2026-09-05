@@ -64,6 +64,66 @@ func gateWorktree(t *testing.T, script string, timeout time.Duration) (*worktree
 	return &worktree{b: b}, dir
 }
 
+// gateReady is what a gate says on stderr when it has reached the point a case
+// needs it at, and gateAnnounce is the shell that says it. Both halves of the
+// handshake are spelled once, so a case cannot wait for a word its gate never
+// speaks.
+const (
+	gateReady    = "ready"
+	gateAnnounce = "echo " + gateReady + " >&2"
+)
+
+// gateResult is what one in-flight RunGate returned. A case that has to act on
+// the runner WHILE it runs cannot read the return value, so it reads this.
+type gateResult struct {
+	run flow.GateRun
+	err error
+}
+
+// gateAnnouncesOnStderr points the gate's stderr at a pipe and returns the
+// channel the gate's announcement arrives on: nil once the gate has said
+// gateReady, an error otherwise.
+//
+// This is the handshake the order-sensitive cases synchronize on. Stderr is the
+// stream the runner hands STRAIGHT to the child with no copying goroutine, so a
+// line arriving here is the gate itself reporting where it got to — not a
+// duration the case hoped was long enough. A window wide enough on an idle
+// machine collapses on a loaded one, and the case then arranges a different
+// state than the one it is named for. See docs/org/engineering-guide.md § "Time
+// is not a coordinate".
+//
+// A pipe and not a temp file: the read blocks until the gate writes.
+func gateAnnouncesOnStderr(t *testing.T) <-chan error {
+	t.Helper()
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restore := gateStderr
+	gateStderr = pw
+	t.Cleanup(func() {
+		gateStderr = restore
+		pw.Close()
+		// Also what unblocks the reader below, so it never outlives the case.
+		pr.Close()
+	})
+
+	announced := make(chan error, 1)
+	go func() {
+		line, err := bufio.NewReader(pr).ReadString('\n')
+		switch {
+		case err != nil:
+			announced <- fmt.Errorf("reading the gate's stderr: %w", err)
+		case strings.TrimSpace(line) != gateReady:
+			announced <- fmt.Errorf("gate announced %q, want %q", strings.TrimSpace(line), gateReady)
+		default:
+			announced <- nil
+		}
+	}()
+	return announced
+}
+
 // writeScript drops one entry point into the tree's bin/. The name is a
 // parameter because a project exposes more than one — the gate that measures,
 // and the judge that holds the thresholds — and both are reached the same way.
@@ -282,22 +342,11 @@ func TestRunGate_TheDeclaredTimeoutOutranksTheTruncationItCaused(t *testing.T) {
 	// consulting gateDeadline while keeping the var would kill the sleep on the
 	// clock and let this pass for the wrong reason. At an hour the sleep ends
 	// first and the outcome is died, so that bypass fails loudly.
-	w, _ := gateWorktree(t, "printf '{\"gate\":\"tes'\nexec sh -c 'echo ready >&2; exec sleep 60'", time.Hour)
+	w, _ := gateWorktree(t, "printf '{\"gate\":\"tes'\nexec sh -c '"+gateAnnounce+"; exec sleep 60'", time.Hour)
 
 	// The signal rides the stderr the runner already hands straight to the
-	// child, so reading it is a real handshake with the gate rather than a
-	// poll. A pipe and not a temp file: the read blocks until the gate writes.
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	restoreStderr := gateStderr
-	gateStderr = pw
-	t.Cleanup(func() {
-		gateStderr = restoreStderr
-		pw.Close()
-		pr.Close()
-	})
+	// child, so reading it is a real handshake with the gate rather than a poll.
+	announced := gateAnnouncesOnStderr(t)
 
 	fired := make(chan struct{})
 	var once sync.Once
@@ -308,19 +357,15 @@ func TestRunGate_TheDeclaredTimeoutOutranksTheTruncationItCaused(t *testing.T) {
 	}
 	t.Cleanup(func() { gateDeadline = restoreDeadline })
 
-	type result struct {
-		run flow.GateRun
-		err error
-	}
 	// In flight, because the deadline has to be fired while the call is
 	// running.
-	results := make(chan result, 1)
+	results := make(chan gateResult, 1)
 	var running sync.WaitGroup
 	running.Add(1)
 	go func() {
 		defer running.Done()
 		run, err := w.RunGate(context.Background(), flow.GateIntegration)
-		results <- result{run: run, err: err}
+		results <- gateResult{run: run, err: err}
 	}()
 	// However this test ends, no sleep outlives it. Registered last, so it runs
 	// before the restores above.
@@ -329,26 +374,12 @@ func TestRunGate_TheDeclaredTimeoutOutranksTheTruncationItCaused(t *testing.T) {
 		running.Wait()
 	})
 
-	ready := make(chan error, 1)
-	go func() {
-		line, err := bufio.NewReader(pr).ReadString('\n')
-		if err != nil {
-			ready <- fmt.Errorf("reading the gate's stderr: %w", err)
-			return
-		}
-		if strings.TrimSpace(line) != "ready" {
-			ready <- fmt.Errorf("gate announced %q, want %q", strings.TrimSpace(line), "ready")
-			return
-		}
-		ready <- nil
-	}()
-
 	// A select and not a bare read: the runner holds the write end open, so a
 	// gate that died before announcing would never produce EOF and the read
 	// would hang until go test's own panic. Its outcome is the more useful
 	// failure.
 	select {
-	case err := <-ready:
+	case err := <-announced:
 		if err != nil {
 			t.Fatalf("waiting for the gate to announce its write: %v", err)
 		}
@@ -372,10 +403,20 @@ func TestRunGate_TheDeclaredTimeoutOutranksTheTruncationItCaused(t *testing.T) {
 	}
 }
 
-// firedDeadline is a deadline the test fires by hand. Err defers to the parent
-// first: a caller that went away is the parent's failure and is NOT this
-// deadline, which is the distinction runGate reads to tell an error from an
-// outcome.
+// firedDeadline is a deadline the test fires by hand, standing in for the one
+// context.WithTimeout builds. Once fired it reports DeadlineExceeded and keeps
+// reporting it, exactly as a real derived deadline does when the deadline is
+// what fired FIRST — including when the caller goes away afterwards. Before it
+// fires it is the parent's answer, which is that same real behaviour in the
+// other direction.
+//
+// It deliberately does not shade the answer toward the parent. Which of the two
+// a run is attributed to — an error, or the timed_out outcome — is runGate's
+// ordering to get right, and a stand-in that pre-resolved it would make the
+// case that pins that ordering pass either way.
+//
+// Done closes only on the firing: the parent's cancellation is not modelled as
+// a kill, because the cases using this one kill their gate from the deadline.
 type firedDeadline struct {
 	context.Context
 	fired <-chan struct{}
@@ -384,14 +425,137 @@ type firedDeadline struct {
 func (d firedDeadline) Done() <-chan struct{} { return d.fired }
 
 func (d firedDeadline) Err() error {
-	if err := d.Context.Err(); err != nil {
-		return err
-	}
 	select {
 	case <-d.fired:
 		return context.DeadlineExceeded
 	default:
-		return nil
+		return d.Context.Err()
+	}
+}
+
+// goneWhenFired is a caller that goes away at the instant the runner's own
+// deadline fires — the one moment both are true, and the only one where the
+// order runGate reads them in changes the answer.
+//
+// Done is never closed: the runner reads a caller's departure from Err, and
+// nothing else here needs to wake on it.
+type goneWhenFired struct {
+	context.Context
+	fired <-chan struct{}
+}
+
+func (c goneWhenFired) Err() error {
+	select {
+	case <-c.fired:
+		return context.Canceled
+	default:
+		return c.Context.Err()
+	}
+}
+
+// The caller going away outranks the runner's own deadline, and the order the
+// two are read in is the whole of it. Both are true at once whenever a caller
+// gives up in the moment the runner spends killing a gate at its deadline and
+// reaping it. Read deadline-first, that run is reported timed_out — an outcome
+// whose entire meaning is "retry this unchanged", handed to a retrier for work
+// nobody is waiting for any more. Read caller-first, it is an error and no
+// outcome exists, which is what a run with no reader is.
+//
+// The state cannot be arranged on the clock: a real derived deadline keeps
+// whichever error fired first, so reaching it by timing means waiting out a
+// deadline and then cancelling inside the window before Wait returns. The seam
+// makes it an arrangement instead — the deadline fires by hand, and the caller
+// is gone from that same instant.
+func TestRunGate_ACallerWhoWentAwayOutranksTheRunnersOwnDeadline(t *testing.T) {
+	requireRealProcesses(t)
+
+	w, _ := gateWorktree(t, "exec sh -c '"+gateAnnounce+"; exec sleep 60'", time.Hour)
+	announced := gateAnnouncesOnStderr(t)
+
+	fired := make(chan struct{})
+	var once sync.Once
+	fire := func() { once.Do(func() { close(fired) }) }
+	ctx := goneWhenFired{Context: context.Background(), fired: fired}
+	restoreDeadline := gateDeadline
+	gateDeadline = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return firedDeadline{Context: parent, fired: fired}, func() {}
+	}
+	t.Cleanup(func() { gateDeadline = restoreDeadline })
+
+	results := make(chan gateResult, 1)
+	var running sync.WaitGroup
+	running.Add(1)
+	go func() {
+		defer running.Done()
+		run, err := w.RunGate(ctx, flow.GateIntegration)
+		results <- gateResult{run: run, err: err}
+	}()
+	// However this test ends, no sleep outlives it. Registered last, so it runs
+	// before the restores above.
+	t.Cleanup(func() {
+		fire()
+		running.Wait()
+	})
+
+	select {
+	case err := <-announced:
+		if err != nil {
+			t.Fatalf("waiting for the gate to announce itself: %v", err)
+		}
+	case r := <-results:
+		t.Fatalf("the gate finished before it announced itself: outcome %q, err %v (detail: %s)",
+			r.run.Outcome, r.err, r.run.Detail)
+	}
+
+	// The gate is running. Now the deadline fires and the caller goes away
+	// together, which is the contested state.
+	fire()
+
+	r := <-results
+	if !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("err = %v, want it to wrap context.Canceled — the caller went away, and only the "+
+			"runner's OWN deadline is an outcome (outcome %q, detail: %s)", r.err, r.run.Outcome, r.run.Detail)
+	}
+	if r.run.Outcome != "" {
+		t.Errorf("outcome = %q, want none — a run nobody is waiting for is not one to retry", r.run.Outcome)
+	}
+}
+
+// The runner releases the deadline it built. Not housekeeping: an uncancelled
+// derived deadline holds a timer AND a registration on the caller's context
+// until it expires on its own, and one caller's context spans every gate a
+// resolve runs — so a dropped cancel accumulates one live timer per gate, each
+// for the length of the declared timeout.
+//
+// go vet's lostcancel check enforced this for as long as the call read
+// context.WithTimeout in place. Behind a variable it sees no such call and
+// reports nothing, which is what leaves the claim to a test.
+func TestRunGate_ReleasesTheDeadlineItBuilt(t *testing.T) {
+	requireRealProcesses(t)
+
+	// Written by the deferred cancel inside RunGate, on this goroutine, and
+	// read after it returns.
+	released := false
+	restoreDeadline := gateDeadline
+	gateDeadline = func(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+		gateCtx, cancel := context.WithTimeout(parent, d)
+		return gateCtx, func() { released = true; cancel() }
+	}
+	t.Cleanup(func() { gateDeadline = restoreDeadline })
+
+	w, _ := gateWorktree(t, `echo '{"gate":"integration"}'`, 30*time.Second)
+	run, err := w.RunGate(context.Background(), flow.GateIntegration)
+	if err != nil {
+		t.Fatalf("RunGate: %v", err)
+	}
+	// A gate that never started would release the deadline too. This is the
+	// path that has to.
+	if run.Outcome != flow.OutcomeMeasured {
+		t.Fatalf("outcome = %q, want measured (detail: %s)", run.Outcome, run.Detail)
+	}
+	if !released {
+		t.Error("the deadline's cancel was never called: every gate run leaves a timer on the " +
+			"caller's context until the declared timeout expires")
 	}
 }
 
@@ -507,21 +671,62 @@ func TestRunGate_ADeadlineThatExpiredBeforeTheSpawnIsATimeout(t *testing.T) {
 // The caller going away is not an outcome: no gate result exists to report.
 // Reporting it as timed out would mark a run retryable that nobody is waiting
 // for, and reporting it as died would blame the host for a caller's decision.
+//
+// The cancellation lands while the gate is KNOWN to be running, because the
+// gate says so — not after a sleep the case hoped was long enough. Under load a
+// sleep cancels before the spawn, and the case silently becomes the
+// already-cancelled one below, leaving the branch it is named for untested at
+// exactly the moment it would have mattered.
+//
+// And the declared timeout is an hour, so the second claim has somewhere to
+// fail: the runner's own deadline is DERIVED from the caller's, which is what
+// makes cancelling the caller kill the gate. A deadline built from a fresh root
+// still returns an error here — the runner re-reads the caller's context on the
+// way out — but only after the gate had run out an hour of its own, with the
+// caller long gone and the process still holding the machine.
 func TestRunGate_ACancelledCallerIsAnErrorAndNotAnOutcome(t *testing.T) {
 	requireRealProcesses(t)
 
-	w, _ := gateWorktree(t, "exec sleep 60", 30*time.Second)
+	w, _ := gateWorktree(t, "exec sh -c '"+gateAnnounce+"; exec sleep 60'", time.Hour)
+	announced := gateAnnouncesOnStderr(t)
+
 	ctx, cancel := context.WithCancel(context.Background())
+	// However this test ends, the gate goes with it.
+	t.Cleanup(cancel)
+
+	results := make(chan gateResult, 1)
 	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
+		run, err := w.RunGate(ctx, flow.GateIntegration)
+		results <- gateResult{run: run, err: err}
 	}()
-	run, err := w.RunGate(ctx, flow.GateIntegration)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want it to wrap context.Canceled", err)
+
+	select {
+	case err := <-announced:
+		if err != nil {
+			t.Fatalf("waiting for the gate to announce itself: %v", err)
+		}
+	case r := <-results:
+		t.Fatalf("the gate finished before it announced itself: outcome %q, err %v (detail: %s)",
+			r.run.Outcome, r.err, r.run.Detail)
 	}
-	if run.Outcome != "" {
-		t.Errorf("outcome = %q, want none — no gate result exists", run.Outcome)
+
+	cancel()
+
+	// A bound, not a coordinate: the ordering above is the handshake's, and what
+	// is left to happen is a process kill, which does not take seconds. An hour
+	// is what a runner whose deadline lost the caller waits instead.
+	select {
+	case r := <-results:
+		if !errors.Is(r.err, context.Canceled) {
+			t.Fatalf("err = %v, want it to wrap context.Canceled (outcome %q, detail: %s)",
+				r.err, r.run.Outcome, r.run.Detail)
+		}
+		if r.run.Outcome != "" {
+			t.Errorf("outcome = %q, want none — no gate result exists", r.run.Outcome)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("RunGate is still running 30s after its caller was cancelled: the runner's own " +
+			"deadline is not derived from the caller's, so the gate outlives whoever asked for it")
 	}
 }
 
