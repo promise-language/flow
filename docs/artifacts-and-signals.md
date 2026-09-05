@@ -1,5 +1,8 @@
 # Artifacts and signals
 
+> **Tag:** `artifacts-and-signals` — remaining work to complete this document: the query named in
+> [`docs/index.md`](index.md).
+
 **Normative.** This document defines the two result kinds and the vocabulary that depends on them. Every statement is a requirement. Where the code does not satisfy one, an issue is open against it.
 
 ## The distinction

@@ -1,5 +1,8 @@
 # Resolution
 
+> **Tag:** `resolution` — remaining work to complete this document: the query named in
+> [`docs/index.md`](index.md).
+
 **Normative.** This document defines how an item is resolved, independent of what drives the resolution. Every statement is a requirement. Where the code does not satisfy one, an issue is open against it. Nothing here records progress, status, or history.
 
 Two drive models exist, and they are the only two:

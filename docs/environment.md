@@ -1,5 +1,8 @@
 # The environment
 
+> **Tag:** `environment` — remaining work to complete this document: the query named in
+> [`docs/index.md`](index.md).
+
 **Normative.** What makes a machine fit to be given an item, and what follows from a condition that makes it unfit. Every statement is a requirement. Where the code does not satisfy one, an issue is open against it. Nothing here records progress, status, or history.
 
 `resolution.md` defines what a gate is, and requires that infrastructure failures consume no budget. `gates-and-commands.md` defines the gate contract and names what a project supplies. This document defines the one gate whose subject is not the change, and the rules that follow from a subject that is not the change.

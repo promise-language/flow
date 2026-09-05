@@ -1,5 +1,8 @@
 # Flow CLI
 
+> **Tag:** `cli` — remaining work to complete this document: the query named in
+> [`docs/index.md`](index.md).
+
 **Normative.** This document defines what the CLI *is*, not how it got here. Every statement is a requirement. Where the code does not satisfy a statement, an issue is open against it; when the issue closes the code matches this document. Nothing here records progress, status, or history.
 
 Every binary built on `cli.Run` exposes exactly this surface.

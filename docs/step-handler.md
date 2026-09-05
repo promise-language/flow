@@ -1,5 +1,8 @@
 # Step handler interface
 
+> **Tag:** `step-handler` — remaining work to complete this document: the query named in
+> [`docs/index.md`](index.md).
+
 **Normative.** This document defines what a step handler receives, what it must do, what it may do, and the errors it may return. Every statement is a requirement.
 
 ## Handler signature
