@@ -41,8 +41,19 @@ type cmdHelp struct {
 // perCommandUsage drives `<bin> <cmd> --help`. The top-level summary lives in
 // usage(); this adds focused detail for a single command.
 var perCommandUsage = map[string]cmdHelp{
-	"doctor": {name: "doctor", summary: "verify backend prerequisites",
-		detail: "Checks that the backend is reachable and configured (auth, connectivity).\nTakes no arguments."},
+	"doctor": {name: "doctor", summary: "report whether this environment is fit to be given an item",
+		detail: `Checks, and reports every one of them rather than stopping at the first
+failure:
+
+  orchestrator   reachable and usable
+  agent          can be invoked — established WITHOUT spending a turn
+
+A check the SDK cannot make is reported as skipped and does not affect the
+exit code.
+
+doctor spends nothing and mutates nothing: it runs before every item, in CI,
+and on machines that are mid-item. It exits 1 if any check failed.
+Takes no arguments.`},
 	"list": {name: "list", syntax: "[--scope SCOPE] [--tag TAG]…", summary: "list processable items",
 		detail: `Lists items this flow can see. Default scope is "processable" (open items
 this binary could process).

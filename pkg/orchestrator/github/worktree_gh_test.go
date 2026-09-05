@@ -110,6 +110,7 @@ func verifyArgv(t *testing.T, cmd func(dir string) []string) ([]string, flow.Com
 	// Relative, so it lands in the worktree the command was spawned in — which
 	// is also the assertion that Run set cmd.Dir at all.
 	writeScript(t, dir, "verify", `printf '%s\n' "$0" "$@" > argv`, 0o755)
+	declareCommand(t, dir, flow.CommandVerify)
 
 	b := &Orchestrator{cfg: Config{WorktreeDir: dir, VerifyCmd: cmd(dir), GateTimeout: 30 * time.Second}}
 	b.git = &gitOps{dir: dir, runner: func(_ context.Context, _, name string, _ ...string) ([]byte, []byte, error) {
@@ -174,7 +175,9 @@ func TestVerifyDispatchesTheDefault(t *testing.T) {
 // on a zero-length slice). This is the failure path: if withDefaults were
 // ever broken to leave the field empty, this error is what surfaces.
 func TestVerifyRefusesEmptyCmd(t *testing.T) {
-	cfg := Config{WorktreeDir: "/tmp/wt"} // deliberately skip withDefaults
+	dir := t.TempDir()
+	declareCommand(t, dir, flow.CommandVerify)
+	cfg := Config{WorktreeDir: dir} // deliberately skip withDefaults
 
 	b := &Orchestrator{cfg: cfg}
 	b.git = &gitOps{

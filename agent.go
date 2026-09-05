@@ -110,3 +110,27 @@ type Agent interface {
 	Name() string
 	Run(ctx context.Context, req AgentRequest) (*AgentResponse, error)
 }
+
+// AgentDoctor is an optional Agent capability: report whether the agent can be
+// invoked, WITHOUT starting a turn.
+//
+// `doctor` is mechanical. It runs before every item, in CI, and on every
+// machine an operator touches, and nobody asked for work when it runs — so it
+// must not spend. A preflight check that bills the account is one an operator
+// turns off, and a check that is turned off prevents nothing. That is why the
+// agent check is this capability and not a probe turn: a turn is the one thing
+// `doctor` may never buy.
+//
+// What an impl can establish for free is the difference between "the agent is
+// there and this SDK can start it" and "it is not" — the reference impl spawns
+// the binary and asks its version, which catches an absent, unexecutable,
+// wrong-architecture or too-old install. What it CANNOT establish is that a
+// full turn would succeed: credentials, quota and model availability are only
+// answered by spending. An impl must not paper over that by running a turn.
+//
+// Doctor must not mutate anything: `doctor` runs on machines that are mid-item.
+type AgentDoctor interface {
+	// Doctor reports why this agent could not be invoked, or nil when it can.
+	// It spends nothing and starts no turn.
+	Doctor(ctx context.Context) error
+}

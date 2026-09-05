@@ -134,8 +134,16 @@ func RunWithArgs(app App, args []string) int {
 	if app.Quota == nil {
 		app.Quota = readQuota
 	}
-	if err := app.validate(); err != nil {
-		fmt.Fprintln(app.Err, "startup error:", err)
+	// A startup refusal stops every command but one. `doctor` is the diagnosis,
+	// and what startup now refuses on includes facts about the MACHINE: an
+	// orchestrator reads what it can run off the environment (a missing gate
+	// entry point declares no gates), so the checkout that has not built its
+	// tools fails validation. Refusing to run `doctor` there would withhold the
+	// one report that says why — the operator would be told the binary will not
+	// start, by the tool whose job is explaining exactly that.
+	startupErr := app.validate()
+	if startupErr != nil && (len(args) == 0 || args[0] != "doctor") {
+		fmt.Fprintln(app.Err, "startup error:", startupErr)
 		return 2
 	}
 
@@ -168,7 +176,7 @@ func RunWithArgs(app App, args []string) int {
 	ctx := context.Background()
 	switch cmd {
 	case "doctor":
-		return app.cmdDoctor(ctx, rest)
+		return app.cmdDoctor(ctx, rest, startupErr)
 	case "list":
 		return app.cmdList(ctx, rest)
 	case "claim":
@@ -202,6 +210,15 @@ func (app *App) validate() error {
 	}
 	if app.Agent == nil {
 		return errors.New("App.Agent is required")
+	}
+	// Wrap the agent so the field cannot be spent from. From here on
+	// App.Agent refuses Run(); the real agent is reached only by newStepCtx,
+	// through the metered chokepoint it hands a step handler. See
+	// outsideStepAgent. Idempotent: validate() may run more than once in a
+	// process (tests build several Apps), and wrapping a wrapper would bury
+	// the impl one layer deeper on each pass.
+	if _, wrapped := app.Agent.(*outsideStepAgent); !wrapped {
+		app.Agent = &outsideStepAgent{inner: app.Agent}
 	}
 	if len(app.Artifacts) == 0 {
 		return errors.New("App.Artifacts is empty")
@@ -372,7 +389,7 @@ func usage(bin string) string {
 	return fmt.Sprintf(`%[1]s — flow binary
 
 usage:
-  %[1]s doctor                       verify orchestrator prereqs
+  %[1]s doctor                       is this environment fit to be given an item?
   %[1]s list [--scope SCOPE] [--tag T] list items this flow can process
   %[1]s answer <item-id> <text>       answer a question a step is parked on
   %[1]s claim <item-id>              acquire a claim on an item

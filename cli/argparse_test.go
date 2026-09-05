@@ -58,7 +58,7 @@ func TestNoArgsCommands_RejectExtraPositional(t *testing.T) {
 		name string
 		run  func(app *App, args []string) int
 	}{
-		{"doctor", func(a *App, args []string) int { return a.cmdDoctor(context.Background(), args) }},
+		{"doctor", func(a *App, args []string) int { return a.cmdDoctor(context.Background(), args, nil) }},
 		{"list", func(a *App, args []string) int { return a.cmdList(context.Background(), args) }},
 		{"release", func(a *App, args []string) int { return a.cmdRelease(context.Background(), args) }},
 		{"run-step", func(a *App, args []string) int { return a.cmdRun(context.Background(), args) }},

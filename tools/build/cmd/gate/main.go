@@ -24,7 +24,7 @@ var (
 func usage() string {
 	var sb strings.Builder
 	sb.WriteString("gate — measure one property of this tree.\n\n")
-	sb.WriteString("Usage:\n  gate <name> --envelope\n\n")
+	sb.WriteString("Usage:\n  gate <name> --envelope\n  gate --list\n\n")
 	sb.WriteString("Prints one JSON envelope on stdout and nothing else. Without --envelope it\n")
 	sb.WriteString("prints nothing and fails: a bare run that printed measurements and exited 0\n")
 	sb.WriteString("would be read as a pass by the first script that wrapped it, and a gate has\n")
@@ -36,6 +36,14 @@ func usage() string {
 	return sb.String()
 }
 
+// isListArg reports whether the argv asks for the gate list and nothing else.
+// Exactly one argument: a request with anything alongside it is ambiguous
+// between listing and measuring, and guessing would print a list to a caller
+// waiting for an envelope.
+func isListArg(args []string) bool {
+	return len(args) == 1 && (args[0] == "--list" || args[0] == "-list" || args[0] == "list")
+}
+
 // fail prints to stderr and exits non-zero, leaving stdout untouched. Every
 // path out of this program that is not a complete envelope comes through here.
 func fail(format string, args ...any) {
@@ -45,6 +53,26 @@ func fail(format string, args ...any) {
 
 func main() {
 	args := common.NormalizeArgs(os.Args[1:])
+
+	// --list answers "which gates does this project have?", one name per line
+	// on stdout, exit 0.
+	//
+	// It is the only mode besides a measurement that writes to stdout, and it
+	// does not break the envelope rule: a caller that asked for the list did
+	// not ask for a measurement, and a name-per-line stream cannot be mistaken
+	// for an envelope by anything that parses one.
+	//
+	// It exists because an orchestrator must not hold a second copy of what
+	// this project can measure. Asking the entry point is the only way to
+	// learn it that cannot go stale — and an entry point that is absent or
+	// cannot answer reports a project with no gates, which is the truth about
+	// this machine and exactly what `doctor` needs to say.
+	if isListArg(args) {
+		for _, n := range common.GateNames() {
+			fmt.Println(n)
+		}
+		return
+	}
 
 	// Help goes to STDERR and exits non-zero, where every other tool here
 	// prints it to stdout and exits 0. Stdout carries the envelope and nothing

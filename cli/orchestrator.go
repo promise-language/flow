@@ -692,7 +692,10 @@ func newStepCtx(ctx context.Context, app *App, claim flow.Claim, f *flow.Flow, l
 		timeout:   timeout,
 	}
 	sc.agent = &meteredAgent{
-		inner:   app.Agent,
+		// agentImpl, not App.Agent: the field refuses Run() so nothing but a
+		// step dispatch can spend (see outsideStepAgent). This is that
+		// dispatch.
+		inner:   app.agentImpl(),
 		orch:    app.Orchestrator,
 		claim:   claim,
 		stepCtx: sc,
