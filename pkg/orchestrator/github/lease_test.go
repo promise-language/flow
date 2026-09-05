@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/promise-language/flow"
 	"github.com/promise-language/flow/pkg/clistate"
@@ -290,9 +291,12 @@ func TestBackend_Claim_ZeroContenderRefusalSurvivesA404OnItsOwnRemoval(t *testin
 // the claimer about to win, whose own re-read would then show no contender and
 // refuse too, leaving an item both were racing for claimed by neither.
 func TestBackend_Claim_LosingToASmallerTokenRemovesItsOwnAndOnlyItsOwn(t *testing.T) {
-	// Below any random 128-bit token, so the rival wins the sort.
-	const rivalToken = "00000000000000000000000000000001"
-	const rivalLabel = "flow:claim:" + rivalToken
+	// A live rival minted moments earlier. The creation time leads the token,
+	// so an earlier attempt still in flight sorts below any token minted now
+	// and wins — and being seconds old, it is nowhere near abandoned, so the
+	// collection pass leaves it alone.
+	rivalToken := claimTokenMintedAt(nowUTC().Add(-3*time.Second), "0")
+	rivalLabel := "flow:claim:" + rivalToken
 
 	mock := newGHMock(t)
 	mock.issueLabels = []string{rivalLabel} // a second claimer, mid-race

@@ -163,7 +163,7 @@ All labels use a configurable prefix (default `flow:`). The label set is closed:
 |---|---|
 | `flow:seeded` | The item has been seeded with an artifact checklist. |
 | `flow:owner:<login>` | The item is claimed by `<login>`. |
-| `flow:claim:<hex>` | Transient claim-race token (see "Claim protocol" below). |
+| `flow:claim:<token>` | Transient claim-race token, self-limiting (see "Claim protocol" below). |
 | `flow:blocked` | The item is parked (generic block or deterministic refusal). |
 | `flow:needs-answer` | The item is parked waiting for a human answer. |
 | `flow:disabled` | The item is excluded from processing. Claim is refused. |
@@ -200,10 +200,18 @@ These are refreshed on every `LoadState` call. The PR must be on the branch `flo
 
 Claiming uses a label-based race to achieve exclusivity without server-side locking:
 
-1. **Post** a random claim label `flow:claim:<hex>` (128-bit random token).
-2. **Re-fetch** the issue's labels. If multiple `flow:claim:*` labels are present, the **lexicographically smallest** hex wins.
-3. **Losers** remove their own claim label and return `ErrClaimRefused`. A re-fetch showing **no** `flow:claim:*` label at all is also a loss: the read cannot distinguish a token another actor stripped from one it is too stale to show. Every attempt that returns without becoming the winner removes its own claim label first.
-4. **Winner**: adds self as assignee, posts `flow:owner:<login>`, removes the transient `flow:claim:<hex>` label.
+1. **Post** a claim label `flow:claim:<token>`. The token is exactly 24 lowercase hex digits: 8 of creation time (unix seconds) followed by 16 of randomness.
+2. **Re-fetch** the issue's labels.
+3. **Collect** every abandoned token: one older than **10 minutes**, or one carrying no readable creation time (a different width, a non-hex character, or the untimestamped format that predates this rule). Its label is removed and it takes no part in the race. A claimer never tests its own token, so a clock adjustment mid-attempt cannot make it collect itself.
+4. **Settle** among the tokens that remain: the **lexicographically smallest** wins. Every token is the same fixed width and lowercase, so the comparison is well-defined; because the creation time leads, lexicographic order is chronological order and the earliest attempt still in flight wins.
+5. **Losers** remove their own claim label and return `ErrClaimRefused`. A token that wins is a live attempt, so the refusal names the winner and how long ago it started.
+6. **Winner**: adds self as assignee, posts `flow:owner:<login>`, removes the transient `flow:claim:<token>` label.
+
+The token exists only *inside* one claim attempt — every exit from the attempt removes it. A process that dies between step 1 and its removal therefore strands a token that no process holds and nothing expires, and because the smallest token wins, that one token blocks the item for every later claimer, permanently. Collection in step 3 is what makes the token self-limiting, so recovery is an ordinary `claim` rather than an operator deleting the label through the backend.
+
+**The window is sized for the clocks, not for the attempt.** Age is read against the collecting claimer's own clock — there is no shared one — so ten minutes covers not the attempt itself, which is two API calls, but the disagreement between the clocks of two claimers racing from different machines. The rule holds while those agree to within a window: a claimer running more than a window behind the others mints tokens they read as already abandoned, and they settle the race without it.
+
+**Collection is not lease recovery.** It touches the claim-race token and nothing else: `flow:owner:<login>`, the assignee, and the worktree-local active claim are never removed on a timer. Those record ownership by a person, and recovering a claim held by something no longer running is a separate problem — governed by [resolution-orchestrated.md](resolution-orchestrated.md) under "Interruption", and requiring that the holder be observed to be gone rather than inferred from elapsed time. A settled race token has no holder to observe.
 
 Preflight checks before posting the claim label refuse items that are disabled, owned by another binary, or held by another user (unless `OverrideAlreadyHeld` is passed).
 
