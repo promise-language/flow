@@ -183,6 +183,31 @@ func TestUpToDate_MalformedSidecarEntry(t *testing.T) {
 	}
 }
 
+// Retiring a tool (issue #199 removed cmd/guard) leaves every existing clone
+// with a binary and a sidecar entry for a name that is no longer built. Neither
+// surplus may flip upToDate false: a false here rebuilds every tool on every
+// invocation, forever, in every clone that ever ran the old build.
+func TestUpToDate_SurplusBinaryAndSidecarEntry(t *testing.T) {
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	os.MkdirAll(binDir, 0o755)
+
+	verifyHash := writeBin(t, binDir, "verify", "verify-binary-v1")
+	// The retired tool: still on disk, still recorded, no longer expected.
+	retiredHash := writeBin(t, binDir, "guard", "retired-binary")
+
+	hashFile := filepath.Join(binDir, ".tools.hash")
+	sourceHash := "abc123"
+	writeSidecar(t, hashFile, sourceHash, map[string]string{
+		"verify": verifyHash,
+		"guard":  retiredHash,
+	})
+
+	if !upToDate(hashFile, sourceHash, binDir, []string{"verify"}) {
+		t.Error("expected up-to-date: a retired tool's leftover binary and sidecar entry must be ignored")
+	}
+}
+
 // The exact deadlock from issue #93: sidecar written correctly at build time,
 // then the binary is replaced (copied from another clone, restored from cache,
 // etc.). The old upToDate only checked existence and would report "up to date".
