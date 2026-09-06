@@ -84,6 +84,37 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 				}
 			}
 		}
+		// Idempotent for the holder (docs/resolution.md § Claiming, docs/cli.md
+		// § Claiming): re-claiming an item this arena already holds succeeds and
+		// CHANGES NOTHING — so the lease is returned as it stands, with no token
+		// minted, no label written and no state comment touched. Returning here is
+		// also what keeps the worktree preconditions below on the FRESH-claim path
+		// they belong to: a holder mid-work sits on the item's own branch by
+		// design, and applying "HEAD must be on the base branch" to a re-claim
+		// makes the documented claim-then-resolve sequence impossible.
+		//
+		// LookupActiveClaim is the single source for "what does this arena hold?"
+		// — requireOwnClaim (artifact.go) is its other consumer, and turns the
+		// same state into its two typed refusals instead of a lease.
+		//
+		// Position matters: after the disabled/other-binary preflights and after
+		// the two already-held loops, so an item another account took over still
+		// refuses typed rather than trusting our now-stale lease file; and inside
+		// the !OverrideAlreadyHeld block, so `claim --force` still re-asserts
+		// ownership rather than silently no-op'ing on that stale file.
+		active, err := b.LookupActiveClaim(ctx)
+		if err != nil {
+			return flow.Claim{}, fmt.Errorf("github.Claim: read active claim: %w", err)
+		}
+		if active != nil {
+			activeNum, err := b.issueNumber(active.ItemRef)
+			if err != nil {
+				return flow.Claim{}, err
+			}
+			if activeNum == issueNum {
+				return *active, nil
+			}
+		}
 	}
 
 	// Worktree preconditions — arena-scoped, not item-scoped.
