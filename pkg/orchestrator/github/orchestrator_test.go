@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -2060,6 +2061,197 @@ func TestBackend_Claim_CleanTreeSucceeds(t *testing.T) {
 	}
 	if claim.Account != "alice" {
 		t.Errorf("claim.Account = %q, want alice", claim.Account)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Claim is idempotent for its holder (#201)
+//
+// The worktree preconditions above are FRESH-claim preconditions. A holder
+// mid-work sits on the item's own branch with the work in the tree by design,
+// so applying them to a re-claim makes the documented `claim <id>` →
+// `resolve <id>` sequence impossible. These cases pin the short-circuit and its
+// three boundaries: a fresh claim, another item, and another holder.
+// ---------------------------------------------------------------------------
+
+// sameLease reports whether two claims are the SAME standing lease — every
+// field a caller acts on, so "changes nothing" cannot be satisfied by a
+// re-minted claim that merely looks alike.
+//
+// The raw JSON members are compared by content: a lease returned from
+// .flow/active.json has been through the file's indented encoding, so equal
+// leases differ in byte layout.
+func sameLease(a, b flow.Claim) bool {
+	return a.OrchestratorName == b.OrchestratorName &&
+		a.Arena == b.Arena &&
+		a.Account == b.Account &&
+		a.ClaimedAt.Equal(b.ClaimedAt) &&
+		sameJSON(a.Token, b.Token) &&
+		a.ItemRef.OrchestratorName == b.ItemRef.OrchestratorName &&
+		sameJSON(a.ItemRef.Ref, b.ItemRef.Ref)
+}
+
+func sameJSON(a, b json.RawMessage) bool {
+	var ca, cb bytes.Buffer
+	if json.Compact(&ca, a) != nil || json.Compact(&cb, b) != nil {
+		return false
+	}
+	return ca.String() == cb.String()
+}
+
+func TestBackend_Claim_HeldReclaimOffBaseChangesNothing(t *testing.T) {
+	b, mock, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
+	ctx := t.Context()
+
+	first, err := b.Claim(ctx, b.refFromIssue(42), nil)
+	if err != nil {
+		t.Fatalf("first Claim: %v", err)
+	}
+	labelsAfterFirst := mock.labelNames()
+
+	// Now mid-work: HEAD is on the item's own branch and the tree carries the
+	// change. Both would refuse a fresh claim.
+	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+		return []byte("flow/issue-42\n"), nil
+	}
+	rec.handlers["status --porcelain --untracked-files=normal"] = func([]string) ([]byte, error) {
+		return []byte("M cli/cmd_resolve.go\n"), nil
+	}
+	rec.mu.Lock()
+	rec.calls = nil
+	rec.mu.Unlock()
+	mock.mu.Lock()
+	mock.mutations = nil
+	mock.mu.Unlock()
+
+	second, err := b.Claim(ctx, b.refFromIssue(42), nil)
+	if err != nil {
+		t.Fatalf("re-claiming an item this arena holds must succeed: %v", err)
+	}
+	if !sameLease(first, second) {
+		t.Errorf("re-claim returned %+v, want the standing lease %+v", second, first)
+	}
+
+	// "Changes nothing": no worktree probe, no token minted, no label written.
+	if rec.called("fetch origin") {
+		t.Error("a held re-claim ran the fresh-claim worktree preconditions")
+	}
+	mock.mu.Lock()
+	mutations := append([]string(nil), mock.mutations...)
+	mock.mu.Unlock()
+	if len(mutations) != 0 {
+		t.Errorf("a held re-claim wrote to GitHub: %v", mutations)
+	}
+	after := mock.labelNames()
+	for _, l := range after {
+		if strings.HasPrefix(l, "flow:claim:") {
+			t.Errorf("a held re-claim minted a claim token; labels = %v", after)
+		}
+	}
+	if !slices.Equal(after, labelsAfterFirst) {
+		t.Errorf("labels = %v, want them unchanged at %v", after, labelsAfterFirst)
+	}
+}
+
+// The short-circuit is item-scoped: a lease on a DIFFERENT item is not a
+// re-claim, so the fresh-claim preconditions still apply.
+func TestBackend_Claim_LeaseOnOtherItemIsNotAReclaim(t *testing.T) {
+	b, mock, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
+	mock.mu.Lock()
+	mock.otherIssues = []int{43} // so #43 is a readable issue, not a 404
+	mock.mu.Unlock()
+	ctx := t.Context()
+
+	if _, err := b.Claim(ctx, b.refFromIssue(42), nil); err != nil {
+		t.Fatalf("first Claim: %v", err)
+	}
+	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+		return []byte("flow/issue-42\n"), nil
+	}
+
+	_, err := b.Claim(ctx, b.refFromIssue(43), nil)
+	if err == nil {
+		t.Fatal("claiming a second item off-base must still refuse")
+	}
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+	}
+	if refused.Code != "not-on-base" {
+		t.Errorf("Code = %q, want not-on-base", refused.Code)
+	}
+}
+
+// Another account taking the item over makes our lease file stale, and the
+// server is what decides: the typed already-held refusal must still fire
+// rather than the short-circuit handing back a lease we no longer hold.
+func TestBackend_Claim_HeldReclaimStillRefusesWhenAnotherAccountTookOver(t *testing.T) {
+	b, mock, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
+	ctx := t.Context()
+
+	if _, err := b.Claim(ctx, b.refFromIssue(42), nil); err != nil {
+		t.Fatalf("first Claim: %v", err)
+	}
+	mock.mu.Lock()
+	mock.issueLabels = []string{"flow:owner:bob"}
+	mock.mu.Unlock()
+	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+		return []byte("flow/issue-42\n"), nil
+	}
+
+	_, err := b.Claim(ctx, b.refFromIssue(42), nil)
+	if err == nil {
+		t.Fatal("a re-claim of an item another account took over must refuse")
+	}
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+	}
+	if refused.Code != "already-held" {
+		t.Errorf("Code = %q, want already-held", refused.Code)
+	}
+	if !refused.ItemScoped {
+		t.Error("ItemScoped = false, want true (the item is held, not the arena)")
+	}
+	if refused.Override != "force" {
+		t.Errorf("Override = %q, want force", refused.Override)
+	}
+}
+
+// --force is a deliberate takeover, so it must reach the race and rewrite the
+// owner label rather than being swallowed by the holder short-circuit.
+func TestBackend_Claim_ForceTakesOverDespiteOwnStaleLease(t *testing.T) {
+	b, mock, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
+	ctx := t.Context()
+
+	if _, err := b.Claim(ctx, b.refFromIssue(42), nil); err != nil {
+		t.Fatalf("first Claim: %v", err)
+	}
+	mock.mu.Lock()
+	mock.issueLabels = []string{"flow:owner:bob"}
+	mock.mu.Unlock()
+	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+		return []byte("flow/issue-42\n"), nil
+	}
+
+	overrides := []flow.ClaimOverride{
+		flow.OverrideDirtyTree,
+		flow.OverrideAlreadyHeld,
+		flow.OverrideStaleBase,
+	}
+	claim, err := b.Claim(ctx, b.refFromIssue(42), overrides)
+	if err != nil {
+		t.Fatalf("Claim with all overrides should take the item over: %v", err)
+	}
+	if claim.Account != "alice" {
+		t.Errorf("claim.Account = %q, want alice", claim.Account)
+	}
+	if !contains(mock.labelNames(), "flow:owner:alice") {
+		t.Errorf("owner label not rewritten; labels = %v", mock.labelNames())
 	}
 }
 

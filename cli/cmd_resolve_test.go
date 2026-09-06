@@ -684,6 +684,67 @@ func TestCmdResolve_ExplicitIdStillClaimsWithoutListEligible(t *testing.T) {
 	}
 }
 
+// claimCountingBackend counts Claim calls on top of resolvingFailingListBackend
+// — so a test gets both halves of the id route's contract at once: every
+// `resolve <id>` claims, and none of them falls through to auto-selection.
+type claimCountingBackend struct {
+	*resolvingFailingListBackend
+	claims int
+}
+
+func (b *claimCountingBackend) Claim(ctx context.Context, ref flow.ItemRef, overrides []flow.ClaimOverride) (flow.Claim, error) {
+	b.claims++
+	return b.resolvingFailingListBackend.Claim(ctx, ref, overrides)
+}
+
+// The documented sequence, end to end (#201): `claim <id>` then `resolve <id>`
+// then `resolve <id>` again mid-flight. The id route claims first whether or not
+// the item is already held — claims-first (docs/cli.md § Resolving) and
+// idempotent for the holder (docs/cli.md § Claiming) are one route, not two.
+//
+// This pins the CLI's SELECTION contract only: the fake orchestrator has no
+// worktree preconditions (pkg/orchestrator/fake/fake.go Claim), so the refusal
+// the defect actually produced — "not on main" from a held re-claim — is pinned
+// by TestBackend_Claim_HeldReclaimOffBaseChangesNothing in the github package.
+func TestCmdResolve_ByIdClaimsThenResumesTheHeldClaim(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be := &claimCountingBackend{resolvingFailingListBackend: &resolvingFailingListBackend{
+		Orchestrator: inner,
+		listErr:      errors.New("auto-selection must never be consulted when an id was named"),
+	}}
+	// A step that returns without resolving its artifact parks the run, so the
+	// first `resolve` leaves the item mid-flight and still held — which is the
+	// state the second `resolve <id>` has to be able to resume.
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error { return nil })
+
+	if code := app.cmdClaim(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("claim 1: exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("first resolve 1: exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("second resolve 1 (held, mid-flight): exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+
+	if be.claims != 3 {
+		t.Errorf("Claim called %d times, want 3 (the claim plus one per `resolve <id>`)", be.claims)
+	}
+	if strings.Contains(errBuf.String(), "auto-selecting") {
+		t.Errorf("naming an item must never fall through to auto-selection; got %q", errBuf.String())
+	}
+
+	ref := flow.ItemRef{OrchestratorName: "fake", Ref: json.RawMessage(`"1"`)}
+	info, err := inner.LookupClaim(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("LookupClaim: %v", err)
+	}
+	if info == nil || info.Account != be.Account() {
+		t.Errorf("LookupClaim = %+v, want the item still held by this arena's account %q", info, be.Account())
+	}
+}
+
 // failingLoadStateBackend forces Load to error. Both the progress peek
 // and RunOne read state, so this drives the loop's RunOne-error branch — the
 // one exit that leaves the loop without an InvocationResult to report.
