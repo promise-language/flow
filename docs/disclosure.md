@@ -47,7 +47,7 @@ Commit messages, the diff, and labels are the ones most easily forgotten, becaus
 
 The subject is the distinction, and the rest follows from it — see `docs/resolution.md`. Prevention is not the test: a gate that blocks a push prevents something too, and is still a gate, because its subject persists and its measurement is judged later.
 
-`bin/guard` is the precedent, and the name comes from it: it sits on the critical path of every tool call, receives the action proposed, and answers whether it proceeds. It is not a measuring gate and does not pretend to be one.
+`bin/tool-guard` is the precedent, and the name comes from it: it sits on the critical path of every tool call, receives the action proposed, and answers whether it proceeds. It is not a measuring gate and does not pretend to be one.
 
 **A guard is its own judge, and that is not the contradiction it looks like.** Judging is kept out of a gate because a measurement is stored and re-judged later, so the comparison must be recomputable by someone who was not there, against thresholds held elsewhere. A guard's answer is consumed the moment it is given, is never stored as a fact about anything, and is never re-judged. There is no second judgement to keep honest.
 
