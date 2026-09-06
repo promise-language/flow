@@ -188,19 +188,30 @@ func (app *App) checkAgent(ctx context.Context) check {
 // the declaration is a machine-level fact the orchestrator has already
 // established — and the verify command may modify the tree, which doctor must
 // not do on a machine that is mid-item.
+//
+// Which required declarations are absent — and which declared names this SDK
+// cannot address — is asked through missingGates / missingCommands and
+// invalidGates / invalidCommands, the same computations the boundary refusal in
+// requireRunnable uses. Only the message differs, and it differs on purpose:
+// this is a line in a report a person is reading top to bottom, that is the
+// reason a command they asked for did not run.
+//
+// Both conditions are asked here BECAUSE the boundary refuses on them. That
+// refusal closes on "run doctor for every environment check", and a row that
+// reported a name it cannot address as ok would send its reader to a report
+// where everything is green while `resolve` keeps refusing.
 func (app *App) checkCommands() check {
 	const name = "commands"
 	declared := app.Orchestrator.SupportedCommands()
-	var missing []string
-	for _, want := range flow.RequiredCommands() {
-		if !flow.HasCommand(declared, want) {
-			missing = append(missing, string(want))
-		}
-	}
-	if len(missing) > 0 {
+	if missing := missingCommands(declared); len(missing) > 0 {
 		return check{name: name, status: checkFail, detail: fmt.Sprintf(
-			"%s does not declare the required command(s): %s",
-			app.Orchestrator.Name(), strings.Join(missing, ", "))}
+			"%s does not declare the required command(s): %s — %s",
+			app.Orchestrator.Name(), joinNames(missing), repairUnbuiltTools)}
+	}
+	if bad := invalidCommands(declared); len(bad) > 0 {
+		return check{name: name, status: checkFail, detail: fmt.Sprintf(
+			"%s declares command(s) outside the closed set: %s — %s",
+			app.Orchestrator.Name(), quoteNames(bad), repairUnknownCommand())}
 	}
 	names := make([]string, 0, len(declared))
 	for _, c := range declared {
@@ -212,16 +223,15 @@ func (app *App) checkCommands() check {
 func (app *App) checkGates() check {
 	const name = "gates"
 	declared := app.Orchestrator.SupportedGates()
-	var missing []string
-	for _, want := range flow.RequiredGates() {
-		if !flow.HasGate(declared, want) {
-			missing = append(missing, string(want))
-		}
-	}
-	if len(missing) > 0 {
+	if missing := missingGates(declared); len(missing) > 0 {
 		return check{name: name, status: checkFail, detail: fmt.Sprintf(
-			"%s does not declare the required gate(s): %s",
-			app.Orchestrator.Name(), strings.Join(missing, ", "))}
+			"%s does not declare the required gate(s): %s — %s",
+			app.Orchestrator.Name(), joinNames(missing), repairUnbuiltTools)}
+	}
+	if bad := invalidGates(declared); len(bad) > 0 {
+		return check{name: name, status: checkFail, detail: fmt.Sprintf(
+			"%s declares gate(s) that are not valid gate names: %s — %s",
+			app.Orchestrator.Name(), quoteNames(bad), repairUnknownGate())}
 	}
 	names := make([]string, 0, len(declared))
 	for _, g := range declared {

@@ -27,9 +27,10 @@ import (
 // project's layout, and nothing goes stale.
 //
 // Both are resolved ONCE per orchestrator (the fields on the struct). A
-// binary's answer to "what can I run" must not change under it mid-run —
-// startup validation and `doctor` would otherwise disagree about the same
-// machine — and each answer costs a directory read or a process spawn.
+// binary's answer to "what can I run" must not change under it mid-run — the
+// refusal a gate-running command meets and `doctor` would otherwise disagree
+// about the same machine — and each answer costs a directory read or a process
+// spawn.
 
 // commandDir is where this project keeps its commands: one main per command,
 // which is what makes the directory listing the answer. bin/ is not that list —
@@ -84,7 +85,7 @@ func discoverCommands(root string) []flow.CommandDef {
 // contract requires an orchestrator to have them, and this one reports what it
 // found rather than asserting what should be there. When they do not come back,
 // they are simply absent from the list, which is what `doctor` reports and what
-// startup validation refuses to proceed on.
+// `claim`, `run-step` and `resolve` refuse to proceed on.
 func (b *Orchestrator) SupportedGates() []flow.GateDef {
 	b.gatesOnce.Do(func() { b.gatesList = discoverGates(b.cfg.WorktreeDir) })
 	return b.gatesList
@@ -100,8 +101,10 @@ func discoverGates(root string) []flow.GateDef {
 	out, err := cmd.Output()
 	if err != nil {
 		// An absent, unexecutable or silent entry point is a machine with no
-		// gates. Every caller reads that correctly: startup refuses, `doctor`
-		// reports it, and nothing dispatches a step that would have failed at
+		// gates — which is what a checkout whose tools are not yet built looks
+		// like. Every caller reads that correctly: the commands that would run
+		// a gate refuse, `doctor` reports it, the read-only commands are
+		// unaffected, and nothing dispatches a step that would have failed at
 		// its first measurement.
 		return nil
 	}
