@@ -279,7 +279,9 @@ Startup validation is exhaustive before any work begins. A misconfiguration is n
 
 Startup validation covers what can be checked from configuration alone. What requires touching the environment is `doctor`'s job.
 
-**Validation is scoped to the invoked command.** A command is refused only for configuration it needs. Gate declarations are irrelevant to `list`, `status`, `answer` and `release`, and a binary starts for them on a checkout whose project tools have not been built — that is the state between the two halves of bring-up, not a misconfiguration. `claim`, `run-step` and `resolve` meet the gate check at their own boundary: each refuses when the orchestrator declares no `integration` or `fit` gate, and the refusal names what to run — the project's build, and `doctor` for the whole environment picture. That refusal is an environment condition, so it exits **1**, not 2.
+**Validation is scoped to the invoked command.** A command is refused only for configuration it needs. Gate declarations are irrelevant to `list`, `status`, `answer` and `release`, and a binary starts for them on a checkout whose project tools have not been built — that is the state between the two halves of bring-up, not a misconfiguration. `claim`, `run-step` and `resolve` meet the check at their own boundary: each refuses when the orchestrator cannot run what a step will ask for — a missing `integration` or `fit` gate, a missing `verify` command, or a declared name outside those closed sets — and the refusal names what to run: the project's build, and `doctor` for the whole environment picture. That refusal is an environment condition, so it exits **1**, not 2.
+
+**Every condition the boundary refuses on is one `doctor` reports.** The refusal sends its reader there for the rest of the picture, so a condition visible to one and not the other leaves that reader with a command that will not run and a report saying everything is fine.
 
 ## Doctor
 

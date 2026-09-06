@@ -465,6 +465,74 @@ func TestCmdDoctor_FailsOnACloneWhoseToolsAreNotBuilt(t *testing.T) {
 	}
 }
 
+// The boundary refusal closes on "run doctor for every environment check", so
+// every condition it refuses on has to be one doctor can see. A declared name
+// this SDK cannot address is such a condition — `resolve` refuses on it — and
+// before this was checked here the report showed that row green while the
+// command kept refusing, which sends its reader nowhere.
+//
+// Both halves are asserted in one test on purpose: what is required is that
+// they agree, and two tests that each pass alone would not say so.
+func TestCmdDoctor_SeesTheNamesTheBoundaryRefusesOn(t *testing.T) {
+	required := []flow.GateDef{flow.Gate(flow.GateIntegration, true), flow.Gate(flow.GateFit, true)}
+	for _, tc := range []struct {
+		row    string // the doctor row that must fail
+		be     *declaringOrchestrator
+		want   string // how the message names the offender
+		repair string // one member of the closed set the line must enumerate
+	}{
+		{
+			row: "gates",
+			be: &declaringOrchestrator{
+				Orchestrator: fake.New(),
+				// The empty name is why the message quotes: unquoted it is
+				// invisible, and the reader is told a gate is wrong without
+				// being told which.
+				gates:    append(append([]flow.GateDef{}, required...), flow.Gate("", false)),
+				commands: []flow.CommandDef{flow.Command(flow.CommandVerify)},
+			},
+			want:   `""`,
+			repair: string(flow.GateTested),
+		},
+		{
+			row: "commands",
+			be: &declaringOrchestrator{
+				Orchestrator: fake.New(),
+				gates:        required,
+				commands:     []flow.CommandDef{flow.Command(flow.CommandVerify), flow.Command("deploy")},
+			},
+			want:   `"deploy"`,
+			repair: string(flow.CommandCleanup),
+		},
+	} {
+		t.Run(tc.row, func(t *testing.T) {
+			boundary := declaringApp(tc.be)
+			err := boundary.requireRunnable("resolve")
+			if err == nil {
+				t.Fatalf("resolve was allowed to proceed against a %s declaration this SDK cannot address", tc.row)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("refusal = %q, want it to name %s", err, tc.want)
+			}
+
+			app, out := doctorApp(t, tc.be, &stubAgent{name: "stub"})
+			if code := app.cmdDoctor(context.Background(), nil, nil); code != 1 {
+				t.Fatalf("exit code = %d, want 1; output:\n%s", code, out.String())
+			}
+			line := doctorLine(t, out.String(), tc.row)
+			if !strings.HasPrefix(line, glyphFail) || !strings.Contains(line, tc.want) {
+				t.Errorf("%s line should fail naming %s; got %q", tc.row, tc.want, line)
+			}
+			// And it names the repair, which here is not a build — the machine
+			// is not what is wrong. The vocabulary is closed, so the repair is
+			// the set that may be declared, enumerated on the line.
+			if !strings.Contains(line, tc.repair) {
+				t.Errorf("%s line should name the repair (%q); got %q", tc.row, tc.repair, line)
+			}
+		})
+	}
+}
+
 // What it can run is reported by name, not as a bare "ok": an operator asking
 // why a run refused needs to see the same list the refusal saw.
 func TestCmdDoctor_ReportsWhatTheOrchestratorCanRun(t *testing.T) {

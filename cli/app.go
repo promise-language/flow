@@ -390,6 +390,10 @@ const repairUnbuiltTools = "an orchestrator reads what it can run off the machin
 // (docs/cli.md § Exit codes reserves 2 for one that was not); this is a
 // condition a human must clear.
 //
+// All four are conditions `doctor` reports, which is what the refusal's closing
+// pointer promises: the reader sent there to see the rest of the picture must
+// find this row in it, not a report where everything is green.
+//
 // Besides this method, the only callers that ask an orchestrator what it can
 // run are `doctor` — whose report is the question — and validate()'s App.Gates
 // check, which asks solely when a flow named a gate of its own.
@@ -408,19 +412,17 @@ func (app *App) requireRunnable(cmd string) error {
 				app.Orchestrator.Name(), joinNames(missing)),
 			repairUnbuiltTools)
 	}
-	for _, gd := range gates {
-		if !gd.Name.Valid() {
-			return app.refuseRunnable(cmd, "the orchestrator declares a gate this SDK does not know", "gates",
-				fmt.Sprintf("orchestrator %q declares gate %q, which is not a valid gate name",
-					app.Orchestrator.Name(), gd.Name))
-		}
+	if bad := invalidGates(gates); len(bad) > 0 {
+		return app.refuseRunnable(cmd, "the orchestrator declares a gate this SDK does not know", "gates",
+			fmt.Sprintf("orchestrator %q declares gate(s) that are not valid gate names: %s",
+				app.Orchestrator.Name(), quoteNames(bad)),
+			repairUnknownGate())
 	}
-	for _, cd := range commands {
-		if !cd.Name.Valid() {
-			return app.refuseRunnable(cmd, "the orchestrator declares a command outside the closed set", "commands",
-				fmt.Sprintf("orchestrator %q declares command %q, which is not one of the three command names",
-					app.Orchestrator.Name(), cd.Name))
-		}
+	if bad := invalidCommands(commands); len(bad) > 0 {
+		return app.refuseRunnable(cmd, "the orchestrator declares a command outside the closed set", "commands",
+			fmt.Sprintf("orchestrator %q declares command(s) outside the closed set: %s",
+				app.Orchestrator.Name(), quoteNames(bad)),
+			repairUnknownCommand())
 	}
 	return nil
 }
@@ -460,11 +462,65 @@ func missingCommands(declared []flow.CommandDef) []flow.CommandName {
 	return missing
 }
 
-// joinNames lists name-like values for a message.
+// invalidGates and invalidCommands report which DECLARED names this SDK cannot
+// address. Shared with `doctor` for the same reason the missing-* pair is: the
+// condition refuses `resolve`, so the report that answers "is this environment
+// fit to be given an item" has to be able to see it. A refusal pointing at a
+// report that shows the same row green is a refusal with nowhere to send its
+// reader.
+//
+// Every offender is collected rather than the first one returned: an
+// orchestrator implementor who spelled two names wrong should learn both in one
+// pass, which is the rule `doctor` is already under.
+func invalidGates(declared []flow.GateDef) []flow.GateName {
+	var bad []flow.GateName
+	for _, gd := range declared {
+		if !gd.Name.Valid() {
+			bad = append(bad, gd.Name)
+		}
+	}
+	return bad
+}
+
+func invalidCommands(declared []flow.CommandDef) []flow.CommandName {
+	var bad []flow.CommandName
+	for _, cd := range declared {
+		if !cd.Name.Valid() {
+			bad = append(bad, cd.Name)
+		}
+	}
+	return bad
+}
+
+// repairUnknownGate and repairUnknownCommand are what an unaddressable name
+// tells the reader. Nothing to build here — the machine is not what is wrong —
+// so the repair is the vocabulary itself, enumerated from the one copy of it
+// rather than restated: a hand-written list in a message is what says "checked"
+// after a concept is added.
+func repairUnknownGate() string {
+	return "the gate concept set is closed — declare one of: " + joinNames(flow.AllGateConcepts()) +
+		` (a name may carry an instance, as in "tested:wasm")`
+}
+
+func repairUnknownCommand() string {
+	return "the command set is closed — declare one of: " + joinNames(flow.AllCommandNames())
+}
+
+// joinNames lists name-like values for a message; quoteNames does the same with
+// each name quoted, which is what a message naming a name the SDK REJECTED
+// needs — the empty string is one of them, and it has to be visible.
 func joinNames[T ~string](names []T) string {
 	s := make([]string, 0, len(names))
 	for _, n := range names {
 		s = append(s, string(n))
+	}
+	return strings.Join(s, ", ")
+}
+
+func quoteNames[T ~string](names []T) string {
+	s := make([]string, 0, len(names))
+	for _, n := range names {
+		s = append(s, fmt.Sprintf("%q", string(n)))
 	}
 	return strings.Join(s, ", ")
 }

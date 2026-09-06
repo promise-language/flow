@@ -113,8 +113,19 @@ func TestApp_RequireRunnable_RejectsAnInvalidGateName(t *testing.T) {
 	)
 
 	app := declaringApp(be)
-	if err := app.requireRunnable("resolve"); err == nil {
+	err := app.requireRunnable("resolve")
+	if err == nil {
 		t.Fatal("requireRunnable accepted an orchestrator declaring the empty gate name")
+	}
+	// The offender is quoted, or the empty name is not on the line at all and
+	// the reader is told a gate is wrong without being told which.
+	if !strings.Contains(err.Error(), `""`) {
+		t.Errorf("error = %q, want it to name the offending gate as %q", err, `""`)
+	}
+	// The repair is the closed vocabulary, not a build: no amount of building
+	// makes an unknown name known.
+	if !strings.Contains(err.Error(), string(flow.GateTested)) {
+		t.Errorf("error = %q, want it to enumerate what may be declared", err)
 	}
 }
 

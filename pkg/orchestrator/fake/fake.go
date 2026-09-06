@@ -325,8 +325,9 @@ func (b *Orchestrator) SupportedArtifacts() []flow.ArtifactDef {
 }
 
 // SetSupportedGates overrides the declared gate set. Use it to exercise
-// cli.App's startup refusal of a flow naming a gate nothing can run, and of an
-// orchestrator that fails to declare `integration` or `fit`.
+// cli.App's startup refusal of a flow naming a gate nothing can run, and the
+// refusal a gate-running command meets when the orchestrator declares no
+// `integration` or `fit`.
 func (b *Orchestrator) SetSupportedGates(defs ...flow.GateDef) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
