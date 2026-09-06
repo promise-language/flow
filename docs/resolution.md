@@ -32,6 +32,25 @@ A claim carries the credential for every subsequent write. Operations that modif
 
 Claims are released explicitly, or by finalizing. A claim is never released as a side effect of a step failing, a step parking, or a process exiting — work in progress keeps its claim so it can be resumed.
 
+### A claim binds worktrees, not processes
+
+A claim says which item a worktree holds. It does not say whether anything is running there, and it cannot: a worktree sitting idle under a claim and one mid-resolution carry the same claim. So two runs started in one worktree — one by an unattended driver, one typed by a person who walked into the same checkout — satisfy the binding above exactly, one worktree and one item, while doing what that binding exists to prevent. They advance the same lifecycle twice, interleave writes to the same work-in-progress records, spend a budget that is accounted once, and drive git against one tree from two processes. None of it is detected as it happens; it surfaces later as a corrupted record or a wedged branch, at a moment that has nothing to do with the collision.
+
+> **At most one process advances an item in a worktree at a time.**
+
+**Advancing is the subject, not the command.** Whatever drives a step — a whole resolution or a single step — is one advancing process. Reading is not one, and neither is an operator writing to the item from somewhere else: what is being separated is processes changing one tree, not everything that touches the item.
+
+**It is a second exclusion, not a stronger claim.** A claim is asserted where every worktree can see it, because what it separates is worktrees. This one is asserted in the worktree, because what it separates is processes inside it — and no assertion made elsewhere can see them.
+
+An advancing process therefore **registers its run in the worktree** before its first step, and gives the registration up when the run ends. Four properties are what make the registration worth having:
+
+- **Acquisition is atomic.** It either succeeds or reports the run already holding the worktree. Reading first and writing after is not an implementation of this: two attempts arriving together both read an unheld worktree, and both proceed.
+- **It names its holder** — the machine, the process, and the moment that process started. The start time is not decoration. A process identifier is reused, so an identity without it says only that *something* holds this, which after a reboot is indistinguishable from saying nothing at all.
+- **A holder that is gone is observed to be gone.** A crash must not wedge the worktree, and a long step must not be mistaken for a crash — so a registration is released when its holder is found not to be running, and never when a timer expires. That is what this system does with everything it holds, for the same reason each time: elapsed time is evidence about the clock, not about the holder.
+- **It is readable without acquiring it.** Asking what is running in a worktree is not an attempt to run something there. A caller that had to contend for the registration in order to read it could not ask the question at all, and would be left inferring the answer from the state of the tree — which is the guess the registration exists to replace.
+
+A process finding the worktree held **does not wait and does not take it over.** It stops, naming the holder. There is nothing an override could unlock: a holder no longer running is already released by the rule above without anyone asking, and a holder still running is part-way through changing the very state a second run would start from.
+
 ## Seeding
 
 Seeding records the artifact set and budget caps an item will be resolved against. It happens **once**. A flow definition that changes later does not retroactively re-seed items already in flight, because a step's budget and required-artifact set must not move underneath a run.

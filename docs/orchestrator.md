@@ -77,6 +77,8 @@ These cross the boundary too and need defining, but they classify rather than na
 | `ArtifactType` | An artifact's shape | The type half of the `(ArtifactId, ArtifactType)` pair `SupportedArtifacts()` closes over. Validated at startup by id **and** type. |
 | `ItemScope` | How far up the listing ladder to report | Closed set of six, named for the levels themselves: `all`, `open`, `processable`, `workable`, `free`, `auto`. |
 | `Availability` | Where one item sits on that ladder | Closed set of six: `auto`, `available`, `held`, `blocked`, `unhandled`, `closed`. Each is exactly the boundary between two adjacent scopes. |
+| `Priority` | Where the item sits in the order work is taken in, as whatever manages the backend ranks it | Closed set of four, highest first: `critical`, `high`, `medium`, `low`. It ranks the **work**, and it is written by machines — a triage automation, a flow, whatever else maintains the backend. **`medium` is what an item has when nothing has said otherwise**, so an item nobody assessed does not sort below one a machine deliberately marked `low`: silence is not an assessment. See "Priority and urgency". |
+| `Urgency` | What an operator wants done about the item now | Closed set of three: `next`, `default`, `deferred`. **Not a fifth priority level** — it is an instruction that outranks the assessment, which is why it is a second field and not two more values in the first. `next` starts the item ahead of every priority; `deferred` keeps it out of unattended work entirely; `default` is what an item has when no operator has said otherwise. See "Priority and urgency". |
 | `ParkKind` | Why a step stopped without completing | Closed set of eight: `blocked`, `question`, `budget-exhausted`, `step-did-not-resolve`, `refused`, `infra-transient`, `remote-unreachable`, `write-contract`. The kind decides what clears the park: a grant clears **only** a budget-exhausted one, and only when it raises the offending axis above consumption. Every other kind is cleared by whatever caused it ending, or by an operator. |
 | `BudgetAxis` | Which budget ran out | Names the axis a `budget-exhausted` park stopped on, and the axis a `Grant` must raise above consumption to clear it. |
 | `ClaimOverride` | A safety check the operator chose to bypass | Closed set of four: `dirty-tree`, `already-held`, `unadmitted`, `stale-base`. **flow's own vocabulary** — these are CLI flag names, not the orchestrator's, and an orchestrator receives them rather than defining them. |
@@ -100,7 +102,9 @@ Returned by `List` and `Get`.
 | `Availability` | Where the item sits on the listing ladder, **for the asking `BinaryName`**. |
 | `Holder` | The `(HostId, ArenaId)` of the arena holding it and the `AccountId` credited, or empty when unclaimed. |
 | `Tags` | Every `TagId` the item carries — the operator's and the orchestrator's own markers alike, never filtered to what a flow recognises. |
-| `BlockedBy` | Every blocker declared on the item: each one's `ItemRef` **and its `ItemStatus`**, so a caller can tell which are still blocking from which have finished. See "Dependencies". |
+| `Priority` | Its `Priority`. Item-level and the same whoever asks. |
+| `Urgency` | Its `Urgency`. Item-level and the same whoever asks. |
+| `BlockedBy` | Every blocker declared on the item: each one's `ItemRef` **and its `ItemStatus`**, so a caller can tell which are still blocking from which have gone `terminal`. See "Dependencies". |
 | `Blocked` | Whether the item is blocked. Item-level and the same whoever asks — unlike `Availability`, which can report `closed` or `unhandled` instead. |
 | `BlockKind` | Who must act and on what — `waits-on-items`, `waits-on-condition` or `waits-on-person`. |
 | `BlockReason` | One line **for a person**, and nothing else. Nothing parses it, branches on it, or infers a state from it — not from its wording and not from whether it is empty. Every machine-readable fact about a block is a field beside it. |
@@ -118,6 +122,7 @@ Returned by `Load`. Nothing in it is a state value: an item's states are `ItemSt
 | `Status` | Its `ItemStatus`. |
 | `Holder` | The arena holding it and the `AccountId` credited, or empty when unclaimed. |
 | `Tags` | Every `TagId` it carries. |
+| `Priority`, `Urgency` | Its priority and urgency. Same meaning as on `ItemInfo`. |
 | `BlockedBy`, `BlockReason` | Its blockers, each with its own `ItemStatus`, and why it is blocked. Same meaning as on `ItemInfo`. |
 | `Finalized` | Whether the **flow** is done with it. `Load` **must** report this truthfully; `Finalize` is the only thing that sets it. |
 | `Manual` | Whether an operator has taken hand control. `Load` **must** report this truthfully. |
@@ -198,9 +203,9 @@ Every orchestrator implements the `Orchestrator` interface. The methods group by
 | Method | Contract |
 |---|---|
 | `ResolveRef(ctx, string)` → `(ItemRef, error)` | Turn a user-supplied string into an `ItemRef`. **The one place a value enters this contract before it is an identity**, and the only supported way to reach an item by a name a person typed. Required because the alternative is matching on `Display`, which is a projection: it resolves by substring and first-match, so it answers with *an* item rather than *the* item. |
-| `List(ctx, ItemScope, BinaryName, func(ItemType) bool)` → `([]ItemInfo, error)` | Items at the given `ItemScope`, with per-item availability, tags, holder and blockers. The `BinaryName` names the label that marks an item opted in, which is what separates `auto` from `available`. The predicate is **not a value at all**: it is the SDK lending the orchestrator its own knowledge of which flows are registered, without which the orchestrator could not tell `unhandled` from `processable`. Feeds `list`. The auto-select path **must never** call it. |
+| `List(ctx, ItemScope, BinaryName, func(ItemType) bool)` → `([]ItemInfo, error)` | Items at the given `ItemScope`, with per-item availability, tags, holder and blockers. The `BinaryName` names the label that marks an item opted in, which is what separates `auto` from `available`. The predicate is **not a value at all**: it is the SDK lending the orchestrator its own knowledge of which flows are registered, without which the orchestrator could not tell `unhandled` from `processable`. **At scope `auto` it must return items in selection order**; at every other scope the order is not a contract. See "Priority and urgency". Feeds `list`. The auto-select path **must never** call it. |
 | `Get(ctx, ItemRef, BinaryName, func(ItemType) bool)` → `(*ItemInfo, error)` | One of exactly what `List` returns, addressed by ref instead of enumerated. **It must answer identically to `List` for the same item at the same moment** — one derivation serving both, never two. An item that reads `blocked` in `list` and `available` in `status` is a contradiction an operator cannot resolve, and nothing in the item caused it. Feeds `status`'s availability line, and is what makes an `ItemRef` sufficient — without it, listing metadata is reachable only by enumerating everything and searching. |
-| `ListAutoSelectable(ctx, []TagId)` → `([]ItemRef, error)` | The items an unattended `resolve` may start on, carrying every `TagId` given. An empty list means no filter. Feeds the auto-select path. **Must not** return a `blocked` item. Filtering belongs here because tags live in the orchestrator and `ItemRef` does not carry them — a caller has nothing to filter on. An orchestrator with no tag vocabulary returns nothing when tags are given, which is an honest answer. See "Dependencies" below. |
+| `ListAutoSelectable(ctx, []TagId)` → `([]ItemRef, error)` | The items an unattended `resolve` may start on, carrying every `TagId` given. An empty list means no filter. Feeds the auto-select path. **Must not** return a `blocked` item, and **must not** return a `deferred` one. **Must** return what it does return in selection order. Filtering and ordering both belong here because tags, priority and urgency live in the orchestrator and `ItemRef` carries none of them — a caller has nothing to filter or sort on. See "Priority and urgency". An orchestrator with no tag vocabulary returns nothing when tags are given, which is an honest answer. See "Dependencies" below. |
 
 ### Claiming
 
@@ -237,6 +242,8 @@ Every orchestrator implements the `Orchestrator` interface. The methods group by
 | `RemoveTag(TagId)` | Removes one tag. Removing one absent changes nothing. |
 | `AddBlocker(ItemRef)` | Records that this item waits on that one. Adding one already recorded changes nothing. See "Dependencies". |
 | `RemoveBlocker(ItemRef)` | Retracts one dependency. Removing one not recorded changes nothing. |
+| `SetPriority(Priority)` | Sets the item's assessed priority. |
+| `SetUrgency(Urgency)` | Sets what an operator wants done about the item now. |
 | `SetManual(bool)` | Sets or clears manual control of the item. |
 | `Commit(ctx)` → `error` | Applies every change made on this editor, **or none of them**. |
 
@@ -368,7 +375,7 @@ That is why so little here is optional. A capability an orchestrator lacks is st
 
 ## Dependencies
 
-An item waiting on another item that has not finished is `blocked`, its reason is reported alongside, and the blocking items are reported **by reference — their identifiers, as data** — not named inside the reason text. That is [cli.md](cli.md)'s requirement. This section is what an orchestrator owes it.
+An item waiting on another item that is not yet `terminal` is `blocked`, its reason is reported alongside, and the blocking items are reported **by reference — their identifiers, as data** — not named inside the reason text. That is [cli.md](cli.md)'s requirement. This section is what an orchestrator owes it.
 
 Dependencies are the orchestrator's knowledge. The SDK carries the references and interprets none of them: it does not resolve a blocker, walk a graph, or decide when one clears. An orchestrator with no dependency notion reports no blockers and refuses every blocker it is given, and is fully conformant — it answers the question rather than lacking the method.
 
@@ -376,15 +383,15 @@ Dependencies are the orchestrator's knowledge. The SDK carries the references an
 
 `ItemInfo` carries `BlockReason` and `BlockedBy`. Both reads return them — `List` for a listing, `Get` for a single item — so `list` and `status` report the same fact through the same field. There is no third read: an item's blockers are obtained the same way its availability and tags are.
 
-**`BlockedBy` is every blocker declared on the item, each carrying its own `ItemStatus`.** It is the recorded dependency set — what `AddBlocker` put there and `RemoveBlocker` takes away — so a blocker that has since finished stays listed until someone retracts it. A set that quietly dropped satisfied entries could not be edited, because nothing could see what was there to remove.
+**`BlockedBy` is every blocker declared on the item, each carrying its own `ItemStatus`.** It is the recorded dependency set — what `AddBlocker` put there and `RemoveBlocker` takes away — so a blocker that has since gone `terminal` stays listed until someone retracts it. A set that quietly dropped satisfied entries could not be edited, because nothing could see what was there to remove.
 
-**Each blocker's status comes with it**, because the list alone answers the wrong question. *These items were declared as blockers* is not *this is what you are waiting on*: an operator wants the one still open, and without its status would have to look up every entry to find it. The orchestrator is not doing extra work to say so — it **cannot** derive whether the item is blocked without already knowing which blockers are unfinished, so the answer exists before anyone asks. What it must not do is resolve anything **beyond** that: a blocker's title, its holder, its own blockers are all a lookup the caller can make itself.
+**Each blocker's status comes with it**, because the list alone answers the wrong question. *These items were declared as blockers* is not *this is what you are waiting on*: an operator wants the one still open, and without its status would have to look up every entry to find it. The orchestrator is not doing extra work to say so — it **cannot** derive whether the item is blocked without already knowing which blockers are not `terminal`, so the answer exists before anyone asks. What it must not do is resolve anything **beyond** that: a blocker's title, its holder, its own blockers are all a lookup the caller can make itself.
 
 **`Blocked` is the answer to "is this blocked right now?", not `Availability`.** It is item-level and says the same thing whoever is asking.
 
 `Availability` cannot answer it. The ladder is ordered and each item gets one state at the lowest boundary it fails, so `closed` and `unhandled` both sit below `blocked`: an item this binary does not handle reports `unhandled`, and a closed one reports `closed`, each of them blocked or not. Reading `Availability == blocked` therefore answers a narrower question — *is this blocked and otherwise workable by me* — which is the right question for selection and the wrong one for an operator asking why an item is stuck.
 
-Nor is the length of `BlockedBy` the answer. It holds every blocker ever declared, so a non-empty list on an unblocked item simply means they have all finished.
+Nor is the length of `BlockedBy` the answer. It holds every blocker ever declared, so a non-empty list on an unblocked item simply means every one of them is `terminal`.
 
 **And it is never `BlockReason`.** That is prose for a person: it explains, it does not instruct. Nothing reads a state out of its wording, and nothing reads one out of its being empty — a block whose explanation nobody wrote is still a block. Everything a caller acts on is a field: `Blocked` says whether, `BlockKind` says what to do about it, `BlockedBy` says what it waits on. The reason exists so a person understands what those three already told the machine.
 
@@ -398,7 +405,13 @@ The `BinaryName` and the predicate that `Get` and `List` take are for availabili
 - `BlockedBy` carries identities, not display strings. A display is a projection — the GitHub orchestrator's `ResolveRef` rejects one, and the fallback matcher resolves it only by substring, first-match — so a blocker reported as a display can be read by a person and reached by nothing. A blocker nothing can address is not a reference, and the whole point of reporting blockers as data rather than prose is that something can act on them.
 - The identifiers are reported alone. An orchestrator does **not** resolve the blockers' own state on their behalf — that is a lookup per blocker for something the caller can look up itself, or spot elsewhere in the listing.
 
-**Blocked-for-dependency is derived, never stored.** An orchestrator answers "is this blocked?" by looking at whether the blockers have finished. It does not keep a blocked bit that some later write must remember to clear. This is the whole of "it will clear on its own": the item whose last blocker finishes is workable at the next read, with nobody having acted.
+> **A blocker blocks exactly while its `ItemStatus` is not `terminal`.**
+
+That is the whole test, and it is deliberately the coarser of the two available readings. `terminal` means no more work will happen on the item, and every disposition an orchestrator has for saying so — `done`, `won't fix`, `duplicate`, `closed as not planned` — reduces to it. So **a blocker closed as `won't fix` stops blocking**, which is the correct outcome and the one ordinary prose gets wrong: nothing further is ever going to happen to that item, and an item waiting on it would wait forever.
+
+*Finished* is the wrong word for this rule for exactly that reason — it reads as *succeeded*, and success is not what the dependency was waiting for. It was waiting for the question to be settled, and closing it unfixed settles it. An operator who disagrees retracts the blocker with `RemoveBlocker`; what they must not have to do is reopen an item nobody intends to work in order to keep something blocked.
+
+**Blocked-for-dependency is derived, never stored.** An orchestrator answers "is this blocked?" by looking at whether every blocker is `terminal`. It does not keep a blocked bit that some later write must remember to clear. This is the whole of "it will clear on its own": the item whose last blocker goes `terminal` is workable at the next read, with nobody having acted.
 
 A stored bit beside a stored edge is the failure this rule exists to prevent. It reads as well-formed, selection honours it, and nothing ever lifts it.
 
@@ -430,7 +443,57 @@ An orchestrator **may** refuse a blocker outside its own scope. What counts as i
 
 Those two rules compose, and that is what makes refusing every cycle implementable. An orchestrator that cannot traverse into a blocker cannot see a ring passing through it — so it refuses the blocker. Every blocker it accepts is therefore one it can follow, and every cycle among them is one it can find. An orchestrator never has to detect what it cannot reach; it only has to stop accepting references it cannot reason about.
 
-An already-finished blocker is **accepted**, not refused. Naming a blocker that has landed is not an error — it simply does not block, which the derivation above already reports correctly.
+A blocker that is already `terminal` is **accepted**, not refused. Naming one that has landed is not an error — it simply does not block, which the derivation above already reports correctly.
+
+## Priority and urgency
+
+Auto-selection takes items in an order, and two parties have a say in what that order is. `Priority` is the rank whatever manages the backend gives the work; `Urgency` is what a person wants done about it now. They are two fields because they are two parties.
+
+**Neither is a stronger spelling of the other.** Collapsed onto one scale, every automated re-triage silently outbids the person who said *this one next*, and that person's only way to be heard is to inflate an assessment that is supposed to be about the work. Kept apart, a machine may rewrite its assessment as often as it likes without ever overruling an instruction.
+
+**The separation is enforced by the sort, not by who may write.** Nothing here restricts either field to a class of caller, and a contract that tried would be requiring something it cannot observe — an orchestrator sees a write, not who was at the keyboard. What the two axes guarantee is that an assessment never outranks an instruction, however either one arrived.
+
+### The order
+
+| | Sorts by | Order |
+|---|---|---|
+| 1 | `Urgency` | `next`, then `default` |
+| 2 | `Priority` | `critical`, `high`, `medium`, `low` |
+| 3 | Age | Oldest first |
+
+Urgency sorts first, and that is the entire content of *an operator overrides a machine*: a `next` item at `low` priority starts before a `default` item at `critical`.
+
+**Ordering is all `Priority` does.** It decides when an item is taken, never whether — every item in the selectable set is resolved given enough time, and `low` names later work rather than lesser work. An orchestrator that dropped low-priority items from the set, or aged them out of it, would be answering a question nobody asked it: the only value on either axis that removes an item from the set is `deferred`, and that is an operator's instruction, not a ranking.
+
+Age sorts last, and it is what makes this an order at all rather than a preference. Without a total tiebreak, two callers reading the same set at the same moment start on different items — which is the thing an ordering contract exists to prevent.
+
+**`ListAutoSelectable` must return this order.** Ordering belongs here for the reason filtering does: priority, urgency and age live in the orchestrator, and `ItemRef` carries none of them, so a caller has nothing to sort on. An SDK ordering afterwards would need everything the orchestrator already knows, and a rule enforced in two places is a rule with two owners and one of them wrong.
+
+**`List` must return this order at scope `auto`, and no order at all at the wider scopes.** At that scope the listing *is* the selectable set, so reporting it in an order nothing will take it in answers *what runs next* with something that looks like an answer and is not. This is still one rule with one owner — derived once by the orchestrator, served through both calls. The wider scopes are read by a person who scopes and sorts them for themselves, and fixing an order there would constrain the report without informing anything.
+
+### Deferral
+
+`ListAutoSelectable` **must not** return a `deferred` item. Not sorted last — absent. An item sorted last is still an item a fleet with spare capacity reaches, and *do not start this unattended* is precisely what an operator deferring it said.
+
+**A deferred item stays resolvable when it is named.** `resolve <item-id>` does not go through auto-selection, so this needs no mechanism — but it needs saying, because it is the whole difference between deferring an item and disabling one, and the two are otherwise indistinguishable in effect. A disabled item refuses the claim itself, whoever asks; a deferred one is claimed and driven normally by anyone who names it.
+
+**Deferral is not a rung on the availability ladder.** A deferred item is open, handled, unblocked, free and opted in — every boundary passed. What is true of it is that auto-selection will not take it, and that is exactly the boundary `available` already marks; `Urgency` is what distinguishes *nobody opted this in* from *an operator deferred it*. Giving deferral its own state would put two states on one boundary, which is the same mistake as splitting `blocked` by cause, and the ladder is closed against both for the same reason. See [cli.md](cli.md).
+
+### What an orchestrator reports
+
+`ItemInfo` carries `Priority` and `Urgency`, and both reads return them — `List` for a listing, `Get` for one item — so `list` and `status` report the same fact through the same fields. There is no third read, exactly as there is none for tags, availability or blockers.
+
+`Item` carries them too. They are item-level facts, true whoever asks, and an editor can change them — so a `Load` that omitted them would mean editing blind.
+
+### What an orchestrator accepts
+
+`ItemEditor.SetPriority` and `SetUrgency` are the only supported way to set them.
+
+**They are typed setters, not tags.** An orchestrator is free to *store* them as tags — the GitHub orchestrator does — but `AddTag` cannot be the surface. It must accept any value clearing the `TagId` floor, so `flow:priority:hihg` would be stored, would name nothing, and would leave the item sorting as though nobody had set anything: a closed vocabulary needs a parameter that can be refused. The spelling is the orchestrator's own besides, and a caller writing the label itself would be writing into a schema this contract deliberately does not name.
+
+Setting a value an item already has changes nothing and is not an error, as with every other editor method. Editing takes no claim, for the reason it takes none to record a blocker: an operator re-prioritising a backlog holds none of it, and usually that nobody holds it is the point.
+
+An orchestrator with no way to store either value **refuses the setter, and reports `medium` and `default`.** Refusing is an answer. A value silently dropped and read back as the neutral one is a setting that appears to work, and an operator who deferred an item would watch a fleet start it.
 
 ## What this surface does not create
 

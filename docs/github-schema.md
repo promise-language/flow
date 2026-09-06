@@ -173,8 +173,12 @@ All labels use a configurable prefix (default `flow:`). The label set is closed:
 | `flow:budget-exhausted:<id>` | The step producing `<id>` exhausted its budget. |
 | `flow:type:<type>` | Item type derivation label. |
 | `flow:<binary-name>` | The binary that owns this item. |
+| `flow:priority:<critical\|high\|low>` | Where the work sits in the order it is taken in, as whatever manages the backend ranks it. **Absent means `medium`.** |
+| `flow:urgency:<next\|deferred>` | What an operator wants done about the item now: start it next, or do not start it unattended. **Absent means `default`.** |
 
 Park labels are added when a park is recorded and removed when the park is cleared (by a grant, a resolve, or a reset). A park label that outlives its condition is worse than no label — it is read as current.
+
+**The neutral values of the two selection axes have no label.** `medium` and `default` are not spellable: a state reachable both by a label and by that label's absence is one state with two spellings, and nothing keeps the two reading alike — an item demoted from `high` to `medium` and an item nobody ever assessed are the same item to selection, and must be the same item to a reader. So `SetPriority(medium)` and `SetUrgency(default)` remove the axis's label rather than writing one, and an item carrying no label of either kind is fully specified.
 
 ## Signals from GitHub state
 

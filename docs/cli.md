@@ -125,7 +125,7 @@ A step can run for many minutes. Without this, an operator has no way to disting
 
 ### Implementation hint — not normative
 
-One way to satisfy this: when a step starts, record the step name, the process identifier, and the process's executable path alongside the claim state; `status` reads that record and confirms the process is alive and is still the same executable before reporting it as running.
+The registration [resolution.md](resolution.md) requires is already most of this record: it exists exactly while a process is advancing the item, and it names the machine, the process, and when that process started. One way to satisfy the rest is to record the running step's name alongside it, and to have `status` read that record and confirm the holder is alive and is still the same process before reporting it as running.
 
 The mechanism is not normative. Only the requirement is: `status` reports the running step, and does so on evidence rather than on a stored claim.
 
@@ -184,7 +184,7 @@ Items nest in six levels, from everything the backend holds down to what runs un
 | 3 | Open items **this binary could process** — some flow here accepts the type | `processable` *(default)* |
 | 4 | …of those, the ones **not blocked** — someone could work them | `workable` |
 | 5 | …of those, the ones **free** — this operator could claim one now | `free` |
-| 6 | …of those, the ones **opted in** — an unattended `resolve` would pick one | `auto` |
+| 6 | …of those, the ones an unattended `resolve` would pick — **opted in**, and not deferred | `auto` |
 
 `--scope` names how far up the ladder to report. The levels nest, so each scope includes every level below it. The value set is closed and its names are the level names — there is no second spelling, and no scope that is not a level.
 
@@ -199,7 +199,7 @@ Each item is reported in exactly one availability state. The set is closed:
 | State | Meaning |
 |---|---|
 | `auto` | Free, and opted in — an unattended `resolve` would pick this |
-| `available` | Free, but not opted in — claimable by name; auto-selection will not choose it |
+| `available` | Free, but auto-selection will not choose it — not opted in, or deferred by an operator; claimable by name |
 | `held` | Claimed by someone or something else, named in the report |
 | `blocked` | Nobody can work it yet, for a stated reason |
 | `unhandled` | No flow in this binary accepts this item's type |
@@ -211,7 +211,7 @@ Each state is exactly the boundary between two adjacent levels: `closed` is in l
 
 #### `blocked` covers every reason nobody can work it
 
-An item deliberately disabled, and an item waiting on another item that has not finished, are both `blocked`: in this binary's remit, and not workable by anyone right now. They differ in the **reason**, which is reported alongside, and which says whether a person must act or whether it will clear on its own.
+An item deliberately disabled, and an item waiting on another item that is still open, are both `blocked`: in this binary's remit, and not workable by anyone right now. They differ in the **reason**, which is reported alongside, and which says whether a person must act or whether it will clear on its own.
 
 They are not separate states. Splitting them would put two states on one boundary, and the causes are open-ended — disabled, unmet dependency, unmet prerequisite, whatever a backend adds next — while the boundaries are fixed at six. States enumerate where an item sits; reasons explain why. Only the first can stay closed.
 
@@ -219,7 +219,9 @@ When the reason is an unfinished dependency, the **blocking items are reported b
 
 Two things follow from that. An operator reading the listing can see that the blocker is itself listed, and whether *it* is workable, which turns "this is blocked" into "go work that one instead". And anything acting on the listing gets the identifiers without parsing them out of prose, which is the same reason references belong in fields everywhere else in this system.
 
-The blocking items are reported as references, each with **whether it has finished**. That much comes free: an item is blocked precisely because some blocker has not finished, so anything able to say the item is blocked already knows which one. Reporting the list without it would answer *these were declared as blockers* when the question is *what am I waiting on* — and would send an operator to look up every entry to find the one still open.
+The blocking items are reported as references, each with **whether it is still open**. That much comes free: an item is blocked precisely because some blocker is still open, so anything able to say the item is blocked already knows which one.
+
+**A blocker stops blocking when it closes, however it closed.** An item closed as a duplicate, or as won't-fix, is never going to be worked — so waiting on it is waiting forever, and the dependency was on the question being settled rather than on it being settled a particular way. An operator who wants the block to survive that retracts the blocker and records the real one; nothing requires reopening an item nobody intends to work. Reporting the list without it would answer *these were declared as blockers* when the question is *what am I waiting on* — and would send an operator to look up every entry to find the one still open.
 
 Nothing further is resolved on their behalf. A blocker's title, who holds it, whether it is itself blocked — those are lookups the caller can make, and a reference is enough both to make one and to recognise the blocker elsewhere in the listing. It is a **reference**, not the rendering of one: what an operator reads is that reference displayed, and what anything acting on the listing gets is the reference itself.
 
@@ -236,6 +238,23 @@ Recording one is supported rather than incidental. A dependency is found part-wa
 A tag is a free-form label carried by an item. Each backend maps its own vocabulary onto tags — issue labels, tracker tags — and `list` reports an item's tags in full, not only those a flow recognises. Tags are how an operator picks work by area, and how an unattended `resolve` is scoped to a subset of it.
 
 `list --tag <t> [--tag <t>…]` filters conjunctively, matching `resolve`.
+
+### Priority and urgency
+
+Every item carries two values, and `list` and `status` report both.
+
+| | Set by | Values | Says |
+|---|---|---|---|
+| **Priority** | Whatever manages the backend — a triage automation, a flow, a script | `critical`, `high`, `medium`, `low` | Where the work sits in the order it is taken in |
+| **Urgency** | A person | `next`, `default`, `deferred` | Whether to jump that order, or stay out of it |
+
+**Priority orders; it never excludes.** Every item in the auto-selectable set is resolved given enough time, so `low` is not a lesser class of work — it is later work. Nothing on this axis keeps an item from being taken, and the one value on either axis that does is `deferred`, which is an operator's decision rather than an assessment of the work.
+
+They are two values because they are two parties. **Urgency is not a fifth priority level:** it is an instruction that outranks the assessment, so a `next` item starts ahead of a `critical` one nobody marked, and a `deferred` item stays out of unattended work whatever its priority says.
+
+An item nothing has said anything about is `medium` and `default`. That is the ordinary case and it carries no marker of any kind — an unassessed item is not thereby demoted below one deliberately marked `low`, because silence is not an assessment.
+
+Where the two decide what runs, and in what order, is `resolve`.
 
 ## Resolving
 
@@ -255,9 +274,19 @@ It selects the item in one of three ways:
 
 Selecting nothing is not an error. No eligible item, or no item carrying the tags, exits 0.
 
-Auto-selection never picks a `blocked` item. An item waiting on an unfinished dependency is not merely undesirable to start — starting it wastes a claim and a run on work that cannot proceed, and the backend that knows about the dependency is the one that keeps it out of the selectable set.
+Auto-selection never picks a `blocked` item. An item waiting on a blocker that is still open is not merely undesirable to start — starting it wastes a claim and a run on work that cannot proceed, and the backend that knows about the dependency is the one that keeps it out of the selectable set.
+
+**Auto-selection takes the most urgent item, then the highest priority, then the oldest.** Urgency first, so an operator's `next` starts ahead of any assessment; priority second — `critical`, `high`, `medium`, `low`; age last, which breaks every remaining tie, so that two callers reading the same set start on the same item. Naming an item id selects that item and consults neither value.
+
+**Auto-selection never picks a `deferred` item.** It is not sorted last, it is not in the set: an item sorted last is still one a fleet with spare capacity reaches, and *do not start this unattended* is exactly what deferring it said.
+
+**A deferred item is still resolvable by name.** `resolve <item-id>` does not go through auto-selection, and that is the whole difference between deferring an item and disabling one — a disabled item refuses the claim itself, whoever asks, while a deferred one is claimed and driven normally by anyone who names it.
 
 Losing a race for one item means trying the next. Being refused for a reason no other item would satisfy means stopping.
+
+**A worktree runs one advance at a time.** `resolve` and `run-step` each register their run in the worktree before the first step, and a second one does not start: it names the run already holding the worktree — the machine, the process, and when it started — and exits 1, the code for a condition a human must clear. There is no override flag, and one would have nothing to unlock: a holder that is no longer running is already released without anyone asking, and a holder that is still running is part-way through changing the state a second run would be starting from. [resolution.md](resolution.md) states what the registration is.
+
+That refusal is not a lost race. A lost race is about an item and the answer is to try another one; this is about the worktree, and every other item would meet it identically.
 
 `resolve` bounds attempts, not wall-clock. A slow step is never killed for being slow.
 
