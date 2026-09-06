@@ -20,10 +20,13 @@ import (
 // therefore reports nothing — no ghost frames in the tracker.
 //
 // This is a port of the tracker repo's tools/guard/guard.go ai_context logic
-// (tracker commit 7fda6bb). Its caller is the workspace-supplied tool-guard,
-// which this repository does not build: it must route both Pre and PostToolUse
-// events through here, because the push/pop pairing is what keeps the live
-// "what is the agent doing now" line on the arena card accurate.
+// (tracker commit 7fda6bb). It has had no caller since #199 deleted cmd/guard:
+// the guard on the pre-tool hook is bin/tool-guard, provisioned from outside
+// this repository, and it does not reach this code — tools/build is its own Go
+// module, and nothing requires it. #207 settles whether this stays. Anything
+// that does call it must route both Pre and PostToolUse events through here,
+// because the push/pop pairing is what keeps the live "what is the agent doing
+// now" line on the arena card accurate.
 func TrackContext(in HookInput) {
 	if in.HookEventName != "PreToolUse" && in.HookEventName != "PostToolUse" {
 		return
