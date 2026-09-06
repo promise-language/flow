@@ -36,7 +36,18 @@ type cmdHelp struct {
 	syntax  string // text after the command name, e.g. "<item-id>"
 	summary string
 	detail  string
+
+	// runsGates marks a command that will ask the orchestrator to run a gate,
+	// and so must meet the gate check at its own boundary (App.requireRunnable).
+	// It lives here because this map is already the command registry — a second
+	// list of command names elsewhere is one that goes stale when a command is
+	// added, silently and in the direction that lets a gateless environment
+	// through.
+	runsGates bool
 }
+
+// commandRunsGates reports whether cmd will ask the orchestrator to run a gate.
+func commandRunsGates(cmd string) bool { return perCommandUsage[cmd].runsGates }
 
 // perCommandUsage drives `<bin> <cmd> --help`. The top-level summary lives in
 // usage(); this adds focused detail for a single command.
@@ -64,7 +75,7 @@ this binary could process).
 The "availability" column marks which items resolve would auto-select (auto)
 versus merely claimable (available) — so the answer to "would resolve pick
 this?" belongs in the listing.`},
-	"claim": {name: "claim", syntax: "<item-id>", summary: "acquire a claim on an item",
+	"claim": {name: "claim", syntax: "<item-id>", summary: "acquire a claim on an item", runsGates: true,
 		detail: "Acquires a claim (lease) on <item-id> so this owner can advance it.\nTakes exactly one item id."},
 	"release": {name: "release", summary: "drop the active claim",
 		detail: "Releases the claim currently held by this owner. Takes no arguments."},
@@ -81,9 +92,9 @@ Without --force, prints what would be discarded and refuses.
   --force    actually clear the seed (required)`},
 	"status": {name: "status", syntax: "[<item-id>]", summary: "print the lifecycle checklist",
 		detail: "Prints the read-only lifecycle checklist. With <item-id>, inspects that\nitem from the backend without claiming it; without, uses the active claim."},
-	"run-step": {name: "run-step", summary: "advance one lifecycle item",
+	"run-step": {name: "run-step", summary: "advance one lifecycle item", runsGates: true,
 		detail: "Advances exactly ONE lifecycle item against the active claim\n(one prompt → one artifact). Requires an active claim; takes no arguments."},
-	"resolve": {name: "resolve", syntax: "[<item-id>] [--tag TAG]…", summary: "run all steps to completion",
+	"resolve": {name: "resolve", syntax: "[<item-id>] [--tag TAG]…", summary: "run all steps to completion", runsGates: true,
 		detail: "Runs ALL steps until the item is finalized or parked. With <item-id>,\nclaims it first; otherwise uses the active claim.\n\n" +
 			"--tag TAG narrows the auto-selectable set to items carrying all given\n" +
 			"tags. Mutually exclusive with <item-id> (the id already answers the\n" +

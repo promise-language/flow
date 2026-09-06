@@ -135,12 +135,12 @@ func RunWithArgs(app App, args []string) int {
 		app.Quota = readQuota
 	}
 	// A startup refusal stops every command but one. `doctor` is the diagnosis,
-	// and what startup now refuses on includes facts about the MACHINE: an
-	// orchestrator reads what it can run off the environment (a missing gate
-	// entry point declares no gates), so the checkout that has not built its
-	// tools fails validation. Refusing to run `doctor` there would withhold the
-	// one report that says why — the operator would be told the binary will not
-	// start, by the tool whose job is explaining exactly that.
+	// and a refusal can still rest on a fact about the MACHINE: a binary whose
+	// flows name an extra gate has its App.Gates checked against what the
+	// orchestrator declares, and an orchestrator reads that off the environment.
+	// Refusing to run `doctor` there would withhold the one report that says why
+	// — the operator would be told the binary will not start, by the tool whose
+	// job is explaining exactly that.
 	startupErr := app.validate()
 	if startupErr != nil && (len(args) == 0 || args[0] != "doctor") {
 		fmt.Fprintln(app.Err, "startup error:", startupErr)
@@ -171,6 +171,17 @@ func RunWithArgs(app App, args []string) int {
 	if isKnownCommand(cmd) && wantsHelp(rest) {
 		fmt.Fprintln(app.Out, commandUsage(app.Name, cmd))
 		return 0
+	}
+
+	// The gate/command check, at the boundary of the commands that will run one.
+	// One call site, so the rule cannot drift between the three; after help
+	// handling, so `<bin> resolve --help` still prints help on a machine that
+	// cannot run a gate.
+	if commandRunsGates(cmd) {
+		if err := app.requireRunnable(cmd); err != nil {
+			fmt.Fprintln(app.Err, err)
+			return 1
+		}
 	}
 
 	ctx := context.Background()
@@ -260,36 +271,26 @@ func (app *App) validate() error {
 		}
 	}
 
-	// Gates and commands are declared and validated at startup, exactly as
-	// signals and artifacts are. A flow naming a gate nothing can run fails
-	// BEFORE an item is claimed rather than part-way through one, when a step
-	// has already burned a turn getting there.
-	gates := app.Orchestrator.SupportedGates()
-	for _, want := range flow.RequiredGates() {
-		if !flow.HasGate(gates, want) {
-			return fmt.Errorf("orchestrator %q does not declare the required gate %q", app.Orchestrator.Name(), want)
-		}
-	}
-	commands := app.Orchestrator.SupportedCommands()
-	for _, want := range flow.RequiredCommands() {
-		if !flow.HasCommand(commands, want) {
-			return fmt.Errorf("orchestrator %q does not declare the required command %q", app.Orchestrator.Name(), want)
-		}
-	}
-	for _, gd := range gates {
-		if !gd.Name.Valid() {
-			return fmt.Errorf("orchestrator %q declares gate %q, which is not a valid gate name", app.Orchestrator.Name(), gd.Name)
-		}
-	}
-	for _, cd := range commands {
-		if !cd.Name.Valid() {
-			return fmt.Errorf("orchestrator %q declares command %q, which is not one of the three command names", app.Orchestrator.Name(), cd.Name)
-		}
-	}
-	// Every gate a flow names must be one the orchestrator can run.
-	for _, name := range app.Gates {
-		if !flow.HasGate(gates, name) {
-			return fmt.Errorf("gate %q declared in App.Gates but not in Orchestrator.SupportedGates() (orchestrator %q)", name, app.Orchestrator.Name())
+	// Every gate a flow NAMES must be one the orchestrator can run:
+	// docs/orchestrator.md § Declaration puts that question at startup, and it
+	// is one about this binary's own composition — a flow asking for `tested`
+	// where nothing can run it is wrong wherever it is deployed.
+	//
+	// The probe is skipped when no flow names an extra gate. SupportedGates() is
+	// not a static table: an orchestrator derives it from the machine (the
+	// github one spawns the project's gate entry point and asks), so asking is
+	// touching the environment, and a binary that names no gate must neither pay
+	// for that answer nor be refused by it.
+	//
+	// Whether the REQUIRED gates and commands are present is not asked here at
+	// all. That is environment fitness — `doctor`'s report, and requireRunnable
+	// at the boundary of the commands that will actually run one.
+	if len(app.Gates) > 0 {
+		gates := app.Orchestrator.SupportedGates()
+		for _, name := range app.Gates {
+			if !flow.HasGate(gates, name) {
+				return fmt.Errorf("gate %q declared in App.Gates but not in Orchestrator.SupportedGates() (orchestrator %q)", name, app.Orchestrator.Name())
+			}
 		}
 	}
 
@@ -355,6 +356,117 @@ func (app *App) validate() error {
 		}
 	}
 	return nil
+}
+
+// repairUnbuiltTools is what a missing declaration tells the reader to run. It
+// is the one repair that fits every project: what an orchestrator declares it
+// reads off the machine — asking the project's gate entry point which gates it
+// supports, looking for the command binaries — so "declares nothing" is most
+// often "this checkout's own tools have not been built yet", which is the state
+// the bootstrap sequence deliberately leaves between its two halves.
+//
+// It does not name a build command. The word that fixes this differs per
+// project and only the orchestrator knows it (docs/cli.md § Doctor forbids the
+// SDK holding a second copy of paths only the orchestrator knows), so the
+// refusal answers "what do I run next" at the level the SDK can answer honestly
+// and points at `doctor` for the rest.
+const repairUnbuiltTools = "an orchestrator reads what it can run off the machine, so a checkout whose project tools have not been built declares nothing — build the project's tools and re-run"
+
+// requireRunnable is the gate/command check, met at the boundary of the
+// commands that will actually run one (see commandRunsGates) instead of at
+// startup.
+//
+// It used to be part of validate(), where it refused EVERY invocation — `list`,
+// `status`, `answer`, `release`, and even `--help`, none of which ever run a
+// gate — on a clone provisioned exactly as far as the bootstrap sequence leaves
+// it. That is the wrong question at the wrong moment: gate presence is
+// environment fitness (docs/environment.md), and unfit is a wait, not a startup
+// crash. Startup keeps what can be decided from configuration alone.
+//
+// The four checks are the ones startup made, in the same order, and they still
+// refuse before an item is claimed: the commands that reach this are exactly
+// the ones that would otherwise discover mid-item that the measurement they
+// depend on does not exist. The caller exits 1 — the invocation was well formed
+// (docs/cli.md § Exit codes reserves 2 for one that was not); this is a
+// condition a human must clear.
+//
+// Besides this method, the only callers that ask an orchestrator what it can
+// run are `doctor` — whose report is the question — and validate()'s App.Gates
+// check, which asks solely when a flow named a gate of its own.
+func (app *App) requireRunnable(cmd string) error {
+	gates := app.Orchestrator.SupportedGates()
+	if missing := missingGates(gates); len(missing) > 0 {
+		return app.refuseRunnable(cmd, "this environment cannot run gates", "gates",
+			fmt.Sprintf("orchestrator %q does not declare the required gate(s): %s",
+				app.Orchestrator.Name(), joinNames(missing)),
+			repairUnbuiltTools)
+	}
+	commands := app.Orchestrator.SupportedCommands()
+	if missing := missingCommands(commands); len(missing) > 0 {
+		return app.refuseRunnable(cmd, "this environment cannot run the required commands", "commands",
+			fmt.Sprintf("orchestrator %q does not declare the required command(s): %s",
+				app.Orchestrator.Name(), joinNames(missing)),
+			repairUnbuiltTools)
+	}
+	for _, gd := range gates {
+		if !gd.Name.Valid() {
+			return app.refuseRunnable(cmd, "the orchestrator declares a gate this SDK does not know", "gates",
+				fmt.Sprintf("orchestrator %q declares gate %q, which is not a valid gate name",
+					app.Orchestrator.Name(), gd.Name))
+		}
+	}
+	for _, cd := range commands {
+		if !cd.Name.Valid() {
+			return app.refuseRunnable(cmd, "the orchestrator declares a command outside the closed set", "commands",
+				fmt.Sprintf("orchestrator %q declares command %q, which is not one of the three command names",
+					app.Orchestrator.Name(), cd.Name))
+		}
+	}
+	return nil
+}
+
+// refuseRunnable renders one requireRunnable refusal: the house refusal shape,
+// prefixed with the command that was asked for, and always closing on the
+// pointer to `doctor` — the whole environment picture, of which this refusal
+// saw one row.
+func (app *App) refuseRunnable(cmd, reason, check string, detail ...string) error {
+	detail = append(detail, fmt.Sprintf("run `%s doctor` for every environment check", selfPath(app.Name)))
+	return errors.New(formatRefusal(cmd, reason, check, strings.Join(detail, "\n")))
+}
+
+// missingGates and missingCommands report which REQUIRED declarations are
+// absent from what an orchestrator says it can run. One copy, used by the
+// boundary refusal and by `doctor`: the two report to different readers and
+// their messages stay distinct, but which ones are missing is a single
+// question and a second implementation of it is what goes stale when
+// flow.RequiredGates() changes.
+func missingGates(declared []flow.GateDef) []flow.GateName {
+	var missing []flow.GateName
+	for _, want := range flow.RequiredGates() {
+		if !flow.HasGate(declared, want) {
+			missing = append(missing, want)
+		}
+	}
+	return missing
+}
+
+func missingCommands(declared []flow.CommandDef) []flow.CommandName {
+	var missing []flow.CommandName
+	for _, want := range flow.RequiredCommands() {
+		if !flow.HasCommand(declared, want) {
+			missing = append(missing, want)
+		}
+	}
+	return missing
+}
+
+// joinNames lists name-like values for a message.
+func joinNames[T ~string](names []T) string {
+	s := make([]string, 0, len(names))
+	for _, n := range names {
+		s = append(s, string(n))
+	}
+	return strings.Join(s, ", ")
 }
 
 func flowTypesOverlap(a, b *flow.Flow) bool {

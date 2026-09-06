@@ -420,9 +420,8 @@ func TestCmdDoctor_NormativeDocsMissing(t *testing.T) {
 }
 
 // A missing required gate or command is a failure with the name on the line.
-// The check is exercised directly: startup validation refuses this App, so the
-// only way to reach the branch is to ask the check itself — which is exactly
-// how an orchestrator implementor debugging their own declarations reaches it.
+// The checks are asked directly here, one declaration short each, which is how
+// an orchestrator implementor debugging their own declarations reaches them.
 func TestCmdDoctor_MissingRequiredGateOrCommand(t *testing.T) {
 	app := &App{Orchestrator: &declaringOrchestrator{
 		Orchestrator: fake.New(),
@@ -437,6 +436,32 @@ func TestCmdDoctor_MissingRequiredGateOrCommand(t *testing.T) {
 	cmds := app.checkCommands()
 	if cmds.status != checkFail || !strings.Contains(cmds.detail, string(flow.CommandVerify)) {
 		t.Errorf("commands check = %+v, want a failure naming %q", cmds, flow.CommandVerify)
+	}
+}
+
+// Environment fitness did not move OUT of doctor when it moved out of startup:
+// on the clone that reported this — provisioned, tools not built — the binary
+// starts, and `doctor` is the command that says why nothing can be claimed
+// there. It fails, on the gate and command rows, and each names the repair.
+func TestCmdDoctor_FailsOnACloneWhoseToolsAreNotBuilt(t *testing.T) {
+	be := &declaringOrchestrator{Orchestrator: fake.New()} // declares nothing
+	app, out := doctorApp(t, be, &stubAgent{name: "stub"})
+
+	code := app.cmdDoctor(context.Background(), nil, nil)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; output:\n%s", code, out.String())
+	}
+	for name, want := range map[string]string{
+		"gates":    string(flow.GateIntegration),
+		"commands": string(flow.CommandVerify),
+	} {
+		line := doctorLine(t, out.String(), name)
+		if !strings.HasPrefix(line, glyphFail) || !strings.Contains(line, want) {
+			t.Errorf("%s line should fail naming %q; got %q", name, want, line)
+		}
+		if !strings.Contains(line, "build the project's tools") {
+			t.Errorf("%s line should name the repair; got %q", name, line)
+		}
 	}
 }
 
@@ -455,31 +480,46 @@ func TestCmdDoctor_ReportsWhatTheOrchestratorCanRun(t *testing.T) {
 	}
 }
 
-// declaringOrchestrator is the fake with a caller-chosen set of declarations.
+// declaringOrchestrator is the fake with a caller-chosen set of declarations,
+// counting how often it was asked for them.
+//
+// The counts are the point of the counters: asking an orchestrator what it can
+// run REACHES THE ENVIRONMENT (the github one spawns the project's gate entry
+// point), so "was it asked at all" is what distinguishes a startup that checks
+// only configuration from one that probes the machine on every invocation.
 type declaringOrchestrator struct {
 	*fake.Orchestrator
 	gates    []flow.GateDef
 	commands []flow.CommandDef
+
+	gateCalls    int
+	commandCalls int
 }
 
-func (o *declaringOrchestrator) SupportedGates() []flow.GateDef       { return o.gates }
-func (o *declaringOrchestrator) SupportedCommands() []flow.CommandDef { return o.commands }
+func (o *declaringOrchestrator) SupportedGates() []flow.GateDef {
+	o.gateCalls++
+	return o.gates
+}
+
+func (o *declaringOrchestrator) SupportedCommands() []flow.CommandDef {
+	o.commandCalls++
+	return o.commands
+}
 
 // doctor runs on a machine nothing else will start on. That is the whole point
-// of it: with declarations read off the environment, a checkout that has not
-// built its tools fails startup validation — and refusing to run the one
-// command whose job is explaining why would leave an operator with "the binary
-// will not start" and nothing else.
+// of it: a binary that refuses to start says only that it will not start, and
+// refusing to run the one command whose job is explaining why would leave an
+// operator with nothing else.
 func TestCmdDoctor_RunsAndReportsWhenStartupRefused(t *testing.T) {
 	app, out := doctorApp(t, fake.New(), &stubAgent{name: "stub"})
-	refusal := errors.New(`orchestrator "github" does not declare the required gate "fit"`)
+	refusal := errors.New("App.Artifacts is empty")
 
 	code := app.cmdDoctor(context.Background(), nil, refusal)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; output:\n%s", code, out.String())
 	}
 	line := doctorLine(t, out.String(), "startup")
-	if !strings.HasPrefix(line, glyphFail) || !strings.Contains(line, "fit") {
+	if !strings.HasPrefix(line, glyphFail) || !strings.Contains(line, "App.Artifacts") {
 		t.Errorf("startup line should fail carrying the refusal; got %q", line)
 	}
 	// And the rest of the report is still produced — an operator fixing an
