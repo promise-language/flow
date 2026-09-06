@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -231,4 +232,130 @@ func TestUpToDate_BinaryReplacedAfterBuild(t *testing.T) {
 	if upToDate(hashFile, sourceHash, binDir, []string{"guard"}) {
 		t.Error("expected not up-to-date when binary was replaced after build")
 	}
+}
+
+// guardNames are the names this repository must never build into bin/.
+// `guard` is the retired one — #199 deleted tools/build/cmd/guard. The other
+// two are the workspace artifact's, hard-linked into bin/ by provisioning; a
+// tool built here under either name would overwrite the link on the first
+// ./make and split the installed set behind a version marker still claiming
+// the artifact's.
+var guardNames = []string{"guard", "tool-guard", "precommit-guard"}
+
+// provisionedBinaries are the names in bin/ that come from the workspace
+// artifact rather than from ./make, so a hook may name one even though no
+// directory under cmd/ builds it.
+var provisionedBinaries = []string{"tool-guard", "precommit-guard", "workspace"}
+
+func TestDiscoverTools_ListsDirectoriesExceptMake(t *testing.T) {
+	cmdDir := t.TempDir()
+	for _, name := range []string{"verify", "make", "gate"} {
+		if err := os.Mkdir(filepath.Join(cmdDir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A file is not a tool: `go build ./cmd/notes.md` is not a build.
+	if err := os.WriteFile(filepath.Join(cmdDir, "notes.md"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := discoverTools(cmdDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "gate,verify" {
+		t.Errorf("discoverTools() = %v, want [gate verify] — make runs from source and a file is not a package", got)
+	}
+}
+
+// A cmd directory that cannot be read is not an empty tool set. Reporting no
+// tools with no error would take the up-to-date short circuit — nothing to
+// build, every expected binary present, "Tools up to date" — and leave bin/
+// however it was found, which for a fresh clone is empty.
+func TestDiscoverTools_UnreadableDirectoryIsAnError(t *testing.T) {
+	if _, err := discoverTools(filepath.Join(t.TempDir(), "cmd")); err == nil {
+		t.Error("discoverTools() succeeded on a missing cmd directory; make would report every tool up to date having built none")
+	}
+}
+
+// The #199 regression, and the reason the deletion was the whole change: the
+// tool set is the directory listing, so re-creating tools/build/cmd/guard is
+// by itself enough to bring the twin back. On an artifact-provisioned clone
+// the first ./make then overwrites the hard-linked bin/guard.
+func TestToolSet_BuildsNoGuard(t *testing.T) {
+	for _, name := range repoTools(t) {
+		for _, guard := range guardNames {
+			if name == guard {
+				t.Errorf("./make builds bin/%s: guards are provisioned with the workspace artifact, not built here — delete tools/build/cmd/%s", name, name)
+			}
+		}
+	}
+}
+
+// binRef finds every bin/<name> a hook definition runs or names.
+var binRef = regexp.MustCompile(`bin/([A-Za-z0-9_.-]+)`)
+
+// The other half of #199, and what made its order load-bearing: the hooks were
+// repointed at bin/tool-guard BEFORE cmd/guard was deleted, because a hook
+// naming a binary nothing supplies is worse than one naming a stale binary.
+// These hooks are tracked files, live in a fresh clone before anything has
+// been built or provisioned, and the PreToolUse one ends `|| exit 2` — pointed
+// at a name no build produces, it blocks every tool call in the arena.
+func TestCommittedHooks_NameOnlySuppliedBinaries(t *testing.T) {
+	root := repoRoot(t)
+	tools := repoTools(t)
+	supplied := map[string]bool{}
+	for _, name := range tools {
+		supplied[name] = true
+	}
+	for _, name := range provisionedBinaries {
+		supplied[name] = true
+	}
+
+	for _, rel := range []string{".claude/settings.json", ".githooks/pre-commit"} {
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("reading %s: %v", rel, err)
+		}
+		seen := 0
+		for _, line := range strings.Split(string(data), "\n") {
+			// The interpreter line names a binary too — /usr/bin/env — and it
+			// is not one anything here supplies.
+			if strings.HasPrefix(line, "#!") {
+				continue
+			}
+			for _, m := range binRef.FindAllStringSubmatch(line, -1) {
+				seen++
+				if !supplied[m[1]] {
+					t.Errorf("%s runs bin/%s, which nothing supplies: ./make builds %v and provisioning installs %v",
+						rel, m[1], tools, provisionedBinaries)
+				}
+			}
+		}
+		if seen == 0 {
+			// Not a pass: either the hook stopped naming a binary, or the scan
+			// stopped recognising one. Either way nothing above was checked.
+			t.Errorf("%s names no bin/ binary — this test is no longer looking at anything", rel)
+		}
+	}
+}
+
+// repoTools is the tool set of THIS repository, read the way make reads it.
+func repoTools(t *testing.T) []string {
+	t.Helper()
+	tools, err := discoverTools(filepath.Join(repoRoot(t), "tools", "build", "cmd"))
+	if err != nil {
+		t.Fatalf("reading this repository's cmd directory: %v", err)
+	}
+	return tools
+}
+
+// repoRoot is four levels up from tools/build/cmd/make.
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	abs, err := filepath.Abs(filepath.Join("..", "..", "..", ".."))
+	if err != nil {
+		t.Fatalf("repo root: %v", err)
+	}
+	return abs
 }

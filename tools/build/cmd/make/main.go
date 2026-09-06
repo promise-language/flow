@@ -54,17 +54,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "warning: could not configure git hooks: %v\n", err)
 	}
 
-	// Discover tools: every cmd/<name> except make itself.
-	cmdDir := filepath.Join(repoRoot, "tools", "build", "cmd")
-	entries, err := os.ReadDir(cmdDir)
+	tools, err := discoverTools(filepath.Join(repoRoot, "tools", "build", "cmd"))
 	must(err)
-	var tools []string
-	for _, e := range entries {
-		if e.IsDir() && e.Name() != "make" {
-			tools = append(tools, e.Name())
-		}
-	}
-	sort.Strings(tools)
 
 	binDir := filepath.Join(repoRoot, "bin")
 	hashFile := filepath.Join(binDir, ".tools.hash")
@@ -110,6 +101,28 @@ func main() {
 	}
 	must(os.WriteFile(hashFile, []byte(sb.String()), 0o644))
 	fmt.Printf("built %d tool(s) into bin/\n", len(tools))
+}
+
+// discoverTools is the tool set: one tool per directory under
+// tools/build/cmd, except make itself, which runs from source and is never
+// compiled into bin/. The listing IS the registry — there is no list anywhere
+// to keep in step with it, so adding a tool is adding a directory and retiring
+// one is deleting it (#199 retired `guard` that way).
+//
+// A file under cmd/ is not a tool: `go build ./cmd/<name>` wants a package.
+func discoverTools(cmdDir string) ([]string, error) {
+	entries, err := os.ReadDir(cmdDir)
+	if err != nil {
+		return nil, err
+	}
+	var tools []string
+	for _, e := range entries {
+		if e.IsDir() && e.Name() != "make" {
+			tools = append(tools, e.Name())
+		}
+	}
+	sort.Strings(tools)
+	return tools, nil
 }
 
 func upToDate(hashFile, hash, binDir string, tools []string) bool {
