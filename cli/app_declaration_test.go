@@ -2,6 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 
@@ -309,6 +313,11 @@ func TestRunWithArgs_GateRunningCommandsRefuse(t *testing.T) {
 			if code != 1 {
 				t.Errorf("exit code = %d, want 1 (out=%q err=%q)", code, out.String(), errBuf.String())
 			}
+			// stdout is the machine channel — `resolve` streams results there —
+			// so the refusal belongs entirely on stderr.
+			if out.Len() != 0 {
+				t.Errorf("stdout = %q, want empty", out.String())
+			}
 			got := errBuf.String()
 			want := []string{
 				tc.name, string(flow.GateIntegration), string(flow.GateFit),
@@ -342,6 +351,214 @@ func TestCommandRunsGates_MatchesTheRegistry(t *testing.T) {
 	}
 	if commandRunsGates("frobnicate") {
 		t.Error("an unknown command must not be treated as one that runs a gate")
+	}
+}
+
+// Every offender, not the first one. An implementor who spelled two names
+// wrong should learn both in one pass — a refusal that stops at the first
+// makes them re-run the tool to be told the second, and the same two
+// functions render `doctor`'s rows, where reporting everything is the rule.
+func TestApp_RequireRunnable_NamesEveryOffendingDeclaration(t *testing.T) {
+	required := []flow.GateDef{flow.Gate(flow.GateIntegration, true), flow.Gate(flow.GateFit, true)}
+	for _, tc := range []struct {
+		name string
+		be   *declaringOrchestrator
+		want []string
+	}{
+		{
+			name: "gates",
+			be: &declaringOrchestrator{
+				Orchestrator: fake.New(),
+				gates: append(append([]flow.GateDef{}, required...),
+					flow.Gate("lint", false), flow.Gate("smoke", false)),
+				commands: []flow.CommandDef{flow.Command(flow.CommandVerify)},
+			},
+			want: []string{`"lint"`, `"smoke"`},
+		},
+		{
+			name: "commands",
+			be: &declaringOrchestrator{
+				Orchestrator: fake.New(),
+				gates:        required,
+				commands: []flow.CommandDef{
+					flow.Command(flow.CommandVerify), flow.Command("deploy"), flow.Command("publish")},
+			},
+			want: []string{`"deploy"`, `"publish"`},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := declaringApp(tc.be)
+			err := app.requireRunnable("resolve")
+			if err == nil {
+				t.Fatalf("requireRunnable accepted two %s this SDK cannot address", tc.name)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("refusal = %q, want it to name %s too", err, w)
+				}
+			}
+		})
+	}
+}
+
+// docs/cli.md § 6, applied to all four: a refusal names what to run next. Only
+// the missing-gate one is reached by the end-to-end above (it is checked
+// first), so the other three are asked for here — each one an environment a
+// person can actually be sitting in front of.
+//
+// The check name is asserted because it is the address of the pointer: the
+// refusal closes on `doctor`, and "gates"/"commands" is the row the reader is
+// being sent to find. The doctor tests pin those two row names from the other
+// side, so a rename breaks one of the two rather than silently sending the
+// reader to a report with no such row.
+func TestApp_RequireRunnable_EveryRefusalNamesItsRepairAndDoctor(t *testing.T) {
+	required := []flow.GateDef{flow.Gate(flow.GateIntegration, true), flow.Gate(flow.GateFit, true)}
+	verify := []flow.CommandDef{flow.Command(flow.CommandVerify)}
+	for _, tc := range []struct {
+		name     string
+		gates    []flow.GateDef
+		commands []flow.CommandDef
+		check    string   // the doctor row the refusal sends its reader to
+		want     []string // the offender named, and the repair
+	}{
+		{
+			name:     "missing gate",
+			gates:    []flow.GateDef{flow.Gate(flow.GateIntegration, true)},
+			commands: verify,
+			check:    "gates",
+			want:     []string{string(flow.GateFit), "build the project's tools"},
+		},
+		{
+			name:     "missing command",
+			gates:    required,
+			commands: nil,
+			check:    "commands",
+			want:     []string{string(flow.CommandVerify), "build the project's tools"},
+		},
+		{
+			// Nothing to build here — the machine is not what is wrong — so the
+			// repair is the closed vocabulary, and it must be the whole of it.
+			name:     "unknown gate",
+			gates:    append(append([]flow.GateDef{}, required...), flow.Gate("lint", false)),
+			commands: verify,
+			check:    "gates",
+			want:     []string{`"lint"`, "the gate concept set is closed", string(flow.GateTested)},
+		},
+		{
+			name:     "unknown command",
+			gates:    required,
+			commands: append(append([]flow.CommandDef{}, verify...), flow.Command("deploy")),
+			check:    "commands",
+			want:     []string{`"deploy"`, "the command set is closed", string(flow.CommandCleanup)},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := declaringApp(&declaringOrchestrator{
+				Orchestrator: fake.New(), gates: tc.gates, commands: tc.commands})
+			err := app.requireRunnable("claim")
+			if err == nil {
+				t.Fatalf("requireRunnable accepted an orchestrator with a %s", tc.name)
+			}
+			got := err.Error()
+			// The house refusal shape, prefixed with the command that was asked
+			// for: the reader has to know which invocation this answers.
+			if !strings.HasPrefix(got, "claim: refused — ") {
+				t.Errorf("refusal = %q, want the house shape prefixed with the command", got)
+			}
+			if !strings.Contains(got, fmt.Sprintf("(check %q)", tc.check)) {
+				t.Errorf("refusal = %q, want it to name the %q check", got, tc.check)
+			}
+			for _, w := range append(tc.want, "doctor") {
+				if !strings.Contains(got, w) {
+					t.Errorf("refusal = %q, want it to name %q", got, w)
+				}
+			}
+		})
+	}
+}
+
+// The other half of the split, held from the startup side: what stays at
+// startup stays at startup. A flow NAMING a gate the orchestrator cannot run
+// is this binary's own composition — wrong wherever it is deployed — so it
+// refuses every command, `list` included, and at exit 2 rather than the
+// boundary's 1. Without this, moving the whole block out of validate() would
+// pass every other test in this file.
+func TestRunWithArgs_AFlowNamingAnUnrunnableGateStillFailsAtStartup(t *testing.T) {
+	for _, args := range [][]string{{"list"}, {"status", "1"}, {"resolve"}} {
+		t.Run(args[0], func(t *testing.T) {
+			be := &declaringOrchestrator{
+				Orchestrator: fake.New(),
+				gates:        []flow.GateDef{flow.Gate(flow.GateIntegration, true), flow.Gate(flow.GateFit, true)},
+				commands:     []flow.CommandDef{flow.Command(flow.CommandVerify)},
+			}
+			app := declaringApp(be, "tested")
+			out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+			app.Out, app.Err = out, errBuf
+			app.Name = "issue"
+
+			code := RunWithArgs(app, args)
+			if code != 2 {
+				t.Errorf("exit code = %d, want 2 (out=%q err=%q)", code, out.String(), errBuf.String())
+			}
+			got := errBuf.String()
+			if !strings.HasPrefix(got, "startup error:") {
+				t.Errorf("stderr = %q, want the startup refusal — this is configuration, not the environment", got)
+			}
+			if !strings.Contains(got, "tested") {
+				t.Errorf("stderr = %q, want it to name the gate no flow can run", got)
+			}
+		})
+	}
+}
+
+// commandRunsGates answers from perCommandUsage, and a command with no entry
+// there answers false — the permissive direction. That makes the registry
+// load-bearing for the gate check, so it has to be the same set the dispatch
+// switch handles: a gate-running command added to the switch alone would skip
+// its own boundary silently, which is the one failure this mechanism cannot
+// report on itself.
+func TestPerCommandUsage_IsTheDispatchSet(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "app.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse app.go: %v", err)
+	}
+
+	dispatched := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		sw, ok := n.(*ast.SwitchStmt)
+		if !ok {
+			return true
+		}
+		if id, ok := sw.Tag.(*ast.Ident); !ok || id.Name != "cmd" {
+			return true
+		}
+		for _, stmt := range sw.Body.List {
+			cc, ok := stmt.(*ast.CaseClause)
+			if !ok {
+				continue
+			}
+			for _, e := range cc.List {
+				if lit, ok := e.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+					dispatched[strings.Trim(lit.Value, `"`)] = true
+				}
+			}
+		}
+		return true
+	})
+	if len(dispatched) == 0 {
+		t.Fatal("parsed no commands out of the dispatch switch — the probe is broken, not the code")
+	}
+
+	for cmd := range dispatched {
+		if _, ok := perCommandUsage[cmd]; !ok {
+			t.Errorf("RunWithArgs dispatches %q with no perCommandUsage entry — commandRunsGates(%q) answers false, so a gate check it needs is skipped", cmd, cmd)
+		}
+	}
+	for cmd := range perCommandUsage {
+		if !dispatched[cmd] {
+			t.Errorf("perCommandUsage lists %q, which RunWithArgs does not dispatch", cmd)
+		}
 	}
 }
 
