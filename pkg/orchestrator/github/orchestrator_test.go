@@ -2291,6 +2291,131 @@ func TestBackend_Claim_UnreadableLeaseFileRefusesWithoutClaiming(t *testing.T) {
 	}
 }
 
+// The short-circuit sits BELOW the disabled and other-binary preflights, and
+// those two are the only refusals that must reach a holder mid-work. Both are
+// an outside hand saying "stop": `flow:disabled` is the operator's stop switch,
+// and a foreign binary label says another flow owns this item now. A
+// short-circuit hoisted above them would return the standing lease and let the
+// holder resolve straight past both — and the holder is exactly who the stop
+// switch exists to stop.
+func TestBackend_Claim_HeldReclaimStillRefusesStopLabels(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		label string
+		code  flow.ClaimRefusalCode
+	}{
+		{"disabled", "flow:disabled", "disabled"},
+		{"other binary", "flow:review", "other-binary"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b, mock, rec := newClaimPrecondBackend(t)
+			scriptCleanWorktree(rec)
+			ctx := t.Context()
+
+			if _, err := b.Claim(ctx, b.refFromIssue(42), nil); err != nil {
+				t.Fatalf("first Claim: %v", err)
+			}
+			// Mid-work — on the item's own branch, holding the lease this
+			// arena wrote — when the label lands.
+			mock.mu.Lock()
+			mock.issueLabels = append(mock.issueLabels, c.label)
+			mock.mu.Unlock()
+			rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+				return []byte("flow/issue-42\n"), nil
+			}
+
+			_, err := b.Claim(ctx, b.refFromIssue(42), nil)
+			if err == nil {
+				t.Fatalf("re-claiming an item carrying %s must refuse", c.label)
+			}
+			var refused flow.ErrClaimRefused
+			if !errors.As(err, &refused) {
+				t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+			}
+			if refused.Code != c.code {
+				t.Errorf("Code = %q, want %q", refused.Code, c.code)
+			}
+			if !refused.ItemScoped {
+				t.Error("ItemScoped = false, want true (the item is stopped, not the arena)")
+			}
+		})
+	}
+}
+
+// The short-circuit is arena-scoped as well as item-scoped, and it is
+// LookupActiveClaim that scopes it — reading the lease file directly would
+// resume a lease this checkout never took. A worktree copied or moved to a new
+// path carries the old one's active.json, naming the same item; the copy holds
+// nothing, so it must take a FRESH claim and answer to the fresh-claim
+// preconditions rather than adopting a token minted for another arena.
+func TestBackend_Claim_LeaseFromAnotherArenaIsNotAReclaim(t *testing.T) {
+	b, _, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
+	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+		return []byte("flow/issue-42\n"), nil
+	}
+	elsewhere := b.arena()
+	elsewhere.Id = flow.ArenaId(t.TempDir())
+	if err := clistate.Save(flow.Claim{
+		OrchestratorName: b.Name(),
+		ItemRef:          b.refFromIssue(42),
+		Arena:            elsewhere,
+		Account:          "alice",
+		ClaimedAt:        nowUTC(),
+		Token:            json.RawMessage(`{"state_comment_id":1,"claim_id":"whatever"}`),
+	}); err != nil {
+		t.Fatalf("seed lease file: %v", err)
+	}
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	if err == nil {
+		t.Fatal("another arena's lease must not short-circuit into a re-claim")
+	}
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+	}
+	if refused.Code != "not-on-base" {
+		t.Errorf("Code = %q, want not-on-base — the fresh-claim preconditions apply", refused.Code)
+	}
+}
+
+// A lease file whose ItemRef this orchestrator cannot read is the same class of
+// answer as one it cannot parse at all: not "this arena holds nothing", but no
+// answer. It FAILS THE CLAIM CLOSED for the same reason — reading it as "holds
+// nothing" is how one arena takes a second item while the first is still
+// assigned to it on the server.
+//
+// Reachable through the two writers of that field disagreeing: a ref shaped for
+// another orchestrator, or one from a build whose encoding has moved.
+func TestBackend_Claim_LeaseNamingAnUnreadableItemRefusesWithoutClaiming(t *testing.T) {
+	b, mock, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
+	if err := clistate.Save(flow.Claim{
+		OrchestratorName: b.Name(),
+		ItemRef:          flow.ItemRef{OrchestratorName: b.Name(), Ref: json.RawMessage(`"42"`)},
+		Arena:            b.arena(),
+		Account:          "alice",
+		ClaimedAt:        nowUTC(),
+	}); err != nil {
+		t.Fatalf("seed lease file: %v", err)
+	}
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	if err == nil {
+		t.Fatal("Claim must not proceed on a lease whose item it cannot identify")
+	}
+	if !strings.Contains(err.Error(), "ItemRef") {
+		t.Errorf("error = %v, want it to name the ref it could not read", err)
+	}
+	mock.mu.Lock()
+	mutations := append([]string(nil), mock.mutations...)
+	mock.mu.Unlock()
+	if len(mutations) != 0 {
+		t.Errorf("a refused claim wrote to GitHub: %v", mutations)
+	}
+}
+
 // A disclosure refusal on the park reason must not abort the park: the park is
 // recorded with a substitute reason naming the refusal, not the matched text.
 //
