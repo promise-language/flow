@@ -1381,7 +1381,8 @@ Unit tests (table-driven, in `*_test.go`):
     tests + completion-set) that a tracker-style orchestrator consumes for
     ratcheting baselines and health dashboards. v1 of flow ships without
     them; design is in
-    [docs/proposals/gates.md](proposals/gates.md). The proposed shape adds
+    [docs/gates-and-commands.md](../gates-and-commands.md), which superseded
+    the `docs/proposals/gates.md` proposal. The proposed shape adds
     a `flow/gate` subpackage + optional `cli.App.Gates` + a `gate manifest
     | list | run` cli surface; tracker compatibility is free because the
     wire format mirrors tracker's existing one.

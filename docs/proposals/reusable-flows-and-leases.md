@@ -2,7 +2,8 @@
 
 **Status:** draft, not yet implemented
 **Author:** initial design (promise + flow collaboration)
-**Related:** [docs/design.md](../design.md), [docs/proposals/gates.md](./gates.md),
+**Related:** [docs/archive/design.md](../archive/design.md),
+[docs/gates-and-commands.md](../gates-and-commands.md),
 the reference contributor/maintainer flow in [examples/fix](../../examples/fix/main.go),
 and the private `flow-sdk/doflow` + `flow-sdk/pkg/backend/tracker` (the tracker
 consumer of this SDK, in the closed superproject).
@@ -57,7 +58,7 @@ This proposal is implemented in **two places**:
 
 ## 2. Background: what already exists
 
-The OSS substrate is already in place (see [docs/design.md](../design.md)):
+The OSS substrate is already in place (see [docs/archive/design.md](../archive/design.md)):
 
 - the universal `flow.Item`, the pluggable `flow.Backend` boundary, `flow.Agent`,
   `flow.Telemetry`, `flow.Worktree` + `flow.RequestManager`, and the optional
@@ -230,7 +231,7 @@ Retaining doflow's steps means the canonical artifact ids are
 `plan, phases, implementation, review, coverage, land, summary, inspection`.
 Because `Backend.SupportedArtifacts()` is a **closed set validated at startup**
 (declaring an artifact a backend doesn't support is exit 2 — see
-[design.md §Backend](../design.md)), the recipe must declare a vocabulary every
+[design.md §Backend](../archive/design.md)), the recipe must declare a vocabulary every
 target backend supports. Action: the github backend's `SupportedArtifacts` is
 **widened to a superset** of the canonical ids (today it lacks `phases` /
 `inspection` and names the land artifact `merge-commit`). The recipe owns the
@@ -245,7 +246,7 @@ vocabulary; backends list it.
 Backends implement `flow.Backend` (required methods) plus any of the optional
 capability interfaces (`RefResolver`, `Finalizer`, `StateInspector`,
 `ManualTakeover`) and supply a `flow.Worktree` (with an optional
-`flow.RequestManager`). See [design.md §`flow.Backend`](../design.md).
+`flow.RequestManager`). See [design.md §`flow.Backend`](../archive/design.md).
 
 This proposal **extends** the worktree surface with the merge primitives the
 land loop needs (additive; existing single-shot `Merge` stays):

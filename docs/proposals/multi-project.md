@@ -2,8 +2,8 @@
 
 **Status:** draft, not yet implemented
 **Author:** initial sketch
-**Related:** [docs/design.md](../design.md), [docs/proposals/gates.md](gates.md),
-[docs/proposals/engagement-feed.md](engagement-feed.md)
+**Related:** [docs/archive/design.md](../archive/design.md),
+[docs/gates-and-commands.md](../gates-and-commands.md)
 
 ## Goal
 
@@ -356,7 +356,7 @@ the default). Today a project's `.mcp.json` carries only the URL and no project:
 // about WHICH project the calls are for. Ambiguous on a multi-project Reactor.
 {
   "mcpServers": {
-    "reactor": { "type": "http", "url": "http://192.168.1.7:9121/mcp" }
+    "reactor": { "type": "http", "url": "http://198.51.100.7:9121/mcp" }
   }
 }
 ```
@@ -370,7 +370,7 @@ config — a project-scoped bearer token the setup step obtained for this repo:
   "mcpServers": {
     "reactor": {
       "type": "http",
-      "url": "http://192.168.1.7:9121/mcp",
+      "url": "http://198.51.100.7:9121/mcp",
       "headers": {
         // The one project carrier: a token scoped to this repo. The Reactor
         // resolves token -> (project, principal) server-side; the agent never

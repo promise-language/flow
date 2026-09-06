@@ -2,9 +2,9 @@
 
 **Status:** implemented
 **Author:** initial sketch
-**Related:** [docs/design.md](../design.md),
-[docs/proposals/gates.md](gates.md) (the TTY→JSON output convention this
-proposal adopts for the flow CLI)
+**Related:** [docs/archive/design.md](../archive/design.md),
+[docs/gates-and-commands.md](../gates-and-commands.md), which superseded the
+`gates.md` proposal this one adopts the TTY→JSON output convention from
 
 ## Goal
 
@@ -349,7 +349,10 @@ site, so this is documented rather than split into a second flag set
 
 ## 5. Output modes: human on a TTY, JSON when piped
 
-Same convention [gates.md](gates.md) already specifies for `bin/gate --list`.
+Same convention the `gates.md` proposal specified for `bin/gate --list`. That
+proposal was folded into [docs/gates-and-commands.md](../gates-and-commands.md),
+which did not carry the output-mode rules forward — so the convention this
+section adopts is currently specified nowhere.
 
 **Detection.** `go.mod` carries only `go-github` and `yaml.v3`, and
 `golang.org/x/term` is not worth adding for this: type-assert `app.Out` to
