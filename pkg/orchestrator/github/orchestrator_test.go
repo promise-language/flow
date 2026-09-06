@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -2252,6 +2253,41 @@ func TestBackend_Claim_ForceTakesOverDespiteOwnStaleLease(t *testing.T) {
 	}
 	if !contains(mock.labelNames(), "flow:owner:alice") {
 		t.Errorf("owner label not rewritten; labels = %v", mock.labelNames())
+	}
+}
+
+// The short-circuit's evidence is the lease file, so a file that cannot be read
+// FAILS THE CLAIM CLOSED. An unreadable lease is not the answer "this arena
+// holds nothing"; it is no answer, and taking a fresh claim on no answer is how
+// one arena ends up holding a second item while the first is still assigned to
+// it on the server. The refusal names the file, because clearing it by hand is
+// the only recovery today — `release` reads the same file and stops on the same
+// error, which is #212.
+func TestBackend_Claim_UnreadableLeaseFileRefusesWithoutClaiming(t *testing.T) {
+	b, mock, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
+	if err := os.WriteFile(clistate.ActiveJSONPath(), []byte("{truncated"), 0o644); err != nil {
+		t.Fatalf("write lease file: %v", err)
+	}
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	if err == nil {
+		t.Fatal("Claim must not proceed on a lease file it cannot read")
+	}
+	if !strings.Contains(err.Error(), "read active claim") {
+		t.Errorf("error = %v, want it to name the unreadable claim state", err)
+	}
+	if !strings.Contains(err.Error(), clistate.ActiveJSONPath()) {
+		t.Errorf("error = %v, want it to name %s, the file the operator has to clear",
+			err, clistate.ActiveJSONPath())
+	}
+	// Nothing was taken: the refusal precedes every write, so no token is
+	// minted and no ownership is asserted on an item we may not be free to hold.
+	mock.mu.Lock()
+	mutations := append([]string(nil), mock.mutations...)
+	mock.mu.Unlock()
+	if len(mutations) != 0 {
+		t.Errorf("a refused claim wrote to GitHub: %v", mutations)
 	}
 }
 
