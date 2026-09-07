@@ -292,6 +292,116 @@ func TestBackend_AskQuestionsAssignsIDsAndAnswerFlow(t *testing.T) {
 	}
 }
 
+// PostAnswer records the answer against the question it answers AND LEAVES THE
+// PARK, the same rule the GitHub backend obeys.
+//
+// The park carries the ask time, which is the only window a resumed step reads
+// its answers through: an orchestrator that cleared it here would delete the
+// answer's own delivery, and the resumed step would re-derive the question it
+// was just answered. Both orchestrators are asserted against the rule because a
+// fake that disagreed with the backend is how the loop stayed invisible to
+// every test.
+func TestBackend_PostAnswerRecordsTheAnswerAndLeavesThePark(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := addItem(b, "1")
+	if _, err := b.Claim(ctx, ref, nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	first, err := b.AskQuestion(ctx, ref, flow.AskText("base", "Which base branch?"))
+	if err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+	if _, err := b.AskQuestion(ctx, ref, flow.AskYesNo("ship", "Ship it?")); err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+	if err := b.Park(ctx, ref, flow.ParkRequest{
+		Kind: flow.ParkQuestion, Step: "plan", Reason: "question: " + first.Header,
+		Details: flow.MarkQuestionAsked(first.AskedAt),
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+
+	if err := b.PostAnswer(ctx, ref, first.ID, "main"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+	state, err := b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	answered := false
+	for _, q := range state.Questions {
+		if q.ID == first.ID {
+			answered = q.Answer == "main"
+		}
+	}
+	if !answered {
+		t.Errorf("questions = %+v, want the answer recorded against %q", state.Questions, first.ID)
+	}
+	// Answering one of two is not answering the item.
+	if got := len(state.PendingQuestions()); got != 1 {
+		t.Errorf("PendingQuestions = %d, want 1 — the second question is still waiting", got)
+	}
+	if state.Park == nil {
+		t.Fatal("the park cleared on the answer")
+	}
+	// The marker is RFC3339, so the stamp comes back truncated to the second.
+	wantAskedAt := first.AskedAt.UTC().Truncate(time.Second)
+	if got := flow.QuestionAskedAt(state.Park); !got.Equal(wantAskedAt) {
+		t.Errorf("asked-at = %v, want %v (the window the resume reads answers through)", got, wantAskedAt)
+	}
+
+	// And the LAST answer — the one that used to take the park with it — leaves
+	// it standing too. Only the asking step completing, a superseding park, or
+	// a reset drops it.
+	for _, q := range state.PendingQuestions() {
+		if err := b.PostAnswer(ctx, ref, q.ID, "yes"); err != nil {
+			t.Fatalf("PostAnswer: %v", err)
+		}
+	}
+	state, err = b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.PendingQuestions()) != 0 {
+		t.Fatalf("PendingQuestions = %d, want 0", len(state.PendingQuestions()))
+	}
+	if state.Park == nil {
+		t.Error("the park cleared with the last answer — the resume has no answer window left")
+	}
+}
+
+// An unknown id is refused, and an already-answered one too: either accepted
+// silently would report an answer that moved nothing.
+func TestBackend_PostAnswerRefusesUnknownAndAnsweredQuestions(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := addItem(b, "1")
+	if _, err := b.Claim(ctx, ref, nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	q, err := b.AskQuestion(ctx, ref, flow.AskText("base", "Which base branch?"))
+	if err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+	if err := b.PostAnswer(ctx, ref, "no-such-question", "main"); err == nil {
+		t.Error("PostAnswer accepted an id naming no question on the item")
+	}
+	if err := b.PostAnswer(ctx, ref, q.ID, "main"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+	if err := b.PostAnswer(ctx, ref, q.ID, "the release branch"); err == nil {
+		t.Error("PostAnswer accepted a second answer to one question")
+	}
+	state, err := b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.Questions[0].Answer != "main" {
+		t.Errorf("Answer = %q, want the first answer kept", state.Questions[0].Answer)
+	}
+}
+
 func TestBackend_ParkRecordsRequest(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()

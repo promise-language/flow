@@ -56,6 +56,20 @@ func parkOnQuestion(t *testing.T, b *Orchestrator, claim flow.Claim) {
 	}
 }
 
+// parkOnQuestionAsked is parkOnQuestion carrying the ask time, the way the
+// runner stamps a real question park (cli.parkAndReturn). The marker is the
+// resume's only answer window, so a test about answers reaching a resume needs
+// the park that carries one.
+func parkOnQuestionAsked(t *testing.T, b *Orchestrator, claim flow.Claim, asked flow.Question) {
+	t.Helper()
+	if err := b.Park(t.Context(), claim.ItemRef, flow.ParkRequest{
+		Kind: flow.ParkQuestion, Step: "plan", Reason: "question: " + asked.Header,
+		Details: flow.MarkQuestionAsked(asked.AskedAt),
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+}
+
 // The reported defect: a question park Load returns no question for is a
 // park `answer` cannot clear, because it has no id to name. The whole payload
 // must survive the round trip through the state comment.

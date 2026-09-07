@@ -62,11 +62,13 @@ func TestBackend_TheAnswerMarkerClearsOnlyWithTheLastQuestion(t *testing.T) {
 		if wantPending == 0 && marked {
 			t.Error("the needs-answer marker survived the last answer")
 		}
-		// The park is what the questions were waiting on, so it clears with the
-		// last of them and not before.
-		if item.Parked() != (wantPending > 0) {
-			t.Errorf("parked = %v with %d pending — the park clears with the last question",
-				item.Parked(), wantPending)
+		// The park is not the marker and does not go with it. It records which
+		// step stopped and carries the asked-at window the resumed step reads
+		// its answers through, so it stands through every answer — including
+		// the last, the one that would otherwise delete its own delivery.
+		if !item.Parked() {
+			t.Errorf("the park cleared after answering %d of %d — the resume has no answer window left",
+				i+1, len(asked))
 		}
 	}
 }
@@ -76,7 +78,8 @@ func TestBackend_TheAnswerMarkerClearsOnlyWithTheLastQuestion(t *testing.T) {
 // that does not exist is a disclosure that cannot be taken back.
 func TestBackend_PostAnswer_RefusesAnUnknownQuestionWithoutPublishing(t *testing.T) {
 	mock, b, claim := newQuestionEnv(t)
-	askOne(t, b, claim, flow.AskText("base", "which base branch?"))
+	asked := askOne(t, b, claim, flow.AskText("base", "which base branch?"))
+	parkOnQuestionAsked(t, b, claim, asked)
 	before := countAnswerComments(mock)
 
 	err := b.PostAnswer(t.Context(), claim.ItemRef, "no-such-question", "main")
@@ -92,6 +95,17 @@ func TestBackend_PostAnswer_RefusesAnUnknownQuestionWithoutPublishing(t *testing
 	// And the marker stays up: nothing was answered.
 	if !hasLabel(mock.labelNames(), b.labels.NeedsAnswer()) {
 		t.Error("the needs-answer marker cleared although no question was answered")
+	}
+	// So does the park, with the window it carries — a refusal moves nothing.
+	item, err := b.Load(t.Context(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !item.Parked() {
+		t.Fatal("the park cleared on a refused answer")
+	}
+	if got := flow.QuestionAskedAt(item.Park); !got.Equal(asked.AskedAt) {
+		t.Errorf("asked-at = %v, want %v — a refusal rewrote the answer window", got, asked.AskedAt)
 	}
 }
 
@@ -123,5 +137,114 @@ func TestBackend_PostAnswer_RefusesAQuestionAlreadyAnswered(t *testing.T) {
 	}
 	if item.Questions[0].Answer != "main" {
 		t.Errorf("Answer = %q, want the first answer kept", item.Questions[0].Answer)
+	}
+}
+
+// THE ANSWER MUST NOT DELETE ITS OWN DELIVERY.
+//
+// PostAnswer used to clear the question park along with the marker. The park
+// carries `asked-at`, and that stamp is the ONLY window a resumed step has for
+// finding replies: answersFor returns nil without a question park, so the
+// resumed step got an empty answers block, re-derived the same question, minted
+// a fresh id and parked again — one full agent turn per resume, forever.
+func TestBackend_PostAnswerLeavesTheQuestionParkForTheResume(t *testing.T) {
+	_, b, claim := newQuestionEnv(t)
+	asked := askOne(t, b, claim, flow.AskText("base", "which base branch?"))
+	parkOnQuestionAsked(t, b, claim, asked)
+
+	if err := b.PostAnswer(t.Context(), claim.ItemRef, asked.ID, "main"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+	item, err := b.Load(t.Context(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if item.Park == nil {
+		t.Fatal("the park cleared with the answer — the resume cannot tell which step stopped, or when")
+	}
+	if item.Park.Kind != flow.ParkQuestion {
+		t.Errorf("park kind = %q, want %q", item.Park.Kind, flow.ParkQuestion)
+	}
+	// The assertion that matters: the window, not merely the park object. A
+	// park that survived with a rewritten or missing stamp reads every comment
+	// on the item, or none.
+	if got := flow.QuestionAskedAt(item.Park); !got.Equal(asked.AskedAt) {
+		t.Errorf("asked-at = %v, want %v (the ask time the answers are compared against)", got, asked.AskedAt)
+	}
+}
+
+// The two halves in one test, which is the sequence a resume actually performs:
+// ask → park → answer → read the answers through the park's window. Nothing
+// covered it end to end, which is why the loop was invisible here.
+func TestBackend_AnsweringThenReadingComposesTheResume(t *testing.T) {
+	_, b, claim := newQuestionEnv(t)
+	asked := askOne(t, b, claim, flow.AskText("base", "which base branch?"))
+	parkOnQuestionAsked(t, b, claim, asked)
+
+	if err := b.PostAnswer(t.Context(), claim.ItemRef, asked.ID, "main — the release branch is cut from it"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+	item, err := b.Load(t.Context(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if item.Park == nil {
+		t.Fatal("no park after the answer, so the resume has no window to read through")
+	}
+
+	// `self` is the login the mock posts every comment under, deliberately:
+	// exclusion is by marker, not by author, because the common case is a human
+	// running the flow under their own token.
+	answers, err := b.ReadAnswers(t.Context(), *item, flow.QuestionAskedAt(item.Park), "alice")
+	if err != nil {
+		t.Fatalf("ReadAnswers: %v", err)
+	}
+	if len(answers) != 1 {
+		t.Fatalf("ReadAnswers = %d answer(s), want exactly the one that was posted: %+v", len(answers), answers)
+	}
+	if !strings.Contains(answers[0].Answer, "main — the release branch is cut from it") {
+		t.Errorf("answer = %q, want the text PostAnswer published", answers[0].Answer)
+	}
+}
+
+// The boundary on the other side: the park now outlives the answer, but it is
+// still dropped when the step it belongs to completes — one of the three
+// triggers docs/github-schema.md:113 names. Without this the change would read
+// as "the question park never clears".
+func TestBackend_TheQuestionParkClearsWhenTheAskingStepResolves(t *testing.T) {
+	mock, b, claim := newQuestionEnv(t)
+	first := askOne(t, b, claim, flow.AskText("base", "which base branch?"))
+	askOne(t, b, claim, flow.AskText("naming", "what should the flag be called?"))
+	parkOnQuestionAsked(t, b, claim, first)
+
+	// One of two answered: the park and the marker both stand.
+	if err := b.PostAnswer(t.Context(), claim.ItemRef, first.ID, "main"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+	item, err := b.Load(t.Context(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !item.Parked() {
+		t.Fatal("the park cleared on the answer")
+	}
+	if !hasLabel(mock.labelNames(), b.labels.NeedsAnswer()) {
+		t.Fatal("the needs-answer marker cleared with a question still pending")
+	}
+
+	if err := b.ResolveArtifact(t.Context(), claim.ItemRef, "plan", flow.ArtifactBody{
+		Type: flow.ArtifactMarkdown, Markdown: "the plan",
+	}); err != nil {
+		t.Fatalf("ResolveArtifact: %v", err)
+	}
+	item, err = b.Load(t.Context(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if item.Parked() {
+		t.Errorf("park = %+v, want dropped by the step it was recorded against", item.Park)
+	}
+	if hasLabel(mock.labelNames(), b.labels.NeedsAnswer()) {
+		t.Error("the park label outlived the park it advertises")
 	}
 }

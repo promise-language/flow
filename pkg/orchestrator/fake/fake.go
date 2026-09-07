@@ -1106,9 +1106,13 @@ func (b *Orchestrator) AnswerQuestion(itemID string, qID flow.QuestionId, answer
 	return fmt.Errorf("fake: question %q not found on item %q", qID, itemID)
 }
 
-// PostAnswer records the answer AGAINST THE QUESTION IT ANSWERS, and clears the
-// park only when no pending question remains — answering one of three is not
-// answering the item.
+// PostAnswer records the answer AGAINST THE QUESTION IT ANSWERS.
+//
+// It does NOT clear the park, matching the GitHub backend: the park says which
+// step stopped and carries the `asked-at` window the resumed step reads its
+// answers through, so clearing it on the answer deletes the answer's own
+// delivery. It is dropped when the asking step completes, when another park
+// supersedes it, or on a reset.
 func (b *Orchestrator) PostAnswer(ctx context.Context, ref flow.ItemRef, id flow.QuestionId, text string) error {
 	itemID, err := refID(ref)
 	if err != nil {
@@ -1135,19 +1139,7 @@ func (b *Orchestrator) PostAnswer(ctx context.Context, ref flow.ItemRef, id flow
 	}
 	now := b.clock()
 	rec.questions[idx].UserAnswer = flow.UserAnswer{Answer: text, AnsweredAt: &now}
-	if !anyPending(rec.questions) && rec.parkRequest != nil && rec.parkRequest.Kind == flow.ParkQuestion {
-		rec.parkRequest = nil
-	}
 	return nil
-}
-
-func anyPending(qs []flow.Question) bool {
-	for _, q := range qs {
-		if q.Answer == "" {
-			return true
-		}
-	}
-	return false
 }
 
 // ---------------------------------------------------------------------------
