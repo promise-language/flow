@@ -536,11 +536,50 @@ func TestBackend_BlockednessReason(t *testing.T) {
 	}
 }
 
+// fixtureIssue is one issue a discovery test serves: its number, its labels,
+// and when it was filed — the age selection's last key sorts by.
+type fixtureIssue struct {
+	num     int
+	labels  []string
+	created string // RFC3339; a fixed default when empty
+}
+
+func (f fixtureIssue) json(mock *ghMock) map[string]any {
+	created := f.created
+	if created == "" {
+		created = "2025-01-01T00:00:00Z"
+	}
+	return map[string]any{
+		"number":     f.num,
+		"title":      fmt.Sprintf("Issue %d", f.num),
+		"state":      "open",
+		"labels":     toLabelObjs(f.labels),
+		"assignees":  toLoginObjs([]string{"alice"}),
+		"html_url":   fmt.Sprintf("https://github.com/%s/%s/issues/%d", mock.owner, mock.repo, f.num),
+		"created_at": created,
+		"updated_at": created,
+	}
+}
+
 // searchingOrchestrator serves a /search/issues that returns issue 42 carrying
 // the given labels, and records the query it was asked. Search is the narrowing
 // step; what the labels say is the comparison.
 func searchingOrchestrator(t *testing.T, mock *ghMock, labels []string, query *string) *Orchestrator {
 	t.Helper()
+	return discoveringOrchestrator(t, mock, []fixtureIssue{{num: 42, labels: labels}}, query)
+}
+
+// discoveringOrchestrator serves the SAME fixture through both reads a
+// selection test makes — /search/issues, which ListAutoSelectable narrows with,
+// and the Issues API, which List pages — so the two orders are asserted against
+// one set of issues rather than two that have to agree.
+func discoveringOrchestrator(t *testing.T, mock *ghMock, issues []fixtureIssue, query *string) *Orchestrator {
+	t.Helper()
+	items := make([]map[string]any, 0, len(issues))
+	for _, f := range issues {
+		items = append(items, f.json(mock))
+	}
+
 	mux := http.NewServeMux()
 	prefix := fmt.Sprintf("/repos/%s/%s", mock.owner, mock.repo)
 	mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
@@ -551,14 +590,14 @@ func searchingOrchestrator(t *testing.T, mock *ghMock, labels []string, query *s
 	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"login": "alice"})
 	})
+	mux.HandleFunc(prefix+"/issues", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, items)
+	})
 	mux.HandleFunc("/search/issues", func(w http.ResponseWriter, r *http.Request) {
-		*query = r.URL.Query().Get("q")
-		writeJSON(w, map[string]any{
-			"total_count": 1,
-			"items": []map[string]any{
-				{"number": 42, "title": "A task", "state": "open", "labels": toLabelObjs(labels)},
-			},
-		})
+		if query != nil {
+			*query = r.URL.Query().Get("q")
+		}
+		writeJSON(w, map[string]any{"total_count": len(items), "items": items})
 	})
 	srv := startMockServer(t, mock, mux)
 	t.Cleanup(srv.Close)

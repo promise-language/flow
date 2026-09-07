@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/promise-language/flow"
 )
@@ -51,11 +52,19 @@ type editor struct {
 	addBlockers []flow.ItemRef
 	delBlockers []flow.ItemRef
 	manual      *bool
+	priority    *flow.Priority
+	urgency     *flow.Urgency
 }
 
 func (e *editor) SetTitle(t string) { e.title = &t }
 func (e *editor) SetBody(b string)  { e.body = &b }
 func (e *editor) SetManual(m bool)  { e.manual = &m }
+
+// The two selection axes are stored as labels, so they ride the same PATCH the
+// other fields do. A value outside the vocabulary is refused at Commit, where
+// every other refusal lands.
+func (e *editor) SetPriority(p flow.Priority) { e.priority = &p }
+func (e *editor) SetUrgency(u flow.Urgency)   { e.urgency = &u }
 
 func (e *editor) AddTag(t flow.TagId)    { e.addTags = append(e.addTags, t) }
 func (e *editor) RemoveTag(t flow.TagId) { e.delTags = append(e.delTags, t) }
@@ -77,7 +86,8 @@ func (e *editor) RemoveBlocker(ref flow.ItemRef) { e.delBlockers = append(e.delB
 // what is actually there. And because another writer may have landed in
 // between, it refuses when a field it is changing has moved since Edit opened.
 func (e *editor) Commit(ctx context.Context) error {
-	touchesPatch := e.title != nil || e.body != nil || len(e.addTags) > 0 || len(e.delTags) > 0 || e.manual != nil
+	touchesPatch := e.title != nil || e.body != nil || len(e.addTags) > 0 || len(e.delTags) > 0 ||
+		e.manual != nil || e.priority != nil || e.urgency != nil
 	blockerWrites := len(e.addBlockers) + len(e.delBlockers)
 	touchesBlockers := blockerWrites > 0
 	if touchesPatch && touchesBlockers {
@@ -103,6 +113,17 @@ func (e *editor) Commit(ctx context.Context) error {
 		if !t.Valid() {
 			return fmt.Errorf("github: %q is not a valid tag (non-empty, single-line, no edge whitespace)", string(t))
 		}
+	}
+	// A value outside the vocabulary is a BAD PARAMETER, not a missing
+	// capability: this orchestrator can store either axis, and what it cannot
+	// do is store a value that names nothing. Refused rather than written,
+	// because a stored `flow:priority:hihg` would leave the item sorting as
+	// though nobody had set anything.
+	if e.priority != nil && !e.priority.Valid() {
+		return fmt.Errorf("github: %q is not a priority (one of %v)", string(*e.priority), flow.AllPriorities())
+	}
+	if e.urgency != nil && !e.urgency.Valid() {
+		return fmt.Errorf("github: %q is not an urgency (one of %v)", string(*e.urgency), flow.AllUrgencies())
 	}
 	for _, t := range e.delTags {
 		// An orchestrator MUST refuse to remove a marker it maintains itself:
@@ -149,7 +170,7 @@ func (e *editor) commitFields(ctx context.Context) error {
 
 	current := labelNamesOf(issue.Labels)
 	var labelsOut []string
-	if len(e.addTags) > 0 || len(e.delTags) > 0 || e.manual != nil {
+	if len(e.addTags) > 0 || len(e.delTags) > 0 || e.manual != nil || e.priority != nil || e.urgency != nil {
 		// A label this edit touches that moved since Edit opened is the same
 		// lost update. Labels the edit does NOT touch may move freely — that is
 		// exactly what applying deltas to the current set is for.
@@ -174,6 +195,12 @@ func (e *editor) commitFields(ctx context.Context) error {
 			if *e.manual {
 				labelsOut = append(labelsOut, marker)
 			}
+		}
+		if e.priority != nil {
+			labelsOut = setPrefixedLabel(labelsOut, e.b.labels.PriorityPrefix(), e.b.labels.Priority(*e.priority))
+		}
+		if e.urgency != nil {
+			labelsOut = setPrefixedLabel(labelsOut, e.b.labels.UrgencyPrefix(), e.b.labels.Urgency(*e.urgency))
 		}
 	}
 
@@ -201,6 +228,21 @@ func (e *editor) commitFields(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// setPrefixedLabel makes `want` the ONE label under `prefix`: every existing
+// one is dropped, and `want` is appended unless it is empty.
+//
+// An empty `want` is how the neutral values are unspellable — the axis's
+// formatter answers "" for medium and for default, so setting either removes
+// the label rather than writing one, and no state is reachable both by a label
+// and by that label's absence. One helper for both axes: the rule is one rule.
+func setPrefixedLabel(labelsOut []string, prefix, want string) []string {
+	labelsOut = slices.DeleteFunc(labelsOut, func(x string) bool { return strings.HasPrefix(x, prefix) })
+	if want != "" {
+		labelsOut = append(labelsOut, want)
+	}
+	return labelsOut
 }
 
 // clearPark drops the item's park record and the label that advertises it.

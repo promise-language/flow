@@ -152,8 +152,13 @@ type statusPayload struct {
 	// a tool reading JSON gets the whole string. Always present (no
 	// omitempty): a stable key set is the machine contract, so an item with
 	// no title reports "" rather than dropping the field.
-	Title     string            `json:"title"`
-	Owner     string            `json:"owner"`
+	Title string `json:"title"`
+	Owner string `json:"owner"`
+	// Priority and Urgency are the two selection axes. Always present, for the
+	// reason Title is: an item nothing has said anything about reports
+	// "medium"/"default" rather than dropping the field.
+	Priority  string            `json:"priority"`
+	Urgency   string            `json:"urgency"`
 	Overrides []string          `json:"overrides,omitempty"`
 	Flow      string            `json:"flow"`
 	FlowState string            `json:"flow_state"`
@@ -240,6 +245,12 @@ type listItemPayload struct {
 	Backend      string   `json:"orchestrator"`
 	Availability string   `json:"availability,omitempty"`
 	Tags         []string `json:"tags,omitempty"`
+	// Priority and Urgency are the two selection axes — what decides which of
+	// these items an unattended `resolve` takes, and in what order. No
+	// omitempty: both are always populated, and a stable key set is the machine
+	// contract.
+	Priority string `json:"priority"`
+	Urgency  string `json:"urgency"`
 	// Blocked answers "is this blocked right now?" — item-level, and the same
 	// whoever asks, unlike Availability which reports `closed` or `unhandled`
 	// instead when those come first on the ladder.

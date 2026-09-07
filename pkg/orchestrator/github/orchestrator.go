@@ -264,6 +264,10 @@ func (b *Orchestrator) loadItem(ctx context.Context, issueNum int, cachedComment
 		Disposition: dispositionFromIssue(issue),
 		Holder:      b.holderFromLabels(lbls),
 		Tags:        tagsOf(lbls),
+		// The same readers Get and List go through, so Load cannot disagree
+		// with them about an item an editor is about to change.
+		Priority: b.labels.PriorityOf(lbls),
+		Urgency:  b.labels.UrgencyOf(lbls),
 		// Manual is read from the label the editor maintains, so Load reports
 		// it truthfully — a write nothing can observe is not a record.
 		Manual:    hasLabel(lbls, b.labels.Manual()),

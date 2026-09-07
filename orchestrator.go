@@ -61,6 +61,12 @@ type Item struct {
 	// recognises.
 	Tags []TagId
 
+	// Priority and Urgency are the two selection axes, item-level and the same
+	// whoever asks. An editor can change them, so a Load that omitted them
+	// would mean editing blind.
+	Priority Priority
+	Urgency  Urgency
+
 	// BlockedBy is every blocker DECLARED on the item, each with its own
 	// ItemStatus, and BlockReason is one line for a person. A blocker that has
 	// since finished stays listed until someone retracts it: a set that quietly
@@ -171,6 +177,12 @@ type ItemInfo struct {
 	Holder Holder
 	Tags   []TagId
 
+	// Priority and Urgency are the two selection axes. Both reads return them —
+	// List for a listing, Get for one item — so `list` and `status` report the
+	// same fact through the same fields.
+	Priority Priority
+	Urgency  Urgency
+
 	// BlockedBy is every declared blocker with its own status; Blocked is the
 	// answer to "is this blocked right now?", item-level and the same whoever
 	// asks. BlockKind says who must act and on what. BlockReason is prose for a
@@ -271,6 +283,129 @@ func availLevel(a Availability) int {
 	}
 	return 0
 }
+
+// Priority is where an item sits in the order work is taken in, as whatever
+// manages the backend ranks it. Closed at four, and it ranks the WORK: it
+// decides when an item is taken, never whether. Every item in the selectable
+// set is resolved given enough time, so `low` names later work rather than
+// lesser work, and an orchestrator that dropped low-priority items from the set
+// would be answering a question nobody asked it.
+//
+// DECLARATION ORDER IS RANK ORDER — AllPriorities is the one list, and the rank
+// is a position in it, so a member cannot be added without taking a rank.
+type Priority string
+
+const (
+	PriorityCritical Priority = "critical"
+	PriorityHigh     Priority = "high"
+	// PriorityMedium is what an item has when nothing has said otherwise:
+	// silence is not an assessment, so an item nobody ranked does not sort
+	// below one a machine deliberately marked `low`.
+	PriorityMedium Priority = "medium"
+	PriorityLow    Priority = "low"
+)
+
+// AllPriorities returns every declared priority, HIGHEST FIRST. The order is
+// the rank; see Priority.
+func AllPriorities() []Priority {
+	return []Priority{PriorityCritical, PriorityHigh, PriorityMedium, PriorityLow}
+}
+
+// Valid reports whether p is one of the four. The empty priority is not one —
+// it is the absence of an assessment, which OrNeutral reads as medium.
+func (p Priority) Valid() bool { return slices.Contains(AllPriorities(), p) }
+
+// OrNeutral is what an item has when nothing has said otherwise. Anything not
+// naming a member — the empty value included — reads as PriorityMedium, so a
+// value that names nothing sorts exactly where an unranked item does rather
+// than somewhere of its own.
+func (p Priority) OrNeutral() Priority {
+	if p.Valid() {
+		return p
+	}
+	return PriorityMedium
+}
+
+// Urgency is what an operator wants done about an item now. Closed at three.
+//
+// NOT A FIFTH PRIORITY LEVEL: it is an instruction that outranks the
+// assessment, which is why it is a second field and not two more values in the
+// first. Collapsed onto one scale, every automated re-triage would silently
+// outbid the person who said "this one next".
+//
+// The separation is enforced by the sort, not by who may write — an
+// orchestrator sees a write, not who was at the keyboard. What the two axes
+// guarantee is that an assessment never outranks an instruction, however either
+// one arrived.
+//
+// DECLARATION ORDER IS RANK ORDER, as for Priority.
+type Urgency string
+
+const (
+	// UrgencyNext starts the item ahead of every priority.
+	UrgencyNext Urgency = "next"
+	// UrgencyDefault is what an item has when no operator has said otherwise.
+	UrgencyDefault Urgency = "default"
+	// UrgencyDeferred keeps the item out of unattended work entirely:
+	// ListAutoSelectable must not return one. It is still resolvable when it is
+	// named — that is the whole difference between deferring an item and
+	// disabling one.
+	UrgencyDeferred Urgency = "deferred"
+)
+
+// AllUrgencies returns every declared urgency, most urgent first.
+func AllUrgencies() []Urgency {
+	return []Urgency{UrgencyNext, UrgencyDefault, UrgencyDeferred}
+}
+
+// Valid reports whether u is one of the three. The empty urgency is not one.
+func (u Urgency) Valid() bool { return slices.Contains(AllUrgencies(), u) }
+
+// OrNeutral reads anything that names no member — the empty value included — as
+// UrgencyDefault. See Priority.OrNeutral.
+func (u Urgency) OrNeutral() Urgency {
+	if u.Valid() {
+		return u
+	}
+	return UrgencyDefault
+}
+
+// SelectionKey is what an item is ordered by when auto-selection asks what runs
+// next. Age is when the item was filed.
+type SelectionKey struct {
+	Urgency  Urgency
+	Priority Priority
+	Age      time.Time
+}
+
+// CompareSelection orders two items the way auto-selection takes them: urgency
+// first, then priority, then age with the oldest first. Negative when a runs
+// before b.
+//
+// THE SDK OWNS THE COMPARISON; EACH ORCHESTRATOR OWNS THE SORT. Ordering the
+// returned set belongs to the orchestrator — priority, urgency and age live
+// there and ItemRef carries none of them — but what `critical` outranks is one
+// definition, and a second copy of it would be a rule with two owners and one
+// of them wrong.
+//
+// It returns 0 for two items filed at the same instant. An orchestrator appends
+// its own total tiebreak, because ItemRef is orchestrator-specific and there is
+// nothing here to break the tie on.
+func CompareSelection(a, b SelectionKey) int {
+	if c := urgencyRank(a.Urgency) - urgencyRank(b.Urgency); c != 0 {
+		return c
+	}
+	if c := priorityRank(a.Priority) - priorityRank(b.Priority); c != 0 {
+		return c
+	}
+	return a.Age.Compare(b.Age)
+}
+
+// priorityRank is a position in AllPriorities — the enumerator IS the rank, so
+// a member added without joining the list cannot silently rank last.
+func priorityRank(p Priority) int { return slices.Index(AllPriorities(), p.OrNeutral()) }
+
+func urgencyRank(u Urgency) int { return slices.Index(AllUrgencies(), u.OrNeutral()) }
 
 // Claim is the credentialed handle returned by Orchestrator.Claim. It carries
 // the ItemRef, the arena the lease binds to, the AccountId credited, and the
@@ -445,6 +580,13 @@ type Orchestrator interface {
 	// own knowledge of which flows are registered, without which the
 	// orchestrator could not tell unhandled from processable.
 	//
+	// AT SCOPE ScopeAuto IT MUST RETURN ITEMS IN SELECTION ORDER — the order
+	// CompareSelection defines. At that scope the listing IS the selectable
+	// set, so reporting it in an order nothing will take it in answers "what
+	// runs next" with something that only looks like an answer. At every other
+	// scope the order is not a contract: those are read by a person who scopes
+	// and sorts them for themselves.
+	//
 	// Feeds `list`. THE AUTO-SELECT PATH MUST NEVER CALL IT — List reports
 	// blocked items, and widening auto-select would let a bare `resolve` pick an
 	// arbitrary open item and begin work on it.
@@ -465,10 +607,19 @@ type Orchestrator interface {
 	// does not filter afterwards, because a rule enforced in two places is a
 	// rule with two owners and one of them wrong.
 	//
-	// Filtering belongs here because tags live in the orchestrator and ItemRef
-	// does not carry them — a caller has nothing to filter on. An orchestrator
-	// with no tag vocabulary returns nothing when tags are given, which is an
-	// honest answer.
+	// MUST NOT return a UrgencyDeferred item either — not sorted last, absent.
+	// An item sorted last is still an item a fleet with spare capacity reaches,
+	// and "do not start this unattended" is precisely what an operator
+	// deferring it said.
+	//
+	// MUST RETURN WHAT IT DOES RETURN IN SELECTION ORDER — the order
+	// CompareSelection defines, with a tiebreak of the orchestrator's own.
+	//
+	// Filtering and ordering both belong here because tags, priority, urgency
+	// and age live in the orchestrator and ItemRef carries none of them — a
+	// caller has nothing to filter or sort on. An orchestrator with no tag
+	// vocabulary returns nothing when tags are given, which is an honest
+	// answer.
 	ListAutoSelectable(ctx context.Context, tags []TagId) ([]ItemRef, error)
 
 	// ---- Claiming ----
@@ -685,6 +836,29 @@ type ItemEditor interface {
 	// RemoveBlocker retracts one dependency. Removing one not recorded changes
 	// nothing.
 	RemoveBlocker(ref ItemRef)
+
+	// SetPriority sets the item's assessed priority; SetUrgency sets what an
+	// operator wants done about it now. Setting a value the item already has
+	// changes nothing and is not an error, as with every other method here.
+	//
+	// THEY ARE TYPED SETTERS, NOT TAGS. An orchestrator is free to STORE them
+	// as tags — the GitHub one does — but AddTag cannot be the surface: it must
+	// accept any value clearing the TagId floor, so a misspelled marker would
+	// be stored, would name nothing, and would leave the item sorting as though
+	// nobody had set anything. A closed vocabulary needs a parameter that can
+	// be refused, and the storage spelling is the orchestrator's own besides.
+	//
+	// A value outside the vocabulary is refused at Commit, where every other
+	// refusal lands. An orchestrator with no way to store either value REFUSES
+	// THE SETTER — with ErrUnsupported, at Commit — and reports medium and
+	// default: a value silently dropped and read back as the neutral one is a
+	// setting that appears to work, and an operator who deferred an item would
+	// watch a fleet start it.
+	SetPriority(p Priority)
+
+	// SetUrgency sets what an operator wants done about the item now. See
+	// SetPriority for what refusing looks like.
+	SetUrgency(u Urgency)
 
 	// SetManual sets or clears manual control of the item.
 	//

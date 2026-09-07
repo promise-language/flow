@@ -70,6 +70,8 @@ func (app *App) cmdList(ctx context.Context, args []string) int {
 			Backend:      string(it.Ref.OrchestratorName),
 			Availability: string(it.Availability),
 			Tags:         tagStrings(it.Tags),
+			Priority:     string(it.Priority),
+			Urgency:      string(it.Urgency),
 			Blocked:      it.Blocked,
 			BlockKind:    string(it.BlockKind),
 			BlockReason:  it.BlockReason,
@@ -91,7 +93,10 @@ func (app *App) cmdList(ctx context.Context, args []string) int {
 			if avail == "" {
 				avail = "?"
 			}
-			fmt.Fprintf(app.Out, "%s\t%s\t%s\n", it.Display, avail, owner)
+			// The order the orchestrator returned is preserved as it came: at
+			// scope `auto` that IS the selection order, and re-sorting here
+			// would answer "what runs next" with the CLI's own opinion.
+			fmt.Fprintf(app.Out, "%s\t%s\t%s\t%s\t%s\n", it.Display, avail, it.Urgency, it.Priority, owner)
 		}
 	})
 }
