@@ -286,6 +286,12 @@ func TestBackend_Discover_AvailabilityStates(t *testing.T) {
 	acceptsAll := func(flow.ItemType) bool { return true }
 	acceptsNone := func(flow.ItemType) bool { return false }
 
+	// The claim record's two halves, as this arena writes them. The arena half
+	// is what makes a record OURS: "flow:owner:alice" alone is what every arena
+	// on a one-login fleet writes (#210).
+	ours := b.labels.Arena(b.arenaFingerprint())
+	theirs := b.labels.Arena(fingerprintArena(flow.Arena{Host: "h2", Id: "/w/two"}))
+
 	tests := []struct {
 		name        string
 		labels      []string
@@ -308,7 +314,17 @@ func TestBackend_Discover_AvailabilityStates(t *testing.T) {
 		{"held by another", []string{"flow:implement", "flow:owner:bob"}, []string{"bob"}, "open", "alice", "implement", acceptsAll, "task", flow.AvailHeld},
 		{"available — not assigned", []string{"flow:implement"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.AvailAvailable},
 		{"auto — assigned, binary label present", []string{"flow:implement"}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.AvailAuto},
-		{"auto — owned+assigned", []string{"flow:implement", "flow:owner:alice"}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.AvailAuto},
+		{"auto — owned+assigned by this arena", []string{"flow:implement", "flow:owner:alice", ours}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.AvailAuto},
+		// #210: the three rows an account comparison cannot tell apart. All
+		// three carry OUR OWN login, because that is what every arena on a
+		// single-operator fleet writes; only the arena half separates them.
+		{"held by another arena on this account", []string{"flow:implement", "flow:owner:alice", theirs}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.AvailHeld},
+		{"held — owner label recording no arena", []string{"flow:implement", "flow:owner:alice"}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.AvailHeld},
+		// The ladder is ordered, and level 4 sits above level 5: an item this
+		// arena cannot take because someone else holds it is still reported as
+		// blocked when it is also blocked, because blocked is what an operator
+		// has to go act on.
+		{"blocked outranks held by another arena", []string{"flow:implement", "flow:blocked", "flow:owner:alice", theirs}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.AvailBlocked},
 	}
 
 	for _, tt := range tests {

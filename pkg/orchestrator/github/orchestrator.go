@@ -254,6 +254,7 @@ func (b *Orchestrator) loadItem(ctx context.Context, issueNum int, cachedComment
 	}
 
 	lbls := labelNamesOf(issue.Labels)
+	holder, _ := b.holderFromLabels(lbls)
 	state := &flow.Item{
 		Ref:         b.refFromIssue(issueNum),
 		Type:        itemTypeFromLabels(b.labels, lbls, b.cfg.DefaultType),
@@ -262,7 +263,7 @@ func (b *Orchestrator) loadItem(ctx context.Context, issueNum int, cachedComment
 		URL:         issue.GetHTMLURL(),
 		Status:      itemStatusFromIssue(issue),
 		Disposition: dispositionFromIssue(issue),
-		Holder:      b.holderFromLabels(lbls),
+		Holder:      holder,
 		Tags:        tagsOf(lbls),
 		// The same readers Get and List go through, so Load cannot disagree
 		// with them about an item an editor is about to change.

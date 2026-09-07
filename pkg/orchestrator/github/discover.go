@@ -103,7 +103,7 @@ func (b *Orchestrator) Get(ctx context.Context, ref flow.ItemRef, binary flow.Bi
 
 // ListAutoSelectable returns the issues an unattended `resolve` may start on:
 // open, carrying this binary's label, assigned to this account, carrying every
-// given tag — and NOT blocked.
+// given tag — NOT blocked, and NOT held by another arena.
 //
 // The search query narrows server-side; the exact tag match is done here,
 // through flow.TagsMatch. Search is case-insensitive and index-lagged, so it is
@@ -130,6 +130,10 @@ func (b *Orchestrator) ListAutoSelectable(ctx context.Context, tags []flow.TagId
 	if err != nil {
 		return nil, fmt.Errorf("search issues: %w", err)
 	}
+	account, err := b.resolveAccount(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	type keyed struct {
 		ref flow.ItemRef
@@ -141,6 +145,15 @@ func (b *Orchestrator) ListAutoSelectable(ctx context.Context, tags []flow.TagId
 		lbls := labelNamesOf(issue.Labels)
 		// The contract's comparison, against the labels actually returned.
 		if !flow.TagsMatch(tagsOf(lbls), tags) {
+			continue
+		}
+		// MUST NOT return an item another arena holds. `assignee:@me` narrows
+		// to this ACCOUNT, which on a one-login fleet is every arena's answer,
+		// so the query alone hands the same item to all of them — and each then
+		// claims it, because the claim preflight was making the same comparison.
+		// This is ELIGIBILITY, not a sort key: an item someone else is running
+		// is absent from the set, never merely ranked last.
+		if _, held := b.heldByAnotherArena(lbls, account, b.holdsItem(ctx, issue.GetNumber())); held {
 			continue
 		}
 		blockers, err := b.blockersOf(ctx, issue.GetNumber())
@@ -214,6 +227,7 @@ func (b *Orchestrator) itemInfoFor(ctx context.Context, iss *github.Issue, binar
 		return flow.ItemInfo{}, err
 	}
 	blocked, kind, reason := b.blockedness(blockers, lblNames)
+	holder, _ := b.holderFromLabels(lblNames)
 
 	info := flow.ItemInfo{
 		Ref:         b.refFromIssue(iss.GetNumber()),
@@ -223,7 +237,7 @@ func (b *Orchestrator) itemInfoFor(ctx context.Context, iss *github.Issue, binar
 		URL:         iss.GetHTMLURL(),
 		Status:      itemStatusFromIssue(iss),
 		Disposition: dispositionFromIssue(iss),
-		Holder:      b.holderFromLabels(lblNames),
+		Holder:      holder,
 		Tags:        tagsOf(lblNames),
 		Priority:    b.labels.PriorityOf(lblNames),
 		Urgency:     b.labels.UrgencyOf(lblNames),
@@ -301,11 +315,11 @@ func (b *Orchestrator) availabilityOf(
 		return "", err
 	}
 
-	// Level 5: free — nobody else holds it. The comparison uses the same
-	// account derivation the claim path writes with, so `list` cannot report an
-	// item held by a login `claim` would never have written.
-	holder := b.holderFromLabels(lblNames)
-	if holder.Account != "" && holder.Account != account {
+	// Level 5: free — no OTHER ARENA holds it. The comparison is the same one
+	// Claim's preflight makes, so `list` cannot report `auto` for an item a
+	// claim would refuse — including an item another arena under this very
+	// account is running, which an account comparison reads as our own.
+	if _, held := b.heldByAnotherArena(lblNames, account, b.holdsItem(ctx, iss.GetNumber())); held {
 		return flow.AvailHeld, nil
 	}
 
@@ -331,21 +345,107 @@ func (b *Orchestrator) availabilityOf(
 	return flow.AvailAvailable, nil
 }
 
-// holderFromLabels reads the claim holder off the flow:owner:<account> label.
+// holderFromLabels is the ONE reader of the item's claim record: the account
+// from flow:owner:<login>, and the arena fingerprint from flow:arena:<fp>.
 //
-// The GitHub orchestrator's arena is the local checkout and `.flow/active.json`
-// is the whole lease store, so the label carries the ACCOUNT only —
-// docs/orchestrator.md grants exactly that ("both halves are implicit… one file
-// per checkout does the scoping a fleet-serving orchestrator must do
-// explicitly"). The arena half is reported by LookupClaim when this checkout is
-// the holder, and is empty otherwise, because no label records it.
-func (b *Orchestrator) holderFromLabels(lblNames []string) flow.Holder {
+// It returns the fingerprint alongside the Holder because the two answer
+// different questions. The Holder is what a caller is shown, and its arena half
+// can be filled only when the fingerprint is OURS — that is the single case
+// this orchestrator can honestly name the holding arena, since a digest names
+// no arena and cannot be reversed into one. The fingerprint itself is what the
+// exclusion compares, and a foreign one is perfectly comparable even though it
+// is unnameable. Reporting a remote holder's (HostId, ArenaId) is #222's and
+// #164's work and needs a record this one does not publish.
+//
+// Empty fingerprint means the item carries no arena label — either it is
+// unclaimed, or the claim predates flow:arena: entirely; heldByAnotherArena is
+// where those two are told apart.
+func (b *Orchestrator) holderFromLabels(lblNames []string) (flow.Holder, string) {
+	var h flow.Holder
+	var fingerprint string
 	for _, lbl := range lblNames {
 		if account, ok := b.labels.OwnerFromLabel(lbl); ok {
-			return flow.Holder{Account: account}
+			if h.Account == "" {
+				h.Account = account
+			}
+			continue
+		}
+		if fp, ok := b.labels.ArenaFromLabel(lbl); ok && fingerprint == "" {
+			fingerprint = fp
 		}
 	}
-	return flow.Holder{}
+	if fingerprint != "" && fingerprint == b.arenaFingerprint() {
+		h.Arena = b.arena()
+	}
+	return h, fingerprint
+}
+
+// heldByAnotherArena reports whether the labels record a claim held by an arena
+// other than this one — INCLUDING one under this same account, which is the
+// ordinary single-operator fleet and the case an account comparison cannot see.
+// A lease binds item ↔ arena (docs/orchestrator.md § Required surface →
+// Claiming: "at most one item per arena, at most one arena per item"), so the
+// account is attribution and the arena is the exclusion.
+//
+// weHoldIt is this arena's own answer, from its lease file, to "am I the
+// holder?" — the one fact the item cannot carry for a record written before
+// flow:arena: existed.
+//
+//	no owner label                                    → not held
+//	owner label, another account                      → held (the older rule)
+//	owner label, this account, arena label ≠ ours     → held
+//	owner label, this account, arena label = ours     → not held
+//	owner label, this account, no arena label         → held unless weHoldIt
+//
+// The last row is not a tolerance for legacy records, it is the correct reading
+// of one: flow:owner: is written by Claim's Phase 3 and by nothing else — not
+// by seeding — so an owner label means SOME arena holds this and the item does
+// not say which. The only arena that can prove it is the holder is the one
+// whose own lease file says so. The holder therefore re-claims idempotently and
+// every other arena is refused, which is the safe direction. The residual cost
+// is that an owner label left behind by a crashed holder needs --force, already
+// the documented break-glass and what #222 exists to make conditional.
+//
+// The reason is a clause naming the item's own state, without the issue number:
+// the caller has it, and prefixes it.
+func (b *Orchestrator) heldByAnotherArena(lblNames []string, account flow.AccountId, weHoldIt bool) (reason string, held bool) {
+	holder, fingerprint := b.holderFromLabels(lblNames)
+	switch {
+	case holder.Account == "":
+		return "", false
+	case holder.Account != account:
+		return fmt.Sprintf("carries owner label for %s (use --force to take over)", holder.Account), true
+	case fingerprint == b.arenaFingerprint():
+		return "", false
+	case fingerprint != "":
+		return fmt.Sprintf(
+			"is held by another arena (%s) claiming as %s (use --force to take over)",
+			fingerprint, account), true
+	case weHoldIt:
+		return "", false
+	default:
+		return fmt.Sprintf(
+			"carries an owner label for %s but records no arena, and this arena does not hold it "+
+				"(use --force to take over)", account), true
+	}
+}
+
+// holdsItem answers "does this arena hold this item?" from the lease file —
+// the arena-side half heldByAnotherArena needs for a record that names no
+// arena. A local file read, so asking once per item in a listing costs nothing.
+//
+// A file that cannot be read answers false, which reads the item as held: for a
+// listing that is the conservative direction, and it never widens what an
+// unattended run may start on. Claim does NOT go through here — it must fail
+// the claim closed on an unreadable lease rather than infer anything from it,
+// so it reads LookupActiveClaim itself.
+func (b *Orchestrator) holdsItem(ctx context.Context, issueNum int) bool {
+	active, err := b.LookupActiveClaim(ctx)
+	if err != nil || active == nil {
+		return false
+	}
+	activeNum, err := b.issueNumber(active.ItemRef)
+	return err == nil && activeNum == issueNum
 }
 
 // tagsOf reports EVERY label as a TagId — the operator's classification and

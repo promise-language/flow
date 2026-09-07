@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
@@ -23,8 +24,8 @@ import (
 //     attempt that is no longer running, then, if multiple remain, the
 //     lexicographically smallest token wins.
 //  3. Losers DELETE their own claim label and return an error.
-//  4. Winner: POST self as assignee, POST flow:owner:<login>, DELETE
-//     flow:claim:<token>.
+//  4. Winner: POST self as assignee, POST flow:owner:<login> and
+//     flow:arena:<fingerprint>, DELETE flow:claim:<token>.
 //  5. POST or supersede the state comment.
 //
 // NEITHER THE ARENA NOR THE ACCOUNT IS A PARAMETER. Both are ambient, fixed by
@@ -63,9 +64,8 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 		}
 	}
 	if !slices.Contains(overrides, flow.OverrideAlreadyHeld) {
-		// Refuse when another person holds the issue — either via an
-		// assignee or a flow:owner:<login> label. The caller must pass
-		// OverrideAlreadyHeld to take over deliberately.
+		// Refuse when another person holds the issue via an assignee. The
+		// caller must pass OverrideAlreadyHeld to take over deliberately.
 		for _, u := range issue.Assignees {
 			if login := flow.AccountId(u.GetLogin()); login != "" && login != owner {
 				return flow.Claim{}, flow.ErrClaimRefused{
@@ -75,13 +75,34 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 				}
 			}
 		}
-		for _, name := range names {
-			if login, ok := b.labels.OwnerFromLabel(name); ok && login != owner {
-				return flow.Claim{}, flow.ErrClaimRefused{
-					Code: "already-held", ItemScoped: true,
-					Reason:   fmt.Sprintf("issue #%d carries owner label for %s (use --force to take over)", issueNum, login),
-					Override: "force",
-				}
+		// LookupActiveClaim is the single source for "what does this arena
+		// hold?" — requireOwnClaim (artifact.go) is its other consumer, and
+		// turns the same state into its two typed refusals instead of a lease.
+		// Read ONCE here, because the two decisions below both need it: the
+		// already-held refusal, for a record that names no arena, and the
+		// holder's idempotent return.
+		active, err := b.LookupActiveClaim(ctx)
+		if err != nil {
+			return flow.Claim{}, fmt.Errorf("github.Claim: read active claim: %w", err)
+		}
+		weHold := false
+		if active != nil {
+			activeNum, err := b.issueNumber(active.ItemRef)
+			if err != nil {
+				return flow.Claim{}, err
+			}
+			weHold = activeNum == issueNum
+		}
+		// Refuse when another ARENA holds the issue — the claim record on the
+		// item, read by the one predicate `list` also uses, so the two cannot
+		// disagree. It compares arenas and not accounts because a lease binds
+		// item ↔ arena: three worktrees under one login all answer "that is my
+		// own account" to an account comparison, and all three then claim.
+		if reason, held := b.heldByAnotherArena(names, owner, weHold); held {
+			return flow.Claim{}, flow.ErrClaimRefused{
+				Code: "already-held", ItemScoped: true,
+				Reason:   fmt.Sprintf("issue #%d %s", issueNum, reason),
+				Override: "force",
 			}
 		}
 		// Idempotent for the holder (docs/resolution.md § Claiming, docs/cli.md
@@ -93,27 +114,18 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 		// design, and applying "HEAD must be on the base branch" to a re-claim
 		// makes the documented claim-then-resolve sequence impossible.
 		//
-		// LookupActiveClaim is the single source for "what does this arena hold?"
-		// — requireOwnClaim (artifact.go) is its other consumer, and turns the
-		// same state into its two typed refusals instead of a lease.
-		//
-		// Position matters: after the disabled/other-binary preflights and after
-		// the two already-held loops, so an item another account took over still
-		// refuses typed rather than trusting our now-stale lease file; and inside
-		// the !OverrideAlreadyHeld block, so `claim --force` still re-asserts
-		// ownership rather than silently no-op'ing on that stale file.
-		active, err := b.LookupActiveClaim(ctx)
-		if err != nil {
-			return flow.Claim{}, fmt.Errorf("github.Claim: read active claim: %w", err)
-		}
-		if active != nil {
-			activeNum, err := b.issueNumber(active.ItemRef)
-			if err != nil {
-				return flow.Claim{}, err
-			}
-			if activeNum == issueNum {
-				return *active, nil
-			}
+		// Position matters, and only the READ above moved — the order of the
+		// decisions is unchanged. The return still sits after the
+		// disabled/other-binary preflights and after the already-held refusal,
+		// so an item another party took over refuses typed rather than handing
+		// back our now-stale lease file; and it stays inside the
+		// !OverrideAlreadyHeld block, so `claim --force` still re-asserts
+		// ownership through Phases 1-3 rather than silently no-op'ing on that
+		// stale file. "Another party" now includes another arena under this
+		// same account, which the refusal above could not see before and which the
+		// stale file would otherwise have been believed about.
+		if weHold {
+			return *active, nil
 		}
 	}
 
@@ -250,17 +262,34 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 		_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
 		return flow.Claim{}, fmt.Errorf("add assignee: %w", err)
 	}
-	// Clear any stale owner labels first (other than our own).
+	// Clear the previous holder's markers first — any owner label naming
+	// another account, and any arena label naming another arena. The arena half
+	// is what a take-over under ONE account has to displace: the owner label is
+	// then byte-identical between the two arenas, so nothing else on the item
+	// changes hands.
+	fingerprint := b.arenaFingerprint()
 	for _, name := range labelNamesOf(issue2.Labels) {
+		stale := false
 		if login, ok := b.labels.OwnerFromLabel(name); ok && login != owner {
-			if err := b.out.RemoveLabel(ctx, issueNum, name); err != nil {
-				_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
-				return flow.Claim{}, fmt.Errorf("remove stale owner label %s: %w", name, err)
-			}
+			stale = true
+		}
+		if fp, ok := b.labels.ArenaFromLabel(name); ok && fp != fingerprint {
+			stale = true
+		}
+		if !stale {
+			continue
+		}
+		if err := b.out.RemoveLabel(ctx, issueNum, name); err != nil {
+			_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
+			return flow.Claim{}, fmt.Errorf("remove stale holder label %s: %w", name, err)
 		}
 	}
+	// The owner and arena labels go in ONE request: they are two halves of one
+	// claim record, and a window with one present and not the other is a window
+	// in which every reader of the record decides differently.
 	if err := b.out.AddLabels(ctx, issueNum, []string{
 		b.labels.Owner(string(owner)),
+		b.labels.Arena(fingerprint),
 		b.labels.Binary(b.cfg.BinaryName),
 	}); err != nil {
 		// Best-effort cleanup, then surface.
@@ -304,14 +333,17 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 		ClaimedAt:        nowUTC(),
 		Token:            tokenJSON,
 	}
-	// The github orchestrator's lease store IS the worktree-local
-	// .flow/active.json file — one file per checkout, which does the arena
-	// scoping a fleet-serving orchestrator must do explicitly. Write it here so
-	// LookupActiveClaim and the CLI commands that consume the active claim can
-	// find it.
+	// The github orchestrator's lease store is the worktree-local
+	// .flow/active.json file — one file per checkout, which is what scopes
+	// "what does THIS arena hold?". It cannot scope the other direction: a file
+	// only the holding checkout can see says nothing to the arena next door,
+	// which is why the item carries flow:arena:<fingerprint> too. Write it here
+	// so LookupActiveClaim and the CLI commands that consume the active claim
+	// can find it.
 	if err := clistate.Save(c); err != nil {
 		// Best-effort rollback of the github-side ownership we just took.
 		_ = b.out.RemoveLabel(ctx, issueNum, b.labels.Owner(string(owner)))
+		_ = b.out.RemoveLabel(ctx, issueNum, b.labels.Arena(fingerprint))
 		_ = b.out.RemoveAssignees(ctx, issueNum, []string{string(owner)})
 		return flow.Claim{}, fmt.Errorf("github.Claim: save active claim: %w", err)
 	}
@@ -319,10 +351,14 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 }
 
 // arena is the (HostId, ArenaId) pair this checkout is. Both halves are
-// implicit for this orchestrator — the arena IS the local checkout — but the
-// pair is still recorded on the claim, because a handle to a lease that could
-// not name what the lease binds leaves every holder unidentifiable wherever one
-// account runs more than one arena.
+// derived rather than configured for this orchestrator — the arena IS the local
+// checkout — but the pair is still recorded on the claim, because a handle to a
+// lease that could not name what the lease binds leaves every holder
+// unidentifiable wherever one account runs more than one arena.
+//
+// It is also published, as fingerprintArena's digest: the local file this pair
+// is written to answers only the arena that wrote it, and the exclusion that
+// keeps two arenas off one item has to be decidable by the OTHER one.
 //
 // The HostId is derived from the machine and normalized; the ArenaId is the
 // absolute worktree path, which is stable across restarts and unique within the
@@ -335,8 +371,34 @@ func (b *Orchestrator) arena() flow.Arena {
 	return flow.Arena{Host: flow.DeriveHostId(), Id: flow.ArenaId(id)}
 }
 
-// Release strips the assignee, removes the flow:owner:<account> label, clears
-// the worktree-local active-claim file, and leaves the state comment intact.
+// fingerprintArena reduces an arena to the opaque, comparable value that goes
+// on the item as flow:arena:<fingerprint>.
+//
+// A DIGEST rather than the pair, and that is a requirement, not a compaction.
+// docs/disclosure.md closes the categories a flow must not publish, and two of
+// the five are precisely what an arena is made of — "Local filesystem paths"
+// (the ArenaId is the absolute worktree path) and "Host and account
+// identifiers — machine names, arena names, internal hostnames". The same
+// document lists labels as a guarded surface. Equality is the only operation
+// the three exclusion sites need, and a digest supports exactly that: the same
+// host and the same absolute path yield the same value across restarts, which
+// is the stability docs/orchestrator.md asks of an ArenaId, and no reader of
+// the issue learns either half.
+//
+// Sixteen hex digits: flow:arena: (11) plus 16 is 27 characters, inside
+// GitHub's 50-character label cap, and 64 bits is far more than a fleet's worth
+// of arenas needs to stay distinct.
+func fingerprintArena(a flow.Arena) string {
+	sum := sha256.Sum256([]byte(string(a.Host) + "\x00" + string(a.Id)))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// arenaFingerprint is fingerprintArena over this checkout's own arena.
+func (b *Orchestrator) arenaFingerprint() string { return fingerprintArena(b.arena()) }
+
+// Release strips the assignee, removes the flow:owner:<account> and
+// flow:arena:<fingerprint> labels, clears the worktree-local active-claim file,
+// and leaves the state comment intact.
 //
 // Addressed by ref: the account is ambient, so it is read rather than taken off
 // a claim value the caller might be holding after the lease was revoked.
@@ -351,6 +413,12 @@ func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef) error {
 	}
 	if err := b.out.RemoveLabel(ctx, issueNum, b.labels.Owner(string(owner))); err != nil && !isNotFound(err) {
 		return fmt.Errorf("remove owner label: %w", err)
+	}
+	// The arena half of the same record. Left behind, it makes the item read as
+	// held by this arena forever, and every other arena — including this one
+	// after a re-claim from a different worktree — needs --force to touch it.
+	if err := b.out.RemoveLabel(ctx, issueNum, b.labels.Arena(b.arenaFingerprint())); err != nil && !isNotFound(err) {
+		return fmt.Errorf("remove arena label: %w", err)
 	}
 	if err := b.out.RemoveAssignees(ctx, issueNum, []string{string(owner)}); err != nil && !isNotFound(err) {
 		return fmt.Errorf("remove assignee: %w", err)
@@ -456,8 +524,10 @@ func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef) error {
 // LookupActiveClaim returns the claim THIS ARENA holds right now, or nil.
 //
 // It takes no key. The github orchestrator's lease store is the worktree-local
-// .flow/active.json file, and one file per checkout IS the arena scoping — so
-// the file already answers "what is this arena working on?" exactly. The old
+// .flow/active.json file, and one file per checkout is what scopes THIS
+// question — so the file already answers "what is this arena working on?"
+// exactly. It answers no question about another arena, which is what
+// flow:arena:<fingerprint> on the item is for. The old
 // signature took an account and returned one claim, which worked here only by
 // accident: one person resolving twenty-five items from one GitHub account has
 // twenty-five claims, and the file was silently supplying the arena the
@@ -485,10 +555,12 @@ func (b *Orchestrator) LookupActiveClaim(ctx context.Context) (*flow.Claim, erro
 // LookupClaim reports who holds this item, without taking a lease.
 //
 // The account comes from the flow:owner:<account> label. The ARENA is reported
-// only when this checkout is the holder, because no label records it —
-// docs/orchestrator.md grants exactly that for this orchestrator ("both halves
-// are implicit… .flow/active.json is the whole lease store"), so there is no
-// new label to invent for it.
+// only when this checkout is the holder: flow:arena:<fingerprint> records WHICH
+// arena holds the item, but it records it as a digest, so it decides equality
+// and nothing else — a foreign fingerprint is comparable and unnameable. Naming
+// a remote holder's (HostId, ArenaId) needs a record this orchestrator does not
+// publish, and whether it may publish one is a disclosure question (#222, #164)
+// rather than something to settle here.
 func (b *Orchestrator) LookupClaim(ctx context.Context, ref flow.ItemRef) (*flow.ClaimInfo, error) {
 	issueNum, err := b.issueNumber(ref)
 	if err != nil {
@@ -543,6 +615,7 @@ func (b *Orchestrator) otherBinaryLabel(names []string) (string, bool) {
 			rest == labelSuffixDisabled,
 			rest == labelSuffixInfraTransient,
 			strings.HasPrefix(rest, labelSuffixOwnerPrefix),
+			strings.HasPrefix(rest, labelSuffixArenaPrefix),
 			strings.HasPrefix(rest, labelSuffixClaimPrefix),
 			strings.HasPrefix(rest, labelSuffixStalePrefix),
 			strings.HasPrefix(rest, labelSuffixBudgetExhPref),
