@@ -550,12 +550,38 @@ func (b *Orchestrator) blockednessOf(rec *itemRecord) (bool, flow.BlockKind, str
 	if rec.parkRequest != nil {
 		switch rec.parkRequest.Kind {
 		case flow.ParkQuestion:
-			return true, flow.WaitsOnPerson, "waiting for an answer"
+			// Read the QUESTIONS, not the bare park. The park outlives the
+			// answer on purpose — it carries the ask time the resumed step
+			// reads its replies through (see PostAnswer) — so a park alone no
+			// longer means anybody is waiting. Deciding on the park would leave
+			// an item whose every question is answered reported blocked and
+			// skipped by ListAutoSelectable forever: never selected, so the
+			// asking step never resumes, so the park never clears.
+			//
+			// This is the rule the GitHub orchestrator already applies: its
+			// blockedness reads the needs-answer marker, and PostAnswer drops
+			// that marker with the last answer while leaving the park.
+			//
+			// A question park that registered NO question still waits: there is
+			// nothing to have answered, so nobody has.
+			if len(rec.questions) == 0 || anyPending(rec.questions) {
+				return true, flow.WaitsOnPerson, "waiting for an answer"
+			}
 		case flow.ParkBudgetExhausted:
 			return true, flow.WaitsOnPerson, "budget exhausted"
 		}
 	}
 	return false, "", ""
+}
+
+// anyPending reports whether any recorded question is still unanswered.
+func anyPending(qs []flow.Question) bool {
+	for _, q := range qs {
+		if q.Answer == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

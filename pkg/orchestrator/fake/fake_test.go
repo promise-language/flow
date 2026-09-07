@@ -402,6 +402,104 @@ func TestBackend_PostAnswerRefusesUnknownAndAnsweredQuestions(t *testing.T) {
 	}
 }
 
+// "Waiting for an answer" is decided by the QUESTIONS, not by the presence of a
+// question park.
+//
+// The park now outlives the answer — it carries the window the resume reads its
+// replies through. Blockedness read off the bare park would therefore report an
+// item whose every question is answered as still waiting on a person, and
+// ListAutoSelectable would skip it: never selected, so the asking step never
+// resumes, so the park never clears. The stall the park was kept to prevent,
+// moved one step later.
+func TestBackend_AnsweringUnblocksTheItemWhileTheParkStands(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := addItem(b, "1")
+	if _, err := b.Claim(ctx, ref, nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	q, err := b.AskQuestion(ctx, ref, flow.AskText("base", "Which base branch?"))
+	if err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+	if err := b.Park(ctx, ref, flow.ParkRequest{
+		Kind: flow.ParkQuestion, Step: "plan", Reason: "question: " + q.Header,
+		Details: flow.MarkQuestionAsked(q.AskedAt),
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+
+	// Unanswered: blocked, and off the selectable list.
+	state, err := b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.BlockReason == "" {
+		t.Error("an item with an unanswered question reports no block reason")
+	}
+	selectable, err := b.ListAutoSelectable(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListAutoSelectable: %v", err)
+	}
+	if len(selectable) != 0 {
+		t.Errorf("ListAutoSelectable = %v, want nothing while the question is unanswered", selectable)
+	}
+
+	if err := b.PostAnswer(ctx, ref, q.ID, "main"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+
+	state, err = b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.BlockReason != "" {
+		t.Errorf("BlockReason = %q after the answer, want none — the human has acted", state.BlockReason)
+	}
+	selectable, err = b.ListAutoSelectable(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListAutoSelectable: %v", err)
+	}
+	if len(selectable) != 1 {
+		t.Errorf("ListAutoSelectable = %v, want the answered item back — nothing else can resume the step", selectable)
+	}
+	// And the park is still there for the resume to read its answer through.
+	if state.Park == nil {
+		t.Error("the park cleared with the answer")
+	}
+}
+
+// A question park that registered no question is still waiting: there is
+// nothing to have answered, so nobody has. Without this the "answered" rule
+// above would report the unanswerable park of flow#166 as workable.
+func TestBackend_AQuestionParkWithNoQuestionStaysBlocked(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := addItem(b, "1")
+	if _, err := b.Claim(ctx, ref, nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if err := b.Park(ctx, ref, flow.ParkRequest{
+		Kind: flow.ParkQuestion, Step: "plan", Reason: "question: which base branch?",
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+	state, err := b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.BlockReason == "" {
+		t.Error("a question park with no registered question reports no block reason")
+	}
+	selectable, err := b.ListAutoSelectable(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListAutoSelectable: %v", err)
+	}
+	if len(selectable) != 0 {
+		t.Errorf("ListAutoSelectable = %v, want nothing — the park still needs a person", selectable)
+	}
+}
+
 func TestBackend_ParkRecordsRequest(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
