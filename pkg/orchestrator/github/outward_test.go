@@ -1178,6 +1178,73 @@ func TestPushSeparatesBranchMessagesAndDiff(t *testing.T) {
 	}
 }
 
+// The patch a push discloses is the diff and nothing around it. `git log
+// --patch` prints an author line under every format but the empty one, so the
+// identity that made the commits is one flag away from riding into the push
+// disclosure under OriginWorktree — an address in the one string a guard is
+// told the tree vouches for.
+//
+// The origin assertions above do not reach it. They catch a format that
+// reintroduces the commit MESSAGE, because the message is text they already
+// look for; an author line carries an address they never mention, and adding
+// one leaves every assertion in this file passing.
+//
+// The addresses are read back out of the repository rather than spelled again,
+// so the check asserts about whatever identity gitInTest actually gave the
+// commits and cannot quietly stop matching when that changes.
+func TestPushDisclosesNoCommitterIdentity(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir, origin := t.TempDir(), t.TempDir()
+	gitInTest(t, origin, "init", "--bare", "-b", "main", ".")
+	gitInTest(t, dir, "init", "-b", "main", ".")
+	commitFile(t, dir, "a.txt", "old content\n", "on origin already")
+	gitInTest(t, dir, "remote", "add", "origin", origin)
+	gitInTest(t, dir, "push", "origin", "main")
+	gitInTest(t, dir, "checkout", "-b", "flow/issue-42")
+	commitFile(t, dir, "b.txt", "a line only this branch has\n", "new work here")
+
+	idents := map[string]string{
+		"author":    strings.TrimSpace(gitInTest(t, dir, "log", "-1", "--format=%ae")),
+		"committer": strings.TrimSpace(gitInTest(t, dir, "log", "-1", "--format=%ce")),
+	}
+
+	g := newGitOps(dir)
+	spawn := g.runner
+	g.runner = func(ctx context.Context, wd, name string, args ...string) ([]byte, []byte, error) {
+		if slices.Contains(args, "push") {
+			return nil, nil, nil
+		}
+		return spawn(ctx, wd, name, args...)
+	}
+
+	guard := &recordingGuard{}
+	o := &outward{git: g, owner: "o", repo: "r", guard: guard}
+	if err := o.Push(t.Context()); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	seen := guard.of(flow.ActPush)
+	if len(seen) != 1 {
+		t.Fatalf("guard saw %d push disclosures, want 1", len(seen))
+	}
+	// A disclosure carrying nothing would satisfy the check below vacuously.
+	if !carries(seen[0], "a line only this branch has") {
+		t.Fatalf("the push disclosure does not carry the branch's diff: %q", bodies(seen[0]))
+	}
+	for role, addr := range idents {
+		if addr == "" {
+			t.Fatalf("the fixture commits record no %s address, so this asserts nothing", role)
+		}
+		for _, p := range seen[0].Text {
+			if strings.Contains(p.Body, addr) {
+				t.Errorf("the push discloses the %s address %q, stated %q:\n%s",
+					role, addr, p.Origin, p.Body)
+			}
+		}
+	}
+}
+
 // docs/disclosure.md's own example of an assembled string: artifactFilePath
 // templates a filename the agent chose in flow.FileBody.Name, and the commit
 // message interpolates the same one. The SDK stands behind its frame, but not
