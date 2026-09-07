@@ -3,31 +3,59 @@
 > **Tag:** `issue-flow` — remaining work to complete this document: the query named in
 > [`docs/index.md`](index.md).
 
-**Normative.** The step set this repository ships for resolving issues, and what each step must do.
+**Normative.** The step graph this repository ships for resolving issues, and what each step must do.
 
-`docs/resolution.md` defines the process, boundaries and responsibilities common to any resolution. `docs/resolution-standalone.md` defines the model this flow runs under. This document defines **these steps** — a different flow may hold every property in those documents with a different step set.
+`docs/resolution.md` defines the process, boundaries and responsibilities common to any resolution. `docs/resolution-standalone.md` defines the model this flow runs under. This document defines **these steps and these routes** — a different flow may hold every property in those documents with a different graph.
 
-## Contributor steps
+## Roles
 
-In order. Each produces exactly one result, and the result is the step's identity.
+The graph declares two roles ([resolution.md](resolution.md) § Accounts, capabilities and roles):
 
-| # | Step | Concern | What the agent decides | Writes | Deliverable |
-|---|---|---|---|---|---|
-| 1 | plan | What will be done, before anything changes | What to do | the `plan` — nothing in the worktree | A decision about the work to do |
-| 2 | **open branch** | Put the worktree on a branch for this item | **nothing — mechanical** | the branch, and a record of what it was cut from | A worktree ready to be changed |
-| 3 | implement | Make it work | How to change it, and how to answer a failing check | the solution, a commit, and the `implementation` record naming it | A branch carrying the change |
-| 4 | review | Make it right | What is wrong, and how to fix it | the solution, a commit, the `review` briefing | Corrections applied, not reported |
-| 5 | coverage | Make it tested | What needs testing, and what must change to allow it | tests **and** the solution, a commit, the `coverage` briefing | Tests meeting the project's standard |
-| 6 | **open request** | Propose a change that can land | **nothing — mechanical** | the gate's result, the pushed branch, the request, the `pr-open` signal | A request that will pass the maintainer's gate |
-| 7 | **close branch** | Return the worktree to the base | **nothing — mechanical** | nothing — it restores | An arena ready for the next item |
+| Role | Requires | Performs |
+|---|---|---|
+| **contributor** | push | Producing and proposing a change, or filing the items that resolve the issue |
+| **maintainer** | push, merge | Judging a proposal: integrating it, returning it for rework, or rejecting it |
 
-Steps 3 to 5 are the producing phase. Each carries the change further under a different concern, and each may modify the worktree — including the solution itself. The properties governing them are in `resolution-standalone.md` and are not repeated here.
+One principal whose capabilities cover both crosses the boundary without a handoff — that is carry-through, declared per [resolution-standalone.md](resolution-standalone.md). Two principals are the split: the contributor's part ends at the proposal, and the item awaits the maintainer.
+
+## The graph
+
+Each step produces exactly one result, and the result is the step's identity. **Routes to** is the declared successor set — the whole route space; which route an execution elects is decided at runtime, with the reasons in its message.
+
+| Step | Role | Concern | Writes | Routes to |
+|---|---|---|---|---|
+| plan | contributor | What will be done, before anything changes — and **which shape the work is** | the `plan` — nothing in the worktree | open branch · review the filing |
+| **open branch** | contributor | Put the worktree on a branch for this item | the branch, and a record of what it was cut from | implement |
+| implement | contributor | Make it work | the solution, a commit, the `implementation` record naming it | review |
+| review | contributor | Make it right | the solution, a commit, the `review` briefing | coverage |
+| coverage | contributor | Make it tested | tests **and** the solution, a commit, the `coverage` briefing | open request |
+| **open request** | contributor | Propose a change that can land | the gate's result, the pushed branch, the request, the `pr-open` signal | close branch |
+| **close branch** | contributor | Return the worktree to the base | nothing — it restores | review the proposal |
+| review the proposal | maintainer | Judge the proposal as what will land | the `proposal-review` briefing — nothing in the worktree | verify merge result · implement *(rework)* · **finalize: rejected** |
+| **verify merge result** | maintainer | Measure the merge result | the gate's result | merge |
+| **merge** | maintainer | Land the change | the merge, the `pr-merged` signal | record merge commit |
+| **record merge commit** | maintainer | Name what landed | the `merge-commit` record | **finalize: resolved** |
+| review the filing | contributor | Do the intended items close the gap | the `filing-review` briefing — nothing in the worktree | file the items · plan |
+| **file the items** | contributor | File what the plan decided | the filed items on the backend, the `filed-items` list naming them — nothing in the worktree | **finalize: resolved** · plan *(refused text)* |
+
+Steps in **bold** are mechanical — no agent turn. Implement, review and coverage are the producing phase; the properties governing producing steps are in `resolution-standalone.md` and are not repeated here.
+
+### The work has a shape, and plan elects it
+
+The plan step's deliverable is a decision about the work — and part of that decision is **which shape the work is**, because the shape is the route:
+
+- **A change.** The issue is resolved by changing the tree: branch, produce, propose. The route through open branch.
+- **A filing.** The issue is resolved by filing items — a reconciliation pass after a document amendment, a set of follow-ups to record — and the deliverable is the filed items themselves. The route through review the filing.
+
+The shapes differ in what the artifact is and in what the worktree contract means. On the filing route no step touches the tree, and that is by declaration, not by exception: a filing forced through the change route arrives at steps whose contract expects commits, where the actual deliverable — items filed on the backend — reads as a violation and the resolution stops on work done correctly. The route is how the same flow holds both kinds of work to the right contract.
+
+Filing writes are **outward writes**: every item filed passes the disclosure guard ([disclosure.md](disclosure.md)) like anything else that leaves the machine.
 
 ### Verify is a tool, not a step
 
 There is no verification step, and that is deliberate.
 
-The verify command is **something a producing step uses while working** — it formats, it checks, it tells the agent whether what it has written holds together. A step runs it as often as it finds useful, which is why implement's loop is built around it. It is an instrument, and instruments do not get their own place in a sequence.
+The verify command is **something a producing step uses while working** — it formats, it checks, it tells the agent whether what it has written holds together. A step runs it as often as it finds useful, which is why implement's loop is built around it. It is an instrument, and instruments do not get their own place in a graph.
 
 Making it a step would put a checkpoint where there is no decision: by the time the producing phase ends, every step has been using the verify command throughout, and a further run establishes nothing that the last producing step did not already know.
 
@@ -46,7 +74,7 @@ The first is what makes the request honest: **what is proposed has been measured
 
 ### Planning can conclude that there is no plan
 
-The plan step answers two questions, and only the first has a plan as its answer: *should this be done*, and *how*.
+The plan step answers three questions, and only the first has a plan as its answer: *should this be done*, *what shape is it*, and *how*.
 
 Some items should not be done, and discovering that is the plan step working rather than failing. It is also the cheapest possible moment to discover it — before a branch exists, before an agent has written anything, and before anyone has reviewed a change that should not have been made.
 
@@ -63,23 +91,23 @@ So the step's deliverable is a plan **or** a refusal, and a refusal names which 
 
 **Every refusal carries evidence a person can check.** That is what makes it a finding rather than a shrug: a refusal naming the duplicate item, or the line where the behaviour already exists, or the document it contradicts, can be confirmed or overturned in a minute. One that says only "this cannot be done" is indistinguishable from an agent that gave up, and a reader has no way to tell which it was.
 
-A refusal **blocks the resolution on a named reason.** It is not a failure and not a dead end: the flow stops, the reason says what would unblock it, and when a person acts on that reason the resolution continues from where it stopped. An item found to duplicate another is usually closed instead — but if the finding was wrong, clearing the block resumes the work rather than starting it again.
+A refusal **blocks the resolution on a named reason.** It is not a route and not a dead end: the flow stops, the reason says what would unblock it, and when a person acts on that reason the resolution continues from where it stopped. An item found to duplicate another is usually closed instead — but if the finding was wrong, clearing the block resumes the work rather than starting it again.
 
 The set is closed. A refusal fitting none of these means the vocabulary is wrong, not that a fifth may be invented in prose.
 
 **Not knowing enough to plan is different and is not a refusal.** An item that could be planned given an answer asks the question and parks, which is a resumable state — the plan step will run again with the answer in hand. Refusing means no answer would help.
 
-A step that stops this way **keeps as much of its work as it can**, and continues from it when it resumes. How much survives depends on what the work was: implement's changes are in the worktree, so a run cut off mid-step — by a park, a crash, or a power failure — leaves them there to resume from. The plan step has no such durable half-product, so it needs somewhere to put one. The question exists because of that work: the step read enough to find the ambiguity, and discarding it means re-deriving the same reasoning to arrive at the same question, now answered. The plan step is where this matters most, because it changes no files — a park with nothing kept erases the step entirely.
+A step that stops this way **keeps as much of its work as it can**, and continues from it when it resumes. How much survives depends on what the work was: implement's changes are in the worktree, so a run cut off mid-step — by a park, a crash, or a power failure — leaves them there to resume from. The plan step has no such durable half-product, so its draft is where one goes. The question exists because of that work: the step read enough to find the ambiguity, and discarding it means re-deriving the same reasoning to arrive at the same question, now answered. The plan step is where this matters most, because it changes no files — a park with nothing kept erases the step entirely.
 
-What it keeps is scaffolding, not a result: it does not resolve the step, only the step that wrote it reads it, and it is discarded once the step completes. `resolution.md` § "Work in progress" states the general rule.
+What it keeps is a draft, not a result: it completes nothing, only the step that wrote it reads it, and it is discarded once the step completes. `resolution.md` § "Drafts" states the general rule.
 
 ### A step's write contract is checked, not merely stated
 
 The **Writes** column is a contract, and every step is held to it after it runs.
 
-Prevention comes first where it exists — the plan step runs in a mode that forbids editing, and an agent may be given a gate over the actions it proposes, which refuses a forbidden command before it runs and lets the agent adapt mid-turn rather than losing the whole turn.
+Prevention comes first — each step's declaration is a layer of the action guard, so a plan dispatch has a file write refused as it is attempted: the union of the general rules, the contributor role's restrictions, and plan's own layer ([resolution.md](resolution.md) § Guards), refusing a forbidden action before it runs and letting the agent adapt mid-turn rather than losing the whole turn.
 
-But prevention of either kind is enforced **by the agent**, not by this flow, which passes a flag or a configuration and trusts the outcome. A shell, a tool that shells out, or a mode that does not apply cleanly goes straight through it. So prevention is worth having, is the cheapest place to catch a violation, and is not the guarantee.
+But prevention is enforced **by the agent**, not by this flow, which passes a configuration and trusts the outcome. A shell, a tool that shells out, or a mode that does not apply cleanly goes straight through it. So prevention is worth having, is the cheapest place to catch a violation, and is not the guarantee.
 
 **The two layers are a guard and a gate**, in the senses `resolution.md` defines. Neither substitutes for the other, and the reason is what each can and cannot see: a guard refuses an action before it happens and is bypassed by any route that does not pass through it, while a gate measures the result however it came about and cannot speak until the turn is over.
 
@@ -97,9 +125,23 @@ A violation **blocks the resolution and names what happened.** It is not a failu
 
 One check covers all three because they are one question: **did this step do only what it said it would.**
 
+### The branching sequence is declared
+
+Every step declares the worktree state it needs and the state it leaves ([resolution.md](resolution.md) § Steps and the worktree), so the resolution's whole branching story is written down here, not improvised route by route — committed and clean at every boundary, which is the commit contract's guarantee:
+
+| Step | Needs | Leaves |
+|---|---|---|
+| plan · review the proposal · review the filing · file the items · merge · record merge commit | `any` | `as-found` |
+| open branch | `any` | `item-branch` |
+| implement · review · coverage · open request | `item-branch` | `item-branch` |
+| verify merge result | `item-branch` | `as-found` |
+| close branch | `item-branch` | `base` |
+
+Implement, review and coverage refuse to run anywhere but the item's branch, and complete only with their changes committed there — work cannot end on the base, half-committed, or split across a stray branch, because no step's declared boundary accepts that state.
+
 ### Branches are moved only by mechanical steps
 
-**Steps 2, 6 and 7 are the only ones that create, switch or publish a branch, and none of them runs an agent.** Every other step finds the worktree already on the right branch and leaves it there.
+**Open branch, open request and close branch are the only steps that create, switch or publish a branch, and none of them runs an agent.** Every other step finds the worktree already established on its declared branch and leaves it there.
 
 This is a restriction on the agent-driven steps, and it is deliberate. An agent given a shell and a goal will reach for git when it seems expedient — cutting a branch of its own, committing directly to the base, resetting to escape a state it does not understand. Each of those is locally reasonable and globally wrong: a ghost branch strands the work where nothing will find it, and a commit on the base defeats the entire proposal model, which exists so that nothing reaches the mainline unreviewed.
 
@@ -111,13 +153,13 @@ The check costs two reads and turns an unenforceable instruction into an invaria
 
 ### Closing the branch is part of finishing, not of stopping
 
-Step 7 runs when the resolution **completed**. A run that parked, was blocked, or failed leaves the worktree exactly where it stopped, because that state is what someone will resume from or diagnose.
+Close branch runs when the contributor's part **completed**. A run that parked, was blocked, or failed leaves the worktree exactly where it stopped, because that state is what someone will resume from or diagnose.
 
-Returning the worktree is not the same act as releasing a claim. An operator who releases mid-work is stepping away and keeps their branch; a resolution that finished is done with it and owes the arena a clean starting point for the next item.
+Returning the worktree is not the same act as releasing a claim. An operator who releases mid-work is stepping away and keeps their branch; a contributor role that finished is done with it and owes the arena a clean starting point for the next item.
 
 ### The implementation lives in the branch, and the record names it
 
-The deliverable of a producing step is the **commit it left on the branch**, and what it records is that commit.
+The deliverable of a producing step is the **commit it left on the branch**, and what it records is that commit — a result captured from the tree, in [artifacts-and-signals.md](artifacts-and-signals.md)'s sense.
 
 Recording a diff instead would be recording a copy. The copy can legitimately be empty — a resumed branch whose work an earlier run already committed has a clean tree, so there is nothing left to capture — which means an empty record cannot be read as "the step did nothing" without deadlocking a resumption over work sitting right there in the branch. A copy that may be empty, that nothing reads back, and that can disagree with the thing it copies is not a record worth keeping.
 
@@ -127,29 +169,31 @@ So the question of whether the work exists is answered by the branch: **does thi
 
 ### Every step writes something
 
-No step is purely an inspection. Step 1 touches no file and still produces the plan, which is its whole output: a plan existing only inside an agent's turn would be a decision nobody could review, revisit, or hold the change against.
+No step is purely an inspection. Plan touches no file and still produces the plan, which is its whole output: a plan existing only inside an agent's turn would be a decision nobody could review, revisit, or hold the change against.
 
 Where a result is stored is the backend's business, not this flow's. What this flow requires is that it **is** stored, and that it reaches a reader.
 
 ### Where judgement lives, and why it is worth knowing
 
-Steps 1, 3, 4 and 5 spend an agent turn on a decision. Steps 2, 6 and 7 spend none.
+Plan, implement, review, coverage, review the proposal and review the filing spend an agent turn on a decision. Open branch, open request, close branch, verify merge result, merge, record merge commit and file the items spend none.
 
-That distinction is not bookkeeping. A step whose outcome an agent decides is **neither cheap nor reproducible**: it costs a turn, and running it twice on the same input can produce different work. A mechanical step is both — it costs nothing beyond the operations it performs, and it does the same thing every time.
+That distinction is not bookkeeping. A step whose outcome an agent decides is **neither cheap nor reproducible**: it costs a turn, and running it twice on the same input can produce different work. A mechanical step is both — it costs nothing beyond the operations it performs, and it does the same thing every time. File the items is mechanical for exactly that reason: *what* to file was the plan's decision and *whether it closes the gap* was the filing review's; executing the filing decides nothing.
 
-So the flow's cost and its variability sit entirely in the four agent-driven steps, and every one of them is there because a decision has to be made.
+**Deliverable and record are not the same thing**, and the difference matters most where they diverge. Implement's deliverable is a working change; what is recorded is the commit carrying it. Review's deliverable is the corrections themselves — already in the tree — and what is recorded is prose *about* them. A step is not finished when its entry is journaled; it is finished when its deliverable exists.
 
-**Deliverable and record are not the same thing**, and the difference matters most where they diverge. Implement's deliverable is a working change; what is recorded is the commit carrying it. Review's deliverable is the corrections themselves — already in the tree — and what is recorded is prose *about* them. A step is not finished when its artifact resolves; it is finished when its deliverable exists.
+## The contributor steps
 
-### 1. Plan
+### Plan
 
-States what will be done and why, before the worktree is touched.
+States what will be done and why, before the worktree is touched — and elects the route matching the work's shape.
+
+On the filing shape, its deliverable is the intended items themselves — each fully drafted and carrying a key stable within this resolution — because two steps consume them verbatim: the filing review judges exactly what would be filed, and the filing files exactly what was judged, idempotently by that key.
 
 **This step does not modify anything.** It is the one step in the flow that cannot, and the restriction is the point: a plan written by a step that has already started changing things is a description of work done, not a decision about work to do. The distinction is what makes the plan reviewable.
 
 The plan is required. A resolution that reaches the proposal without one refuses to propose — a request carrying no plan presents a silent read failure as a finished change.
 
-### 2. Open branch
+### Open branch
 
 Puts the worktree on a branch for this item, cut from the base, and records what it was cut from.
 
@@ -157,17 +201,19 @@ Mechanical, and it exists as its own step for three reasons. A branch that fails
 
 Recording the base is what makes the change answerable later: *what is this relative to* has one answer, fixed at the moment the branch was cut, rather than being re-derived against a base that has since moved.
 
-### 3. Implement
+### Implement
 
 Makes the change work.
 
-It drives the change against the gate in a bounded loop: each failing run re-prompts with the gate's output, until the gate passes or the step's prompt budget is exhausted. Exhaustion parks; it does not fail.
+It drives the change against the gate in a bounded loop: each failing run re-prompts with the gate's output, until the gate passes or the treasurer stops allowing rounds. Exhaustion parks; it does not fail.
 
 **This step commits.** The prompts tell the agent not to — committing mid-loop would bury a half-finished round in history — so the step stages and commits once the gate is green, and its result names that commit.
 
-The result resolves only on a passing gate. A commit recorded after a failing gate would name work that does not build.
+The result is captured only on a passing gate. A commit recorded after a failing gate would name work that does not build.
 
-### 4. Review
+**When the route returns here** — a rework handback from the maintainer's review — the transfer message carries what must change, and the work happens on the item's existing branch, as further commits: the proposal's history is the record of the rounds, not a rewrite of them.
+
+### Review
 
 **A second implementation pass, accountable to the change rather than to the plan.**
 
@@ -181,17 +227,17 @@ That is the whole boundary, and it is worth stating because the two steps otherw
 
 Its result is a briefing for the person who will review the proposal — what was looked for, what was changed, what still needs a human decision.
 
-### 5. Coverage
+### Coverage
 
 Makes the change tested, to this project's standard.
 
-**This is a requirement to meet, not a state to assess.** Nothing runs after the producing phase and the item is resolved when the flow finishes, so a gap described rather than closed is a gap that ships, handed to nobody.
+**This is a requirement to meet, not a state to assess.** No producing step runs after this one, so a gap described rather than closed is a gap that ships, handed to nobody.
 
 Where a change cannot be tested as written, this step **restructures it so that it can be**. Code that cannot be tested is not finished.
 
 Leaving something untested is an exception, justified specifically — what resisted, why, and what would have to change — never a list handed onward.
 
-### 6. Open request
+### Open request
 
 Proposes a change that can land.
 
@@ -207,26 +253,60 @@ It then pushes the branch and opens the request, in that order: opening first wo
 
 The request body carries the plan, each producing step's briefing, and the gate's result. The plan is required; the others appear when they have content.
 
-### 7. Close branch
+**On a rework round the request already exists.** The push updates it; a second request is never opened for the same branch, and the step completes on the request being current rather than on it being new.
 
-Returns the worktree to the base branch.
+### Close branch
 
-Runs only when the resolution **completed**. A run that stopped — parked, blocked, or failed — leaves the worktree exactly where it stopped, because that state is what someone will resume from or diagnose.
+Returns the worktree to the base branch, and routes the item to the maintainer's review — the contributor's part is complete, and where the maintainer is another principal, this election is the handoff.
 
-It does not delete the branch. The branch is the product: it carries the request, and the request outlives the resolution that opened it.
+It does not delete the branch. The branch is the product: it carries the request, and the request outlives the role that opened it.
 
-## Integration
+## The maintainer steps
 
-The phase that lands the change. It belongs to the maintainer capability, and a principal holding both may reach it in the same resolution — see `resolution-standalone.md`.
+### Review the proposal
 
-### Integrate
+Judges the proposal **as what will land**: the diff, the plan it claims to implement, the briefings, the gate result it arrived with — and the item it all answers to.
 
-Runs the **gate** on the merge result, and lands the change if it passes.
+Its election is the decision, and the three routes are the three honest outcomes:
 
-The gate answers one question: *will the mainline still be green*. It measures and modifies nothing, which is what makes its answer reproducible by anyone who was not there — a reviewer, a later bisect, a rebuild elsewhere.
+- **verify merge result** — the proposal should land. The route continues to integration.
+- **implement** — the proposal needs work the contributor must do. The message carries what must change and why, specifically enough to act on: a handback with a vague message spends a full contributor round to rediscover what this step already knew. The route crosses back to the contributor's account of record.
+- **finalize: rejected** — the item should not be resolved by this proposal or any successor to it, with the reasons in the finalizing message.
 
-**It measures the merge result, not the branch.** The branch was already measured before the request was opened; what has changed since is the mainline. Re-measuring the branch would re-establish something already known and miss the only thing that moved.
+The distinction between the last two is the one worth deciding deliberately: rework expects the resolution to continue; rejection ends it ([resolution.md](resolution.md) § Finalizing).
 
-Landing is a push to the mainline, or a merge of the request — the same act by two routes, and which one depends on how the change was proposed.
+A merged request found already in place — a human integrated by hand — is not an anomaly: the step observes `pr-merged` set and elects the route onward, so the record still completes.
 
-A failing gate does not land, and does not return the change to the producing phase. The producing steps have had their turns; a gate failing after all of them is a fact for a person.
+### Verify merge result
+
+Measures the **merge result**, not the branch. A branch that was green when proposed can be red after merging, because the mainline moved underneath it. Verifying the branch again would re-establish something already known and miss the thing that changed.
+
+Mechanical: the gate answers, and this step does not argue with it. A failing gate does not land, and does not route the change back to the producing phase on its own authority — the producing steps have had their turns; a gate failing after all of them is a fact for the maintainer's review, where the handback carries the gate's own output.
+
+### Merge
+
+Lands the change: merges the request. The same act by two routes — a push to the mainline, or a merge of the request — and which one depends on how the change was proposed.
+
+### Record merge commit
+
+Records the merge commit the landing produced, and finalizes the item as resolved. What landed has exactly one name, and this is where it is written down.
+
+## The filing steps
+
+### Review the filing
+
+Checks the plan's intended items against the gap they exist to close: together, do they cover it; singly, is each one actionable, correctly scoped, and filed where it belongs. It answers to the gap, not to the plan — items the plan missed are its findings as much as items the plan got wrong.
+
+It elects **file the items** when the set is right, or routes back to **plan** with what is missing or wrong — the same accountability structure as the change route's review, applied to a different deliverable.
+
+### File the items
+
+Files what was decided, and records the filed references as its result — the `filed-items` list is the deliverable, and each reference in it must resolve to an item that exists on the backend.
+
+Mechanical: what to file was decided at plan, and that the set closes the gap was established at review the filing. Every filed item is an outward write, guarded as every outward write is.
+
+**Filing is resumable, not atomic — completion is the atomic act.** The backend files one item at a time and offers no transaction, so the step never pretends otherwise: each intended item is filed through the orchestrator's idempotent surface ([orchestrator.md](orchestrator.md) § Filing), keyed by this item and the intended item's key, so a dispatch interrupted after filing three of five files the two missing on resume and duplicates nothing. The journal entry appends only when every intended item exists — the step completes whole or not at all, and the `filed-items` artifact lists exactly what exists.
+
+**A guard refusal routes back to plan.** The refused text is the plan's — the intended items are its artifact — and this step is mechanical: retrying it cannot change a word, so parking here would buy the loop the treasurer exists to stop. The election back to plan carries the refusal verbatim; items already filed stay filed and stay recorded, and the corrected set returns through the filing review before anything more goes out.
+
+It finalizes the item as resolved: the filing **is** the resolution.

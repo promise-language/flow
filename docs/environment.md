@@ -82,6 +82,18 @@ This is what `resolution.md` § *Parking* requires of any advertised condition �
 
 **The report names the condition, the measurement, and what would clear it.** `12 MB free on /srv/work/promise, floor 2 GB` is actionable; *verify failed* is not, and *infrastructure failure* is not either. A condition reported without the measurement that established it is one an operator has to reproduce before believing, on the machine that is already the problem.
 
+## Placement
+
+Some items run only on some machines: work on a platform-specific fault needs the platform. That is not unfitness — a Linux arena refused a Windows item is a perfectly fit machine looking at somebody else's work — so nothing above applies to it: there is no wait, nothing to re-measure, and no condition to clear. It is a stable fact about the **pair**, and it is acted on where pairs are made: selection and placement.
+
+> **The placement axes are closed: `os` and `arch`. An item carries restrictions on them; a machine reports facts about them; a pair qualifies when every restriction admits the machine's fact.**
+
+- **The machine's side is measured, never declared** — the same rule as capabilities ([resolution.md](resolution.md) § Accounts, capabilities and roles): the facts are ambient constants of the arena, read where it runs.
+- **The item's side is carried on the item**, recorded like any other item-level fact ([orchestrator.md](orchestrator.md)) — by whoever files it, by triage, or by a resolution that discovers it mid-run. No restriction on an axis means any value qualifies; several restrictions on one axis are alternatives.
+- **A mismatched pair is never worked.** Selection does not offer the item to the arena, placement does not send it there, and a claim named explicitly is refused — typed, with an override for an operator who knows better. A resolution that discovers the restriction mid-run records it and stops as `blocked`, naming it; the journal is what lets a qualifying arena resume exactly where this one stopped, and nothing about the work is lost to the move.
+
+The axes are closed the way every vocabulary here is: extending them is an SDK change, not a project's. What a **project's** machines must have — disk, toolchain, services — already has its seam in the `fit` gate and its thresholds; placement is for what varies **per item**, and it is closed at the platform.
+
 ## The set is closed, and one rule keeps it closed
 
 **Every member is both a check made before work is given and a classification made during it.** A condition worth recognising after effort has been spent is worth refusing before it is spent; a condition not worth checking up front is not a member. Adding one means adding it in both places, and that requirement is what stops the set growing by accident into "things that went wrong".

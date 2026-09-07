@@ -18,7 +18,7 @@ Concrete implementations live in subpackages (the reference is `flow/claude`). T
 
 ## The chokepoint
 
-`ctx.Agent()` is the **only** route to spend agent budget. Budget is metered here — cost, invocations, and prompts per invocation. There is no second path. A step that needs agent work calls `ctx.Agent().Run(...)` and nothing else.
+`ctx.Agent()` is the **only** route to spend on agent work. Every expense is metered here, and every expense is approved by the treasurer before it is incurred — allowed, blocked, or priced with an allowance ([resolution.md](resolution.md) § The treasurer). There is no second path. A step that needs agent work calls `ctx.Agent().Run(...)` and nothing else.
 
 ## Nothing mechanical may spend
 
@@ -71,9 +71,9 @@ An agent with no `AgentDoctor` is reported as **skipped**, not failed. The SDK c
 
 ### MaxCostUSD contract
 
-`MaxCostUSD` is the headroom left in the step's cost grant. An implementation that can enforce it passes it to the substrate and reports a stop as `AgentFailure{Kind: FailureCostCap}`. The bound is not exact: the substrate learns what a model call cost only after it returns, so the turn stops at the **first call that crosses the cap**. The overrun is bounded by one model call, not by a whole turn — that is the difference this axis provides.
+`MaxCostUSD` is the allowance the treasurer priced for this expense. An implementation that can enforce it passes it to the substrate and reports a stop as `AgentFailure{Kind: FailureCostCap}`. The bound is not exact: the substrate learns what a model call cost only after it returns, so the turn stops at the **first call that crosses the cap**. The overrun is bounded by one model call, not by a whole turn — that is the difference this axis provides.
 
-An implementation that cannot enforce it may ignore the field; the caller's pre-dispatch and pre-prompt budget gates still apply. A caller setting this field is asking for a tighter ceiling; a metered wrapper must narrow it, never widen it.
+An implementation that cannot enforce it may ignore the field; the treasurer's chokepoint consultations still apply. A caller setting this field is asking for a tighter ceiling; a metered wrapper must narrow it, never widen it.
 
 ## Permission modes
 
@@ -131,15 +131,12 @@ The `Kind` field is drawn from a closed set:
 
 ### Transient failures
 
-When `Transient` is true, the failure is infrastructure (remote runner died, network blip, transient 5xx) rather than a real agent-side failure. The orchestrator:
-
-1. Parks the step with `ParkInfraTransient`.
-2. **Skips** the `BumpInvocations` call — a flapping runner must not burn the step's invocation budget.
+When `Transient` is true, the failure is infrastructure (remote runner died, network blip, transient 5xx) rather than a real agent-side failure. The orchestrator parks the step with `ParkInfraTransient`, and the treasurer does not count the attempt — a flapping runner must not spend the resolution's budget ([environment.md](environment.md)).
 
 Agent implementations (typically a backend's runner-HTTP wrapper) set `Transient` from substrate-specific signals.
 
 ## Cross-references
 
 - [step-handler.md](step-handler.md) — `ctx.Agent()` is how handlers reach the agent.
-- [resolution.md](resolution.md) — budget metering and park semantics.
-- [flow-registration.md](flow-registration.md) — step declaration and budget configuration.
+- [resolution.md](resolution.md) — the treasurer and park semantics.
+- [flow-registration.md](flow-registration.md) — step declaration.

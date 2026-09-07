@@ -21,8 +21,9 @@ The set is closed: a disclosure is persisted public state, and a write not on th
 |---|---|
 | **Issue comments** | Step artifacts — the plan, the review, the coverage briefing. When an artifact exceeds the comment size limit, its full text is committed to the artifacts branch and the comment keeps a preview with a link |
 | **The parked question** | An agent's own account of what it could not decide, quoting whatever it was looking at |
-| **The state comment** | The flow's bookkeeping, rewritten on every step |
+| **The state comment** | The flow's bookkeeping — the journal with its messages and standing notes, the ledger, the park, the questions — rewritten on every step |
 | **The pull request** | Title, body, and the artifacts assembled into it |
+| **Filed items** | The title, body and labels of every item a filing step creates through `FileItem` |
 | **Commit messages** | Text an agent wrote, published by the push |
 | **The diff** | The change itself, published by the push |
 | **Labels** | Names the flow constructs, including claim identifiers |
@@ -34,22 +35,9 @@ Commit messages, the diff, and labels are the ones most easily forgotten, becaus
 
 ## A guard is not a gate
 
-`docs/resolution.md` defines a **gate**: it measures something that exists and reports what it found. A **guard** is a different thing, and the flow has both.
-
-**A guard stands on the execution path of an act that has not happened yet, and prevents it.**
-
-| | Gate | Guard |
-|---|---|---|
-| **Subject** | **Something that persists independently of the check** | **The act itself, which exists only as a proposal** |
-| Position | Beside the work. It observes | **On the path.** The act cannot occur without passing it |
-| Answers with | Measurements. Something else judges them | Allow or refuse, and why |
-| Its answer | Is stored, ratcheted, re-judged later | Is consumed once, by the caller about to act |
-
-The subject is the distinction, and the rest follows from it — see `docs/resolution.md`. Prevention is not the test: a gate that blocks a push prevents something too, and is still a gate, because its subject persists and its measurement is judged later.
+What a guard is — its subject the act itself, its answer consumed once, its own judge, never authored by the party it constrains — is defined once, in [resolution.md](resolution.md) § Guards, and this document does not restate it. This is the second of the two guards named there: the one over what the flow publishes.
 
 `bin/tool-guard` is the precedent, and the name comes from it: it sits on the critical path of every tool call, receives the action proposed, and answers whether it proceeds. It is not a measuring gate and does not pretend to be one.
-
-**A guard is its own judge, and that is not the contradiction it looks like.** Judging is kept out of a gate because a measurement is stored and re-judged later, so the comparison must be recomputable by someone who was not there, against thresholds held elsewhere. A guard's answer is consumed the moment it is given, is never stored as a fact about anything, and is never re-judged. There is no second judgement to keep honest.
 
 **Being on the path is the whole mechanism.** A guard that is consulted is a convention; a guard that cannot be gone around is a guarantee. If a caller can reach GitHub without passing it, it describes what usually happens rather than what can.
 
@@ -135,7 +123,7 @@ Text reaches GitHub by two paths, and the guard stands on both. It is **one guar
 | The SDK's own writes | The seam between the github orchestrator and GitHub | A resolution step |
 | **A tool call** | The pre-tool hook | **Any agent with a terminal — including one working with a person** |
 
-**The first: one seam, not a check per call site.** Every outward write goes through the github orchestrator — the API calls that create and edit comments and labels, the `gh` invocations that open a pull request, the git operations that push a branch. That seam is the one place a byte is both **final** and **not yet sent**, which are the two properties the guard needs. Anywhere earlier is too early: the text is still being assembled, and a template is not what gets published. A guard installed at six call sites is a guard absent from the seventh.
+**The first: one seam, not a check per call site.** Every outward write goes through the github orchestrator — the API calls that create and edit comments, labels and items, the `gh` invocations that open a pull request, the git operations that push a branch. That seam is the one place a byte is both **final** and **not yet sent**, which are the two properties the guard needs. Anywhere earlier is too early: the text is still being assembled, and a template is not what gets published. A guard installed at six call sites is a guard absent from the seventh.
 
 **The second is the path that is easy to forget, because it is not the flow.** An agent at a terminal running `gh issue create`, `gh pr comment` or `git push` publishes exactly as permanently as a resolution does, and reaches none of the SDK's code to do it. It does pass the pre-tool hook — so the same guard applies there, and an agent working alongside a person is bound by it too.
 

@@ -38,11 +38,11 @@ under-report and read as nearly done.
   may be refused.
 - [step-handler.md](step-handler.md) — What a handler receives, must do, may do, and may
   return.
-- [flow-registration.md](flow-registration.md) — How a flow declares steps, item types, signal
-  preconditions.
+- [flow-registration.md](flow-registration.md) — How a flow declares its roles, step graph and
+  routes, item types, signal preconditions.
 - [artifacts-and-signals.md](artifacts-and-signals.md) — The two result kinds and the
   vocabulary depending on them.
-- [issue-flow.md](issue-flow.md) — The concrete step set this repository ships for resolving
+- [issue-flow.md](issue-flow.md) — The concrete step graph this repository ships for resolving
   issues.
 - [github-schema.md](github-schema.md) — The on-issue wire format: state comment, artifact
   comments, orphan branch.

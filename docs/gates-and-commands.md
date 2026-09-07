@@ -363,6 +363,10 @@ Serialization is not one thing. What is being protected differs, and so does how
 
 Serializing the landing turns that into a queue. The loop's bound then catches genuine starvation rather than ordinary contention, which is the difference between a bound that fires when something is wrong and one that fires on a busy afternoon.
 
+**The serialized section is the round, not the push.** A lock over the push alone leaves the measurement open to invalidation — a landing elsewhere during a ten-minute suite rejects the push and the round's gate run with it, and under contention that is a stream of expensive measurements nobody lands. Held across the rebase, the merge-result measurement and the push, the lock means what was measured is what lands: the gate run cannot be wasted by traffic, contention is paid as waiting — recorded as waiting, never as work — and checking the mainline's position first buys nothing the lock does not already guarantee, since a check shrinks the race window while the lock closes it.
+
+**And the round is the lock's whole life.** It is never held across a stop — a park, a crash, an arena gone quiet — because a lock in a stalled arena starves every landing behind it. The cost of that necessity is borne by the stopped work, not the queue: work that stops mid-landing resumes *behind* whatever landed meanwhile, arbitrarily far behind after an outage, and it re-enters through the drift judgment ([orchestrator.md](orchestrator.md) § Drift is evidence for judgment) rather than by resuming a lock nothing kept for it.
+
 **Both scopes are the backend's**, because only it knows what shares a machine and what shares a mainline. And waiting is not failing at either scope.
 
 ### A project has gates the flow knows nothing about
@@ -418,6 +422,8 @@ They are separate because their answers are. An agent may be free to run anythin
 **These apply to every agent action, whoever asked for it.** They are properties of the environment an agent runs in, not of a resolution — so they hold when a flow is driving, and equally when a person is sitting at a terminal asking for something ill-advised. A constraint that lapses the moment a human is in the loop protects nothing: the mistakes are the same mistakes, and a person asking for them directly is if anything the likelier case.
 
 That also means the flow does not supply them. It benefits from them, and it must not assume them.
+
+What the flow does supply is **narrowing**: the running step's declaration and the acting role's restrictions join the same chokepoint as further layers of refusal, and no layer widens another — the environment's rules hold whatever a step declares. The composition is [resolution.md](resolution.md) § Guards.
 
 ### The worktree is the default boundary
 

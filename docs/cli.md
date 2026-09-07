@@ -13,14 +13,13 @@ Every binary built on `cli.Run` exposes exactly this surface.
 |---|---|
 | `claim <item-id>` | Acquire an exclusive claim on an item |
 | `release` | Drop the active claim |
-| `reseed [--force]` | Clear the active claim's seed — artifacts, budgets, park state — for re-seeding |
-| `run-step` | Advance the claimed item by exactly one step |
-| `resolve [<item-id>]` | Drive an item to completion, one step at a time |
-| `status [<item-id>]` | Report an item's lifecycle checklist |
-| `list` | Report the work available to this operator |
+| `reset [--force]` | Clear the active claim's flow record — journal, ledger, park state — for a fresh resolution |
+| `run-step` | Advance the claimed item by at most one step — the dispatch may instead park, skip, block, or fail |
+| `resolve [<item-id>]` | Drive an item, one step at a time, until it finalizes, hands off, or stops |
+| `status [<item-id>]` | Report an item's route: the journal so far, the pending step, and whose move it is |
+| `list` | Report items and where each stands — this binary's remit by default, everything the backend holds at its widest |
 | `answer <item-id> <text>` | Answer a question a step is parked on |
-| `grant <step> <axis> <amount>` | Add budget to a step and clear a matching budget park |
-| `stale <step-id>` | Mark one resolved artifact stale so its step re-runs |
+| `grant <step> <axis> <amount>` | Extend the treasurer's allowance for a step and clear a matching treasurer park |
 | `doctor` | Report whether this environment is fit to be given an item |
 
 No command outside this set exists. A binary that needs project-specific behaviour expresses it as a flow, not as a new command.
@@ -44,14 +43,15 @@ Matching is exact. A typed id never resolves to an item whose identifier merely 
 Two modes, `human` and `json`. Selection, highest precedence first:
 
 1. `--json` / `--human`
-2. `FLOW_OUTPUT=json|human`
-3. whether stdout is a terminal — human if it is, JSON if it is not
+2. whether stdout is a terminal — human if it is, JSON if it is not
+
+There is no environment variable: the mode arrives as a flag or is decided by stdout, and nothing else — [org/cli-guide.md](org/cli-guide.md)'s rule, so a reader of a command line knows everything the tool was told.
 
 Passing both `--json` and `--human` is a usage error, detected before the command takes any action.
 
 Commands fall into two shapes, and the shape determines the streams.
 
-### One-shot reports — `list`, `status`, `grant`, `stale`, `doctor`, `run-step`
+### One-shot reports — `list`, `status`, `grant`, `doctor`, `run-step`
 
 The report *is* the output. It goes to **stdout**, rendered in the selected mode.
 
@@ -68,7 +68,7 @@ The mode is decided by **stdout**, never by stderr. Bare `resolve 2>/dev/null` o
 
 JSON-mode stdout is a stable interface. Its bytes are consumed by other programs.
 
-Each `InvocationResult` object may carry `duration_seconds` (wall-clock time of the step, measured by the orchestrator around handler dispatch) and `cost_usd` (what the invocation spent, as a sum of agent turns). Both fields are optional with `omitempty`: a consumer that does not know them is unaffected, and JSON output for a run that reports neither is byte-identical to before these fields existed. `cost_usd` is a pointer type: `null`/absent means unknown (the step never dispatched), while `0` means the step ran but spent nothing.
+Each `InvocationResult` object may carry `duration_seconds` (the step's active time as the ledger records it — waits on declared exclusions excluded) and `cost_usd` (what the invocation spent, as a sum of agent turns). Both fields are optional with `omitempty`: a consumer that does not know them is unaffected, and JSON output for a run that reports neither is byte-identical to before these fields existed. `cost_usd` is a pointer type: `null`/absent means unknown (the step never dispatched), while `0` means the step ran but spent nothing.
 
 ## Invocation errors
 
@@ -103,9 +103,9 @@ A step that parks exits 0 — parking is a designed outcome, not a failure. A st
 
 ## Status
 
-`status` reports an item's lifecycle: which steps are complete, which remain, and **which step is running right now**.
+`status` reports an item's route: the journal so far — each completed execution with who ran it, in which role, electing what and why — the **pending step** and its declared ways forward, **whose move it is** (the awaited role, or the awaited signal), the park when there is one with what would clear it, the treasurer's spend so far — cost and active time, with time spent waiting on exclusions reported apart — and **which step is running right now**.
 
-Each step is reported in exactly one state. The set is closed, and it includes a state for a step that is currently executing — a step being actively worked on is not the same thing as a step that has yet to start, and reporting both as pending loses the distinction an operator most often needs.
+The journal is reported in order, and the pending step in exactly one state — parked, waiting, ready, or running. A step being actively worked on is not the same thing as one that has yet to start, and reporting both as pending loses the distinction an operator most often needs.
 
 For a running step, `status` reports what is running: the step, and the identity of the process executing it, so an operator can find it, watch it, or end it.
 
@@ -147,7 +147,7 @@ If the item has more than one outstanding question, the one being answered is na
 
 `claim` acquires an exclusive claim and is idempotent for the holder: re-claiming an item this worktree already holds succeeds and changes nothing.
 
-A claim is refused when the item is already held, when the target worktree is unfit, or when the backend's own preconditions are unmet. Every refusal is **typed** — the caller can tell the reasons apart without reading prose — and carries:
+A claim is refused when the item is already held, when the target worktree is unfit, when the item awaits a role this account's detected capabilities cannot assume, when its placement restrictions exclude this arena, or when the backend's own preconditions are unmet. Every refusal is **typed** — the caller can tell the reasons apart without reading prose — and carries:
 
 - a one-line human reason,
 - the failing check's own output, reproduced verbatim and unmodified,
@@ -169,22 +169,23 @@ Overrides are named and independent. There is one option per thing being overrid
 
 Restricting it to available work would make the listing unable to answer the question that follows it: *why isn't the item I expected here?* An item held by someone else, or explicitly disabled, is absent for a reason the operator needs, and a listing that omits it sends them to the backend's web UI to find out — which is the gap this command exists to close.
 
-Scope is the binary's own remit. An item no flow here handles is not listed: it is not hidden by policy, it simply is not this binary's work, and browsing the backend's full contents is the backend's own job, not this command's.
+Scope is the binary's own remit. An item outside it is not listed: it is not hidden by policy, it simply is not this binary's work, and browsing the backend's full contents is the backend's own job, not this command's.
 
 `list` is a report. It never claims, never mutates, and never starts work.
 
 ### Scope
 
-Items nest in six levels, from everything the backend holds down to what runs unattended:
+Items nest in seven levels, from everything the backend holds down to what runs unattended:
 
 | # | Level | `--scope` |
 |---|---|---|
 | 1 | Every item the backend holds, open and closed | `all` |
 | 2 | Every **open** item | `open` |
-| 3 | Open items **this binary could process** — some flow here accepts the type | `processable` *(default)* |
-| 4 | …of those, the ones **not blocked** — someone could work them | `workable` |
-| 5 | …of those, the ones **free** — this operator could claim one now | `free` |
-| 6 | …of those, the ones an unattended `resolve` would pick — **opted in**, and not deferred | `auto` |
+| 3 | Open items **this binary could process** — the flow's remit accepts the type | `processable` *(default)* |
+| 4 | …of those, the ones that are **this operator's, here** — awaiting a role this account can assume, with placement restrictions this arena meets | `actionable` |
+| 5 | …of those, the ones **not blocked** — they could be worked now | `workable` |
+| 6 | …of those, the ones **free** — this operator could claim one now | `free` |
+| 7 | …of those, the ones an unattended `resolve` would pick — **opted in**, and not deferred | `auto` |
 
 `--scope` names how far up the ladder to report. The levels nest, so each scope includes every level below it. The value set is closed and its names are the level names — there is no second spelling, and no scope that is not a level.
 
@@ -202,16 +203,17 @@ Each item is reported in exactly one availability state. The set is closed:
 | `available` | Free, but auto-selection will not choose it — not opted in, or deferred by an operator; claimable by name |
 | `held` | Claimed by someone or something else, named in the report |
 | `blocked` | Nobody can work it yet, for a stated reason |
-| `unhandled` | No flow in this binary accepts this item's type |
+| `awaits` | Somebody else's move, or somebody else's machine — the pending step's role is one this account cannot assume, or the item's placement restrictions exclude this arena; the report names which, and the role's account of record when one is bound |
+| `outside-remit` | The item's type is outside this binary's remit — another binary's work, not an error |
 | `closed` | Not open; not work |
 
-Each state is exactly the boundary between two adjacent levels: `closed` is in level 1 but not 2, `unhandled` is in 2 but not 3, `blocked` is in 3 but not 4, `held` is in 4 but not 5, `available` is in 5 but not 6, and `auto` is in 6.
+Each state is exactly the boundary between two adjacent levels: `closed` is in level 1 but not 2, `outside-remit` is in 2 but not 3, `awaits` is in 3 but not 4, `blocked` is in 4 but not 5, `held` is in 5 but not 6, `available` is in 6 but not 7, and `auto` is in 7.
 
 **The state set is closed because the ladder is.** There is no seventh place an item can be, and a new state would mean a new level rather than a new label.
 
 #### `blocked` covers every reason nobody can work it
 
-An item deliberately disabled, and an item waiting on another item that is still open, are both `blocked`: in this binary's remit, and not workable by anyone right now. They differ in the **reason**, which is reported alongside, and which says whether a person must act or whether it will clear on its own.
+An item deliberately disabled, an item waiting on another item that is still open, and an item whose pending step is a signal wait — nobody's move until the orchestrator observes the signal — are all `blocked`: in this binary's remit, and not workable by anyone right now. They differ in the **reason**, which is reported alongside, and which says whether a person must act or whether it will clear on its own.
 
 They are not separate states. Splitting them would put two states on one boundary, and the causes are open-ended — disabled, unmet dependency, unmet prerequisite, whatever a backend adds next — while the boundaries are fixed at six. States enumerate where an item sits; reasons explain why. Only the first can stay closed.
 
@@ -258,7 +260,7 @@ Where the two decide what runs, and in what order, is `resolve`.
 
 ## Resolving
 
-`resolve` drives one item to completion, advancing it a step at a time until it finalizes, parks, is skipped, is blocked, or fails.
+`resolve` drives one item as far as this runner's part goes, advancing it a step at a time until it finalizes, hands off, parks, is skipped, is blocked, or fails. A handoff is a clean end: this runner's roles are done with the item, the claim is released, and the report names the role the item now awaits.
 
 It selects the item in one of three ways:
 
@@ -276,6 +278,8 @@ Selecting nothing is not an error. No eligible item, or no item carrying the tag
 
 Auto-selection never picks a `blocked` item. An item waiting on a blocker that is still open is not merely undesirable to start — starting it wastes a claim and a run on work that cannot proceed, and the backend that knows about the dependency is the one that keeps it out of the selectable set.
 
+Auto-selection never picks an `awaits` item either: a role this account cannot assume is somebody else's move, and placement restrictions this arena does not meet are somebody else's machine — claiming either would hold work its holder cannot advance.
+
 **Auto-selection takes the most urgent item, then the highest priority, then the oldest.** Urgency first, so an operator's `next` starts ahead of any assessment; priority second — `critical`, `high`, `medium`, `low`; age last, which breaks every remaining tie, so that two callers reading the same set start on the same item. Naming an item id selects that item and consults neither value.
 
 **Auto-selection never picks a `deferred` item.** It is not sorted last, it is not in the set: an item sorted last is still one a fleet with spare capacity reaches, and *do not start this unattended* is exactly what deferring it said.
@@ -288,7 +292,7 @@ Losing a race for one item means trying the next. Being refused for a reason no 
 
 That refusal is not a lost race. A lost race is about an item and the answer is to try another one; this is about the worktree, and every other item would meet it identically.
 
-`resolve` bounds attempts, not wall-clock. A slow step is never killed for being slow.
+`resolve` imposes no bounds of its own. What a step may spend — dispatches, cost, and the time allowance each dispatch runs within — is the treasurer's to decide, and `resolve` enforces the allowance it was handed rather than a judgement of its own about slowness.
 
 ## Reporting an outcome
 
@@ -296,13 +300,13 @@ Every invocation reports exactly one status: `done`, `skipped`, `parked`, `block
 
 These five are the vocabulary. A backend that mirrors them mirrors all five.
 
-`done` means work completed. An item that no flow will ever act on — because nothing accepts its type — is not `done`, and is never finalized on that basis: reporting success for work that was never attempted hides a misconfiguration, and finalizing makes it irreversible. It is `blocked`, and the reason names the item's type and the registered ones.
+`done` means work completed. An item that no flow will ever act on — because its type is outside every remit — is not `done`, and is never finalized on that basis: reporting success for work that was never attempted hides a misconfiguration, and finalizing makes it irreversible. It is `blocked`, and the reason names the item's type and the remit.
 
-The human narration includes duration and cost when present, as a parenthetical after the status: `resolve: write plan → done (1m22s, $0.34)`. At finalization, the total across all artifacts is reported: `resolve: promise-language/flow#46 finalized ✓ (14m02s, $2.71)`. When any artifact's duration is absent (predates tracking), the total is stated as a lower bound (`≥`).
+The human narration includes duration and cost when present, as a parenthetical after the status: `resolve: write plan → done (1m22s, $0.34)`. At finalization, the ledger's total is reported: `resolve: promise-language/flow#46 finalized ✓ (14m02s, $2.71)`; at a handoff, the same total and the awaited role: `resolve: promise-language/flow#46 handed off — awaits maintainer (11m40s, $2.12)`. When any entry's duration is absent (predates tracking), the total is stated as a lower bound (`≥`).
 
 ## Startup
 
-A binary refuses to start, with a named error and exit 2, when its configuration cannot produce correct behaviour: an artifact its backend cannot store, a signal its backend cannot observe, a flow with no steps, a missing agent.
+A binary refuses to start, with a named error and exit 2, when its configuration cannot produce correct behaviour: an artifact its backend cannot store, a signal its backend cannot observe, a flow with no steps, a route naming an undeclared step, a step from which finalization is unreachable, a step tagged with an undeclared role, a missing agent.
 
 Startup validation is exhaustive before any work begins. A misconfiguration is never discovered part-way through an item.
 

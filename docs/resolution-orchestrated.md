@@ -11,13 +11,13 @@ This document specifies **what the flow binary must do** under an orchestrator. 
 
 ## What "orchestrated" means
 
-A server owns scheduling. It decides which item runs, where it runs, and when. The binary is invoked to advance **one step**, and returns.
+A server owns scheduling. It decides which item runs, where it runs, and when. The binary is invoked to advance **at most one step**, and returns.
 
 The binary is therefore **not** the system, and does not behave as though it were:
 
 - It does not select its own work. An item is given to it.
 - It does not decide when to run again. The server decides.
-- It does not loop. One invocation, one step, one report.
+- It does not loop. One invocation, at most one step, one report.
 
 The loop that drives an item to completion belongs to the server. A binary that ran the loop itself would be making scheduling decisions the server has already made, on staler information.
 
@@ -33,7 +33,7 @@ The lease outlives a single invocation. Steps run under a lease the server grant
 
 ## Placement
 
-An item runs where the server says. The binary does not choose its machine, and does not move an item between machines.
+An item runs where the server says — and as whom: an item is dispatched to a runner that may assume the role it awaits ([resolution.md](resolution.md) § Whose move it is), on an arena its placement restrictions admit ([environment.md](environment.md) § Placement), and the binary neither chooses its machine nor its part. It does not move an item between machines — but an item that stops on one arena resumes on any qualifying other, because the journal is the whole of what resuming needs.
 
 A machine's fitness to receive work is established **before** work is given to it, not discovered part-way through an item. The binary reports what it finds about its own environment; the server decides what to do with it.
 

@@ -3,14 +3,14 @@
 > **Tag:** `github-schema` — remaining work to complete this document: the query named in
 > [`docs/index.md`](index.md).
 
-**Normative.** This document defines how state, artifacts, and history are stored on a GitHub issue by the GitHub backend. It is written for readers who have no SDK — the wire format is the contract.
+**Normative.** This document defines how state, the journal, and history are stored on a GitHub issue by the GitHub backend. It is written for readers who have no SDK — the wire format is the contract.
 
 ## State comment
 
-Each issue carries at most one **state comment** — the machine-readable record `LoadState` returns. It is identified by HTML-comment markers and wrapped in a `<details>` element:
+Each issue carries at most one **state comment** — the machine-readable record `Load` returns. It is identified by HTML-comment markers and wrapped in a `<details>` element:
 
 ```
-<!-- flow:state-v1 begin owner=<login> -->
+<!-- flow:state-v2 begin owner=<login> -->
 <details><summary>📋 Flow state — <binary> (machine-managed, do not edit)</summary>
 
 ```yaml
@@ -18,53 +18,70 @@ Each issue carries at most one **state comment** — the machine-readable record
 ```
 
 </details>
-<!-- flow:state-v1 end -->
+<!-- flow:state-v2 end -->
 ```
 
 The `owner=<login>` attribute on the `begin` marker records who authored the state comment. When a different user claims the item, a fresh state comment is posted under their identity.
 
 ### Schema version
 
-The YAML body carries a `schema` field. The current version is **1**. The version is bumped only on incompatible schema changes.
+The YAML body carries a `schema` field. The current version is **2**. The version is bumped only on incompatible schema changes.
 
 ### YAML fields
 
 | Field | Type | Meaning |
 |---|---|---|
-| `flow` | string | The binary name that seeded this item. |
-| `schema` | int | Schema version (currently 1). |
-| `seeded_at` | timestamp | When the artifact checklist was written. |
-| `artifacts` | array | Per-artifact state entries. See below. |
+| `flow` | string | The binary name that opened this record. |
+| `schema` | int | Schema version (currently 2). |
+| `journal` | array | The journal: one entry per completed step execution, in order. See below. |
+| `ledger` | object | The treasurer's durable record. See below. |
 | `signals` | array | Per-signal state entries. See below. |
 | `park` | object or null | Current park record, or absent when not parked. |
 | `questions` | array | Questions the item is parked on. Written by an ask and dropped with the park that was waiting on it; read back only while `park.kind` is `question`. See below. |
+| `filed` | map | Items filed from this item: intended-item key → issue reference, written as each is created. See "Filed items". |
 | `finalized` | bool | Whether the item's flow run is complete. |
+| `disposition` | string | `resolved` or `rejected`; present only when `finalized` is true. |
 
-### Artifact entries
+### Journal entries
 
-Each entry in the `artifacts` array:
+Each entry in the `journal` array is one completed step execution ([resolution.md](resolution.md) § The journal). The array is **append-only**: entries are never rewritten, reordered, or removed, and the last entry's `next` (or `finalize`) is what the pending step is derived from.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `id` | string | The artifact identifier. |
-| `type` | string | One of: `flag`, `commit_hash`, `markdown`, `json`, `file`, `patch`. |
-| `required` | bool | Whether this artifact blocks completion. |
-| `stale` | bool | Whether the artifact has been marked stale. |
-| `resolved` | bool | Whether the artifact has been produced. |
-| `resolved_by` | string | URL of the artifact comment (when resolved). |
-| `resolved_by_principal` | string | Login of who resolved it. |
-| `produced_at` | timestamp | When the artifact was resolved. |
-| `version` | int | Monotonically increasing version counter. |
+| `step` | string | The step's result id (artifact or signal id). |
+| `execution` | int | Which completed execution of this step this is: 1 on first completion, counting up as the route returns. |
+| `type` | string | Result kind: one of `flag`, `commit_hash`, `markdown`, `json`, `file`, `patch` for an artifact; `signal` for a signal step or wait. |
 | `commit_hash` | string | Inline value for `commit_hash` type. |
 | `json` | string | Inline value for `json` type. |
-| `granted_invocations` | int | Budget cap: invocations. |
-| `granted_prompts_per_invocation` | int | Budget cap: prompts per invocation. |
-| `granted_cost_usd` | float | Budget cap: cost in USD. |
-| `granted_timeout` | duration | Budget cap: wall-clock time. |
-| `invocations` | int | Usage counter: invocations consumed. |
-| `prompts_this_invocation` | int | Usage counter: prompts in current invocation. |
-| `cost_usd_spent` | float | Usage counter: cost spent. |
-| `last_run_at` | timestamp | When the last invocation started. |
+| `body_at` | string | URL of the artifact comment carrying the payload, for types stored as comments. |
+| `next` | string | The elected successor's step id. Exactly one of `next` and `finalize` is present. |
+| `awaits` | string | What the item now awaits: the successor's declared role, or `signal:<id>` when the successor is a signal wait — what the `flow:awaits:<…>` label is maintained from. Present with `next`. |
+| `finalize` | string | The elected disposition: `resolved` or `rejected`. |
+| `message` | string | The message to the successor — why it is being run. On a finalizing entry, the closing reasons. |
+| `note` | string | Standing note addressed to every subsequent step, when one was set. |
+| `by` | string | Login of the account that ran the step. |
+| `role` | string | The declared role it acted in. |
+| `at` | timestamp | When the execution completed. |
+| `cost_usd` | float | What the execution spent. |
+| `duration_seconds` | float | The execution's active time — waits on declared exclusions excluded, as in the ledger. |
+
+### Ledger
+
+The `ledger` object carries the treasurer's record: a `steps` map keyed by step result id, and item-level totals.
+
+Each entry in `steps`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `dispatches` | int | Dispatches of this step, counting attempts that did not complete. |
+| `resumptions` | int | Times a park on this step was resumed. |
+| `cost_usd_spent` | float | Cost consumed across all dispatches. |
+| `duration_seconds` | float | Active time across all dispatches — time doing work; waits are not in it. |
+| `waiting_seconds` | float | Time blocked on declared exclusions across all dispatches. |
+| `granted` | array | Operator extensions recorded against this step: each with `axis`, `amount`, `at`. |
+| `last_run_at` | timestamp | When the last dispatch started. |
+
+Item-level: `total_cost_usd`, `total_duration_seconds`, `total_waiting_seconds`.
 
 ### Signal entries
 
@@ -93,7 +110,7 @@ Each entry in the `questions` array:
 
 A new ask replaces the array rather than appending to it: the field carries the questions currently outstanding, and the question comments carry the history. Answers are not recorded here — the issue thread is the answer store.
 
-The array belongs to the park that is waiting on it, and goes wherever that park does: dropped when the asking step resolves, when a park of another kind supersedes it, and on a re-seed. A record left behind would be inherited by the next question park and presented as its outstanding ask, which `answer` would then accept — an answer to a question nothing is waiting on.
+The array belongs to the park that is waiting on it, and goes wherever that park does: dropped when the asking step completes, when a park of another kind supersedes it, and on a reset. A record left behind would be inherited by the next question park and presented as its outstanding ask, which `answer` would then accept — an answer to a question nothing is waiting on.
 
 ### Park record
 
@@ -101,20 +118,20 @@ When present, the `park` object:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `kind` | string | One of: `blocked`, `question`, `budget-exhausted`, `step-did-not-resolve`, `infra-transient`, `remote-unreachable`, `refused`. |
-| `step` | string | The step's result id (artifact or signal id). |
-| `axis` | string | Budget axis when `kind=budget-exhausted`. |
-| `axes` | array | Full budget snapshot at park time (each with `axis`, `used`, `granted`, `exhausted`). |
+| `kind` | string | One of: `blocked`, `question`, `treasurer-refused`, `step-did-not-complete`, `infra-transient`, `remote-unreachable`, `refused`, `write-contract`. |
+| `step` | string | The pending step's result id (artifact or signal id). |
+| `axis` | string | The treasurer's axis when `kind=treasurer-refused`. |
+| `axes` | array | Full spend snapshot at park time, in the treasurer's vocabulary (each with `axis`, `used`, `granted`, `exhausted`). |
 | `reason` | string | Human-readable reason. |
 | `details` | string | Additional detail (e.g. question timestamp marker). |
 | `parked_at` | timestamp | When the park was recorded. |
 
 ## Artifact comments
 
-Each resolved artifact (except `flag`, which has no payload) gets its own issue comment, identified by an HTML-comment marker:
+Each captured artifact (except `flag`, which has no payload) gets its own issue comment, identified by an HTML-comment marker:
 
 ```
-<!-- flow:artifact id=<id> type=<type> v=<version> by=<login> ts=<RFC3339> -->
+<!-- flow:artifact id=<id> type=<type> v=<execution> by=<login> ts=<RFC3339> -->
 <body>
 ```
 
@@ -128,7 +145,7 @@ The body format depends on the type:
 | `file` | Link to the orphan-branch file with byte count. |
 | `patch` | Link to the orphan-branch diff with byte count and base SHA. |
 
-Multiple versions of the same artifact produce multiple comments (append-only). The state comment's `version` pointer identifies the current one.
+A step the route reaches again produces a further comment (append-only); `v=` carries the execution count, matching the journal entry's `execution`, and the journal entry's `body_at` names the comment that carries its payload.
 
 ## Large artifact storage
 
@@ -161,7 +178,8 @@ All labels use a configurable prefix (default `flow:`). The label set is closed:
 
 | Label | Meaning |
 |---|---|
-| `flow:seeded` | The item has been seeded with an artifact checklist. |
+| `flow:awaits:<role>` | Whose move it is: the role of the step the journal routes to next — or `flow:awaits:signal:<id>` while the route holds at a signal wait, which is nobody's move. Maintained at every append — added as the journal records what is awaited, moved when it changes, removed at finalization. |
+| `flow:requires:<axis>:<value>` | Placement restriction: only arenas whose `<axis>` fact is `<value>` qualify. Axes closed at `os` and `arch` ([environment.md](environment.md) § Placement); several labels on one axis are alternatives. |
 | `flow:owner:<login>` | The item is claimed by `<login>`. |
 | `flow:claim:<token>` | Transient claim-race token, self-limiting (see "Claim protocol" below). |
 | `flow:blocked` | The item is parked (generic block or deterministic refusal). |
@@ -169,14 +187,13 @@ All labels use a configurable prefix (default `flow:`). The label set is closed:
 | `flow:disabled` | The item is excluded from processing. Claim is refused. |
 | `flow:manual` | An operator has taken hand control (`ItemEditor.SetManual`). Nothing dispatches the item underneath the person driving it. |
 | `flow:infra-transient` | The item is parked due to infrastructure failure. |
-| `flow:stale:<id>` | The artifact `<id>` has been marked stale. |
-| `flow:budget-exhausted:<id>` | The step producing `<id>` exhausted its budget. |
+| `flow:treasurer-refused:<id>` | The treasurer refused further spend on the step producing `<id>`. |
 | `flow:type:<type>` | Item type derivation label. |
 | `flow:<binary-name>` | The binary that owns this item. |
 | `flow:priority:<critical\|high\|low>` | Where the work sits in the order it is taken in, as whatever manages the backend ranks it. **Absent means `medium`.** |
 | `flow:urgency:<next\|deferred>` | What an operator wants done about the item now: start it next, or do not start it unattended. **Absent means `default`.** |
 
-Park labels are added when a park is recorded and removed when the park is cleared (by a grant, a resolve, or a reset). A park label that outlives its condition is worse than no label — it is read as current.
+Park labels are added when a park is recorded and removed when the park is cleared (by a grant, a resume, or a reset). A park label that outlives its condition is worse than no label — it is read as current.
 
 **The neutral values of the two selection axes have no label.** `medium` and `default` are not spellable: a state reachable both by a label and by that label's absence is one state with two spellings, and nothing keeps the two reading alike — an item demoted from `high` to `medium` and an item nobody ever assessed are the same item to selection, and must be the same item to a reader. So `SetPriority(medium)` and `SetUrgency(default)` remove the axis's label rather than writing one, and an item carrying no label of either kind is fully specified.
 
@@ -191,7 +208,7 @@ The backend derives four signals by polling the pull request on the claim branch
 | `pr-closed` | The PR state is `closed`. |
 | `pr-approved` | At least one reviewer's latest review state is `APPROVED`. |
 
-These are refreshed on every `LoadState` call. The PR must be on the branch `flow/issue-<N>` to be found.
+These are refreshed on every `Load` call. The PR must be on the branch `flow/issue-<N>` to be found.
 
 ## Branch naming
 
@@ -217,14 +234,24 @@ The token exists only *inside* one claim attempt — every exit from the attempt
 
 **Collection is not lease recovery.** It touches the claim-race token and nothing else: `flow:owner:<login>`, the assignee, and the worktree-local active claim are never removed on a timer. Those record ownership by a person, and recovering a claim held by something no longer running is a separate problem — governed by [resolution-orchestrated.md](resolution-orchestrated.md) under "Interruption", and requiring that the holder be observed to be gone rather than inferred from elapsed time. A settled race token has no holder to observe.
 
-Preflight checks before posting the claim label refuse items that are disabled, owned by another binary, or held by another user (unless `OverrideAlreadyHeld` is passed).
+Preflight checks before posting the claim label refuse items that are disabled, owned by another binary, held by another user (unless `OverrideAlreadyHeld` is passed), awaiting a role the claiming account's detected capabilities cannot assume — or carrying placement restrictions this arena does not meet (unless the `unmet-placement` override is passed).
 
-## Work in progress
+## Filed items
 
-The GitHub backend's work-in-progress store is the worktree-local `.flow/work/` directory. Records are keyed by issue number and step result id. Nothing in this directory touches the GitHub API — the structural separation from the outward-facing code **is** the "never published" guarantee. Records are cleared when the claim is released (via `clistate.Clear`).
+`FileItem` creates an ordinary issue whose body opens with a provenance marker, machine-managed like every marker here; the draft's own body follows untouched:
+
+```
+<!-- flow:filed source=<owner/repo#N> key=<key> by=<login> ts=<RFC3339> -->
+```
+
+Idempotence reads the **source** issue, not search: the state comment's `filed` map records each created issue against its key, written immediately after each creation, and `FileItem` returns the recorded ref for a key already present. The marker is the audit stamp on the filed side — what lets a reader of any issue see where it came from — and the backstop for the one gap the two-write sequence leaves: a process dying between creating an issue and recording it leaves a marker without a record, and the next `FileItem` for that key searches for the marker before creating. Search can lag, so the residual race is one item wide, and it fails toward the visible side — a duplicate a person closes, never a silent loss. The recorded map, read exactly, is the authority for everything it holds.
+
+## Drafts
+
+The GitHub backend's draft store is the worktree-local `.flow/draft/` directory. Drafts are keyed by issue number and step result id. Nothing in this directory touches the GitHub API — the structural separation from the outward-facing code **is** the "never published" guarantee. Drafts are cleared when the claim is released (via `clistate.Clear`).
 
 ## Cross-references
 
 - [artifacts-and-signals.md](artifacts-and-signals.md) — the result kinds stored here.
 - [orchestrator.md](orchestrator.md) — the SDK ↔ orchestrator boundary this schema implements.
-- [resolution.md](resolution.md) — the lifecycle whose state this schema persists.
+- [resolution.md](resolution.md) — the journal and lifecycle whose state this schema persists.

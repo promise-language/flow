@@ -16,11 +16,41 @@ Everything in *this* document is true of both. A statement that is true of only 
 
 ## The item and its lifecycle
 
-An **item** is a unit of work owned by a backend. A **flow** is an ordered list of steps that resolves items of a given type.
+An **item** is a unit of work owned by a backend. A **flow** is a set of steps that resolves items of a given type — a graph, not a sequence. Each step declares what may run after it, and the route an item actually takes is elected step by step as it is worked.
 
-A **step** produces exactly one result: an artifact, or a signal. The distinction between the two — what each is, who writes it, and what it carries — is defined in [artifacts-and-signals.md](artifacts-and-signals.md). A step that produces nothing has not run. The result is the step's identity — it is what budget is metered against, what a park names, and what `status` reports.
+A **step** is an independent function. It receives the item, the journal of everything that has happened so far, and the context to work in; it does its work; and it ends in one act that records its result and elects the route onward — the next step, or finalization. Producing and routing are inseparable: a result cannot be recorded without saying where the resolution goes from here.
 
-The lifecycle is: **claim → seed → advance one step at a time → finalize**. An item enters at claim and leaves at finalize; everything between is a sequence of single-step advances.
+A step produces exactly one result: an artifact, or a signal. The distinction between the two — what each is, who writes it, and what it carries — is defined in [artifacts-and-signals.md](artifacts-and-signals.md). A step that produces nothing has not run. The result is the step's identity — it is what the treasurer's ledger meters, what a park names, and what `status` reports.
+
+The lifecycle is: **claim → advance one step at a time → finalize**, the claim released and retaken at each handoff between roles (§ Accounts, capabilities and roles). An item enters at claim and leaves at finalize; everything between is a sequence of single-step advances, each recorded in the journal.
+
+## Accounts, capabilities and roles
+
+A resolution involves people, and the flow knows who they are. Three layers, each defined by how it is established:
+
+- An **account** is an identity in the backend's own namespace. Two accounts matter to every item — the **creator**, who filed it, and the **runner**, whose credentials the current resolution acts as — and one more per role, below.
+- A **capability** is a verifiable fact about an account on the repository: it can push, it can merge, it can approve. Capabilities are **detected from the backend, never declared** — an account's word for what it may do is worth exactly what the backend will actually permit, so the backend is asked rather than told.
+- A **role** is a part the flow defines — contributor, maintainer, reviewer — and the vocabulary it routes and authorizes by. Every step is tagged with the role that performs it. A role names the capabilities it requires, and the roles a runner may assume are **derived from its detected capabilities**, never assigned by hand and never assumed by assertion.
+
+> **Every step belongs to exactly one role, and only a runner that may assume that role executes it.**
+
+The role check is what keeps a resolution from starting work it cannot finish; the backend's own permissions are the enforcement of last resort — an account without the merge capability cannot merge, whatever it believes its role to be. The two layers agree by construction, because the first is derived from the second.
+
+The creator's account matters beyond attribution: the creator's detected standing is an input a step may route on, which is how a flow gives an untrusted source's item a stricter route than a maintainer's own.
+
+### Whose move it is
+
+At any moment an unfinalized item **awaits exactly one thing**: the role of the step its journal routes to next — or, while that step is a signal wait, the signal. Awaiting a role is what a runner's work-selection answers to: the items offered to a runner are the items awaiting a role it may assume, on an arena their placement restrictions admit ([environment.md](environment.md) § Placement).
+
+Reaching a step whose role the current runner cannot assume — or may not continue into — is a **handoff**: the runner's part of the resolution is complete, the claim is released, and the item records the role it now awaits. A handoff is not a park and not a failure; it is a role finishing its part.
+
+The first entry a runner appends in a role binds its account as that role's **account of record** for the item. A route that returns to a role returns to its account of record — a rework handback goes to *the* contributor who proposed, not to whichever account could have. The binding is read from the journal, which already carries who ran every step.
+
+**A role is matched only against the flow's declared set.** The vocabulary is open — a flow names whatever roles its work needs — and that is exactly why every reference is checked: a step's tag, a lookup by role name, the awaited-role marker an item carries. A reference that names no declaration is refused loudly, never left to match nothing, because the silent reading is a trap: an awaited role that does not exist looks identical to a role whose runner has not arrived, and the item sits unofferable forever with nothing naming why. A recorded awaited role outside the declaration therefore reports the item blocked, naming the unknown role — a person fixes the flow or the record; nothing ever matches against what is not defined.
+
+### One principal, several roles
+
+A runner whose capabilities cover the roles on both sides of a boundary crosses it without a handoff: the same resolution continues, the claim is kept, and the phases remain distinct in the journal — the change is still proposed, the record still shows which role performed each step. Carrying an item through from proposal to integration is this, and nothing more: a principal holding both roles, crossing the boundary its capabilities span. Whether a binary intends to carry through is declared where the binary is configured, not inferred from capability — see [resolution-standalone.md](resolution-standalone.md) for what declaring it requires.
 
 ## Claiming
 
@@ -30,11 +60,13 @@ A claim is **idempotent for its holder**: re-claiming an item this worktree alre
 
 A claim carries the credential for every subsequent write. Operations that modify an item require it; read-only inspection does not.
 
-Claims are released explicitly, or by finalizing. A claim is never released as a side effect of a step failing, a step parking, or a process exiting — work in progress keeps its claim so it can be resumed.
+A claim is taken **for the role the item awaits, on an arena its placement restrictions admit** ([environment.md](environment.md) § Placement): a runner that cannot assume the role, or an arena the item excludes, is refused — claiming an item whose pending work is not yours to do, or not doable here, wastes an exclusive claim on work that cannot proceed.
+
+Claims are released explicitly, by handing off, or by finalizing. A claim is never released as a side effect of a step failing, a step parking, or a process exiting — work in progress keeps its claim so it can be resumed.
 
 ### A claim binds worktrees, not processes
 
-A claim says which item a worktree holds. It does not say whether anything is running there, and it cannot: a worktree sitting idle under a claim and one mid-resolution carry the same claim. So two runs started in one worktree — one by an unattended driver, one typed by a person who walked into the same checkout — satisfy the binding above exactly, one worktree and one item, while doing what that binding exists to prevent. They advance the same lifecycle twice, interleave writes to the same work-in-progress records, spend a budget that is accounted once, and drive git against one tree from two processes. None of it is detected as it happens; it surfaces later as a corrupted record or a wedged branch, at a moment that has nothing to do with the collision.
+A claim says which item a worktree holds. It does not say whether anything is running there, and it cannot: a worktree sitting idle under a claim and one mid-resolution carry the same claim. So two runs started in one worktree — one by an unattended driver, one typed by a person who walked into the same checkout — satisfy the binding above exactly, one worktree and one item, while doing what that binding exists to prevent. They advance the same lifecycle twice, interleave writes to the same durable records, spend against one ledger twice, and drive git against one tree from two processes. None of it is detected as it happens; it surfaces later as a corrupted record or a wedged branch, at a moment that has nothing to do with the collision.
 
 > **At most one process advances an item in a worktree at a time.**
 
@@ -51,66 +83,111 @@ An advancing process therefore **registers its run in the worktree** before its 
 
 A process finding the worktree held **does not wait and does not take it over.** It stops, naming the holder. There is nothing an override could unlock: a holder no longer running is already released by the rule above without anyone asking, and a holder still running is part-way through changing the very state a second run would start from.
 
-## Seeding
-
-Seeding records the artifact set and budget caps an item will be resolved against. It happens **once**. A flow definition that changes later does not retroactively re-seed items already in flight, because a step's budget and required-artifact set must not move underneath a run.
-
-Re-seeding is possible only by an explicit operator action, never automatically.
-
 ## Advancing
 
 One invocation advances **at most one step**. This holds in both drive models and is what makes a run inspectable: after any invocation, the item is in a state some human can read.
 
-The next step is derived from durable state — which artifacts are resolved, which signals are set — never from a record of what ran last. Two consequences follow, and both are requirements:
+### The journal
 
-- Resolution is **resumable**. An item picked up by a different worktree, after any interruption, derives the same next step.
-- Execution history is **telemetry**. It records what happened; it never decides what happens next.
+> **The journal is the durable record of the route: an append-only sequence of completed step executions, and the only thing position is ever derived from.**
 
-A step runs only when its result is unresolved. A resolved result is not recomputed unless something explicitly marks it stale.
+Every completed step execution appends exactly one entry, written in the same act that records the step's result — result and route land together or not at all. An **execution** is the unit the journal records, and it spans from the first **dispatch** of the pending step, across any parks and resumes, to the completion that appends it: several dispatches may serve one execution, and only the completion writes. An entry carries:
 
-## Budgets
+- the **step**, and which execution of it this was — a step the route reaches again appends again, and the later entry's result stands as the step's current one;
+- the **result** — the artifact value, or the signal observation;
+- the **route elected** — the next step, or finalization with its disposition;
+- the **message to the successor** — why it is being run, from the step that sent it;
+- optionally, a **standing note** — addressed to every subsequent step, not only the next one;
+- **who** ran it — the account, and the role it acted in — when it ran, and what it spent.
 
-Every step carries caps on what it may consume: invocations, prompts per invocation, cost, and wall-clock time. The set is closed.
+Only completion appends. A park, a skip, a failure, an interruption — none of them is a journal entry; each is recorded beside the journal, and the journal reads the same before and after it.
 
-A step that reaches a cap **parks** rather than continuing. Parking is not failure — no work is lost and the claim is kept.
+A step receives the journal whole: the route traveled, every prior result, the messages and notes along the way, and how many times each step on the route has run and resumed. That is the context its work arrives in — a step never reconstructs what happened from side effects, and never needs a channel outside the journal to learn it.
 
-Budget is granted additively by an operator. A grant clears the park it satisfies, and only that park: granting an axis that is not the exhausted one leaves the item parked, because the next dispatch would re-park immediately.
+**A standing note informs; it never binds.** It is the one channel addressed past the immediate successor — for what later steps should know that no artifact's shape can carry. A later step reads it and decides for itself; a note that constrained the route would be control exercised at a distance, by a step no longer present to answer for it.
 
-Infrastructure failures consume no budget. A step that could not run because the environment was unavailable has not spent an attempt. What counts as one, and how it is told apart from a failure of the work, is [environment.md](environment.md).
+### Deriving the next step
 
-**Spending resources must produce progress.** Every invocation either advances the item or leaves behind something the next invocation starts from — the work done, the answer needed, or the reason the attempt could not be recorded. An invocation that consumes budget and leaves the item exactly as it found it has not failed once; it has established that every remaining invocation will fail the same way, because nothing about the next attempt differs from the last.
+The pending step is read from the journal — the route its last entry elected — and from nothing else. An empty journal pends the flow's declared entry step. Two consequences follow, and both are requirements:
 
-That is the shape to check any retry against: **a retry that cannot differ from the attempt before it is not a retry, it is a loop with a budget.** It exhausts the grant, reports the cap as the reason, and names the wrong problem — an operator granted more budget would buy an identical failure.
+- Resolution is **resumable**. Any runner, on any machine, after any interruption, derives the same pending step by reading the same journal. Nothing about position lives in process memory.
+- **The journal decides; telemetry observes.** What ran and what it chose is durable state, recorded ahead of the act it authorizes. Execution telemetry — narration, notifications, timing detail — remains observational and never decides what happens next.
+
+A step runs when the route names it, and for no other reason. There is no eligibility beside the route: no step is latched done, none is skipped by a marker, and reaching a step a second time is not an anomaly but a route — rework arrives as an ordinary election, carrying the reasons in its message.
+
+### Routing
+
+A step's possible routes are **declared at registration**, and the route it elects at runtime must be one of them: its declared successors, and whether it may finalize, with which dispositions. The declaration is what makes the graph a reviewable object — every route an item can take, including every handback and every role boundary, is visible before anything runs — and it is what bounds election at runtime: a handler talked into an arbitrary jump by whatever influenced its turn has no such route to elect.
+
+Startup validates the graph whole: every declared successor exists, every step is reachable from the entry, and finalization is reachable from every step — a step from which no election could ever end the item is refused before any item is claimed.
+
+This is [org/engineering-guide.md](org/engineering-guide.md) § One obvious way, projected onto resolution. Every restriction here — successors declared, roles tagged, worktree states needed and left — exists to shrink the combinations a step's author must consider: a step reached only by declared edges, in a declared state, carrying a message that says why, is written against a small closed set of situations, while a step reachable from anywhere, in any state, for any reason, must be correct in all of them and will not be. Fewer reachable situations is fewer flow bugs, and the route that exists is the one obvious one.
+
+Every election carries its message. The successor is told why it is being run — what was found, what is expected of it, what changed since it last ran — by the step that decided, at the moment it decided. An election with an empty message hands the successor a task with no brief, and the journal a decision with no reason.
+
+## The treasurer
+
+Steps try to resolve the item. The **treasurer** keeps what that costs at bay. The two concerns are held by two parties deliberately, and the separation is load-bearing:
+
+> **The treasurer is independent of what it constrains. Its policy is out of reach of the steps, the prompts, and the agent whose spending it bounds.**
+
+The reasoning is the guard rule (§ Guards): a limit held by the party it limits is editable by that party, and an agent that can move its own bounds has none.
+
+The treasurer keeps a **durable ledger**: time and cost, per step and for the resolution whole, and the count of dispatches and resumptions of each step on the route. The ledger survives interruption with the same durability as the journal, and `status` reports from it.
+
+**The time it keeps is active time — time spent doing work — and waiting is recorded apart from it.** Cost measures what the agent spent; active time measures everything else the resolution consumes — the machine hosting it while it runs gates, commands, and git. A dispatch blocked on a declared exclusion — the serialized landing, a gate's lock, any resource the system queues work for — spends wall-clock and consumes nothing, and the two must not be confused in either direction: waiting charged as work has the treasurer refusing a resolution for being queued behind another, naming the wrong problem, while waiting dropped entirely leaves `status` unable to say where an afternoon went. So the ledger carries both, separately — active time, which the treasurer prices and bounds, and waiting time, which it reads as evidence about contention rather than about the work.
+
+**The time allowance bounds active time.** A dispatch is never ended for being queued: waiting is not failing, and elapsed time in a queue is evidence about the queue, not about the work.
+
+**Waiting on an exclusion is not waiting on a signal, and the ledger's waiting covers only the first.** Serialization is temporal: the dispatch is running, the claim is held, and the wait ends when the queue reaches it — nothing about the world needs to change, only its turn to arrive. A signal wait is the opposite in every dimension: a declared position in the graph, the item sitting between dispatches with nobody's move pending, ended by the world changing — a fact observed, not a turn arriving ([artifacts-and-signals.md](artifacts-and-signals.md)). One is a queue inside a dispatch; the other is a state of the item. The ledger accrues waiting only while a dispatch holds it, so a signal wait accrues nothing.
+
+It is consulted at exactly two chokepoints, both **before** the spend:
+
+- **Every dispatch of a step.** The treasurer approves or refuses it; an approval sets the **time allowance** the dispatch runs within.
+- **Every agent expense.** The treasurer allows or blocks it before it is incurred, and prices the allowance it grants — see [agent.md](agent.md) for how the allowance reaches the agent substrate.
+
+What the treasurer decides from is everything the resolution has durably produced: the journal — the route traveled — and its own ledger, the per-step dispatch and resumption counts included, and the pending step. That is what makes it the party that **detects runaway**: a route cycling without its messages changing, a step resumed past reason, a resolution whose spend grows while its journal does not. Steps cannot be asked to notice this about themselves; the treasurer has exactly the vantage they lack, and stopping it is its purpose, not a side effect.
+
+**How the treasurer decides is its own design, and deliberately not this document's.** What is required of any policy:
+
+- **Ordinary progress is never stalled.** Admission is the default and refusal is the exception; a resolution advancing normally passes both chokepoints without waiting on anything.
+- **Every refusal parks the item** (§ Parking), in the treasurer's own words: what was exhausted or detected, and what an operator can do about it.
+- **An operator can extend.** A grant is an operator's instruction to the treasurer; it clears the park it satisfies, and only that park.
+- **Infrastructure failures consume nothing.** A step that could not run because the environment was unavailable has not spent an attempt, and the treasurer does not count it as one. What counts as an infrastructure failure is [environment.md](environment.md).
+
+**Spending resources must produce progress.** Every dispatch either advances the item or leaves behind something the next dispatch starts from — the work done, the answer needed, or the reason the attempt could not be recorded. A dispatch that consumes budget and leaves the item exactly as it found it has not failed once; it has established that every remaining dispatch will fail the same way, because nothing about the next attempt differs from the last.
+
+That is the shape to check any retry against: **a retry that cannot differ from the attempt before it is not a retry, it is a loop with a budget.** It exhausts whatever the treasurer allows, reports the limit as the reason, and names the wrong problem — an operator extending the allowance would buy an identical failure.
 
 So an attempt stopped by something correctable hands the correction back. A refused write returns to the step that produced the text, carrying what was refused and why, so the next attempt is answering something the last one did not know.
 
-**A correction round costs a prompt, not an invocation.** An invocation is an attempt at the step; a refused *expression* of finished work is not a failed attempt. Charging one exhausts a three-invocation grant in three sentences and then reports a budget cap — naming the wrong problem, which is exactly what this section is about. It must cost something: a correction that were free is a loop against whatever refused it, with nothing bounding it at all.
+**A correction round is priced as a round, not as a dispatch.** A dispatch is an attempt at the step; a refused *expression* of finished work is not a failed attempt, and a treasurer that charged it as one would report exhaustion after three refused sentences — naming the wrong problem, which is exactly what this section is about. It must cost something: a correction that were free is a loop against whatever refused it, with nothing bounding it at all.
 
 ## Parking
 
-A park records that a step stopped without completing, and why. Every park names the step it belongs to.
+A park records that a step stopped without completing, and why. Every park names the step it belongs to — always the pending step, since no other is running. A park is not a journal entry: the route is untouched, and when the park clears, the same step runs again, its resumption counted and the park's reason in hand.
 
 Parks divide into two kinds, and the division is what an operator acts on:
 
 - **Self-clearing** — the condition resolves without human action, and the item resumes when it does.
-- **Human-clearing** — nothing changes until a person acts. A budget cap, an unanswered question, or a condition only a human can lift.
+- **Human-clearing** — nothing changes until a person acts. A treasurer refusal, an unanswered question, or a condition only a human can lift.
 
 A park that advertises a condition **stops advertising it the moment the condition ends**. A marker outliving its condition is worse than no marker, because it is read as current.
 
-## Work in progress
+## Drafts
 
-A step that stops without completing may leave **what it worked out** where its own next invocation finds it. That is what makes an invocation that could not finish still produce progress: the work that led to the question, or to the refused sentence, is the expensive part, and it is exactly the part a stop would otherwise discard.
+A step does not write its artifact while working — the result is captured once, when the step completes ([artifacts-and-signals.md](artifacts-and-signals.md) defines the capture). What a step may keep mid-flight is its **draft**: the artifact taking shape, and the working state behind it, stored where its own next dispatch finds it. That is what makes a dispatch that could not finish still produce progress: the work that led to the question, or to the refused sentence, is the expensive part, and it is exactly the part a stop would otherwise discard. A parked step resumes with its draft in hand.
 
-The record is **scaffolding, not a result**:
+The draft is **scaffolding, not a result**:
 
-- **It does not resolve the step.** An unfinished plan stored as the plan artifact would mark the step done and let the resolution proceed against a plan that was never finished — a worse outcome than losing it.
-- **It decides nothing.** The next step is still derived from artifacts and signals; a record is read by the step that wrote it and by nothing else. It is not part of what a reviewer reads, and it does not appear in what is proposed.
-- **It is keyed by item and step, and read only when both match.** Keying is the correctness property; clearing is hygiene. Every path that skips a cleanup — a crash, a kill, a lost machine, a working directory left by an abandoned run — would otherwise feed one item's reasoning to another item's agent, where it arrives indistinguishable from that agent's own thinking. A missing record costs a re-derivation, which is the cost of not having the mechanism at all; a wrong record costs a plan built on another item's reasoning, published under this item's number. Every ambiguity resolves toward discarding.
+- **It does not complete the step.** An unfinished plan captured as the plan artifact would append a journal entry and route the resolution onward against a plan that was never finished — a worse outcome than losing it.
+- **It decides nothing.** The route is read from the journal; a draft is read by the step that wrote it and by nothing else. It is not part of what a reviewer reads, and it does not appear in what is proposed.
+- **It is keyed by item and step, and read only when both match.** Keying is the correctness property; clearing is hygiene. Every path that skips a cleanup — a crash, a kill, a lost machine, a working directory left by an abandoned run — would otherwise feed one item's reasoning to another item's agent, where it arrives indistinguishable from that agent's own thinking. A missing draft costs a re-derivation, which is the cost of not having the mechanism at all; a wrong draft costs a plan built on another item's reasoning, published under this item's number. Every ambiguity resolves toward discarding.
 - **It is never published.** For a refused write the text to keep *is* the text a guard refused, so a store that could go outward is a store that cannot hold it.
-- **It is cleared when the step resolves**, and when the claim is released or finalized. Scaffolding that outlives its work becomes stale prose a later reader mistakes for a record; reasoning left behind after the work is over is a disclosure sitting around for no benefit.
-- **It is optional.** A step that does not use it behaves exactly as one would without the mechanism.
+- **It is cleared when the step completes**, and when the claim is released or the item finalized. Scaffolding that outlives its work becomes stale prose a later reader mistakes for a record; reasoning left behind after the work is over is a disclosure sitting around for no benefit.
+- **It is optional, and the progress rule is why a parking step rarely wants to skip it.** A step that does not use it behaves exactly as one would without the mechanism — but every dispatch must leave behind something the next one starts from (§ The treasurer), and a step whose work lives nowhere durable — no commit, no tree — has only the draft to leave. Parking without one re-derives the same reasoning at full price on resume, and the treasurer counts both times.
 
-Where the record physically lives is the backend's: beside its claim state on a machine that holds one, or with the claim on a server, so that an arena can lose its disk without losing the record.
+Where the draft physically lives is the backend's: beside its claim state on a machine that holds one, or with the claim on a server, so that an arena can lose its disk without losing the record.
 
 ## Questions
 
@@ -178,7 +255,7 @@ A **guard** is not a gate. It stands on the execution path of an act that has no
 
 Prevention is **not** the test, and using it as one misclassifies the ordinary case. A gate that blocks a push prevents something: remove it and the push happens. It is still a gate, because its subject is a tree that exists, its answer is a measurement, and that measurement is judged against a baseline later. Whether a verdict blocks something is a fact about what consumes it, not about what it is.
 
-Two guards exist in a resolution: one over the actions an agent proposes to take, and one over what the flow publishes (`docs/disclosure.md`).
+Two guards exist in a resolution: one over the actions an agent proposes to take, and one over what the flow publishes ([disclosure.md](disclosure.md)).
 
 **A guard decides for itself, where a gate must not.** Judging is kept out of a gate because its measurement is re-judged later, so the comparison has to be recomputable by someone who was not there — which is why thresholds are a separate artifact. A guard has no persistent subject to re-judge, so there is no second judgement for separation to keep honest.
 
@@ -189,6 +266,8 @@ Two guards exist in a resolution: one over the actions an agent proposes to take
 The reason is that a guard leaves no review window. A weakened gate is caught by review before its answer authorises anything — the measurement persists, and a wrong one can be recomputed and contradicted. **A guard weakened at one step authorises the next step immediately**, before any review exists, and leaves no trace: a run in which the guard was bypassed looks exactly like a run in which it had nothing to refuse.
 
 So a guard's rules come from outside the tree it constrains. Where a resolution runs under an orchestrator, that is the arena applying rules from a companion repository; where it runs standalone, the guard is part of the flow, which is delivered from outside the tree it resolves. A guard configured from inside the worktree is one an `implement` step can edit, and an agent that can edit its own bounds has none.
+
+**The action guard's refusals are layered, and layers only narrow.** What it refuses during a dispatch is the union of every layer that applies: the general rules binding any resolution here, the acting role's restrictions, and the running step's own — a step declared to write no files has a file write refused as it is attempted, in that step's name, not merely caught after the turn. No layer widens another: a step's declaration cannot grant what the general rules forbid, and a role's cannot lift a step's. The step and role layers are derived from the flow's declarations, which are legitimate guard sources under the authorship rule above — the flow arrives from outside the tree it resolves, and no step can edit its own registration mid-run.
 
 **This is a property, not a machinery.** What defines the gates, schedules them, records their measurements, holds the thresholds those measurements are judged against and decides what a failure means for the work queue belongs to whatever schedules work — not to this SDK. What is stated here is what any of them must be.
 
@@ -236,7 +315,13 @@ Whichever a project configures, it is configured **once** and reaches everything
 
 ## Steps and the worktree
 
-A step declares whether it may modify the worktree, and the declaration is explicit. A step whose product is a report does not acquire the ability to edit by default or by omission.
+A step declares its worktree contract, and the declaration is explicit. A step whose product is a report does not acquire the ability to edit by default or by omission.
+
+The contract has three parts, each enforced at its own moment: the state the step **needs**, established mechanically before dispatch — the worktree is put there, checked out from durable state rather than trusted to be current, and a state that cannot be established blocks the item naming what is missing; what the step **may do** while it runs — a layer of the action guard, refusing the rest as it is attempted (§ Guards) — and checked afterwards against what actually happened; and the state it must **leave**, verified before its result is captured — a step that ends off its declared branch, or over a dirty tree, has not completed: nothing journals, and the changes stay where they are for a person to judge.
+
+> **A step runs only in its declared worktree state, and completes only into its declared worktree state.**
+
+What this buys is a single expressible branching story. The route's worktree sequence is declared step by step at registration, so there are not several ways for work to reach finalization: a producing step cannot run on the base branch, work cannot end half-committed, and nothing arrives at the proposal scattered between a mainline commit here and an abandoned branch there. An agent's locally reasonable improvisation — cutting its own branch, committing to the base, leaving the tree dirty for later — is refused at the first declared boundary it violates, named as that step's violation rather than discovered downstream as a branch nobody expected.
 
 **Every modification a step makes is either recorded or refused.** A flow does not leave a step's changes uncommitted for a later step to sweep up, and does not complete an item while carrying changes no step recorded. Silent loss and silent inclusion are the same defect seen from two sides.
 
@@ -258,7 +343,7 @@ Ignoring is the worst of the three and reads as the most helpful. The gate measu
 
 **A refusal returns to the step that caused it, in the refusing tool's own words.** The refusal names the offending file and the remedy precisely; a step told only that committing failed has to rediscover both. This is the path a failing gate already takes.
 
-**A refusal that survives repair parks, and costs nothing.** Once retrying is known to be pointless — the same tree, committed again, refused identically — the step parks carrying the refusal's own message, rather than spending invocations on a repetition it cannot change.
+**A refusal that survives repair parks, and costs nothing.** Once retrying is known to be pointless — the same tree, committed again, refused identically — the step parks carrying the refusal's own message, rather than spending dispatches on a repetition it cannot change.
 
 ### Duplicate-fix conflicts during rebase
 
@@ -274,7 +359,16 @@ The correct resolution is to accept the mainline's version and drop the branch's
 
 Finalizing marks an item's resolution complete and releases the claim. It is terminal: a finalized item is not reprocessed.
 
-Finalizing means **the work was done**. An item that no flow will act on — because no flow accepts its type — is not finalized on that basis. Reporting success for work that was never attempted hides a misconfiguration, and doing it terminally makes the misconfiguration irreversible.
+Only a step finalizes, by electing it as its route, and the election carries a **disposition** — the set is closed at two:
+
+| Disposition | Means |
+|---|---|
+| **resolved** | The work was done. |
+| **rejected** | The item was reviewed and declined, with the reasons in the finalizing entry's message. |
+
+Rejection is terminal in a way a handback is not. A route that returns work for rework expects the resolution to continue; a rejection ends it, and the difference is a decision the finalizing step makes in the open, with its reasons recorded where every decision is.
+
+An item that no flow will act on — because no flow accepts its type — is not finalized on that basis. Reporting success for work that was never attempted hides a misconfiguration, and doing it terminally makes the misconfiguration irreversible.
 
 Such an item is reported `blocked`, naming the type it carries and the types that are registered: nothing failed and no later cycle will pass, so what clears it is a person — a flow registered for that type, or a corrected type on the item.
 
@@ -287,7 +381,7 @@ A step that cannot complete ends in exactly one of:
 | Outcome | Means | Cleared by |
 |---|---|---|
 | **Transient failure** | Something outside the work went wrong | Retrying |
-| **Invalidates earlier work** | An earlier step's result is wrong; that step must run again, with the reason why | The flow itself |
+| **Invalidates earlier work** | An earlier step's result is wrong; the route returns to that step, carrying why | The flow itself, as an ordinary election |
 | **Waits on a person** | A question, a decision, a permission | An answer |
 | **Waits on something else** | Another item, an external condition | That condition clearing |
 
@@ -299,4 +393,6 @@ That is why every stopping outcome names what would clear it. The name is not do
 
 Every invocation reports exactly one status: `done`, `skipped`, `parked`, `blocked`, or `failed`. These five are the vocabulary, and anything mirroring them mirrors all five.
 
-The report says what happened to **one step**, not to the item. An item's overall state is derived from its durable artifacts, never from the last report.
+`skipped` is the status of an invocation that stopped **before any dispatch**: a pre-dispatch check found nothing runnable — an unanswered question, a manual hold — so nothing ran, nothing was spent, and the item reads exactly as it did. No handler can produce it: a handler that has run has been dispatched, and a dispatched step's stop is one of the named outcomes (§ Every outcome leads somewhere), never a bare "no progress".
+
+The report says what happened to **one step**, not to the item. An item's overall state is derived from its journal, never from the last report.
