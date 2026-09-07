@@ -500,6 +500,67 @@ func TestBackend_AQuestionParkWithNoQuestionStaysBlocked(t *testing.T) {
 	}
 }
 
+// ANSWERING ONE OF TWO IS NOT ANSWERING THE ITEM.
+//
+// Blockedness is now derived from the questions, so it inherits the rule the
+// needs-answer marker already obeys: the wait ends with the LAST answer and not
+// before. A derivation that unblocked on the first — "somebody has replied" —
+// would put the item back on the selectable list with a question still
+// outstanding, and the resumed step would spend a turn re-asking the one nobody
+// answered. That is the reported loop, reached by another road.
+func TestBackend_AnsweringOneOfTwoLeavesTheItemBlocked(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := addItem(b, "1")
+	if _, err := b.Claim(ctx, ref, nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	first, err := b.AskQuestion(ctx, ref, flow.AskText("base", "Which base branch?"))
+	if err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+	second, err := b.AskQuestion(ctx, ref, flow.AskYesNo("ship", "Ship it?"))
+	if err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+	if err := b.Park(ctx, ref, flow.ParkRequest{
+		Kind: flow.ParkQuestion, Step: "plan", Reason: "question: " + first.Header,
+		Details: flow.MarkQuestionAsked(first.AskedAt),
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+
+	if err := b.PostAnswer(ctx, ref, first.ID, "main"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+	state, err := b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.BlockReason == "" {
+		t.Error("BlockReason cleared with one question still unanswered")
+	}
+	selectable, err := b.ListAutoSelectable(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListAutoSelectable: %v", err)
+	}
+	if len(selectable) != 0 {
+		t.Errorf("ListAutoSelectable = %v, want nothing — %q is still unanswered", selectable, second.ID)
+	}
+
+	// The last answer is what ends the wait.
+	if err := b.PostAnswer(ctx, ref, second.ID, "yes"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+	state, err = b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.BlockReason != "" {
+		t.Errorf("BlockReason = %q after both answers, want none", state.BlockReason)
+	}
+}
+
 func TestBackend_ParkRecordsRequest(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()

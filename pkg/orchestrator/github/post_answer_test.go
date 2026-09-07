@@ -3,6 +3,7 @@ package github
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/promise-language/flow"
 )
@@ -204,6 +205,98 @@ func TestBackend_AnsweringThenReadingComposesTheResume(t *testing.T) {
 	}
 	if !strings.Contains(answers[0].Answer, "main — the release branch is cut from it") {
 		t.Errorf("answer = %q, want the text PostAnswer published", answers[0].Answer)
+	}
+}
+
+// A PARK THAT SURVIVES THE ANSWER MUST NOT KEEP THE ITEM BLOCKED.
+//
+// The item has to become workable again, or the fix trades one stall for
+// another: blocked items are skipped by selection, so the step that asked would
+// never resume, so nothing would ever drop the park it is waiting behind. Here
+// that holds because blockedness is derived from the LABELS and PostAnswer drops
+// the needs-answer one — a derivation that also consulted `park`, the obvious
+// reading of a park that is still there, would reintroduce the stall with every
+// existing test still green.
+func TestBackend_AnsweringUnblocksTheItemThoughTheParkStands(t *testing.T) {
+	_, b, claim := newQuestionEnv(t)
+	asked := askOne(t, b, claim, flow.AskText("base", "which base branch?"))
+	parkOnQuestionAsked(t, b, claim, asked)
+
+	item, err := b.Load(t.Context(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if item.BlockReason == "" {
+		t.Fatal("an item with an unanswered question reports no block reason")
+	}
+
+	if err := b.PostAnswer(t.Context(), claim.ItemRef, asked.ID, "main"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+	item, err = b.Load(t.Context(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if item.BlockReason != "" {
+		t.Errorf("BlockReason = %q after the answer, want none — the human has acted", item.BlockReason)
+	}
+	if !item.Parked() {
+		t.Error("the park cleared with the answer — the resume has no answer window left")
+	}
+}
+
+// seedComment puts a comment on the issue with a CHOSEN creation time, which
+// posting through the API cannot do: the mock stamps a POST with its own clock.
+// The window ReadAnswers applies is a comparison against that stamp, so a test
+// about the window has to be able to place a comment on either side of it.
+func seedComment(t *testing.T, mock *ghMock, body string, at time.Time) {
+	t.Helper()
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	mock.nextCommentID++
+	mock.comments = append(mock.comments, ghMockComment{
+		ID: mock.nextCommentID, Body: body, User: "carol", CreatedAt: at,
+	})
+}
+
+// THE WINDOW IS WHAT MAKES THE PARK WORTH KEEPING, so it has to actually
+// exclude.
+//
+// The park is kept through the answer because it carries `asked-at`; that stamp
+// earns its keep only if replies at or before it are dropped. A thread carries
+// prose from long before the question ("any update?", the reporter's original
+// comment), and GitHub's own `since` filter is inclusive to the second, so the
+// question's own second leaks through unless the backend drops it itself — the
+// mock, like the API, hands back everything and lets the caller filter. Counting
+// either as an answer clears the gate with nobody having decided, and the step
+// resumes only to ask again: the reported loop, reached from the other side.
+func TestBackend_ReadAnswersTakesOnlyRepliesAfterTheAsk(t *testing.T) {
+	mock, b, claim := newQuestionEnv(t)
+	asked := askOne(t, b, claim, flow.AskText("base", "which base branch?"))
+	parkOnQuestionAsked(t, b, claim, asked)
+
+	seedComment(t, mock, "any update on this?", asked.AskedAt.Add(-time.Hour))
+	seedComment(t, mock, "posted in the very second of the ask", asked.AskedAt)
+
+	if err := b.PostAnswer(t.Context(), claim.ItemRef, asked.ID, "main"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+	item, err := b.Load(t.Context(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	answers, err := b.ReadAnswers(t.Context(), *item, flow.QuestionAskedAt(item.Park), "alice")
+	if err != nil {
+		t.Fatalf("ReadAnswers: %v", err)
+	}
+	var got []string
+	for _, a := range answers {
+		got = append(got, a.Answer)
+	}
+	// Matched loosely rather than exactly: what is under test is which comments
+	// pass the window, not how a comment body is framed.
+	if len(got) != 1 || !strings.Contains(got[0], "main") {
+		t.Errorf("ReadAnswers = %q, want only the reply posted after the ask", got)
 	}
 }
 

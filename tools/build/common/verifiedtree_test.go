@@ -168,6 +168,37 @@ func TestRecordLeavesIndexAlone(t *testing.T) {
 	}
 }
 
+// THE FORMAT IS HALF THE CONTRACT. The guard is a workspace tool that cannot be
+// imported here, so nothing but agreement on the bytes connects the two ends:
+// one tree id, newline terminated, and nothing else in the file. Every other
+// test in this file reads the record through a trim, so a record written
+// without its newline — or with a second line of commentary — passes all of
+// them and is refused by a reader this repository cannot run.
+func TestRecordIsOneTreeIdNewlineTerminated(t *testing.T) {
+	dir := verifyRepoForTest(t)
+	writeFile(t, filepath.Join(dir, "a.txt"), "a\n")
+
+	if err := recordVerifiedTree(dir); err != nil {
+		t.Fatalf("recordVerifiedTree: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(verifiedTreeRecord)))
+	if err != nil {
+		t.Fatalf("read the record: %v", err)
+	}
+	body := string(raw)
+	if !strings.HasSuffix(body, "\n") {
+		t.Errorf("record = %q, want it newline terminated", body)
+	}
+	id := strings.TrimSuffix(body, "\n")
+	if strings.ContainsAny(id, "\n ") || id == "" {
+		t.Errorf("record = %q, want exactly one bare tree id and nothing else", body)
+	}
+	// And it must name a tree git can resolve, not merely look like an id.
+	if got := git(t, dir, "cat-file", "-t", id); got != "tree" {
+		t.Errorf("recorded id is a %q, want a tree", got)
+	}
+}
+
 func TestClearVerifiedTree(t *testing.T) {
 	dir := t.TempDir()
 	record := filepath.Join(dir, ".workspace", "verified-tree")
@@ -257,6 +288,32 @@ func TestRunVerifyRedRunLeavesNothingBlessed(t *testing.T) {
 	}
 	if Exists(filepath.Join(dir, ".workspace", "verified-tree")) {
 		t.Error("a red run must leave nothing blessed — the stale record survived")
+	}
+}
+
+// A CLEAR THAT FAILS FAILS THE RUN. The clear exists so a run that dies part
+// way leaves nothing blessed; if it can fail and be ignored, the case it was
+// added for is exactly the case it does not cover — the record it could not
+// remove survives the whole run, and a red verify hands the guard a stale
+// blessing for a tree nobody checked. Nothing may run past it.
+func TestRunVerifyFailsWhenTheStaleRecordCannotBeCleared(t *testing.T) {
+	dir := verifyRepoForTest(t)
+	writeFile(t, filepath.Join(dir, "a.txt"), "a\n")
+	// A non-empty directory where the record belongs: os.Remove refuses it, the
+	// one clear failure that is neither "absent" nor a permission quirk of the
+	// machine the tests run on.
+	writeFile(t, filepath.Join(dir, filepath.FromSlash(verifiedTreeRecord), "occupied"), "x\n")
+
+	err := RunVerify(dir, nil)
+	if err == nil {
+		t.Fatal("RunVerify passed although the stale record could not be cleared")
+	}
+	if !strings.Contains(err.Error(), verifiedTreeRecord) {
+		t.Errorf("err = %v, want it to name %s", err, verifiedTreeRecord)
+	}
+	// And it stopped there rather than running the pipeline over it.
+	if !Exists(filepath.Join(dir, filepath.FromSlash(verifiedTreeRecord), "occupied")) {
+		t.Error("the run went on and disturbed what it could not clear")
 	}
 }
 
