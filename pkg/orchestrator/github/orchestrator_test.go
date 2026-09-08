@@ -99,6 +99,14 @@ type ghMock struct {
 	// not a route existed for it. Recorded before routing on purpose: a write
 	// that reached the network is a disclosure even when GitHub rejects it.
 	mutations []string
+
+	// labelAdds records each label POST as one batch, keeping the request
+	// boundaries mutations flattens away. Which labels went on TOGETHER is a
+	// contract for one pair — the two halves of a claim record — because a
+	// window with one present and not the other is a window in which every
+	// reader of the record decides differently (docs/github-schema.md § Claim
+	// protocol, step 6).
+	labelAdds [][]string
 }
 
 // recordMutations counts the requests that change something, so a test can
@@ -165,10 +173,31 @@ func (m *ghMock) server() *httptest.Server {
 		})
 	})
 
+	// GET /repos/{o}/{r}/issues — the list endpoint List pages over. Serves the
+	// one issue this mock has, with its live labels and assignees.
+	listIssues := func(w http.ResponseWriter, r *http.Request) {
+		m.mu.Lock()
+		item := map[string]any{
+			"number": m.issueNum, "title": m.issueTitle, "body": m.issueBody,
+			"state":      m.issueState,
+			"labels":     toLabelObjs(m.issueLabels),
+			"assignees":  toLoginObjs(m.assignees),
+			"html_url":   fmt.Sprintf("https://github.com/%s/%s/issues/%d", m.owner, m.repo, m.issueNum),
+			"updated_at": "2026-01-01T00:00:00Z",
+		}
+		m.mu.Unlock()
+		writeJSON(w, []map[string]any{item})
+	}
+	mux.HandleFunc(prefix+"/issues", listIssues)
+
 	// GET/PATCH /repos/{o}/{r}/issues/{n}
 	mux.HandleFunc(prefix+"/issues/", func(w http.ResponseWriter, r *http.Request) {
 		// Sub-paths: /issues/{n}/labels, /issues/{n}/assignees, /issues/{n}/comments, /issues/comments/{id}
 		path := strings.TrimPrefix(r.URL.Path, prefix+"/issues/")
+		if path == "" { // the list endpoint, reached with a trailing slash
+			listIssues(w, r)
+			return
+		}
 
 		if strings.HasPrefix(path, "comments/") { // single-comment endpoint
 			m.handleSingleComment(w, r, strings.TrimPrefix(path, "comments/"))
@@ -240,13 +269,21 @@ func (m *ghMock) server() *httptest.Server {
 	mux.HandleFunc(prefix+"/contents/", m.handleContents)
 
 	// GET /search/issues
+	//
+	// Serves the issue's LIVE labels and assignees, like the real endpoint. A
+	// search result stripped of them cannot express any post-filter defect:
+	// ListAutoSelectable compares the labels the search returned, so a mock
+	// returning none would let every item through whatever the item says.
 	mux.HandleFunc("/search/issues", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{
-			"total_count": 1,
-			"items": []map[string]any{
-				{"number": m.issueNum, "title": m.issueTitle, "user": map[string]string{"login": "alice"}},
-			},
-		})
+		m.mu.Lock()
+		item := map[string]any{
+			"number": m.issueNum, "title": m.issueTitle,
+			"user":      map[string]string{"login": "alice"},
+			"labels":    toLabelObjs(m.issueLabels),
+			"assignees": toLoginObjs(m.assignees),
+		}
+		m.mu.Unlock()
+		writeJSON(w, map[string]any{"total_count": 1, "items": []map[string]any{item}})
 	})
 
 	// GET /user
@@ -424,6 +461,7 @@ func (m *ghMock) handleIssueLabels(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		m.issueLabels = append(m.issueLabels, arr...)
+		m.labelAdds = append(m.labelAdds, arr)
 		writeJSON(w, toLabelObjs(m.issueLabels))
 	case http.MethodGet:
 		writeJSON(w, toLabelObjs(m.issueLabels))
@@ -1151,17 +1189,23 @@ func TestBackend_Claim_AllowsSelfAssigned(t *testing.T) {
 	}
 }
 
-// Self owner-label is not a refusal.
+// Our own claim record is not a refusal. "Our own" is the ARENA half: the
+// owner label alone names an account, and on a one-login fleet every arena
+// writes the same one — so it is the fingerprint that makes the record this
+// arena's rather than the worktree next door's (#210).
 func TestBackend_Claim_AllowsSelfOwnerLabel(t *testing.T) {
 	mock := newGHMock(t)
-	mock.issueLabels = []string{"flow:owner:alice"}
 	srv := mock.server()
 	defer srv.Close()
 	b := newMockedOrchestrator(t, mock, srv)
 
+	mock.mu.Lock()
+	mock.issueLabels = []string{"flow:owner:alice", b.labels.Arena(b.arenaFingerprint())}
+	mock.mu.Unlock()
+
 	_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
 	if err != nil {
-		t.Fatalf("Claim should allow own owner label: %v", err)
+		t.Fatalf("Claim should allow this arena's own claim record: %v", err)
 	}
 }
 

@@ -78,9 +78,10 @@ func TestBackend_AnItemThisArenaClaimedDoesNotReadAsHeldElsewhere(t *testing.T) 
 
 // LookupActiveClaim takes NO KEY: one arena holds at most one claim, so the
 // question has exactly one answer. The github orchestrator's lease store is the
-// worktree-local claim file, and one file per checkout IS the arena scoping —
-// so a file this checkout did not write answers "no claim here" rather than
-// handing over somebody else's lease.
+// worktree-local claim file, and one file per checkout is what scopes THIS
+// question — so a file this checkout did not write answers "no claim here"
+// rather than handing over somebody else's lease. It scopes no OTHER arena's
+// answer, which is what flow:arena:<fingerprint> on the item is for (#210).
 func TestBackend_LookupActiveClaim_IsScopedToThisArena(t *testing.T) {
 	mock := newGHMock(t)
 	srv := mock.server()
@@ -151,8 +152,9 @@ func TestBackend_Claim_NamesTheArenaItBinds(t *testing.T) {
 	if claim.Arena != b.arena() {
 		t.Errorf("Claim.Arena = %+v, want the arena this checkout is (%+v)", claim.Arena, b.arena())
 	}
-	// LookupClaim reports the arena too, but only because this checkout is the
-	// holder — no label records it, so there is nothing to report otherwise.
+	// LookupClaim reports the arena too, off flow:arena:<fingerprint> on the
+	// item — and only because this checkout is the holder, since a digest
+	// decides equality and names nothing.
 	info, err := b.LookupClaim(t.Context(), b.refFromIssue(42))
 	if err != nil || info == nil {
 		t.Fatalf("LookupClaim = %+v, %v", info, err)

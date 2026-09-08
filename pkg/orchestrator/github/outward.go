@@ -173,6 +173,13 @@ func (o *outward) EditComment(ctx context.Context, a flow.DisclosureAct, issue i
 // The origin is fixed here rather than taken from the caller because the whole
 // input class is the flow's: a name is a closed suffix vocabulary joined to
 // identifiers the SDK was configured with, and no agent prose reaches one.
+//
+// flow:arena: is the one suffix whose value is NOT configuration — an arena is
+// a machine name and an absolute worktree path, both of them things
+// docs/disclosure.md closes the door on. It keeps the justification above true
+// by carrying a digest of the pair instead of the pair (see fingerprintArena),
+// so what reaches this function is still a value the flow computed and not a
+// fact about the operator's machine.
 func (o *outward) AddLabels(ctx context.Context, issue int, names []string) error {
 	d := flow.Disclosure{Act: flow.ActLabel, Item: itemOf(issue), Text: stated(flow.OriginFlow, names...)}
 	return o.publish(ctx, d, func(ctx context.Context) error {

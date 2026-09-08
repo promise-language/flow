@@ -17,8 +17,21 @@ const (
 	labelSuffixInfraTransient = "infra-transient"
 	labelSuffixStalePrefix    = "stale:"
 	labelSuffixClaimPrefix    = "claim:"
-	labelSuffixBudgetExhPref  = "budget-exhausted:"
-	labelSuffixTypePrefix     = "type:"
+	// labelSuffixArenaPrefix marks WHICH ARENA holds the claim, as an opaque
+	// digest of its (HostId, ArenaId). It is the other half of
+	// flow:owner:<login>: the owner label records the account credited, and on
+	// the ordinary single-operator fleet — one login, several worktrees — every
+	// arena writes the same one, so it cannot separate them. The lease binds
+	// item ↔ arena, so the arena is what the exclusion has to compare.
+	//
+	// A DIGEST and not the pair, because docs/disclosure.md closes the
+	// categories of thing a flow must not publish and two of them are exactly
+	// what an arena is made of — local filesystem paths and host identifiers.
+	// Equality is the only operation the exclusion needs, and a digest supports
+	// exactly that and nothing else.
+	labelSuffixArenaPrefix   = "arena:"
+	labelSuffixBudgetExhPref = "budget-exhausted:"
+	labelSuffixTypePrefix    = "type:"
 	// The two selection axes. Their NEUTRAL VALUES ARE UNSPELLABLE: `medium`
 	// and `default` have no label, so no state is reachable both by a label and
 	// by that label's absence — an item demoted from `high` to `medium` and an
@@ -68,6 +81,13 @@ func (l labels) ClaimToken(hex string) string {
 	return l.named(labelSuffixClaimPrefix + hex)
 }
 func (l labels) ClaimPrefix() string { return l.prefix + labelSuffixClaimPrefix }
+
+// Per-arena claim labels. The value is a fingerprint, never the pair itself —
+// see labelSuffixArenaPrefix and fingerprintArena.
+func (l labels) Arena(fingerprint string) string {
+	return l.named(labelSuffixArenaPrefix + fingerprint)
+}
+func (l labels) ArenaPrefix() string { return l.prefix + labelSuffixArenaPrefix }
 
 // Artifact lifecycle labels.
 func (l labels) StaleArtifact(id string) string {
@@ -146,7 +166,7 @@ func (l labels) OwnerFromLabel(name string) (account flow.AccountId, ok bool) {
 }
 
 // Maintained reports whether `name` is a marker this orchestrator maintains
-// itself as a consequence of a contract operation — the owner and claim
+// itself as a consequence of a contract operation — the owner, arena and claim
 // markers from Claim, the seeded and binary markers from seeding, the park
 // markers from Park, the manual marker from the editor, and the two selection
 // axes, which the typed setters own the way SetManual owns flow:manual.
@@ -165,6 +185,7 @@ func (l labels) Maintained(name string) bool {
 		rest == labelSuffixInfraTransient,
 		rest == labelSuffixManual,
 		strings.HasPrefix(rest, labelSuffixOwnerPrefix),
+		strings.HasPrefix(rest, labelSuffixArenaPrefix),
 		strings.HasPrefix(rest, labelSuffixClaimPrefix),
 		strings.HasPrefix(rest, labelSuffixStalePrefix),
 		strings.HasPrefix(rest, labelSuffixBudgetExhPref),
@@ -178,6 +199,17 @@ func (l labels) Maintained(name string) bool {
 // ClaimTokenFromLabel returns the random hex if `name` has the flow:claim: prefix.
 func (l labels) ClaimTokenFromLabel(name string) (hex string, ok bool) {
 	want := l.ClaimPrefix()
+	if !strings.HasPrefix(name, want) {
+		return "", false
+	}
+	return name[len(want):], true
+}
+
+// ArenaFromLabel returns the arena fingerprint if `name` has the flow:arena:
+// prefix. The value is opaque: it compares for equality against this arena's
+// own fingerprint and cannot be turned back into a (HostId, ArenaId).
+func (l labels) ArenaFromLabel(name string) (fingerprint string, ok bool) {
+	want := l.ArenaPrefix()
 	if !strings.HasPrefix(name, want) {
 		return "", false
 	}
