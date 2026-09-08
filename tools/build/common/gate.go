@@ -303,7 +303,7 @@ func unknownGate(name string) error {
 // measureFormatted counts files gofmt would rewrite. `-l` lists them; `-w`
 // would repair them, which is verify's job and not a gate's.
 func measureFormatted(repoRoot string) ([]Metric, string, error) {
-	out, err := gateOutput(repoRoot, "gofmt", "-l", ".")
+	out, err := gateOutput(repoRoot, repoRoot, "gofmt", "-l", ".")
 	if err != nil && out == "" {
 		return nil, "", fmt.Errorf("gofmt: %w", err)
 	}
@@ -332,7 +332,7 @@ func modules(repoRoot string) []string {
 func measureBuilds(repoRoot string) ([]Metric, string, error) {
 	n := 0
 	for _, dir := range modules(repoRoot) {
-		_, stderr, err := gateValue(dir, "go", "build", "./...")
+		_, stderr, err := gateValue(repoRoot, dir, "go", "build", "./...")
 		found := countPrefixed(stderr, "# ")
 		if err != nil && found == 0 {
 			// It failed and named no package: the failure is about the
@@ -350,7 +350,7 @@ func measureBuilds(repoRoot string) ([]Metric, string, error) {
 func measureChecked(repoRoot string) ([]Metric, string, error) {
 	n := 0
 	for _, dir := range modules(repoRoot) {
-		_, stderr, err := gateValue(dir, "go", "vet", "./...")
+		_, stderr, err := gateValue(repoRoot, dir, "go", "vet", "./...")
 		found := countDiagnostics(stderr)
 		if err != nil && found == 0 {
 			return nil, "", fmt.Errorf("go vet in %s: %w: %s", dir, err, firstLine(stderr))
@@ -366,7 +366,7 @@ func measureChecked(repoRoot string) ([]Metric, string, error) {
 func measureTested(repoRoot string) ([]Metric, string, error) {
 	tests, pkgs := 0, 0
 	for _, dir := range modules(repoRoot) {
-		out, err := gateOutput(dir, "go", "test", "./...")
+		out, err := gateOutput(repoRoot, dir, "go", "test", "./...")
 		t := countPrefixed(out, "--- FAIL:")
 		p := countPrefixed(out, "FAIL\t")
 		if err != nil && t == 0 && p == 0 {
@@ -397,11 +397,11 @@ func measureCovered(repoRoot string) ([]Metric, string, error) {
 	defer os.RemoveAll(dir)
 	profile := filepath.Join(dir, "coverage.out")
 
-	_, testErr := gateOutput(repoRoot, "go", "test", "-coverprofile="+profile, "./...")
+	_, testErr := gateOutput(repoRoot, repoRoot, "go", "test", "-coverprofile="+profile, "./...")
 	if _, err := os.Stat(profile); err != nil {
 		return nil, "", fmt.Errorf("coverage: no profile was produced: %w", testErr)
 	}
-	out, err := gateOutput(repoRoot, "go", "tool", "cover", "-func="+profile)
+	out, err := gateOutput(repoRoot, repoRoot, "go", "tool", "cover", "-func="+profile)
 	if err != nil {
 		return nil, "", fmt.Errorf("go tool cover: %w: %s", err, firstLine(out))
 	}
@@ -469,7 +469,7 @@ func measureFit(repoRoot string) ([]Metric, string, error) {
 // process's own directory and reports as the build cache, at full size, with no
 // incomplete to say the number is about somewhere else.
 func buildCache(repoRoot string) (path, why string) {
-	stdout, stderr, err := gateValue(repoRoot, "go", "env", "GOCACHE")
+	stdout, stderr, err := gateValue(repoRoot, repoRoot, "go", "env", "GOCACHE")
 	cache := strings.TrimSpace(stdout)
 	if err != nil || cache == "" {
 		return "", gocacheReason(stderr, err)
@@ -524,12 +524,64 @@ func freeBytesNear(path string) (int64, error) {
 // cannot exhaust the process.
 const maxToolOutput = 10 << 20 // 10 MiB
 
+// announceColumn is the display column the directory parenthetical starts at,
+// counted from the end of the "==> " prefix. It is a column and not a limit: a
+// command longer than this pushes its parenthetical right rather than being cut.
+const announceColumn = 28
+
+// outsideRepo is what a directory that is not under the repository root is
+// called on a progress line — a fixed string, never a path.
+const outsideRepo = "outside the repository"
+
+// announce writes the one progress line a gate prints before each child it
+// runs. Both runners come through here because the format has to exist in one
+// place: the two lines this naming exists to tell apart stop being comparable
+// the moment two copies of the format drift.
+//
+// The directory is what the line adds. This repository has two modules, so
+// `go build ./...` runs twice over modules(), and a line naming only the
+// command prints the same eleven characters for two different pieces of work —
+// output indistinguishable from a gate running everything twice, whose obvious
+// "fix" is to stop measuring the module that builds the gates.
+func announce(repoRoot, dir, name string, args []string) {
+	command := strings.TrimSpace(name + " " + strings.Join(args, " "))
+	fmt.Fprintf(os.Stderr, "==> %-*s (%s)\n", announceColumn, command, relToRepo(repoRoot, dir))
+}
+
+// relToRepo names dir the way a reader of this repository knows it: "." for the
+// root and "tools/build" for the module under it, with forward slashes on every
+// host so a line reads the same wherever it was produced.
+//
+// Relative, never absolute. An absolute path here is noise and a disclosure at
+// once: the commit guard refuses an absolute home path outright, so a pasted
+// transcript of a run would be refused — the failure this project has already
+// hit twice (#224, #226).
+//
+// The label is DERIVED from the directory the child is given rather than passed
+// beside it. A label carried alongside dir is a second copy of the same fact,
+// free to disagree with the directory the child actually ran in.
+func relToRepo(repoRoot, dir string) string {
+	rel, err := filepath.Rel(repoRoot, dir)
+	// Rel fails when there is no path from one to the other — different volumes
+	// on Windows. When it succeeds for a directory outside the root it answers
+	// with a "../" path, which is what IsLocal refuses; "." is the root itself
+	// and IsLocal accepts it, so the commonest answer here needs no exception.
+	// Neither refusal is reachable from this file's callers today: they exist so
+	// that no later caller can turn this line back into the path it was written
+	// to keep out, and answering with a name rather than "." is what keeps such
+	// a caller from claiming work happened in the repository when it did not.
+	if err != nil || !filepath.IsLocal(rel) {
+		return outsideRepo
+	}
+	return filepath.ToSlash(rel)
+}
+
 // gateOutput runs a child and returns its stdout as a string. Stderr is
 // passed through to os.Stderr so a person watching a long gate sees the
 // child's progress as it happens — silence and a hang look the same from
 // outside.
-func gateOutput(dir, name string, args ...string) (string, error) {
-	fmt.Fprintf(os.Stderr, "==> %s %s\n", name, strings.Join(args, " "))
+func gateOutput(repoRoot, dir, name string, args ...string) (string, error) {
+	announce(repoRoot, dir, name, args)
 	bw := newBoundedWriter(maxToolOutput)
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
@@ -546,8 +598,8 @@ func gateOutput(dir, name string, args ...string) (string, error) {
 // else, and stderr because the caller parses it — see buildCache, where mixing
 // them turns a warning into part of a path. Stderr is not passed through here,
 // which is the deliberate exception to the file-level rule.
-func gateValue(dir, name string, args ...string) (stdout, stderr string, err error) {
-	fmt.Fprintf(os.Stderr, "==> %s %s\n", name, strings.Join(args, " "))
+func gateValue(repoRoot, dir, name string, args ...string) (stdout, stderr string, err error) {
+	announce(repoRoot, dir, name, args)
 	out := newBoundedWriter(maxToolOutput)
 	errs := newBoundedWriter(maxToolOutput)
 	cmd := exec.Command(name, args...)

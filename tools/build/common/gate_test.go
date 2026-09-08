@@ -546,7 +546,7 @@ func TestGateOutputDoesNotCaptureStderr(t *testing.T) {
 	}
 
 	stderr := captureStream(t, &os.Stderr)
-	out, err := gateOutput(dir, script)
+	out, err := gateOutput(dir, dir, script)
 	if err != nil {
 		t.Fatalf("gateOutput: %v", err)
 	}
@@ -580,7 +580,7 @@ func TestGateOutputBoundsStdout(t *testing.T) {
 
 	// Suppress the "==>" prefix on stderr.
 	captureStream(t, &os.Stderr)
-	out, _ := gateOutput(dir, script)
+	out, _ := gateOutput(dir, dir, script)
 	if len(out) > maxToolOutput {
 		t.Errorf("output is %d bytes, want at most %d — the capture is unbounded", len(out), maxToolOutput)
 	}
@@ -603,13 +603,237 @@ func TestGateValueBoundsBothStreams(t *testing.T) {
 	}
 
 	captureStream(t, &os.Stderr)
-	stdout, stderr, _ := gateValue(dir, script)
+	stdout, stderr, _ := gateValue(dir, dir, script)
 	if len(stdout) > maxToolOutput {
 		t.Errorf("stdout is %d bytes, want at most %d", len(stdout), maxToolOutput)
 	}
 	if len(stderr) > maxToolOutput {
 		t.Errorf("stderr is %d bytes, want at most %d", len(stderr), maxToolOutput)
 	}
+}
+
+// The defect #275 reports: two modules, one command, two identical lines.
+// `go build ./...` runs once at the root and once in tools/build — both
+// necessary, since the root's `./...` does not reach a module with its own
+// go.mod — and a line naming only the command prints the same eleven characters
+// for each. The pairing reads as a gate running everything twice, and the
+// obvious "fix" for that would silently stop measuring the module that builds
+// bin/verify, bin/run and the guards.
+func TestAnnouncementNamesTheModuleTheChildRanIn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell script")
+	}
+	repoRoot, nested, script := twoModules(t)
+
+	stderr := captureStream(t, &os.Stderr)
+	if _, err := gateOutput(repoRoot, repoRoot, script); err != nil {
+		t.Fatalf("gateOutput at the root: %v", err)
+	}
+	if _, err := gateOutput(repoRoot, nested, script); err != nil {
+		t.Fatalf("gateOutput in the nested module: %v", err)
+	}
+
+	lines := announcements(stderr())
+	if len(lines) != 2 {
+		t.Fatalf("want one announcement per child, got %d:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	if lines[0] == lines[1] {
+		t.Fatalf("the two modules announce identically, so the pair reads as duplicated work:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.HasSuffix(lines[0], "(.)") {
+		t.Errorf("the root's line = %q, want it to end with (.)", lines[0])
+	}
+	if !strings.HasSuffix(lines[1], "(tools/build)") {
+		t.Errorf("the nested module's line = %q, want it to end with (tools/build)", lines[1])
+	}
+}
+
+// The directory is named relative to the root and never as it arrives. `dir` is
+// absolute, and an absolute path here is a disclosure as well as noise: the
+// commit guard refuses an absolute home path, so a transcript of a run pasted
+// into an issue or a pull request body would be refused — twice already
+// (#224, #226). This is what catches a later simplification to printing `dir`.
+//
+// It is about the root this naming introduces, not about every byte on the
+// line: a command's own arguments still carry whatever path the caller built
+// into them, which is a separate question from the directory.
+func TestAnnouncementNeverCarriesTheAbsoluteRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell script")
+	}
+	repoRoot, nested, script := twoModules(t)
+
+	stderr := captureStream(t, &os.Stderr)
+	if _, err := gateOutput(repoRoot, repoRoot, script); err != nil {
+		t.Fatalf("gateOutput at the root: %v", err)
+	}
+	if _, _, err := gateValue(repoRoot, nested, script); err != nil {
+		t.Fatalf("gateValue in the nested module: %v", err)
+	}
+
+	if got := stderr(); strings.Contains(got, repoRoot) {
+		t.Errorf("the announcement carries the absolute root %q:\n%s", repoRoot, got)
+	}
+}
+
+// Both runners announce through one printer. Two copies of the format drift,
+// and the moment they do, the two lines this naming exists to tell apart stop
+// being comparable.
+func TestBothRunnersAnnounceTheSameWay(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell script")
+	}
+	repoRoot, nested, script := twoModules(t)
+
+	stderr := captureStream(t, &os.Stderr)
+	if _, err := gateOutput(repoRoot, nested, script, "-x"); err != nil {
+		t.Fatalf("gateOutput: %v", err)
+	}
+	if _, _, err := gateValue(repoRoot, nested, script, "-x"); err != nil {
+		t.Fatalf("gateValue: %v", err)
+	}
+
+	lines := announcements(stderr())
+	if len(lines) != 2 {
+		t.Fatalf("want one announcement per child, got %d:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	if lines[0] != lines[1] {
+		t.Errorf("the same child announces differently through the two runners:\n%s\n%s", lines[0], lines[1])
+	}
+}
+
+// The gates that loop over modules are what the defect was seen through, and
+// they are what a later reader would change to "fix" it. Each of them hands the
+// runner the ROOT alongside the directory the child runs in; a gate that handed
+// the child's own directory as the root instead — the shortening that looks
+// like a simplification, since the runner already has a directory — names both
+// modules "." and prints the identical pair #275 reports, with every test about
+// the printer itself still passing.
+func TestModuleGatesNameEachModuleTheChildRanIn(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		measure func(string) ([]Metric, string, error)
+	}{
+		{"builds", measureBuilds},
+		{"checked", measureChecked},
+		{"tested", measureTested},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fakeGo(t, "exit 0") // skips on Windows: a POSIX shell script
+			repoRoot, nested, _ := twoModules(t)
+			// modules() counts a directory as a module when it carries a
+			// go.mod, so this is what makes the loop run twice.
+			if err := os.WriteFile(filepath.Join(nested, "go.mod"), []byte("module example/tools/build\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			stderr := captureStream(t, &os.Stderr)
+			if _, _, err := c.measure(repoRoot); err != nil {
+				t.Fatalf("measure %s: %v", c.name, err)
+			}
+
+			lines := announcements(stderr())
+			if len(lines) != 2 {
+				t.Fatalf("want one announcement per module, got %d:\n%s", len(lines), strings.Join(lines, "\n"))
+			}
+			if !strings.HasSuffix(lines[0], "(.)") || !strings.HasSuffix(lines[1], "(tools/build)") {
+				t.Errorf("the pair does not say which module each half is:\n%s", strings.Join(lines, "\n"))
+			}
+		})
+	}
+}
+
+// The directory is added to the line, never printed in place of part of it. The
+// column the parenthetical starts at is a column and not a limit — a format
+// that cut the command to fit would drop exactly the arguments that tell two
+// runs of the same program apart, which is the confusion this line exists to
+// end rather than move.
+func TestAnnouncementDoesNotCutACommandLongerThanTheColumn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell script")
+	}
+	repoRoot, nested, script := twoModules(t)
+	args := []string{"-coverprofile=coverage.out", "./..."}
+
+	stderr := captureStream(t, &os.Stderr)
+	if _, err := gateOutput(repoRoot, nested, script, args...); err != nil {
+		t.Fatalf("gateOutput: %v", err)
+	}
+
+	lines := announcements(stderr())
+	if len(lines) != 1 {
+		t.Fatalf("want one announcement, got %d:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	command := script + " " + strings.Join(args, " ")
+	if len(command) <= announceColumn {
+		t.Fatalf("this test needs a command longer than the column; %q is %d characters", command, len(command))
+	}
+	if !strings.Contains(lines[0], command) {
+		t.Errorf("the announcement does not carry the whole command:\n%s\nwant it to contain %q", lines[0], command)
+	}
+	if !strings.HasSuffix(lines[0], "(tools/build)") {
+		t.Errorf("the announcement = %q, want the directory still named after a command that overflows the column", lines[0])
+	}
+}
+
+// The name on the line is derived from (repoRoot, dir), so the edge paths are a
+// table over the pure function — which is also what lets them run on Windows,
+// where the tests that spawn a shell script skip.
+func TestRelToRepoNamesTheDirectoryTheWayTheRepositoryDoes(t *testing.T) {
+	root := filepath.Join(string(filepath.Separator), "repo")
+	cases := []struct {
+		name string
+		dir  string
+		want string
+	}{
+		{"the root itself", root, "."},
+		{"a nested module", filepath.Join(root, "tools", "build"), "tools/build"},
+		// Never ".": a fallback answering with the root would claim the work
+		// happened in the repository when it did not.
+		{"a directory outside the root", filepath.Join(string(filepath.Separator), "elsewhere"), outsideRepo},
+		// The other refusal, and the one the "../" check cannot make: Rel
+		// answers with an error when there is no path from the root to the
+		// directory at all. A relative directory against an absolute root is
+		// that on every host; Windows' two volumes are the same branch.
+		{"a directory that cannot be resolved against the root", filepath.Join("tools", "build"), outsideRepo},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := relToRepo(root, c.dir); got != c.want {
+				t.Errorf("relToRepo(%q, %q) = %q, want %q", root, c.dir, got, c.want)
+			}
+		})
+	}
+}
+
+// twoModules builds what this repository looks like to the gates: a root with a
+// second module under tools/build, and one child to run in either. The child
+// lives OUTSIDE the fake root, so the only thing that can put the root's path on
+// a progress line is the line naming the directory it was given.
+func twoModules(t *testing.T) (repoRoot, nested, script string) {
+	t.Helper()
+	repoRoot = t.TempDir()
+	nested = filepath.Join(repoRoot, "tools", "build")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script = filepath.Join(t.TempDir(), "quiet")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return repoRoot, nested, script
+}
+
+// announcements picks the gate's own progress lines out of a captured stderr,
+// which also carries whatever the children wrote there.
+func announcements(stderr string) []string {
+	var lines []string
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "==> ") {
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }
 
 // captureStream redirects one of this process's own streams for the rest of the
