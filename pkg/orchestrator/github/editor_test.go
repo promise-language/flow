@@ -132,6 +132,13 @@ func TestEditor_ALabelTheEditDoesNotTouchMayMove(t *testing.T) {
 func TestEditor_RefusesToRemoveAMarkerItMaintains(t *testing.T) {
 	for _, marker := range []string{
 		"flow:owner:alice",
+		// The other two halves of a claim. Removing either directly makes a
+		// held item read as unheld — or as held by no arena — to the exclusion
+		// `list` and Claim both consult, which is the one state no operation
+		// can put it in. Their maintained bit is pinned here and nowhere else:
+		// TestLabels_Maintained compares Maintained to the bit itself.
+		"flow:claim:0123456789abcdef",
+		"flow:arena:0123456789abcdef",
 		"flow:seeded",
 		"flow:needs-answer",
 		"flow:blocked",

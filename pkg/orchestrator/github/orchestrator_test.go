@@ -2509,6 +2509,50 @@ func TestBackend_Claim_ManualRefusesNothing(t *testing.T) {
 	})
 }
 
+// The positive side of the other-binary table, by NAME. The structural rows
+// above prove what is skipped; this pins what is found, which is what makes
+// the skip list meaningful — a structural() that answered true for everything
+// would pass every negative row. Three things a rewrite of the loop could lose
+// that the code-only assertion in TestBackend_Claim_HeldReclaimStillRefusesStopLabels
+// does not see: a structural label ahead of the binary label is skipped rather
+// than ending the scan; this binary's own marker is not "other"; and an
+// unvalued suffix is the WHOLE label, so a name that merely begins with one is
+// a binary name — the exclusion reading has no third category, and the valued
+// bit on structuralLabels is what says so.
+func TestBackend_OtherBinaryLabel_NamesTheBinaryAmongStructuralLabels(t *testing.T) {
+	b, _, _ := newClaimPrecondBackend(t)
+	for _, c := range []struct {
+		name   string
+		labels []string
+		want   string
+		other  bool
+	}{{
+		name: "another binary's marker among structural labels",
+		labels: []string{
+			"flow:seeded", "flow:owner:alice", "flow:claim:0123456789abcdef",
+			"flow:manual", "flow:review", "flow:priority:high",
+		},
+		want:  "review",
+		other: true,
+	}, {
+		name:   "this binary's own marker among structural labels",
+		labels: []string{"flow:seeded", "flow:owner:alice", "flow:implement", "flow:manual"},
+	}, {
+		name:   "a name that merely begins with an unvalued suffix",
+		labels: []string{"flow:implement", "flow:manual-review"},
+		want:   "manual-review",
+		other:  true,
+	}} {
+		t.Run(c.name, func(t *testing.T) {
+			got, other := b.otherBinaryLabel(c.labels)
+			if got != c.want || other != c.other {
+				t.Errorf("otherBinaryLabel(%v) = (%q, %v), want (%q, %v)",
+					c.labels, got, other, c.want, c.other)
+			}
+		})
+	}
+}
+
 // The short-circuit is arena-scoped as well as item-scoped, and it is
 // LookupActiveClaim that scopes it — reading the lease file directly would
 // resume a lease this checkout never took. A worktree copied or moved to a new
