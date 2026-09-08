@@ -2136,10 +2136,13 @@ func assertQuestionParkRefused(t *testing.T, be *fake.Orchestrator, claim flow.C
 	}
 }
 
-// A non-question park must not be stamped: the marker means "a question was
-// asked at this time", and putting it on a budget park would be a lie.
-func TestRunOne_NonQuestionParkIsNotStamped(t *testing.T) {
-	app, _, claim := testApp(t, func(f *flow.Flow) {
+// The refusal above reaches the question kind and no further: every other kind
+// still parks through ctx.Park, with the kind it asked for, on the backend.
+// The park itself is what has to be asserted — a check on the request's fields
+// alone reads a nil park as clean, and so would pass just as well against a
+// guard that had refused the park outright.
+func TestRunOne_NonQuestionParkStillParks(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("blocks", "plan", func(ctx flow.StepCtx) error {
 			return ctx.Park(flow.ParkRequest{Kind: flow.ParkBlocked, Reason: "waiting on infra"})
 		}, flow.StepConfig{})
@@ -2149,8 +2152,11 @@ func TestRunOne_NonQuestionParkIsNotStamped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
-	if !flow.QuestionAskedAt(res.Park).IsZero() {
-		t.Errorf("Details = %q, want no ask marker on a non-question park", res.Park.Details)
+	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkBlocked {
+		t.Fatalf("res = %+v, want a blocked park", res)
+	}
+	if req := be.ParkRequest("1"); req == nil || req.Kind != flow.ParkBlocked {
+		t.Errorf("the backend was parked with %+v, want a blocked park", req)
 	}
 }
 

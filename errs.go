@@ -113,7 +113,14 @@ type ErrSkip struct {
 func (e ErrSkip) Error() string { return "skip: " + e.Reason }
 
 // ErrPark — handler raised a structured park request. The SDK forwards
-// req to Backend.Park.
+// req to Backend.Park — with one exception: Kind ParkQuestion fails the step
+// instead of parking. This route registers no question, so the park it would
+// write is one `answer` has no id to name. A decision needed asks
+// (StepCtx.AskQuestions), which records the question and parks on it.
+//
+// The rule is stated here, not only on StepCtx.Park, because this type is
+// exported: a handler can return it directly without going through ctx.Park,
+// and the SDK guards both doors alike.
 type ErrPark struct {
 	Req ParkRequest
 }
