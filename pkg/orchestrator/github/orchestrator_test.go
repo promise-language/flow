@@ -99,6 +99,14 @@ type ghMock struct {
 	// not a route existed for it. Recorded before routing on purpose: a write
 	// that reached the network is a disclosure even when GitHub rejects it.
 	mutations []string
+
+	// labelAdds records each label POST as one batch, keeping the request
+	// boundaries mutations flattens away. Which labels went on TOGETHER is a
+	// contract for one pair — the two halves of a claim record — because a
+	// window with one present and not the other is a window in which every
+	// reader of the record decides differently (docs/github-schema.md § Claim
+	// protocol, step 6).
+	labelAdds [][]string
 }
 
 // recordMutations counts the requests that change something, so a test can
@@ -453,6 +461,7 @@ func (m *ghMock) handleIssueLabels(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		m.issueLabels = append(m.issueLabels, arr...)
+		m.labelAdds = append(m.labelAdds, arr)
 		writeJSON(w, toLabelObjs(m.issueLabels))
 	case http.MethodGet:
 		writeJSON(w, toLabelObjs(m.issueLabels))

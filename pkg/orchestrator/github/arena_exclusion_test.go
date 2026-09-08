@@ -231,6 +231,19 @@ func TestBackend_Claim_RefusesAnItemAnotherArenaHoldsUnderTheSameAccount(t *test
 		if refused.Override != "force" {
 			t.Errorf("Override = %q, want force", refused.Override)
 		}
+		// The refusal has to say which of the three cases it is. "Held" alone
+		// leaves an operator whose own login is on the item with nothing to act
+		// on; the arena is what they have to go and look at, and the
+		// fingerprint is the handle that matches this refusal to the
+		// flow:arena: label on the issue.
+		if !strings.Contains(refused.Reason, "another arena") {
+			t.Errorf("Reason = %q, want it to name another ARENA — the account on the item is this operator's own",
+				refused.Reason)
+		}
+		if !strings.Contains(refused.Reason, one.b.arenaFingerprint()) {
+			t.Errorf("Reason = %q, want the holder's fingerprint %q, the only handle tying it to the item",
+				refused.Reason, one.b.arenaFingerprint())
+		}
 	})
 
 	// Nothing was written: no claim token minted, no ownership asserted on an
@@ -444,6 +457,11 @@ func TestBackend_Claim_LegacyOwnerLabelRefusesEveryOtherArena(t *testing.T) {
 		}
 		if refused.Code != "already-held" || !refused.ItemScoped {
 			t.Errorf("refusal = %+v, want already-held and item-scoped", refused)
+		}
+		// And it says what is missing, because that is what tells the operator
+		// this needs --force rather than waiting for the holder to finish.
+		if !strings.Contains(refused.Reason, "records no arena") {
+			t.Errorf("Reason = %q, want it to say the record names no arena", refused.Reason)
 		}
 	})
 	two.run(func() {
@@ -714,6 +732,184 @@ func TestBackend_LookupClaim_DoesNotNameADisplacedArenaAsTheHolder(t *testing.T)
 		}
 		if info.Arena != two.b.arena() {
 			t.Errorf("Arena = %+v, want the holding arena %+v", info.Arena, two.b.arena())
+		}
+	})
+}
+
+// The other side of the same record: the arena HOLDING a claim that names no
+// arena still sees its own item, in the listing as well as at the claim.
+//
+// This is the branch of holdsItem the refusals above cannot reach. The item
+// cannot say which arena holds it, so the only arena that can answer is the one
+// whose own lease file names the item, and the listing has to ask — a fleet
+// upgrading mid-flight would otherwise have every holder's own item disappear
+// from its selectable set and read as held against itself, which is #210 with
+// the sign flipped.
+func TestBackend_Listing_HolderOfARecordNamingNoArenaStillSeesItsOwnItem(t *testing.T) {
+	mock, one, _ := twoArenas(t)
+	mock.mu.Lock()
+	mock.issueLabels = []string{"flow:implement", "flow:owner:alice"} // no arena label
+	mock.mu.Unlock()
+
+	one.run(func() {
+		if err := clistate.Save(flow.Claim{
+			OrchestratorName: one.b.Name(),
+			ItemRef:          one.b.refFromIssue(42),
+			Arena:            one.b.arena(),
+			Account:          "alice",
+			ClaimedAt:        nowUTC(),
+		}); err != nil {
+			t.Fatalf("seed lease file: %v", err)
+		}
+		refs, err := one.b.ListAutoSelectable(t.Context(), nil)
+		if err != nil {
+			t.Fatalf("ListAutoSelectable: %v", err)
+		}
+		if len(refs) != 1 {
+			t.Errorf("got %v, want #42 — this arena's lease file says it holds it (labels %v)",
+				refs, mock.labelNames())
+		}
+		info, err := one.b.Get(t.Context(), one.b.refFromIssue(42), "implement", acceptsAllTypes)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if info.Availability != flow.AvailAuto {
+			t.Errorf("Availability = %q, want %q — the holder's own item is not held against it",
+				info.Availability, flow.AvailAuto)
+		}
+	})
+}
+
+// A lease file that cannot be READ answers the same question with "no", and the
+// item reads as held. That is the conservative direction for a listing and the
+// only one that cannot widen what an unattended run starts on: the alternative
+// — treating an unreadable file as "we must be the holder" — hands the item to
+// an arena that has no evidence it holds anything.
+//
+// The listing itself must still answer. `list` failing outright because one
+// arena's state file is corrupt would take the whole command down over a
+// question about one item, and Claim is where an unreadable lease is fatal
+// (TestBackend_Claim_UnreadableLeaseFileRefusesWithoutClaiming) — it takes a
+// lease on the answer, a listing only reports it.
+func TestBackend_Listing_AnUnreadableLeaseFileReadsTheItemAsHeld(t *testing.T) {
+	mock, one, _ := twoArenas(t)
+	mock.mu.Lock()
+	mock.issueLabels = []string{"flow:implement", "flow:owner:alice"} // no arena label
+	mock.mu.Unlock()
+
+	one.run(func() {
+		if err := os.WriteFile(clistate.ActiveJSONPath(), []byte("{truncated"), 0o644); err != nil {
+			t.Fatalf("write lease file: %v", err)
+		}
+		refs, err := one.b.ListAutoSelectable(t.Context(), nil)
+		if err != nil {
+			t.Fatalf("ListAutoSelectable must answer despite an unreadable lease file: %v", err)
+		}
+		if len(refs) != 0 {
+			t.Errorf("got %v, want none — an unreadable lease file is no evidence that this arena holds #42", refs)
+		}
+		info, err := one.b.Get(t.Context(), one.b.refFromIssue(42), "implement", acceptsAllTypes)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if info.Availability != flow.AvailHeld {
+			t.Errorf("Availability = %q, want %q", info.Availability, flow.AvailHeld)
+		}
+	})
+}
+
+// The two halves go on in ONE request. Split across two, the item carries a
+// half record for as long as the second takes — and every reader of a half
+// record decides differently: an owner label alone is held-by-everyone-but-the
+// -holder, an arena label alone is not a claim at all. Only the removals are
+// meant to be observable halfway, and those are ordered per path (Release and
+// the rollback below) so that the halfway state is the true one.
+func TestBackend_Claim_WritesBothHalvesOfTheRecordInOneRequest(t *testing.T) {
+	mock, one, _ := twoArenas(t)
+	one.claimed(t)
+
+	owner := one.b.labels.Owner("alice")
+	arena := one.b.labels.Arena(one.b.arenaFingerprint())
+	mock.mu.Lock()
+	batches := append([][]string(nil), mock.labelAdds...)
+	mock.mu.Unlock()
+
+	for _, batch := range batches {
+		if !contains(batch, owner) {
+			continue
+		}
+		if !contains(batch, arena) {
+			t.Errorf("the owner half was posted as %v, without the arena half; every add was %v", batch, batches)
+		}
+		return
+	}
+	t.Fatalf("no request added %q at all; adds = %v", owner, batches)
+}
+
+// A claim that posted its record and then could not write its lease file takes
+// the record back off, and the item is free again — no lease was taken, so
+// nothing may be left holding it.
+//
+// The ORDER of the two removals is asserted directly, and it has to be: both
+// are best-effort within one process, so nothing observable here separates them
+// — what separates them is a process that stops between the two requests, which
+// is the case docs/github-schema.md pairs with Release's opposite order. Owner
+// half first, so the halfway state reads FREE. Reversed, what survives is an
+// owner label naming no arena, which is held by every arena except the one
+// whose lease file says otherwise — and here that is nobody, since the lease
+// file is precisely what could not be written. The item would need --force with
+// no arena running it.
+func TestBackend_Claim_RollbackOfAFailedLeaseSaveLeavesTheItemReadingFree(t *testing.T) {
+	mock, one, two := twoArenas(t)
+
+	// A lease file that cannot be written is the only way into the rollback:
+	// the record is on the item by then, and Save is the next thing that runs.
+	if err := os.Chmod(one.flowDir, 0o555); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(one.flowDir, 0o755) })
+	probe := filepath.Join(one.flowDir, "probe")
+	if err := os.WriteFile(probe, nil, 0o644); err == nil {
+		_ = os.Remove(probe)
+		t.Skip("this filesystem does not enforce directory permissions (running as root?), " +
+			"so the lease save cannot be made to fail")
+	}
+
+	one.run(func() {
+		if _, err := one.b.Claim(t.Context(), one.b.refFromIssue(42), nil); err == nil {
+			t.Fatal("Claim must fail when it cannot record the lease it just took")
+		}
+	})
+
+	owner := one.b.labels.Owner("alice")
+	arena := one.b.labels.Arena(one.b.arenaFingerprint())
+	after := mock.labelNames()
+	if contains(after, owner) || contains(after, arena) {
+		t.Fatalf("labels = %v, want both halves gone — a claim that did not stand records nothing", after)
+	}
+
+	mock.mu.Lock()
+	mutations := append([]string(nil), mock.mutations...)
+	mock.mu.Unlock()
+	ownerAt := slices.IndexFunc(mutations, func(m string) bool {
+		return strings.HasPrefix(m, "DELETE ") && strings.HasSuffix(m, "/labels/"+owner)
+	})
+	arenaAt := slices.IndexFunc(mutations, func(m string) bool {
+		return strings.HasPrefix(m, "DELETE ") && strings.HasSuffix(m, "/labels/"+arena)
+	})
+	if ownerAt < 0 || arenaAt < 0 {
+		t.Fatalf("requests = %v, want a DELETE of each half", mutations)
+	}
+	if ownerAt > arenaAt {
+		t.Errorf("the arena half was removed first; requests = %v — a rollback cut off between the two "+
+			"must leave the item reading free, and an owner label with no arena beside it reads as held",
+			mutations)
+	}
+
+	// And the item is one the next arena can take, with nothing to override.
+	two.run(func() {
+		if _, err := two.b.Claim(t.Context(), two.b.refFromIssue(42), nil); err != nil {
+			t.Errorf("an item whose claim was rolled back must be claimable without --force: %v", err)
 		}
 	})
 }
