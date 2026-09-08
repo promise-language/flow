@@ -2405,6 +2405,154 @@ func TestBackend_Claim_HeldReclaimStillRefusesStopLabels(t *testing.T) {
 	}
 }
 
+// The negative side of the other-binary table, NAMED: no structural label is
+// another binary's name. otherBinaryLabel reads by exclusion, so a row missing
+// from structuralLabels would not lose a feature — it would make every claim on
+// an item carrying the label refuse other-binary, naming a binary nobody wrote
+// (#210, #217, #256). Each row is held to what its own semantics say a fresh
+// claim does: disabled refuses as the stop switch, an owner label for another
+// account refuses as held, and every other row is claimable.
+func TestBackend_Claim_StructuralLabelsAreNotAnotherBinary(t *testing.T) {
+	for _, s := range structuralLabels {
+		t.Run(s.suffix, func(t *testing.T) {
+			b, mock, rec := newClaimPrecondBackend(t)
+			scriptCleanWorktree(rec)
+			label := sampleStructuralLabel(b.labels, s)
+			mock.issueLabels = []string{"flow:implement", label}
+
+			var want flow.ClaimRefusalCode
+			switch s.suffix {
+			case labelSuffixDisabled:
+				want = "disabled"
+			case labelSuffixOwnerPrefix:
+				want = "already-held" // the sample names an account that is not ours
+			}
+
+			_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+			if err == nil {
+				if want != "" {
+					t.Fatalf("Claim on %s succeeded, want a %q refusal", label, want)
+				}
+				return
+			}
+			var refused flow.ErrClaimRefused
+			if !errors.As(err, &refused) {
+				t.Fatalf("Claim on %s: %T: %v", label, err, err)
+			}
+			if refused.Code == "other-binary" {
+				t.Fatalf("Claim read %s as another binary's marker: %s", label, refused.Reason)
+			}
+			if want == "" {
+				t.Fatalf("Claim on %s refused %q, want it claimable: %s", label, refused.Code, refused.Reason)
+			}
+			if refused.Code != want {
+				t.Fatalf("Claim on %s refused %q, want %q: %s", label, refused.Code, want, refused.Reason)
+			}
+		})
+	}
+}
+
+// flow:manual REFUSES NO CLAIM — the manual row's decision beside
+// structuralLabels. The lease is not dispatch: the person driving the item holds
+// the lease, and their next `claim` or `resolve` is the holder's idempotent
+// re-claim, which is exactly the claim the missing row refused (#256). Pinned by
+// code rather than by message text, because other-binary is a PERMANENT
+// condition a caller stops asking about, and a manual hold clears when the
+// person hands the item back.
+func TestBackend_Claim_ManualRefusesNothing(t *testing.T) {
+	t.Run("a fresh claim on a manual item nobody holds", func(t *testing.T) {
+		b, mock, rec := newClaimPrecondBackend(t)
+		scriptCleanWorktree(rec)
+		mock.issueLabels = []string{"flow:implement", b.labels.Manual()}
+
+		if _, err := b.Claim(t.Context(), b.refFromIssue(42), nil); err != nil {
+			var refused flow.ErrClaimRefused
+			if errors.As(err, &refused) {
+				t.Fatalf("Claim refused a manual item with code %q: %s", refused.Code, refused.Reason)
+			}
+			t.Fatalf("Claim: %v", err)
+		}
+	})
+
+	t.Run("the driver's own re-claim", func(t *testing.T) {
+		b, mock, rec := newClaimPrecondBackend(t)
+		scriptCleanWorktree(rec)
+		ctx := t.Context()
+
+		first, err := b.Claim(ctx, b.refFromIssue(42), nil)
+		if err != nil {
+			t.Fatalf("first Claim: %v", err)
+		}
+		// run-step sets manual on the item this arena holds — mid-work, on the
+		// item's own branch.
+		mock.mu.Lock()
+		mock.issueLabels = append(mock.issueLabels, b.labels.Manual())
+		mock.mutations = nil
+		mock.mu.Unlock()
+		rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+			return []byte("flow/issue-42\n"), nil
+		}
+
+		second, err := b.Claim(ctx, b.refFromIssue(42), nil)
+		if err != nil {
+			t.Fatalf("the driver's re-claim of a manual item must succeed: %v", err)
+		}
+		if !sameLease(first, second) {
+			t.Errorf("re-claim returned %+v, want the standing lease %+v", second, first)
+		}
+		mock.mu.Lock()
+		mutations := append([]string(nil), mock.mutations...)
+		mock.mu.Unlock()
+		if len(mutations) != 0 {
+			t.Errorf("the driver's re-claim wrote to GitHub: %v", mutations)
+		}
+	})
+}
+
+// The positive side of the other-binary table, by NAME. The structural rows
+// above prove what is skipped; this pins what is found, which is what makes
+// the skip list meaningful — a structural() that answered true for everything
+// would pass every negative row. Three things a rewrite of the loop could lose
+// that the code-only assertion in TestBackend_Claim_HeldReclaimStillRefusesStopLabels
+// does not see: a structural label ahead of the binary label is skipped rather
+// than ending the scan; this binary's own marker is not "other"; and an
+// unvalued suffix is the WHOLE label, so a name that merely begins with one is
+// a binary name — the exclusion reading has no third category, and the valued
+// bit on structuralLabels is what says so.
+func TestBackend_OtherBinaryLabel_NamesTheBinaryAmongStructuralLabels(t *testing.T) {
+	b, _, _ := newClaimPrecondBackend(t)
+	for _, c := range []struct {
+		name   string
+		labels []string
+		want   string
+		other  bool
+	}{{
+		name: "another binary's marker among structural labels",
+		labels: []string{
+			"flow:seeded", "flow:owner:alice", "flow:claim:0123456789abcdef",
+			"flow:manual", "flow:review", "flow:priority:high",
+		},
+		want:  "review",
+		other: true,
+	}, {
+		name:   "this binary's own marker among structural labels",
+		labels: []string{"flow:seeded", "flow:owner:alice", "flow:implement", "flow:manual"},
+	}, {
+		name:   "a name that merely begins with an unvalued suffix",
+		labels: []string{"flow:implement", "flow:manual-review"},
+		want:   "manual-review",
+		other:  true,
+	}} {
+		t.Run(c.name, func(t *testing.T) {
+			got, other := b.otherBinaryLabel(c.labels)
+			if got != c.want || other != c.other {
+				t.Errorf("otherBinaryLabel(%v) = (%q, %v), want (%q, %v)",
+					c.labels, got, other, c.want, c.other)
+			}
+		})
+	}
+}
+
 // The short-circuit is arena-scoped as well as item-scoped, and it is
 // LookupActiveClaim that scopes it — reading the lease file directly would
 // resume a lease this checkout never took. A worktree copied or moved to a new

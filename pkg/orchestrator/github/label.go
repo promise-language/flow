@@ -46,6 +46,79 @@ const (
 	labelSuffixManual = "manual"
 )
 
+// structuralLabel is one row of the structural vocabulary: a suffix under the
+// label prefix that is THIS ORCHESTRATOR'S OWN MARKER rather than a binary's
+// name, and what the two readers of that distinction may do with it.
+type structuralLabel struct {
+	// suffix is a labelSuffix* constant — never a literal, so a row cannot
+	// spell a suffix the vocabulary above does not declare.
+	suffix string
+	// valued marks a suffix that carries a value after it (owner:<login>,
+	// type:<type>) and so matches a label by prefix; an unvalued suffix is the
+	// whole label and matches exactly.
+	valued bool
+	// maintained marks a label a contract operation writes, and so one
+	// ItemEditor.RemoveTag refuses to delete: a caller able to remove it
+	// directly could make an item report a state no operation put it in.
+	maintained bool
+}
+
+// structuralLabels is THE vocabulary of structural suffixes. Both readers of
+// the distinction derive from it — otherBinaryLabel (claim.go), which reads
+// every label under the prefix it does not find here as another binary's name,
+// and Maintained below — so a suffix cannot be known to one and not the other.
+// Two hand-kept switches drifted three times (#210, #217, #256), and each
+// omission was a standing other-binary refusal on every item carrying the
+// label, because otherBinaryLabel reads by exclusion. The rule, enforced by
+// TestLabels_EveryDeclaredSuffixHasAVocabularyRow: EVERY labelSuffix* constant
+// has exactly one row here, and every row names a constant.
+//
+// The three rows one switch had and the other did not, decided:
+//
+//   - manual: structural, maintained (SetManual owns it), and it REFUSES NO
+//     CLAIM. The lease is not dispatch. The person driving the item holds the
+//     lease — run-step requires an active claim and sets manual on that
+//     claimed item — and their later `claim` or `resolve` is the holder's
+//     idempotent re-claim (docs/resolution.md § Claiming), which the
+//     other-binary preflight sits above: the driver's own next claim was the
+//     one refused. Another arena is kept off by the already-held refusal while
+//     the driver holds the lease; a manual item nobody holds is claimable, and
+//     what keeps it from being DISPATCHED is the manual hold at dispatch
+//     (docs/resolution.md § skipped; #170). Neither docs/github-schema.md
+//     § Claim protocol nor docs/orchestrator.md § What an orchestrator may
+//     refuse lists manual among the refusals.
+//   - disabled: structural, NOT maintained. No operation writes it — it is
+//     the operator's stop switch — and RemoveTag is the contract's only route
+//     to "re-enable it", which is waits-on-person's own wording. Its absence
+//     from Maintained was the intent, now stated.
+//   - type:: structural, NOT maintained. No operation writes it, and a
+//     flow:type:bug label must never read as a binary named "type:bug". The
+//     schema spells the label flow:type: and this code reads a bare type:
+//     prefix; that mismatch is #266 and does not change the row.
+//
+// Recognising a binary label POSITIVELY — it equals a known binary's name —
+// would remove the deny-by-default that makes each omission a hard block, but
+// nothing declares the fleet's names: cfg.BinaryName is this binary only, and
+// the schema spells the label flow:<binary-name> with no distinguishing shape.
+// Until a registry exists, this table plus the completeness test is the
+// containment.
+var structuralLabels = []structuralLabel{
+	{suffix: labelSuffixSeeded, maintained: true},
+	{suffix: labelSuffixOwnerPrefix, valued: true, maintained: true},
+	{suffix: labelSuffixBlocked, maintained: true},
+	{suffix: labelSuffixNeedsAnswer, maintained: true},
+	{suffix: labelSuffixDisabled},
+	{suffix: labelSuffixInfraTransient, maintained: true},
+	{suffix: labelSuffixStalePrefix, valued: true, maintained: true},
+	{suffix: labelSuffixClaimPrefix, valued: true, maintained: true},
+	{suffix: labelSuffixArenaPrefix, valued: true, maintained: true},
+	{suffix: labelSuffixBudgetExhPref, valued: true, maintained: true},
+	{suffix: labelSuffixTypePrefix, valued: true},
+	{suffix: labelSuffixPriorityPrefix, valued: true, maintained: true},
+	{suffix: labelSuffixUrgencyPrefix, valued: true, maintained: true},
+	{suffix: labelSuffixManual, maintained: true},
+}
+
 // labels collects the prefixed label names an orchestrator instance uses.
 // Built from cfg.LabelPrefix at New time.
 type labels struct {
@@ -165,35 +238,37 @@ func (l labels) OwnerFromLabel(name string) (account flow.AccountId, ok bool) {
 	return flow.AccountId(name[len(want):]), true
 }
 
+// structural reports the structuralLabels row `name` falls under, if any: the
+// prefix stripped, then an exact match for an unvalued suffix or a prefix match
+// for a valued one. THE one reader of the table — otherBinaryLabel and
+// Maintained both go through here, so the two cannot disagree about what is
+// structural.
+func (l labels) structural(name string) (structuralLabel, bool) {
+	rest, ok := strings.CutPrefix(name, l.prefix)
+	if !ok {
+		return structuralLabel{}, false
+	}
+	for _, s := range structuralLabels {
+		if (s.valued && strings.HasPrefix(rest, s.suffix)) || (!s.valued && rest == s.suffix) {
+			return s, true
+		}
+	}
+	return structuralLabel{}, false
+}
+
 // Maintained reports whether `name` is a marker this orchestrator maintains
 // itself as a consequence of a contract operation — the owner, arena and claim
 // markers from Claim, the seeded and binary markers from seeding, the park
 // markers from Park, the manual marker from the editor, and the two selection
-// axes, which the typed setters own the way SetManual owns flow:manual.
+// axes, which the typed setters own the way SetManual owns flow:manual. Which
+// rows those are is structuralLabels' maintained bit, decided beside the
+// vocabulary rather than restated here.
 //
 // ItemEditor.RemoveTag refuses these: a caller able to delete one directly
 // could make an item report a state no operation put it in.
 func (l labels) Maintained(name string) bool {
-	if !strings.HasPrefix(name, l.prefix) {
-		return false
-	}
-	rest := strings.TrimPrefix(name, l.prefix)
-	switch {
-	case rest == labelSuffixSeeded,
-		rest == labelSuffixBlocked,
-		rest == labelSuffixNeedsAnswer,
-		rest == labelSuffixInfraTransient,
-		rest == labelSuffixManual,
-		strings.HasPrefix(rest, labelSuffixOwnerPrefix),
-		strings.HasPrefix(rest, labelSuffixArenaPrefix),
-		strings.HasPrefix(rest, labelSuffixClaimPrefix),
-		strings.HasPrefix(rest, labelSuffixStalePrefix),
-		strings.HasPrefix(rest, labelSuffixBudgetExhPref),
-		strings.HasPrefix(rest, labelSuffixPriorityPrefix),
-		strings.HasPrefix(rest, labelSuffixUrgencyPrefix):
-		return true
-	}
-	return false
+	s, ok := l.structural(name)
+	return ok && s.maintained
 }
 
 // ClaimTokenFromLabel returns the random hex if `name` has the flow:claim: prefix.
