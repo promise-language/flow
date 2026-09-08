@@ -140,55 +140,95 @@ func quotaNow() (quotaReading, error) {
 		return quotaReading{Usage: usage, ReadAt: time.Now()}, nil
 	}
 
-	now := time.Now()
 	rec := loadQuotaRecord(path)
-
-	if r, ok := servableReading(rec, now, quotaRefreshInterval); ok {
+	if r, ok := servableReading(rec, time.Now(), quotaRefreshInterval); ok {
 		return r, nil
 	}
 
 	// Stale, or nothing on disk. Refresh — unless the endpoint has already said
 	// no and the machine is inside the backoff it asked for.
-	if !inQuotaBackoff(rec, now) {
-		next, refreshed := refreshQuota(path, rec, now)
-		if refreshed {
-			return quotaReading{Usage: next.Usage, ReadAt: next.ReadAt}, nil
-		}
-		rec = next
+	if !inQuotaBackoff(rec, time.Now()) {
+		rec = refreshQuota(path, rec)
 	}
 
-	// The refresh was skipped or failed. A reading inside the outer bound is
+	// Whatever the refresh left: a new reading, a sibling's, or the previous one
+	// with a refusal recorded against it. A reading inside the outer bound is
 	// still the best estimate available, and serving it is what keeps this
 	// process paced alongside the siblings that read the same file.
-	if r, ok := servableReading(rec, now, quotaStaleBound); ok {
+	//
+	// The clock is read again here rather than carried down from the top: a
+	// refresh takes as long as fetchUsage's timeout allows, and both the age of
+	// the reading and the reading itself can move while it runs. Reusing a
+	// timestamp taken before the request would age a reading that arrived
+	// DURING it into the future and discard it.
+	if r, ok := servableReading(rec, time.Now(), quotaStaleBound); ok {
 		return r, nil
 	}
 	return quotaReading{}, quotaUnknown(rec)
 }
 
-// refreshQuota asks the endpoint once, under the machine-wide single-flight
-// lock, and stores what it learns for every other tool on the machine.
+// refreshQuota asks the endpoint at most once, under the machine-wide
+// single-flight lock, stores what it learns for every other tool on the
+// machine, and returns the record to serve from.
 //
-// Returns (record, true) when the reading is new, and (record, false) when it
-// is not — the lock was held by somebody already asking, or the endpoint
-// refused, in which case the returned record carries the refusal AND whatever
-// reading prev already had. The caller serves that.
-func refreshQuota(path string, prev *quotaRecord, now time.Time) (*quotaRecord, bool) {
-	release, held := acquireRefreshLock(path, now)
+// It asks for nothing at all when it does not have to: the lock is held by
+// somebody already asking, or the record turned out — between this process
+// loading it and winning the slot — to have been refreshed by a sibling, or to
+// have come under a refusal every process must back off on. A refusal it does
+// earn is recorded against whatever reading the record already had, so a
+// failure never costs the machine its last known-good numbers.
+func refreshQuota(path string, prev *quotaRecord) *quotaRecord {
+	release, held := acquireRefreshLock(path, time.Now())
 	if !held {
-		return prev, false
+		return prev
 	}
 	defer release()
 
+	// Re-read under the lock. Winning the slot is not instantaneous, and the
+	// record this process decided on was read before it. A sibling that
+	// refreshed in that window has already answered the question — asking again
+	// is precisely the duplicate request single-flight exists to save — and a
+	// sibling that recorded a refusal in it binds this process too, or the
+	// shared backoff is only shared with whoever reads late enough.
+	if cur := loadQuotaRecord(path); cur != nil {
+		prev = cur
+		now := time.Now()
+		if _, fresh := servableReading(cur, now, quotaRefreshInterval); fresh {
+			return cur
+		}
+		if inQuotaBackoff(cur, now) {
+			return cur
+		}
+	}
+
 	usage, err := quotaFetch()
 	if err != nil {
-		next := withQuotaFailure(prev, err, time.Now())
+		next := quotaFailureRecord(path, prev, err)
 		storeQuotaRecord(path, *next)
-		return next, false
+		return next
 	}
 	next := &quotaRecord{Usage: usage, ReadAt: time.Now()}
 	storeQuotaRecord(path, *next)
-	return next, true
+	return next
+}
+
+// quotaFailureRecord records a failed refresh against the freshest reading the
+// machine has: the one on disk when a sibling landed a newer one WHILE this
+// process was asking, and otherwise the one this process started from.
+//
+// The re-read is not belt-and-braces. A failure never clearing the reading is
+// what keeps the paced/unpaced asymmetry from opening, and the reading it must
+// not clear can be one that arrived mid-request — a lock broken at its TTL, or
+// a machine with nowhere to put one, is enough to overlap two refreshes. Writing
+// this process's pre-request view back over a newer one would take the whole
+// machine unpaced for a refresh interval, which is the failure this file exists
+// to prevent.
+func quotaFailureRecord(path string, prev *quotaRecord, err error) *quotaRecord {
+	base := prev
+	if cur := loadQuotaRecord(path); cur != nil && (base == nil || cur.ReadAt.After(base.ReadAt)) {
+		base = cur
+	}
+	return withQuotaFailure(base, err, time.Now())
 }
 
 // servableReading returns the record's reading when it exists and is younger

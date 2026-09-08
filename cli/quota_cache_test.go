@@ -517,9 +517,11 @@ func TestQuotaNow_StaleLockIsBroken(t *testing.T) {
 	}
 }
 
-func TestQuotaNow_ConcurrentReadersAreBounded(t *testing.T) {
-	// Run under -race. Every goroutine gets a coherent reading, and the whole
-	// group makes at most one request each — never more.
+func TestQuotaNow_ConcurrentReadersMakeOneRequest(t *testing.T) {
+	// Run under -race. Every goroutine gets a coherent reading, and the group
+	// makes exactly one request between them: the winner asks, the losers serve
+	// the stale reading, and a loser that reaches the slot after the winner has
+	// released it finds the answer already there rather than asking again.
 	dir := useTempQuotaCache(t)
 	seedRecord(t, dir, quotaRecord{Usage: usageAt(0.42), ReadAt: time.Now().Add(-10 * time.Minute)})
 	s := installFetch(t, func() ([]windowUsage, error) {
@@ -553,8 +555,85 @@ func TestQuotaNow_ConcurrentReadersAreBounded(t *testing.T) {
 			t.Errorf("goroutine %d read %v, want the stale 0.42 or the refreshed 0.55", i, used[i])
 		}
 	}
-	if c := s.count(); c < 1 || c > n {
-		t.Errorf("fetches = %d, want between 1 and %d", c, n)
+	if c := s.count(); c != 1 {
+		t.Errorf("fetches = %d over %d concurrent readers, want 1", c, n)
+	}
+}
+
+func TestRefreshQuota_ServesASiblingsReadingRatherThanAsking(t *testing.T) {
+	// The record this process loaded was stale, but by the time it won the
+	// single-flight slot a sibling had already refreshed. Asking again is the
+	// duplicate request single-flight exists to save.
+	dir := useTempQuotaCache(t)
+	seedRecord(t, dir, quotaRecord{Usage: usageAt(0.55), ReadAt: time.Now()})
+	stale := &quotaRecord{Usage: usageAt(0.42), ReadAt: time.Now().Add(-10 * time.Minute)}
+	s := installFetch(t, func() ([]windowUsage, error) {
+		t.Error("a sibling refreshed while this process waited for the slot — it must not ask")
+		return nil, nil
+	})
+
+	rec := refreshQuota(filepath.Join(dir, quotaCacheFile), stale)
+	if len(rec.Usage) == 0 || rec.Usage[0].Used != 0.55 {
+		t.Errorf("record = %+v, want the sibling's 0.55", rec)
+	}
+	if s.count() != 0 {
+		t.Errorf("fetches = %d, want 0", s.count())
+	}
+}
+
+func TestRefreshQuota_HonoursARefusalRecordedWhileItWaited(t *testing.T) {
+	// The backoff is shared, or it is only shared with whoever reads late
+	// enough: a refusal recorded between this process loading the record and
+	// winning the slot binds it too.
+	dir := useTempQuotaCache(t)
+	seedRecord(t, dir, quotaRecord{
+		Usage:   usageAt(0.42),
+		ReadAt:  time.Now().Add(-10 * time.Minute),
+		Failure: "rejected — HTTP 429",
+		RetryAt: time.Now().Add(2 * time.Minute),
+	})
+	stale := &quotaRecord{Usage: usageAt(0.42), ReadAt: time.Now().Add(-10 * time.Minute)}
+	s := installFetch(t, func() ([]windowUsage, error) {
+		t.Error("a refusal recorded while this process waited for the slot binds it too")
+		return nil, nil
+	})
+
+	rec := refreshQuota(filepath.Join(dir, quotaCacheFile), stale)
+	if !strings.Contains(rec.Failure, "429") {
+		t.Errorf("record = %+v, want the sibling's refusal", rec)
+	}
+	if s.count() != 0 {
+		t.Errorf("fetches = %d, want 0", s.count())
+	}
+}
+
+func TestQuotaNow_FailedRefreshKeepsAReadingThatLandedMidRequest(t *testing.T) {
+	// Two refreshes overlapped — a lock broken at its TTL is enough — and this
+	// one lost: a sibling's reading landed while this process was asking, and
+	// this process's own request was refused. The refusal is recorded AGAINST
+	// the sibling's numbers. Writing the pre-request view back over them would
+	// take the whole machine unpaced for a refresh interval, which is the
+	// failure the cache exists to prevent.
+	dir := useTempQuotaCache(t)
+	seedRecord(t, dir, quotaRecord{Usage: usageAt(0.42), ReadAt: time.Now().Add(-10 * time.Minute)})
+	installFetch(t, func() ([]windowUsage, error) {
+		seedRecord(t, dir, quotaRecord{Usage: usageAt(0.77), ReadAt: time.Now()})
+		return nil, &quotaRefusal{msg: "rejected — HTTP 429"}
+	})
+
+	r, err := quotaNow()
+	if err != nil {
+		t.Fatalf("a failed refresh over a good reading must not error: %v", err)
+	}
+	if got := firstUsed(t, r); got != 0.77 {
+		t.Errorf("used = %v, want the sibling's 0.77 — a failure may not drop a reading", got)
+	}
+	rec := readRecord(t, dir)
+	if len(rec.Usage) == 0 || rec.Usage[0].Used != 0.77 {
+		t.Errorf("record = %+v, want the sibling's reading preserved", rec)
+	}
+	if rec.Failure == "" || rec.RetryAt.IsZero() {
+		t.Errorf("record = %+v, want the refusal recorded against it", rec)
 	}
 }
 
