@@ -218,6 +218,26 @@ func TestBackend_ReadsAnUnrecognizedAxisLabelAsTheNeutralValue(t *testing.T) {
 	}
 }
 
+// A label naming no member does not MASK a real one. The readers keep looking
+// under the prefix rather than answering on the first label they meet, so an
+// issue that picked up a hand-typed `flow:priority:hihg` beside a written
+// `flow:priority:critical` still reads as critical — otherwise a typo nobody
+// can see demotes the item to where nothing had been said about it.
+func TestBackend_AnUnrecognizedAxisLabelDoesNotMaskAValidOne(t *testing.T) {
+	_, b := editingOrchestrator(t, "flow:implement",
+		"flow:priority:hihg", "flow:priority:critical",
+		"flow:urgency:soon", "flow:urgency:next")
+
+	info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", func(flow.ItemType) bool { return true })
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if info.Priority != flow.PriorityCritical || info.Urgency != flow.UrgencyNext {
+		t.Errorf("= %q/%q, want critical/next — the unrecognized label is no label, not an answer",
+			info.Priority, info.Urgency)
+	}
+}
+
 // Deferral is NOT a rung on the availability ladder. An opted-in, assigned,
 // unblocked, deferred item has passed every boundary — what is true of it is
 // that auto-selection will not take it, which is exactly the boundary
@@ -341,6 +361,32 @@ func TestEditor_SetsAndReplacesEachAxisLabel(t *testing.T) {
 				t.Errorf("labels = %v, want the binary marker untouched", mock.labelNames())
 			}
 		})
+	}
+}
+
+// Both axes in ONE commit, against an item carrying both labels and an ordinary
+// tag. The two setters write through the same label list, so one that rebuilt
+// the list rather than adding to it would silently drop the other's work — and
+// the item would report a value nobody set.
+func TestEditor_SetsBothAxesInOneCommitAndLeavesEveryOtherLabelAlone(t *testing.T) {
+	mock, b := editingOrchestrator(t, "flow:implement", "area:cli", "flow:priority:high", "flow:urgency:next")
+	ed, err := b.Edit(t.Context(), b.refFromIssue(42))
+	if err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+	ed.SetPriority(flow.PriorityCritical)
+	// The neutral value on the other axis: its label is REMOVED, and removing
+	// it must not take the priority the same commit just wrote.
+	ed.SetUrgency(flow.UrgencyDefault)
+	if err := ed.Commit(t.Context()); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	got := slices.Clone(mock.labelNames())
+	want := []string{"area:cli", "flow:implement", "flow:priority:critical"}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Errorf("labels = %v, want %v", mock.labelNames(), want)
 	}
 }
 

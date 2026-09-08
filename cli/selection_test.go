@@ -161,3 +161,97 @@ func TestCmdStatus_ReportsTheNeutralValuesWhenNothingIsSet(t *testing.T) {
 		t.Errorf("status = %q/%q, want medium/default", payload.Priority, payload.Urgency)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// `resolve` — where the two axes decide something rather than report it.
+// ---------------------------------------------------------------------------
+
+var (
+	janSel = time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	febSel = time.Date(2025, 2, 1, 0, 0, 0, 0, time.UTC)
+	marSel = time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC)
+)
+
+// seedAged registers an item filed at `at`. The clock is restored to real time
+// afterwards, so only the age the caller asked for is backdated and the claim
+// the run takes is stamped now.
+func seedAged(be *fake.Orchestrator, id string, at time.Time, p flow.Priority, u flow.Urgency) {
+	be.SetClock(func() time.Time { return at })
+	be.AddItem(id, flow.Item{Type: "task", Title: id, Priority: p, Urgency: u})
+	be.SetClock(time.Now)
+}
+
+// `resolve` with no item id claims the FIRST ref the orchestrator returned, and
+// that is the whole reason the order is a contract. Here the instruction wins:
+// a `next` item at `low` priority starts before a `critical` one nobody asked
+// for, and before an older one nobody assessed.
+//
+// The ids are alphabetical against the expected pick and the filing order is
+// too, so a selection that ignored both axes would fail here rather than pass
+// by coincidence.
+func TestCmdResolve_AutoSelectionTakesTheTopRankedItem(t *testing.T) {
+	be := fake.New()
+	seedAged(be, "a-critical", janSel, flow.PriorityCritical, "")
+	seedAged(be, "b-unassessed", febSel, "", "")
+	seedAged(be, "c-next-low", marSel, flow.PriorityLow, flow.UrgencyNext)
+	app, _, errBuf := resolveTestApp(t, be)
+
+	if code := app.cmdResolve(context.Background(), nil); code != 0 {
+		t.Fatalf("cmdResolve = %d; err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "auto-selecting c-next-low (1/3)") {
+		t.Errorf("resolve did not start on the top-ranked item of three; got:\n%s", errBuf.String())
+	}
+	// And that is the item the arena holds. The narration is printed BEFORE the
+	// claim, so a run that announced one item and fell through to another would
+	// still carry the line above.
+	info, err := be.LookupClaim(context.Background(), flow.ItemRef{
+		OrchestratorName: "fake", Ref: json.RawMessage(`"c-next-low"`)})
+	if err != nil {
+		t.Fatalf("LookupClaim: %v", err)
+	}
+	if info == nil || info.Account != be.Account() {
+		t.Errorf("LookupClaim = %+v, want the top-ranked item held by this arena", info)
+	}
+}
+
+// Auto-selection never picks a deferred item — not sorted last, absent — while
+// naming one does not go through auto-selection at all. That is the whole
+// difference between deferring an item and disabling one, and the two are
+// otherwise indistinguishable in effect.
+func TestCmdResolve_NeverAutoSelectsADeferredItemButDrivesItByName(t *testing.T) {
+	// The deferred item outranks the other on priority AND is older, so it
+	// would be taken first if deferral did anything less than remove it.
+	seed := func() *fake.Orchestrator {
+		be := fake.New()
+		seedAged(be, "deferred-critical", janSel, flow.PriorityCritical, flow.UrgencyDeferred)
+		seedAged(be, "ordinary-low", marSel, flow.PriorityLow, "")
+		return be
+	}
+
+	be := seed()
+	app, _, errBuf := resolveTestApp(t, be)
+	if code := app.cmdResolve(context.Background(), nil); code != 0 {
+		t.Fatalf("cmdResolve = %d; err=%q", code, errBuf.String())
+	}
+	// (1/1) is the assertion that it is ABSENT: an item sorted last would still
+	// be in the set, and a fleet with spare capacity reaches the whole set.
+	if !strings.Contains(errBuf.String(), "auto-selecting ordinary-low (1/1)") {
+		t.Errorf("the deferred item was in the selectable set; got:\n%s", errBuf.String())
+	}
+
+	// Named, the same item is claimed and driven normally.
+	be2 := seed()
+	app2, _, errBuf2 := resolveTestApp(t, be2)
+	if code := app2.cmdResolve(context.Background(), []string{"deferred-critical"}); code != 0 {
+		t.Fatalf("cmdResolve by name = %d; err=%q", code, errBuf2.String())
+	}
+	state, err := be2.Load(context.Background(), flow.ItemRef{
+		OrchestratorName: "fake", Ref: json.RawMessage(`"deferred-critical"`)})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if rec := state.Artifact("plan"); !rec.Resolved {
+		t.Errorf("plan artifact = %+v, want the named deferred item driven to a resolved artifact", rec)
+	}
+}
