@@ -85,20 +85,38 @@ func (app *App) cmdList(ctx context.Context, args []string) int {
 			return
 		}
 		for _, it := range payload.Items {
-			owner := it.Owner
-			if owner == "" {
-				owner = "—"
-			}
+			// An empty availability is a backend defect, not an absent value,
+			// so it gets its own marker rather than the absent-cell dash.
 			avail := it.Availability
 			if avail == "" {
 				avail = "?"
 			}
+			// Ref and availability lead, for addressability and scanning; the
+			// title takes the flexible tail; tags sit compact between, joined
+			// with a bare comma so the cell reads as one token and the eye
+			// lands on the title after it. Every tag prints verbatim, in the
+			// backend's order — the listing reports them in full, not only
+			// those a flow recognises. The title goes through titleLine, which
+			// bounds free backend prose to one line: tab is the column
+			// separator, so a tab in a title would otherwise shift the row.
+			//
 			// The order the orchestrator returned is preserved as it came: at
 			// scope `auto` that IS the selection order, and re-sorting here
 			// would answer "what runs next" with the CLI's own opinion.
-			fmt.Fprintf(app.Out, "%s\t%s\t%s\t%s\t%s\n", it.Display, avail, it.Urgency, it.Priority, owner)
+			fmt.Fprintf(app.Out, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				it.Display, avail, it.Urgency, it.Priority,
+				orDash(it.Owner), orDash(strings.Join(it.Tags, ",")), orDash(titleLine(it.Title)))
 		}
 	})
+}
+
+// orDash renders an absent listing cell as "—", so a row never carries an
+// empty column that a reader cannot tell from a dropped one.
+func orDash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
 }
 
 // tagFilter validates the operator's --tag values into TagIds.

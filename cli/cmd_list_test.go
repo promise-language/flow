@@ -51,10 +51,86 @@ func TestCmdList_DefaultScope(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("cmdList = %d; stderr=%q", code, errBuf.String())
 	}
-	// The listing line is display, availability, holder — the three things a
-	// person scanning for something to work needs.
+	// The listing line is display, availability, urgency, priority, holder,
+	// tags, title — ref and availability lead so a person scanning for
+	// something to work can address it, and the title trails so they can tell
+	// what it is.
 	if !strings.Contains(out.String(), "1\tauto") {
 		t.Errorf("output missing the item's display and availability; got:\n%s", out.String())
+	}
+}
+
+// The human row carries the title and the tags the report already holds, so a
+// reader is not sent to the backend's web UI to learn what an item IS. The
+// whole line is asserted, not just presence: the column order is the contract
+// a `cut -f` reader depends on. Tags print in full, in backend order, joined
+// by a bare comma.
+func TestCmdList_HumanRowCarriesTitleAndTags(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{
+		Type:  "task",
+		Title: "Startup validation does not validate the graph",
+		Tags:  []flow.TagId{"cli", "bug"},
+	})
+	app, out := selectionApp(t, be)
+
+	if code := app.cmdList(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdList = %d", code)
+	}
+	want := "1\tauto\tdefault\tmedium\t—\tcli,bug\tStartup validation does not validate the graph\n"
+	if got := out.String(); got != want {
+		t.Errorf("row = %q, want %q", got, want)
+	}
+}
+
+// The title cell is bounded the way the status header's is, through the same
+// titleLine: a newline or a tab in a title stays ONE row with ONE title cell
+// (tab is the column separator, so an uncollapsed one would shift every cell
+// after it), and an over-long title is clipped with an ellipsis. One case
+// each — the clipping table itself is titleLine's own test.
+func TestCmdList_HumanRowBoundsTheTitle(t *testing.T) {
+	t.Run("whitespace collapses to one line", func(t *testing.T) {
+		be := fake.New()
+		be.AddItem("1", flow.Item{Type: "task", Title: "first line\nsecond\tline"})
+		app, out := selectionApp(t, be)
+
+		if code := app.cmdList(context.Background(), []string{"--human"}); code != 0 {
+			t.Fatalf("cmdList = %d", code)
+		}
+		want := "1\tauto\tdefault\tmedium\t—\t—\tfirst line second line\n"
+		if got := out.String(); got != want {
+			t.Errorf("row = %q, want %q", got, want)
+		}
+	})
+	t.Run("over-long title is clipped", func(t *testing.T) {
+		be := fake.New()
+		be.AddItem("1", flow.Item{Type: "task", Title: strings.Repeat("a", statusTitleMax+10)})
+		app, out := selectionApp(t, be)
+
+		if code := app.cmdList(context.Background(), []string{"--human"}); code != 0 {
+			t.Fatalf("cmdList = %d", code)
+		}
+		want := "1\tauto\tdefault\tmedium\t—\t—\t" + strings.Repeat("a", statusTitleMax) + "…\n"
+		if got := out.String(); got != want {
+			t.Errorf("row = %q, want %q", got, want)
+		}
+	})
+}
+
+// An item with no title and no tags still fills every cell: owner, tags and
+// title each render as "—", so the row keeps its column count and a reader
+// can tell an absent value from a dropped column.
+func TestCmdList_HumanRowMarksAbsentTitleAndTags(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task"})
+	app, out := selectionApp(t, be)
+
+	if code := app.cmdList(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdList = %d", code)
+	}
+	want := "1\tauto\tdefault\tmedium\t—\t—\t—\n"
+	if got := out.String(); got != want {
+		t.Errorf("row = %q, want %q", got, want)
 	}
 }
 

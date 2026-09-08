@@ -400,11 +400,12 @@ func axesLine(axes []axisReportPayload) string {
 	return flow.FormatAxes(reports)
 }
 
-// statusTitleMax bounds the human "title:" line, in runes. Item.Title is free
-// prose the backend supplies — a pasted paragraph or a 300-char sentence would
-// swamp the three-line header the operator actually reads and wrap it across
-// the terminal. JSON carries the title unclipped, so nothing that needs the
-// whole string loses it.
+// statusTitleMax bounds the human "title:" line, in runes — and the title cell
+// of the human listing row, which renders through the same titleLine.
+// Item.Title is free prose the backend supplies — a pasted paragraph or a
+// 300-char sentence would swamp the three-line header the operator actually
+// reads and wrap it across the terminal. JSON carries the title unclipped, so
+// nothing that needs the whole string loses it.
 const statusTitleMax = 72
 
 // titleLine renders a title as ONE bounded line: every whitespace run
@@ -412,7 +413,9 @@ const statusTitleMax = 72
 // title cannot break the header block, and the result is clipped to
 // statusTitleMax RUNES — not bytes, which would split a multi-byte character
 // mid-sequence and print a replacement glyph. Returns "" for a title that is
-// empty or all whitespace; the caller drops the line entirely.
+// empty or all whitespace; the caller drops the line entirely. The human
+// listing row's title cell uses it too: there the collapse matters twice over,
+// because tab is the row's column separator.
 func titleLine(title string) string {
 	s := strings.Join(strings.Fields(title), " ")
 	if s == "" {
