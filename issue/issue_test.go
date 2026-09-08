@@ -862,12 +862,17 @@ func TestDetectWaitsOn(t *testing.T) {
 		in          string
 		wantSummary string
 		wantRefs    []string
-		wantOK      bool
+		// wantBlock is the block VERBATIM, notes and all — it is what an
+		// operator is shown when a reference cannot be used, so the lines the
+		// parser skipped matter as much as the ones it read.
+		wantBlock string
+		wantOK    bool
 	}{
 		{
 			"one ref with a note",
 			"I read the tree.\nPLAN-WAITS-ON: needs the parser first\n```\n#12  the parser this builds on\n```",
-			"needs the parser first", []string{"12"}, true,
+			"needs the parser first", []string{"12"},
+			"#12  the parser this builds on", true,
 		},
 		{
 			// The `#` is the shape's, not the reference's: what comes out is what
@@ -877,87 +882,93 @@ func TestDetectWaitsOn(t *testing.T) {
 			// inside it.
 			"several refs, notes and blank lines",
 			"PLAN-WAITS-ON: waits on three\n```\n#12 parser\n\n#13\towner/repo#14 is not this line's ref\n#owner/repo#14\n```",
-			"waits on three", []string{"12", "13", "owner/repo#14"}, true,
+			"waits on three", []string{"12", "13", "owner/repo#14"},
+			"#12 parser\n\n#13\towner/repo#14 is not this line's ref\n#owner/repo#14", true,
 		},
 		{
 			// The reported defect (#280): the note ran onto a second line, whose
 			// first word is prose. Reading it as a reference sent `(same` to the
-			// tracker and killed the step.
+			// tracker and killed the step. The prose line stays IN the block —
+			// it is the line an operator has to see to know their note wrapped.
 			"a note that wraps is not a reference",
 			"PLAN-WAITS-ON: waits on the migration\n```\n#231 migrate issueflow to the new parser\n(same work as #232)\n```",
-			"waits on the migration", []string{"231"}, true,
+			"waits on the migration", []string{"231"},
+			"#231 migrate issueflow to the new parser\n(same work as #232)", true,
 		},
 		{
 			"a line without the # is a note, not a reference",
 			"PLAN-WAITS-ON: needs the parser\n```\n12 the parser\n```",
-			"", nil, false,
+			"", nil, "", false,
 		},
 		{
 			// A block that is all prose names no item, so it is not a sentinel
 			// and scanning continues — the documented skip, not a failure.
 			"a block of pure prose names nothing",
 			"PLAN-WAITS-ON: needs the parser\n```\nthe parser this builds on is not filed yet\n```",
-			"", nil, false,
+			"", nil, "", false,
 		},
 		{
 			"a bare # names nothing",
 			"PLAN-WAITS-ON: needs the parser\n```\n# the parser\n```",
-			"", nil, false,
+			"", nil, "", false,
 		},
 		{
 			"bare sentinel",
 			"PLAN-WAITS-ON:",
-			"", nil, false,
+			"", nil, "", false,
 		},
 		{
 			"summary without a block",
 			"PLAN-WAITS-ON: needs the parser",
-			"", nil, false,
+			"", nil, "", false,
 		},
 		{
 			"empty block names nothing",
 			"PLAN-WAITS-ON: needs the parser\n```\n\n```",
-			"", nil, false,
+			"", nil, "", false,
 		},
 		{
 			"sentinel not at column zero",
 			"    PLAN-WAITS-ON: needs the parser\n```\n#12\n```",
-			"", nil, false,
+			"", nil, "", false,
 		},
 		{
 			"mid-line mention does not trip",
 			"the convention is PLAN-WAITS-ON: <summary> at line start\n```\n#12\n```",
-			"", nil, false,
+			"", nil, "", false,
 		},
 		{
+			// The block travels with the summary it belongs to: showing an
+			// operator the first guess's block beside the last one's summary
+			// would be worse than showing none.
 			"multiple sentinels — last one wins",
 			"PLAN-WAITS-ON: first guess\n```\n#7\n```\nPLAN-WAITS-ON: the real finding\n```\n#12 the parser\n```",
-			"the real finding", []string{"12"}, true,
+			"the real finding", []string{"12"}, "#12 the parser", true,
 		},
 		{
 			"later sentinel without a block falls through to the earlier one",
 			"PLAN-WAITS-ON: with block\n```\n#7\n```\nPLAN-WAITS-ON: no block here",
-			"with block", []string{"7"}, true,
+			"with block", []string{"7"}, "#7", true,
 		},
 		{
 			"indented example ignored, real one honored",
 			"    PLAN-WAITS-ON: <one-line summary>\n    ```\n    #<n>  <why>\n    ```\nPLAN-WAITS-ON: needs the parser\n```\n#12\n```",
-			"needs the parser", []string{"12"}, true,
+			"needs the parser", []string{"12"}, "#12", true,
 		},
 		{
 			"blank lines before fence tolerated",
 			"PLAN-WAITS-ON: needs the parser\n\n\n```\n#12\n```",
-			"needs the parser", []string{"12"}, true,
+			"needs the parser", []string{"12"}, "#12", true,
 		},
 		{
 			"unterminated fence keeps remainder",
 			"PLAN-WAITS-ON: needs the parser\n```\n#12 never closes",
-			"needs the parser", []string{"12"}, true,
+			"needs the parser", []string{"12"}, "#12 never closes", true,
 		},
 		{
 			"empty text",
 			"",
-			"", nil, false,
+			"", nil, "", false,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -966,11 +977,8 @@ func TestDetectWaitsOn(t *testing.T) {
 				t.Errorf("detectWaitsOn(%q) = (%q, %v, %v), want (%q, %v, %v)",
 					tc.in, summary, refs, ok, tc.wantSummary, tc.wantRefs, tc.wantOK)
 			}
-			// The block comes back so a caller can show it; a detected sentinel
-			// that returned no block would leave the failure as mystifying as
-			// the one token it quotes.
-			if ok && block == "" {
-				t.Errorf("detectWaitsOn(%q) returned no block alongside %v", tc.in, refs)
+			if block != tc.wantBlock {
+				t.Errorf("detectWaitsOn(%q) block = %q, want %q", tc.in, block, tc.wantBlock)
 			}
 		})
 	}
@@ -997,6 +1005,17 @@ func TestPlanStepResolutionTeachesWaitsOn(t *testing.T) {
 	}
 	if !strings.Contains(body, "replaces this one") {
 		t.Error("the duplicate refusal must be sharpened to the item that replaces this one, or it swallows waits-on")
+	}
+	// refTokens reads only lines that open with `#`, and it reads NOTHING else
+	// — a block written without the prefix declares no wait and the flow moves
+	// on. That is a rule the agent cannot infer from the illustration alone, so
+	// the prompt has to state it or #280 comes back as a silent version of
+	// itself: the wait dropped instead of the step killed.
+	if !strings.Contains(body, "must begin with #") {
+		t.Error("PlanStepResolution must state that a reference line begins with #<n>, which is all refTokens reads")
+	}
+	if !strings.Contains(body, "declares no wait") {
+		t.Error("PlanStepResolution must state what a block naming no #<n> costs — the declaration, silently")
 	}
 }
 

@@ -206,7 +206,9 @@ why it is waited on. The shape (shown indented here; write yours flush left):
     ` + "```" + `
 
 Every reference line must begin with #<n>. A line that does not is a note and
-is ignored, so a note may wrap onto as many lines as it needs.`
+is ignored, so a note may wrap onto as many lines as it needs — and a block
+whose lines all lack the prefix declares no wait at all, so the flow reads no
+declaration and carries on.`
 
 // repoRelativePaths is carried by every default prompt whose product is
 // published on the item.
