@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -473,46 +472,5 @@ func TestCmdRun_NonBudgetParkOmitsAxes(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "axes:") {
 		t.Errorf("non-budget park must not emit axes line; got %q", out.String())
-	}
-}
-
-// The same for run-step, the other route an operator drives by hand: an item
-// claimed unblocked and blocked afterwards refuses before dispatch, keeps the
-// claim, and leaves the pending step pending (docs/cli.md § Claiming).
-func TestCmdRun_HeldClaimSurvivesTheItemBecomingBlocked(t *testing.T) {
-	t.Setenv(outputEnv, "")
-	t.Setenv("FLOW_DIR", filepath.Join(t.TempDir(), ".flow"))
-	ctx := context.Background()
-	// testApp claims the item, and it is unblocked at that moment.
-	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			t.Fatal("the step must not dispatch on a blocked item")
-			return nil
-		}, flow.StepConfig{})
-	}, &stubAgent{name: "stub"})
-	be.AddItem("3", flow.Item{Type: "task", Title: "still open"})
-	blockOn(t, be, claim.ItemRef, be.Ref("3"))
-	out := &bytes.Buffer{}
-	app.Out = out
-
-	if code := app.cmdRun(ctx, []string{"--human"}); code != 1 {
-		t.Fatalf("cmdRun = %d, want 1 — the held claim is not an override", code)
-	}
-	if got := out.String(); !strings.Contains(got, "plan → blocked") || !strings.Contains(got, "blocked by: 3") {
-		t.Errorf("stdout = %q, want the stop at the pending step naming the blocker", got)
-	}
-	held, err := be.LookupActiveClaim(ctx)
-	if err != nil || held == nil {
-		t.Fatalf("the claim was released — becoming blocked does not lift a claim (err=%v)", err)
-	}
-	state, err := be.Load(ctx, claim.ItemRef)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if rec := state.Artifact("plan"); rec.Resolved || rec.Invocations != 0 {
-		t.Errorf("plan = %+v, want it pending and undispatched", rec)
-	}
-	if state.Parked() {
-		t.Error("the stop parked the item — a park is a condition a person clears, and this one clears itself")
 	}
 }

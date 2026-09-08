@@ -197,6 +197,14 @@ func flowName(eligible, typeFlow *flow.Flow) string {
 
 // statusFlowState is the machine-readable counterpart of statusFlowLine: the
 // same decision, as a closed enum instead of a rendered string.
+//
+// The "will the next advance run a step?" half of it is RunOne's own predicate,
+// blockedFromAdvancing, rather than a restatement of it: an item that reads
+// `eligible` here and stops before dispatch there is the one fact answered two
+// ways this reports to prevent. It displaces `eligible` and nothing else — a
+// finalized item is finalized whatever it waits on, and an item with no
+// eligible step has nothing to be blocked from, which is exactly where RunOne
+// puts the check too.
 func statusFlowState(state *flow.Item, eligible, typeFlow *flow.Flow) string {
 	if state.Finalized {
 		return flowStateFinalized
@@ -244,19 +252,6 @@ func statusFlowLine(state *flow.Item, eligible, typeFlow *flow.Flow) string {
 		return typeFlow.Name() + " (no eligible step)"
 	}
 	return "(no matching flow)"
-}
-
-// blockedFromAdvancing answers the one question the "flow:" line asks: will the
-// next advance run a step? It MIRRORS RunOne's pre-dispatch stop, which is
-// waits-on-items and no other kind — the person and condition kinds are
-// park-derived, and `status` already reports those through the park stanza that
-// names what would clear them. Reporting a wider set here would call an item
-// blocked that the next `run-step` would happily run.
-//
-// It displaces `eligible` only. A finalized item is finalized whatever it waits
-// on, and an item with no eligible step has nothing to be blocked from.
-func blockedFromAdvancing(state *flow.Item) bool {
-	return state.Blocked && state.BlockKind == flow.WaitsOnItems
 }
 
 // blockLine renders a block for humans the way parkLine renders a park: the
