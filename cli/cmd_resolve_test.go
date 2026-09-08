@@ -1884,3 +1884,60 @@ func TestCmdResolve_PaceZeroSkipsPacing(t *testing.T) {
 		t.Errorf("pace targets 0 should skip pacing entirely; got:\n%s", output)
 	}
 }
+
+// A claim taken while the item was workable SURVIVES the item becoming blocked
+// (docs/cli.md § Claiming): a dependency declared after the claim, or a blocker
+// reopened. `resolve` with no argument resumes that held claim, refuses before
+// dispatching, and leaves everything where it was — so the item runs from here
+// the moment its last blocker lands, with nobody having reset anything.
+func TestCmdResolve_HeldClaimSurvivesTheItemBecomingBlocked(t *testing.T) {
+	ctx := context.Background()
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be.AddItem("3", flow.Item{Type: "task", Title: "still open"})
+	ran := false
+	app, out, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+		ran = true
+		return ctx.ResolveMarkdown("the plan")
+	})
+	// Claimed UNBLOCKED. The dependency is declared only afterwards.
+	if _, err := be.Claim(ctx, be.Ref("1"), nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	blockOn(t, be, be.Ref("1"), be.Ref("3"))
+
+	// No argument: the active claim is the selection, and it is not consulted
+	// for blockedness by auto-selection because auto-selection never runs.
+	code := app.cmdResolve(ctx, nil)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 — the held claim is not an override; err=%q", code, errBuf.String())
+	}
+	got := errBuf.String()
+	if !strings.Contains(got, "plan → blocked — waiting on unfinished dependencies") {
+		t.Errorf("expected the pre-dispatch stop at the pending step; got %q", got)
+	}
+	if !strings.Contains(got, "blocked by: 3") {
+		t.Errorf("expected the open blocker named; got %q", got)
+	}
+	if ran {
+		t.Error("the step ran on a blocked item")
+	}
+	if out.Len() != 0 {
+		t.Errorf("human mode wrote to stdout: %q", out.String())
+	}
+	held, err := be.LookupActiveClaim(ctx)
+	if err != nil || held == nil {
+		t.Fatalf("the claim was released — becoming blocked does not lift a claim (err=%v)", err)
+	}
+	// Nothing was spent and nothing moved: the pending step is still pending.
+	state, err := be.Load(ctx, be.Ref("1"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if rec := state.Artifact("plan"); rec.Resolved || rec.Invocations != 0 {
+		t.Errorf("plan = %+v, want it pending and undispatched", rec)
+	}
+	if state.Parked() {
+		t.Error("the stop parked the item — a park is a condition a person clears, and this one clears itself")
+	}
+}

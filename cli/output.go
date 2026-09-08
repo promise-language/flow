@@ -132,6 +132,7 @@ const (
 // Flow states, as reported in the status payload's flow_state.
 const (
 	flowStateEligible       = "eligible"
+	flowStateBlocked        = "blocked"
 	flowStateFinalized      = "finalized"
 	flowStateNotSeeded      = "not-seeded"
 	flowStateNoEligibleStep = "no-eligible-step"
@@ -157,11 +158,15 @@ type statusPayload struct {
 	// Priority and Urgency are the two selection axes. Always present, for the
 	// reason Title is: an item nothing has said anything about reports
 	// "medium"/"default" rather than dropping the field.
-	Priority  string            `json:"priority"`
-	Urgency   string            `json:"urgency"`
-	Overrides []string          `json:"overrides,omitempty"`
-	Flow      string            `json:"flow"`
-	FlowState string            `json:"flow_state"`
+	Priority  string   `json:"priority"`
+	Urgency   string   `json:"urgency"`
+	Overrides []string `json:"overrides,omitempty"`
+	Flow      string   `json:"flow"`
+	FlowState string   `json:"flow_state"`
+	// The block, in the same keys `list` reports it under — the fact `list` and
+	// `status` are required to answer identically for the same item at the same
+	// moment (docs/orchestrator.md § Dependencies).
+	blockPayload
 	Finalized bool              `json:"finalized"`
 	Park      *parkPayload      `json:"park"`
 	Steps     []stepPayload     `json:"steps"`
@@ -251,6 +256,14 @@ type listItemPayload struct {
 	// contract.
 	Priority string `json:"priority"`
 	Urgency  string `json:"urgency"`
+	blockPayload
+}
+
+// blockPayload is the item's block, as `list` and `status` both report it.
+// Embedded anonymously, so encoding/json flattens it into the payload that
+// carries it: one set of keys with one meaning, and neither command can grow a
+// field the other lacks.
+type blockPayload struct {
 	// Blocked answers "is this blocked right now?" — item-level, and the same
 	// whoever asks, unlike Availability which reports `closed` or `unhandled`
 	// instead when those come first on the ladder.

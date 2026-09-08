@@ -84,7 +84,7 @@ func (app *App) cmdRun(ctx context.Context, args []string) int {
 		if res.Park != nil && len(res.Park.Axes) > 0 {
 			line += "\n  axes: " + flow.FormatAxes(res.Park.Axes)
 		}
-		if bl := blockedByLine(res); bl != "" {
+		if bl := blockedByLine(openBlockers(res.BlockKind, res.BlockedBy)); bl != "" {
 			line += "\n  " + bl
 		}
 		fmt.Fprintln(app.Out, line)

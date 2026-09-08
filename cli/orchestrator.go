@@ -142,10 +142,6 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// and a blocker reopened blocks it again at the next read, with nobody
 	// having touched the item either time.
 	//
-	// Only waits-on-items stops here. The person and condition kinds are
-	// park-derived, and the answer preflight, the budget gate and the park
-	// machinery already own them.
-	//
 	// Before the preflight, so an item both waiting on items and awaiting an
 	// answer reports waits-on-items — the precedence the derivation itself
 	// gives it, so this report cannot disagree with `status`. After the
@@ -156,7 +152,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// invocation bump, no park, no running record. The claim is kept — an
 	// arena reservation, not work — and the pending step stays pending, so
 	// when the last blocker lands the next advance runs it from here.
-	if state.Blocked && state.BlockKind == flow.WaitsOnItems {
+	if blockedFromAdvancing(state) {
 		li, err := lifecycleItemOf(f, nextName)
 		if err != nil {
 			return flow.InvocationResult{}, err
@@ -399,7 +395,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		if err != nil {
 			return flow.InvocationResult{}, fmt.Errorf("reload after declaring blockers: %w", err)
 		}
-		if state.Blocked && state.BlockKind == flow.WaitsOnItems {
+		if blockedFromAdvancing(state) {
 			return sctx.stampResult(blockedOnItems(state, result), nil)
 		}
 		handlerErr = fmt.Errorf(
@@ -661,6 +657,21 @@ func lifecycleItemOf(f *flow.Flow, name string) (flow.LifecycleItem, error) {
 		return flow.LifecycleItem{}, fmt.Errorf("flow %q has no step %q", f.Name(), name)
 	}
 	return li, nil
+}
+
+// blockedFromAdvancing answers the one question a block puts to an advance:
+// does the item wait on items that are still open? It is the condition both of
+// RunOne's clean stops turn on — the check before dispatch, and the reload
+// after a step declared the blockers it found — and the one `status` reports
+// through, so the advance and the report cannot disagree about whether the
+// next run will run a step.
+//
+// Only waits-on-items. The person and condition kinds are park-derived, and
+// the answer preflight, the budget gate and the park machinery already own
+// them: an advance runs straight through those, so calling them blocked here
+// would stop a step nothing is waiting on.
+func blockedFromAdvancing(state *flow.Item) bool {
+	return state.Blocked && state.BlockKind == flow.WaitsOnItems
 }
 
 // blockedOnItems is the report for a stop on the item's own blockedness, built

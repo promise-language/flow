@@ -91,10 +91,14 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		Overrides: overrides,
 		Flow:      flowName(f, typeFlow),
 		FlowState: statusFlowState(state, f, typeFlow),
-		Finalized: state.Finalized,
-		Park:      parkPayloadOf(state.Park),
-		Steps:     stepPayloads(typeFlow, state),
-		Questions: questionPayloads(state),
+		// Every kind, not only the one that stops an advance: the block is the
+		// item's, and reporting the subset this command acts on would answer a
+		// different question from the one `list` answers about the same item.
+		blockPayload: blockPayloadOf(state.Blocked, state.BlockKind, state.BlockReason, state.BlockedBy),
+		Finalized:    state.Finalized,
+		Park:         parkPayloadOf(state.Park),
+		Steps:        stepPayloads(typeFlow, state),
+		Questions:    questionPayloads(state),
 	}
 
 	return app.emit(mode, payload, func() {
@@ -121,6 +125,13 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		// nothing.
 		printChecklist(app, payload.Steps)
 
+		// Above the park, because a park is one of the things a block is
+		// derived FROM: reading "blocked: waits-on-person — budget exhausted"
+		// and then the park that says which step and which axis is the order
+		// the two facts explain each other in.
+		if payload.Blocked {
+			fmt.Fprintf(app.Out, "\nblocked: %s\n", blockLine(payload.blockPayload))
+		}
 		if payload.Park != nil {
 			fmt.Fprintf(app.Out, "\nparked: %s\n", parkLine(payload.Park))
 		}
@@ -186,11 +197,22 @@ func flowName(eligible, typeFlow *flow.Flow) string {
 
 // statusFlowState is the machine-readable counterpart of statusFlowLine: the
 // same decision, as a closed enum instead of a rendered string.
+//
+// The "will the next advance run a step?" half of it is RunOne's own predicate,
+// blockedFromAdvancing, rather than a restatement of it: an item that reads
+// `eligible` here and stops before dispatch there is the one fact answered two
+// ways this reports to prevent. It displaces `eligible` and nothing else — a
+// finalized item is finalized whatever it waits on, and an item with no
+// eligible step has nothing to be blocked from, which is exactly where RunOne
+// puts the check too.
 func statusFlowState(state *flow.Item, eligible, typeFlow *flow.Flow) string {
 	if state.Finalized {
 		return flowStateFinalized
 	}
 	if eligible != nil {
+		if blockedFromAdvancing(state) {
+			return flowStateBlocked
+		}
 		return flowStateEligible
 	}
 	if typeFlow != nil {
@@ -218,6 +240,9 @@ func statusFlowLine(state *flow.Item, eligible, typeFlow *flow.Flow) string {
 		return "finalized"
 	}
 	if eligible != nil {
+		if blockedFromAdvancing(state) {
+			return eligible.Name() + " (blocked)"
+		}
 		return eligible.Name()
 	}
 	if typeFlow != nil {
@@ -227,6 +252,22 @@ func statusFlowLine(state *flow.Item, eligible, typeFlow *flow.Flow) string {
 		return typeFlow.Name() + " (no eligible step)"
 	}
 	return "(no matching flow)"
+}
+
+// blockLine renders a block for humans the way parkLine renders a park: the
+// kind, then the reason. A block that names items carries a second, indented
+// line listing the ones still open — the references are what the operator goes
+// and works instead, and the reason never names them.
+func blockLine(b blockPayload) string {
+	var sb strings.Builder
+	sb.WriteString(b.BlockKind)
+	if b.BlockReason != "" {
+		fmt.Fprintf(&sb, " — %s", b.BlockReason)
+	}
+	if line := blockedByLine(b.BlockedBy); line != "" {
+		fmt.Fprintf(&sb, "\n  %s", line)
+	}
+	return sb.String()
 }
 
 // stepPayloads projects a flow's lifecycle items onto the state. Returns an

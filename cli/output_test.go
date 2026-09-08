@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -90,6 +92,16 @@ func TestStatusJSON_Schema(t *testing.T) {
 	m := decode(t, env.out)
 
 	for _, key := range []string{"item", "title", "owner", "flow", "flow_state", "finalized", "park", "steps", "questions"} {
+		if _, ok := m[key]; !ok {
+			t.Errorf("payload missing %q: %v", key, m)
+		}
+	}
+
+	// The block, in the same keys `list` reports it under. A budget park is a
+	// block the orchestrator derives, so this item carries one — and `status`
+	// reports every kind, not only the one that stops an advance. No
+	// `blocked_by`: this block names no items.
+	for _, key := range []string{"blocked", "block_kind", "block_reason"} {
 		if _, ok := m[key]; !ok {
 			t.Errorf("payload missing %q: %v", key, m)
 		}
@@ -311,6 +323,56 @@ func TestUsage_NamesExactlyTheCommandsTakingOutputFlags(t *testing.T) {
 		if named := strings.Contains(note, cmd); named != takesFlags {
 			t.Errorf("%s: named in the output-modes note = %v, takes --json/--human = %v — the two must agree.\nnote: %q",
 				cmd, named, takesFlags, note)
+		}
+	}
+}
+
+// The block fields live in a struct both payloads embed. encoding/json flattens
+// an anonymous embed, so the listing's key set is exactly what it always was —
+// and `list --json` stays byte-identical for callers already reading it.
+func TestListItemPayload_EmbeddedBlockKeysStayFlat(t *testing.T) {
+	b, err := json.Marshal(listItemPayload{
+		Display: "1", Title: "t", Owner: "acct", Backend: "fake", Availability: "blocked",
+		Tags: []string{"cli"}, Priority: "medium", Urgency: "default",
+		blockPayload: blockPayload{
+			Blocked: true, BlockKind: "waits-on-items", BlockReason: "waiting", BlockedBy: []string{"3"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal %s: %v", b, err)
+	}
+	want := []string{
+		"availability", "block_kind", "block_reason", "blocked", "blocked_by",
+		"display", "orchestrator", "owner", "priority", "tags", "title", "urgency",
+	}
+	got := slices.Sorted(maps.Keys(m))
+	if !slices.Equal(got, want) {
+		t.Errorf("listing keys = %v, want %v — the embed must flatten, not nest", got, want)
+	}
+}
+
+// And the same four keys reach the status payload, spelled identically: one
+// fact, one pair of answers.
+func TestStatusPayload_EmbeddedBlockKeysStayFlat(t *testing.T) {
+	b, err := json.Marshal(statusPayload{
+		blockPayload: blockPayload{
+			Blocked: true, BlockKind: "waits-on-items", BlockReason: "waiting", BlockedBy: []string{"3"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal %s: %v", b, err)
+	}
+	for _, key := range []string{"blocked", "block_kind", "block_reason", "blocked_by"} {
+		if _, ok := m[key]; !ok {
+			t.Errorf("status payload missing %q: %v", key, m)
 		}
 	}
 }

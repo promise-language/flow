@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -152,6 +153,168 @@ func TestCmdClaim_ForceUnadmittedFlag(t *testing.T) {
 	// --force-unadmitted alone must NOT include the dirty-tree or already-held overrides.
 	if slices.Contains(wrapped.lastOverrides, flow.OverrideDirtyTree) {
 		t.Errorf("OverrideDirtyTree present without --force; overrides=%v", wrapped.lastOverrides)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Open blockers WARN, and never refuse (docs/cli.md § Claiming). A claim is an
+// arena reservation — this worktree, this item — and taking one does no work,
+// so the dependency has nothing to stop here. It stops the next advance.
+// ---------------------------------------------------------------------------
+
+// claimEnv is one unclaimed item on a fresh backend, with both streams
+// captured: the claim under test is the one cmdClaim mints.
+type claimEnv struct {
+	app *App
+	be  *fake.Orchestrator
+	out *bytes.Buffer
+	err *bytes.Buffer
+}
+
+func newClaimEnv(t *testing.T) *claimEnv {
+	t.Helper()
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "the item"})
+	env := &claimEnv{be: be, out: &bytes.Buffer{}, err: &bytes.Buffer{}}
+	env.app = &App{Orchestrator: be, Out: env.out, Err: env.err}
+	return env
+}
+
+// The whole warning: exit 0, the result on stdout, and the narration on stderr
+// naming the blocker still open — and not the one that has landed, which is
+// nowhere to send anybody.
+func TestCmdClaim_OpenBlockersWarnWithoutRefusing(t *testing.T) {
+	env := newClaimEnv(t)
+	env.be.AddItem("2", flow.Item{Type: "task", Title: "landed"})
+	env.be.AddItem("3", flow.Item{Type: "task", Title: "still open"})
+	env.be.SetStatus("2", flow.StatusTerminal, "done")
+	blockOn(t, env.be, env.be.Ref("1"), env.be.Ref("2"))
+	blockOn(t, env.be, env.be.Ref("1"), env.be.Ref("3"))
+
+	code := env.app.cmdClaim(context.Background(), []string{"1"})
+	if code != 0 {
+		t.Fatalf("cmdClaim = %d, want 0 — open blockers do not refuse a claim; stderr=%q", code, env.err.String())
+	}
+	// The result is the claim, and it goes to stdout alone.
+	if got := env.out.String(); !strings.Contains(got, "claimed 1 as ") {
+		t.Errorf("stdout = %q, want the claim result", got)
+	}
+	warn := env.err.String()
+	if !strings.Contains(warn, "blocked by: 3") {
+		t.Errorf("stderr = %q, want the open blocker named", warn)
+	}
+	if strings.Contains(warn, "2") {
+		t.Errorf("stderr = %q, names a blocker that has already landed", warn)
+	}
+	if !strings.Contains(warn, "the next advance will stop on them") {
+		t.Errorf("stderr = %q, want it to say what the block will do", warn)
+	}
+	// And the lease is real: a warning is not a half-taken claim.
+	if held, _ := env.be.LookupActiveClaim(context.Background()); held == nil {
+		t.Error("no claim was taken — the warning must not stand in for the claim")
+	}
+}
+
+func TestCmdClaim_UnblockedItemWarnsNothing(t *testing.T) {
+	env := newClaimEnv(t)
+
+	if code := env.app.cmdClaim(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("cmdClaim = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	if got := env.err.String(); got != "" {
+		t.Errorf("stderr = %q, want nothing for an item with no blockers", got)
+	}
+}
+
+// Every declared blocker has finished: the item is workable, so a warning
+// would send the operator to work something already done.
+func TestCmdClaim_LandedBlockersWarnNothing(t *testing.T) {
+	env := newClaimEnv(t)
+	env.be.AddItem("2", flow.Item{Type: "task", Title: "landed"})
+	env.be.SetStatus("2", flow.StatusTerminal, "done")
+	blockOn(t, env.be, env.be.Ref("1"), env.be.Ref("2"))
+
+	if code := env.app.cmdClaim(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("cmdClaim = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	if got := env.err.String(); got != "" {
+		t.Errorf("stderr = %q, want nothing once every blocker has landed", got)
+	}
+}
+
+// A block NOBODY declared items for warns nothing. The kind decides — a
+// park-derived block is somebody's move on this item, not somewhere else to go,
+// and the next advance runs straight through it (blockedFromAdvancing). Saying
+// "the next advance will stop on them" about it would be false twice over: no
+// them, and no stop.
+func TestCmdClaim_ParkDerivedBlockWarnsNothing(t *testing.T) {
+	env := newClaimEnv(t)
+	if err := env.be.Park(context.Background(), env.be.Ref("1"), budgetExhausted("plan", flow.AxisInvocations)); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+
+	if code := env.app.cmdClaim(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("cmdClaim = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	// The item IS blocked — the backend derives waits-on-person from the park —
+	// and the claim still says nothing about unfinished items.
+	state, err := env.be.Load(context.Background(), env.be.Ref("1"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !state.Blocked || state.BlockKind != flow.WaitsOnPerson {
+		t.Fatalf("item = blocked %v kind %q, want the park's waits-on-person — the test proves nothing otherwise",
+			state.Blocked, state.BlockKind)
+	}
+	if got := env.err.String(); got != "" {
+		t.Errorf("stderr = %q, want nothing — this block names no items to wait on", got)
+	}
+}
+
+// unreadableBackend mints claims normally and then cannot read the item back.
+type unreadableBackend struct{ *fake.Orchestrator }
+
+func (b unreadableBackend) Load(context.Context, flow.ItemRef) (*flow.Item, error) {
+	return nil, errors.New("backend unavailable")
+}
+
+// itemlessBackend answers the read with no item and no error — the shape a
+// third-party orchestrator can return, since Load's contract does not forbid
+// it, and the one that dereferences to a panic if nothing checks.
+type itemlessBackend struct{ *fake.Orchestrator }
+
+func (b itemlessBackend) Load(context.Context, flow.ItemRef) (*flow.Item, error) {
+	return nil, nil
+}
+
+// The warning is best-effort BECAUSE the lease is already minted: a read that
+// comes back with no item — failed, or empty — prints nothing and changes
+// nothing. Reporting it as a failure would leave an arena holding an item the
+// operator was told they did not get, and panicking on it would leave the same
+// arena holding an item behind a stack trace.
+func TestCmdClaim_AWarningReadThatYieldsNoItemIsSilentAndStillSucceeds(t *testing.T) {
+	tests := []struct {
+		name string
+		wrap func(*fake.Orchestrator) flow.Orchestrator
+	}{
+		{"the read fails", func(be *fake.Orchestrator) flow.Orchestrator { return unreadableBackend{be} }},
+		{"the read returns no item", func(be *fake.Orchestrator) flow.Orchestrator { return itemlessBackend{be} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := newClaimEnv(t)
+			env.app.Orchestrator = tt.wrap(env.be)
+
+			if code := env.app.cmdClaim(context.Background(), []string{"1"}); code != 0 {
+				t.Fatalf("cmdClaim = %d, want 0 — a warning read that yields nothing is not a failed claim; stderr=%q", code, env.err.String())
+			}
+			if got := env.out.String(); !strings.Contains(got, "claimed 1 as ") {
+				t.Errorf("stdout = %q, want the claim result", got)
+			}
+			if got := env.err.String(); got != "" {
+				t.Errorf("stderr = %q, want nothing — the read yielded nothing, and the claim did not fail", got)
+			}
+		})
 	}
 }
 
