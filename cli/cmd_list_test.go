@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -155,6 +156,87 @@ func TestCmdList_HumanRowMarksAbsentTitleAndTags(t *testing.T) {
 	want := "1\tauto\tdefault\tmedium\t—\t—\t—\n"
 	if got := out.String(); got != want {
 		t.Errorf("row = %q, want %q", got, want)
+	}
+}
+
+// A title that is all whitespace is absent, not blank: it renders as "—" like
+// a missing one, never as an empty cell. The collapse and the absent marker
+// compose in one order only — the marker applies to the collapsed title, so
+// whitespace the backend supplied cannot leave the row with an empty column
+// the reader cannot tell from a dropped one.
+func TestCmdList_HumanRowMarksAWhitespaceOnlyTitleAbsent(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: " \n\t "})
+	app, out := selectionApp(t, be)
+
+	if code := app.cmdList(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdList = %d", code)
+	}
+	want := "1\tauto\tdefault\tmedium\t—\t—\t—\n"
+	if got := out.String(); got != want {
+		t.Errorf("row = %q, want %q", got, want)
+	}
+}
+
+// Every column of the row filled with a real value, on a held item: the holder
+// sits between the axes and the tags, so the owner an operator scans for is
+// not displaced by the two cells this listing gained. The absent-cell tests
+// pin the column order with dashes; this one pins it with values, so a row
+// that printed the tags where the holder belongs — or dropped the holder for
+// the dash whatever the report said — fails here and nowhere else.
+func TestCmdList_HumanRowFillsEveryColumnOfAHeldItem(t *testing.T) {
+	be := &discovererBackend{
+		Orchestrator: fake.New(),
+		items: []flow.ItemInfo{{
+			Ref:          flow.ItemRef{OrchestratorName: "fake", Display: "o/r#1", Ref: json.RawMessage(`"1"`)},
+			Title:        "Startup validation does not validate the graph",
+			Availability: flow.AvailHeld,
+			Holder:       flow.Holder{Account: "djabi"},
+			Tags:         []flow.TagId{"cli", "bug"},
+			Priority:     flow.PriorityHigh,
+			Urgency:      flow.UrgencyNext,
+		}},
+	}
+	app, out := selectionApp(t, be)
+
+	if code := app.cmdList(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdList = %d", code)
+	}
+	want := "o/r#1\theld\tnext\thigh\tdjabi\tcli,bug\tStartup validation does not validate the graph\n"
+	if got := out.String(); got != want {
+		t.Errorf("row = %q, want %q", got, want)
+	}
+}
+
+// Human and JSON are two renderings of ONE report. The human row bounds the
+// title and collapses the tags because tab is its column separator; JSON has
+// no such constraint and carries both exactly as the backend supplied them —
+// unclipped, uncollapsed — so nothing that needs the whole string loses it.
+// A clip or a collapse applied where the report is built, rather than where
+// the human row is rendered, would pass every human-row test and fail here.
+func TestCmdList_JSONCarriesTitleAndTagsVerbatim(t *testing.T) {
+	title := "first line\nsecond\tline " + strings.Repeat("a", statusTitleMax+10)
+	tags := []flow.TagId{"needs\treview", flow.TagId(strings.Repeat("x", statusTitleMax+10))}
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: title, Tags: tags})
+	app, out := selectionApp(t, be)
+
+	if code := app.cmdList(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdList = %d", code)
+	}
+	var payload listPayload
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("decode listing: %v (%s)", err, out.String())
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("got %d items, want 1: %s", len(payload.Items), out.String())
+	}
+	it := payload.Items[0]
+	if it.Title != title {
+		t.Errorf("title = %q, want the backend's string verbatim %q", it.Title, title)
+	}
+	if want := tagStrings(tags); !slices.Equal(it.Tags, want) {
+		t.Errorf("tags = %q, want the backend's tags verbatim %q", it.Tags, want)
 	}
 }
 
