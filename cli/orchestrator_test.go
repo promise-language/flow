@@ -2067,11 +2067,11 @@ func TestRunOne_AskQuestionWithoutAnIdFailsInsteadOfParking(t *testing.T) {
 	}
 }
 
-// A question park raised through ctx.Park must carry the ask time, exactly as
-// the ctx.AskQuestions route does. Without it a reader scanning for answers has
-// no boundary and takes every comment already on the item — including ones
-// written long before the question — for a reply.
-func TestRunOne_HandlerQuestionParkCarriesAskTime(t *testing.T) {
+// ctx.Park registers no question, so a question park raised through it leaves
+// an item `answer` cannot clear — the same unanswerable state the ask route is
+// guarded against above, through the other door. The step must fail instead,
+// naming the route that works.
+func TestRunOne_HandlerQuestionParkFailsTheStep(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("asks", "plan", func(ctx flow.StepCtx) error {
 			return ctx.Park(flow.ParkRequest{
@@ -2085,21 +2085,87 @@ func TestRunOne_HandlerQuestionParkCarriesAskTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
-	if res.Park == nil || res.Park.Kind != flow.ParkQuestion {
-		t.Fatalf("res = %+v, want a question park", res)
+	assertQuestionParkRefused(t, be, claim, res)
+}
+
+// The sentinel is exported, so a handler can return it without going through
+// ctx.Park. The guard lives at the translation site — the write site — and so
+// catches this door too; this test fails if it is ever moved into stepCtx.Park.
+func TestRunOne_HandBuiltQuestionParkSentinelFailsTheStep(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("asks", "plan", func(ctx flow.StepCtx) error {
+			return flow.ErrPark{Req: flow.ParkRequest{
+				Kind:   flow.ParkQuestion,
+				Reason: "which database?",
+			}}
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
 	}
-	if flow.QuestionAskedAt(res.Park).IsZero() {
-		t.Errorf("Details = %q, want an asked-at marker", res.Park.Details)
+	assertQuestionParkRefused(t, be, claim, res)
+}
+
+// The refusal turns on the kind and nothing else. A handler that stamps the ask
+// time itself — the one shape the route used to let through untouched, since the
+// stamping it did was conditional on the mark being absent — has still registered
+// no question, so admitting it writes exactly the park `answer` cannot clear.
+func TestRunOne_QuestionParkStampedByTheHandlerIsStillRefused(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("asks", "plan", func(ctx flow.StepCtx) error {
+			return ctx.Park(flow.ParkRequest{
+				Kind:    flow.ParkQuestion,
+				Step:    "plan",
+				Reason:  "which database?",
+				Details: flow.MarkQuestionAsked(time.Now()),
+			})
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
 	}
-	if flow.QuestionAskedAt(be.ParkRequest("1")).IsZero() {
-		t.Error("the marker did not reach the backend")
+	assertQuestionParkRefused(t, be, claim, res)
+}
+
+// assertQuestionParkRefused: the step failed naming ctx.AskQuestions, and
+// nothing reached the orchestrator — no park written, no question registered.
+func assertQuestionParkRefused(t *testing.T, be *fake.Orchestrator, claim flow.Claim, res flow.InvocationResult) {
+	t.Helper()
+	if res.Status != "failed" {
+		t.Errorf("status = %q, want failed", res.Status)
+	}
+	if res.Park != nil {
+		t.Errorf("Park = %+v, want nothing parked", res.Park)
+	}
+	if !strings.Contains(res.Reason, "ctx.AskQuestions") {
+		t.Errorf("reason = %q, want it to name ctx.AskQuestions as the route that works", res.Reason)
+	}
+	if req := be.ParkRequest("1"); req != nil {
+		t.Errorf("the backend was parked with %+v, want the park never written", req)
+	}
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.Parked() {
+		t.Errorf("item parked on %+v, want no park", state.Park)
+	}
+	if qs := state.PendingQuestions(); len(qs) != 0 {
+		t.Errorf("PendingQuestions = %+v, want none registered", qs)
 	}
 }
 
-// A non-question park must not be stamped: the marker means "a question was
-// asked at this time", and putting it on a budget park would be a lie.
-func TestRunOne_NonQuestionParkIsNotStamped(t *testing.T) {
-	app, _, claim := testApp(t, func(f *flow.Flow) {
+// The refusal above reaches the question kind and no further: every other kind
+// still parks through ctx.Park, with the kind it asked for, on the backend.
+// The park itself is what has to be asserted — a check on the request's fields
+// alone reads a nil park as clean, and so would pass just as well against a
+// guard that had refused the park outright.
+func TestRunOne_NonQuestionParkStillParks(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("blocks", "plan", func(ctx flow.StepCtx) error {
 			return ctx.Park(flow.ParkRequest{Kind: flow.ParkBlocked, Reason: "waiting on infra"})
 		}, flow.StepConfig{})
@@ -2109,8 +2175,91 @@ func TestRunOne_NonQuestionParkIsNotStamped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
-	if !flow.QuestionAskedAt(res.Park).IsZero() {
-		t.Errorf("Details = %q, want no ask marker on a non-question park", res.Park.Details)
+	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkBlocked {
+		t.Fatalf("res = %+v, want a blocked park", res)
+	}
+	if req := be.ParkRequest("1"); req == nil || req.Kind != flow.ParkBlocked {
+		t.Errorf("the backend was parked with %+v, want a blocked park", req)
+	}
+}
+
+// askedAtBackend answers AskQuestion with a stamp of its own choosing, so a
+// test can tell the ask time the SDK took from the backend apart from one it
+// read off the local clock. A zero askedAt is the backend that registered the
+// question but has no server-side time to report (flow.Question.AskedAt is
+// documented optional) — the case the local clock stands in for.
+type askedAtBackend struct {
+	*fake.Orchestrator
+	askedAt time.Time
+}
+
+func (b *askedAtBackend) AskQuestion(ctx context.Context, ref flow.ItemRef, q flow.AgentQuestion) (flow.Question, error) {
+	rec, err := b.Orchestrator.AskQuestion(ctx, ref, q)
+	if err != nil {
+		return rec, err
+	}
+	rec.AskedAt = b.askedAt
+	return rec, nil
+}
+
+// With ctx.Park refused, ctx.AskQuestions is the only route left that writes a
+// question park — so it is the only place the ask time can now come from.
+// Without it the answer gate has no boundary and takes every comment already on
+// the item, written long before the question, for a reply. The stamp is the
+// BACKEND's clock: the replies it later reports are stamped by that same clock,
+// and a local time compared against it discards answers a slightly fast runner
+// can never get back.
+func TestRunOne_AskRouteParkCarriesTheBackendsAskTime(t *testing.T) {
+	askedAt := time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("asks", "plan", func(ctx flow.StepCtx) error {
+			return ctx.AskQuestions(flow.AskText("base", "which base branch?"))
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	app.Orchestrator = &askedAtBackend{Orchestrator: be, askedAt: askedAt}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkQuestion {
+		t.Fatalf("res = %+v, want a question park", res)
+	}
+	if got := flow.QuestionAskedAt(res.Park); !got.Equal(askedAt) {
+		t.Errorf("asked at %v, want the backend's own %v", got, askedAt)
+	}
+	// The gate reads the park off the item, not off this result.
+	if got := flow.QuestionAskedAt(be.ParkRequest("1")); !got.Equal(askedAt) {
+		t.Errorf("the backend was parked with asked-at %v, want %v", got, askedAt)
+	}
+}
+
+// A backend that registered the question but reported no time of its own leaves
+// the local clock as the only source. It is still stamped — an unmarked question
+// park is the unbounded read above — and backed off by the skew allowance,
+// because a mark that lands early costs one re-ask while one that lands late
+// discards the answer permanently.
+func TestRunOne_AskRouteWithoutABackendAskTimeStampsTheLocalClock(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("asks", "plan", func(ctx flow.StepCtx) error {
+			return ctx.AskQuestions(flow.AskText("base", "which base branch?"))
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	app.Orchestrator = &askedAtBackend{Orchestrator: be}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkQuestion {
+		t.Fatalf("res = %+v, want a question park", res)
+	}
+	got := flow.QuestionAskedAt(be.ParkRequest("1"))
+	if got.IsZero() {
+		t.Fatalf("Details = %q, want an asked-at marker", be.ParkRequest("1").Details)
+	}
+	if latest := time.Now().Add(-flow.LocalClockSkewAllowance); got.After(latest) {
+		t.Errorf("asked at %v, want no later than %v — the local clock backed off by the skew allowance", got, latest)
 	}
 }
 

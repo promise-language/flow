@@ -488,22 +488,29 @@ func translateHandlerError(
 	var park flow.ErrPark
 	if errors.As(handlerErr, &park) {
 		req := park.Req
+		// A question park is answerable only through a question something
+		// REGISTERED, and this route registers nothing — it takes the handler's
+		// kind as given. Writing one here leaves an item parked on a question
+		// `answer` has no id to name (cli/cmd_answer.go: no outstanding
+		// questions) and nothing else clears. Fail the step here, where the kind
+		// is still only a request, and name the route that works — the same
+		// answer the ask route gives when the orchestrator registers nothing
+		// (stepCtx.AskQuestions). docs/resolution.md § Questions: a step that
+		// needs a human decision asks a question and parks.
+		//
+		// The guard sits here rather than in stepCtx.Park because flow.ErrPark
+		// is exported: a handler can return the sentinel without going through
+		// ctx.Park, and errors.As catches it either way. This is the write site,
+		// so it is the only place the invariant holds for both doors.
+		if req.Kind == flow.ParkQuestion {
+			result.Status = string(flow.StatusFailed)
+			result.Reason = "ctx.Park cannot raise a question park: it registers no question, " +
+				"so `answer` would have none to name — ask through ctx.AskQuestions, which " +
+				"records the question and parks on it"
+			return result, nil
+		}
 		if req.Step == "" {
 			req.Step = li.Result()
-		}
-		// A question park needs the ask time whichever route produced it.
-		// Without it, a reader scanning for answers has no boundary and takes
-		// every comment already on the item — including ones written long
-		// before the question — for a reply.
-		//
-		// This route has no backend timestamp to use (the handler parked
-		// directly rather than going through Backend.AskQuestions), so the mark
-		// is backed off the local clock. A local time recorded as-is would be
-		// compared against the backend's, and a runner running even slightly
-		// fast would discard every answer permanently.
-		if req.Kind == flow.ParkQuestion && flow.QuestionAskedAt(&req).IsZero() {
-			req.Details = strings.TrimPrefix(
-				strings.TrimSpace(req.Details+";"+flow.MarkQuestionAskedLocal(time.Now())), ";")
 		}
 		return parkAndReturn(ctx, app, ref, result, req)
 	}

@@ -93,7 +93,7 @@ func TestWorkInProgress_SurvivesToTheNextDispatch(t *testing.T) {
 					return err
 				}
 				sameInvocation, _ = ctx.WorkInProgress()
-				return ctx.Park(flow.ParkRequest{Kind: flow.ParkQuestion, Reason: "question: which one?"})
+				return ctx.Park(flow.ParkRequest{Kind: flow.ParkBlocked, Reason: "stopping here to test the next dispatch"})
 			}
 			nextInvocation = seen
 			return ctx.ResolveMarkdown("the plan")
@@ -186,7 +186,7 @@ func TestWorkInProgress_IsNotVisibleToAnotherStep(t *testing.T) {
 			if err := ctx.RecordWorkInProgress("the plan step's reasoning"); err != nil {
 				return err
 			}
-			return ctx.Park(flow.ParkRequest{Kind: flow.ParkQuestion, Reason: "question: which one?"})
+			return ctx.Park(flow.ParkRequest{Kind: flow.ParkBlocked, Reason: "stopping here so the record outlives the step"})
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	// A second step, added after the helper's own validate so the artifact it
