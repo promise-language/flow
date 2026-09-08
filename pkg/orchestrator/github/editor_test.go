@@ -139,6 +139,10 @@ func TestEditor_RefusesToRemoveAMarkerItMaintains(t *testing.T) {
 		"flow:budget-exhausted:plan",
 		"flow:stale:plan",
 		"flow:implement", // the binary marker seeding maintains
+		// The two selection axes: the typed setters own these labels the way
+		// SetManual owns flow:manual, so removing one directly is refused.
+		"flow:priority:high",
+		"flow:urgency:next",
 	} {
 		t.Run(marker, func(t *testing.T) {
 			mock, b := editingOrchestrator(t, "flow:implement", marker)

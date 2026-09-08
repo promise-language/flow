@@ -139,10 +139,34 @@ func TestVocabularies_AreClosed(t *testing.T) {
 	if got := len(AllCommandNames()); got != 3 {
 		t.Errorf("CommandName is closed at three, got %d", got)
 	}
+	if got := len(AllPriorities()); got != 4 {
+		t.Errorf("Priority is closed at four, got %d", got)
+	}
+	if got := len(AllUrgencies()); got != 3 {
+		t.Errorf("Urgency is closed at three, got %d", got)
+	}
 	// The empty value is never a member: an item that is blocked has a kind,
-	// and a run with no outcome is one the runner never classified.
-	if ItemStatus("").Valid() || BlockKind("").Valid() || CommandName("").Valid() {
+	// and a run with no outcome is one the runner never classified. The two
+	// selection axes have a neutral member each, but the empty value is not it
+	// — that is what OrNeutral is for.
+	if ItemStatus("").Valid() || BlockKind("").Valid() || CommandName("").Valid() ||
+		Priority("").Valid() || Urgency("").Valid() {
 		t.Error("the empty value passed a closed-set check")
+	}
+	// A misspelling is not a member. A closed vocabulary that accepted one
+	// would store a value naming nothing and sort as though nobody had set it.
+	if Priority("hihg").Valid() || Urgency("soon").Valid() {
+		t.Error("a value naming no member passed a closed-set check")
+	}
+	for _, p := range AllPriorities() {
+		if !p.Valid() {
+			t.Errorf("AllPriorities returned %q, which Valid rejects", p)
+		}
+	}
+	for _, u := range AllUrgencies() {
+		if !u.Valid() {
+			t.Errorf("AllUrgencies returned %q, which Valid rejects", u)
+		}
 	}
 	for _, s := range AllItemStatuses() {
 		if !s.Valid() {

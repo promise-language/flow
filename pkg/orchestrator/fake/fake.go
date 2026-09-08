@@ -4,6 +4,7 @@
 package fake
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -99,6 +100,11 @@ var defaultSupportedCommands = []flow.CommandDef{
 type itemRecord struct {
 	id   string
 	item flow.Item // the item's own fields; the flow's record lives beside it
+
+	// created is the item's age — the last key selection orders by. Nothing
+	// else supplies one, so a test wanting distinct ages moves SetClock between
+	// AddItem calls.
+	created time.Time
 
 	claim     *flow.Claim
 	claimedAt time.Time
@@ -230,6 +236,7 @@ func (b *Orchestrator) AddItem(id string, item flow.Item) {
 	b.items[id] = &itemRecord{
 		id:        id,
 		item:      item,
+		created:   b.clock(),
 		artifacts: map[flow.ArtifactId]*flow.ArtifactRecord{},
 		signals:   map[flow.SignalId]flow.SignalState{},
 	}
@@ -386,26 +393,49 @@ func (b *Orchestrator) ResolveRef(ctx context.Context, input string) (flow.ItemR
 func (b *Orchestrator) List(ctx context.Context, scope flow.ItemScope, binary flow.BinaryName, acceptsType func(flow.ItemType) bool) ([]flow.ItemInfo, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	out := make([]flow.ItemInfo, 0, len(b.items))
+	type keyed struct {
+		info flow.ItemInfo
+		rec  *itemRecord
+	}
+	items := make([]keyed, 0, len(b.items))
 	for _, rec := range b.items {
 		info := b.itemInfoFor(rec, acceptsType)
 		if !info.Availability.InScope(scope) {
 			continue
 		}
-		out = append(out, info)
+		items = append(items, keyed{info: info, rec: rec})
 	}
-	// Deterministic order: the map iteration is not, and a listing that
-	// reordered between calls would make every diff of it noise.
-	slices.SortFunc(out, func(x, y flow.ItemInfo) int {
-		switch {
-		case x.Ref.Display < y.Ref.Display:
-			return -1
-		case x.Ref.Display > y.Ref.Display:
-			return 1
-		}
-		return 0
-	})
+	if scope == flow.ScopeAuto {
+		// At `auto` the listing IS the selectable set, so it is reported in the
+		// order it will be taken in — the same key ListAutoSelectable sorts by,
+		// so the two cannot disagree about what runs next. The fake id is the
+		// total tiebreak, as the issue number is for the GitHub orchestrator.
+		slices.SortFunc(items, func(x, y keyed) int {
+			if c := flow.CompareSelection(selectionKeyOf(x.rec), selectionKeyOf(y.rec)); c != 0 {
+				return c
+			}
+			return cmp.Compare(x.rec.id, y.rec.id)
+		})
+	} else {
+		// Deterministic order: the map iteration is not, and a listing that
+		// reordered between calls would make every diff of it noise.
+		slices.SortFunc(items, func(x, y keyed) int { return cmp.Compare(x.rec.id, y.rec.id) })
+	}
+	out := make([]flow.ItemInfo, 0, len(items))
+	for _, k := range items {
+		out = append(out, k.info)
+	}
 	return out, nil
+}
+
+// selectionKeyOf is the ONE place a fake item's position in the selection order
+// comes from — List at scope `auto` and ListAutoSelectable both order by it.
+func selectionKeyOf(rec *itemRecord) flow.SelectionKey {
+	return flow.SelectionKey{
+		Urgency:  rec.item.Urgency.OrNeutral(),
+		Priority: rec.item.Priority.OrNeutral(),
+		Age:      rec.created,
+	}
 }
 
 // Get answers about one item, through the same derivation List uses. That is
@@ -438,14 +468,8 @@ func (b *Orchestrator) ListAutoSelectable(ctx context.Context, tags []flow.TagId
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	ids := make([]string, 0, len(b.items))
-	for id := range b.items {
-		ids = append(ids, id)
-	}
-	slices.Sort(ids)
-	out := make([]flow.ItemRef, 0, len(ids))
-	for _, id := range ids {
-		rec := b.items[id]
+	selectable := make([]*itemRecord, 0, len(b.items))
+	for _, rec := range b.items {
 		// acceptsType is not available here and availability is not the
 		// question: selection asks whether the item is workable, and the
 		// caller's own flow selection decides the rest.
@@ -461,7 +485,26 @@ func (b *Orchestrator) ListAutoSelectable(ctx context.Context, tags []flow.TagId
 		if !flow.TagsMatch(rec.item.Tags, tags) {
 			continue
 		}
-		out = append(out, b.refFor(id))
+		// A deferred item is ABSENT, not sorted last: one sorted last is still
+		// an item a fleet with spare capacity reaches. It stays resolvable by
+		// name, which does not come through here.
+		if rec.item.Urgency.OrNeutral() == flow.UrgencyDeferred {
+			continue
+		}
+		selectable = append(selectable, rec)
+	}
+	slices.SortFunc(selectable, func(x, y *itemRecord) int {
+		if c := flow.CompareSelection(selectionKeyOf(x), selectionKeyOf(y)); c != 0 {
+			return c
+		}
+		// The total tiebreak: CompareSelection returns 0 for two items filed at
+		// the same instant, and two callers reading one set must still start on
+		// one item.
+		return cmp.Compare(x.id, y.id)
+	})
+	out := make([]flow.ItemRef, 0, len(selectable))
+	for _, rec := range selectable {
+		out = append(out, b.refFor(rec.id))
 	}
 	return out, nil
 }
@@ -480,6 +523,10 @@ func (b *Orchestrator) itemInfoFor(rec *itemRecord, acceptsType func(flow.ItemTy
 		Disposition: rec.item.Disposition,
 		Holder:      rec.holder,
 		Tags:        slices.Clone(rec.item.Tags),
+		// Reported through OrNeutral, so the fake never answers with the empty
+		// value: an item nothing has said anything about is medium and default.
+		Priority:    rec.item.Priority.OrNeutral(),
+		Urgency:     rec.item.Urgency.OrNeutral(),
 		BlockedBy:   b.blockersOf(rec),
 		Blocked:     blocked,
 		BlockKind:   kind,
@@ -502,6 +549,13 @@ func (b *Orchestrator) availabilityOf(rec *itemRecord, blocked bool, acceptsType
 	}
 	if !holderIsFree(rec.holder, b.arena) {
 		return flow.AvailHeld
+	}
+	// Deferral is NOT a rung of its own — a deferred item has passed every
+	// boundary, and what is true of it is that auto-selection will not take it,
+	// which is exactly what `available` marks. Urgency says which kind of
+	// `available` this is.
+	if rec.item.Urgency.OrNeutral() == flow.UrgencyDeferred {
+		return flow.AvailAvailable
 	}
 	// The fake opts every workable item in: its whole selectable set is what it
 	// holds, which is what its callers' tests are written against.
@@ -703,6 +757,9 @@ func (b *Orchestrator) loadLocked(rec *itemRecord) *flow.Item {
 	it.Ref = b.refFor(rec.id)
 	it.Holder = rec.holder
 	it.Tags = slices.Clone(rec.item.Tags)
+	// The same reading Get and List report, so an editor never edits blind.
+	it.Priority = rec.item.Priority.OrNeutral()
+	it.Urgency = rec.item.Urgency.OrNeutral()
 	it.BlockedBy = b.blockersOf(rec)
 	_, _, it.BlockReason = b.blockednessOf(rec)
 	it.Artifacts = make(map[flow.ArtifactId]flow.ArtifactRecord, len(rec.artifacts))
@@ -791,11 +848,20 @@ type editor struct {
 	addTags, delTags []flow.TagId
 	addBlk, delBlk   []string
 	manual           *bool
+	priority         *flow.Priority
+	urgency          *flow.Urgency
 }
 
-func (e *editor) SetTitle(t string)      { e.title = &t }
-func (e *editor) SetBody(b string)       { e.body = &b }
-func (e *editor) SetManual(m bool)       { e.manual = &m }
+func (e *editor) SetTitle(t string) { e.title = &t }
+func (e *editor) SetBody(b string)  { e.body = &b }
+func (e *editor) SetManual(m bool)  { e.manual = &m }
+
+// The fake stores each axis as a FIELD, not a label, so the neutral values need
+// no special handling — they are simply stored, and read back through
+// OrNeutral. A value outside the vocabulary is refused at Commit.
+func (e *editor) SetPriority(p flow.Priority) { e.priority = &p }
+func (e *editor) SetUrgency(u flow.Urgency)   { e.urgency = &u }
+
 func (e *editor) AddTag(t flow.TagId)    { e.addTags = append(e.addTags, t) }
 func (e *editor) RemoveTag(t flow.TagId) { e.delTags = append(e.delTags, t) }
 
@@ -828,6 +894,15 @@ func (e *editor) Commit(ctx context.Context) error {
 		if !t.Valid() {
 			return fmt.Errorf("fake: %q is not a valid tag", string(t))
 		}
+	}
+	// A closed vocabulary needs a parameter that can be refused: a value naming
+	// no member, stored, would leave the item sorting as though nobody had set
+	// anything.
+	if e.priority != nil && !e.priority.Valid() {
+		return fmt.Errorf("fake: %q is not a priority (one of %v)", string(*e.priority), flow.AllPriorities())
+	}
+	if e.urgency != nil && !e.urgency.Valid() {
+		return fmt.Errorf("fake: %q is not an urgency (one of %v)", string(*e.urgency), flow.AllUrgencies())
 	}
 
 	// Blockers are validated before anything is written: an identifier naming
@@ -867,6 +942,12 @@ func (e *editor) Commit(ctx context.Context) error {
 		rec.item.Tags = slices.DeleteFunc(rec.item.Tags, func(x flow.TagId) bool { return x == t })
 	}
 	rec.blockedBy = next
+	if e.priority != nil {
+		rec.item.Priority = *e.priority
+	}
+	if e.urgency != nil {
+		rec.item.Urgency = *e.urgency
+	}
 	if e.manual != nil {
 		rec.item.Manual = *e.manual
 		// Setting manual resolves any unresolved park: the operator's run-step

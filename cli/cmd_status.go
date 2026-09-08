@@ -86,6 +86,8 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		Item:      display,
 		Title:     state.Title,
 		Owner:     owner,
+		Priority:  string(state.Priority),
+		Urgency:   string(state.Urgency),
 		Overrides: overrides,
 		Flow:      flowName(f, typeFlow),
 		FlowState: statusFlowState(state, f, typeFlow),
@@ -104,6 +106,10 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 			fmt.Fprintf(app.Out, "title: %s\n", line)
 		}
 		fmt.Fprintf(app.Out, "owner: %s\n", payload.Owner)
+		// The two selection axes, reported as `list` reports them — one fact
+		// through one pair of fields, whichever command asks.
+		fmt.Fprintf(app.Out, "priority: %s\n", payload.Priority)
+		fmt.Fprintf(app.Out, "urgency: %s\n", payload.Urgency)
 		if len(payload.Overrides) > 0 {
 			fmt.Fprintf(app.Out, "overrides: %s\n", strings.Join(payload.Overrides, ", "))
 		}

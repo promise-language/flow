@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/go-github/v68/github"
@@ -31,7 +32,15 @@ func (b *Orchestrator) List(ctx context.Context, scope flow.ItemScope, binary fl
 		return nil, err
 	}
 
-	var items []flow.ItemInfo
+	// The key travels with the item, so the sort below needs no second read of
+	// the issue. It is derived only at scope `auto`: at the wider scopes the
+	// order is not a contract, and deriving one there is work for nothing.
+	type keyed struct {
+		info flow.ItemInfo
+		key  flow.SelectionKey
+		num  int
+	}
+	var items []keyed
 	for _, iss := range issues {
 		if iss.IsPullRequest() {
 			continue // the Issues API includes PRs; skip them
@@ -43,9 +52,36 @@ func (b *Orchestrator) List(ctx context.Context, scope flow.ItemScope, binary fl
 		if !info.Availability.InScope(scope) {
 			continue
 		}
-		items = append(items, info)
+		k := keyed{info: info, num: iss.GetNumber()}
+		if scope == flow.ScopeAuto {
+			k.key = b.selectionKeyOf(iss, labelNamesOf(iss.Labels))
+		}
+		items = append(items, k)
 	}
-	return items, nil
+
+	// At scope `auto` the listing IS the selectable set, so it is reported in
+	// the order it will be taken in — anything else answers "what runs next"
+	// with something that only looks like an answer. The wider scopes keep the
+	// API's own order: they are read by a person who scopes and sorts them for
+	// themselves, and fixing an order there would constrain the report without
+	// informing anything.
+	if scope == flow.ScopeAuto {
+		slices.SortStableFunc(items, func(x, y keyed) int {
+			if c := flow.CompareSelection(x.key, y.key); c != 0 {
+				return c
+			}
+			// The total tiebreak. CompareSelection returns 0 for two issues
+			// filed in the same second, and two callers reading one set must
+			// still start on one item.
+			return x.num - y.num
+		})
+	}
+
+	out := make([]flow.ItemInfo, 0, len(items))
+	for _, k := range items {
+		out = append(out, k.info)
+	}
+	return out, nil
 }
 
 // Get answers about one item through the same derivation List uses.
@@ -95,7 +131,12 @@ func (b *Orchestrator) ListAutoSelectable(ctx context.Context, tags []flow.TagId
 		return nil, fmt.Errorf("search issues: %w", err)
 	}
 
-	refs := make([]flow.ItemRef, 0, len(result.Issues))
+	type keyed struct {
+		ref flow.ItemRef
+		key flow.SelectionKey
+		num int
+	}
+	selectable := make([]keyed, 0, len(result.Issues))
 	for _, issue := range result.Issues {
 		lbls := labelNamesOf(issue.Labels)
 		// The contract's comparison, against the labels actually returned.
@@ -113,9 +154,45 @@ func (b *Orchestrator) ListAutoSelectable(ctx context.Context, tags []flow.TagId
 		if blocked, _, _ := b.blockedness(blockers, lbls); blocked {
 			continue
 		}
-		refs = append(refs, b.refFromIssue(issue.GetNumber()))
+		// A deferred item is ABSENT, not sorted last: one sorted last is still
+		// an item a fleet with spare capacity reaches, and "do not start this
+		// unattended" is exactly what deferring it said. It stays resolvable by
+		// name, which needs no mechanism — `resolve <item-id>` does not come
+		// through here.
+		if b.labels.UrgencyOf(lbls) == flow.UrgencyDeferred {
+			continue
+		}
+		selectable = append(selectable, keyed{
+			ref: b.refFromIssue(issue.GetNumber()),
+			key: b.selectionKeyOf(issue, lbls),
+			num: issue.GetNumber(),
+		})
+	}
+
+	slices.SortStableFunc(selectable, func(x, y keyed) int {
+		if c := flow.CompareSelection(x.key, y.key); c != 0 {
+			return c
+		}
+		return x.num - y.num
+	})
+
+	refs := make([]flow.ItemRef, 0, len(selectable))
+	for _, k := range selectable {
+		refs = append(refs, k.ref)
 	}
 	return refs, nil
+}
+
+// selectionKeyOf is the ONE place an issue's position in the selection order
+// comes from: the two axis labels, and the issue's own filing time as its age.
+// List and ListAutoSelectable both order by it, so the two cannot disagree
+// about what runs next.
+func (b *Orchestrator) selectionKeyOf(iss *github.Issue, lblNames []string) flow.SelectionKey {
+	return flow.SelectionKey{
+		Urgency:  b.labels.UrgencyOf(lblNames),
+		Priority: b.labels.PriorityOf(lblNames),
+		Age:      iss.GetCreatedAt().Time,
+	}
 }
 
 // quoteSearchTerm wraps a search term in quotes so a value carrying a space
@@ -148,6 +225,8 @@ func (b *Orchestrator) itemInfoFor(ctx context.Context, iss *github.Issue, binar
 		Disposition: dispositionFromIssue(iss),
 		Holder:      b.holderFromLabels(lblNames),
 		Tags:        tagsOf(lblNames),
+		Priority:    b.labels.PriorityOf(lblNames),
+		Urgency:     b.labels.UrgencyOf(lblNames),
 		BlockedBy:   blockers,
 		Blocked:     blocked,
 		BlockKind:   kind,
@@ -230,7 +309,15 @@ func (b *Orchestrator) availabilityOf(
 		return flow.AvailHeld, nil
 	}
 
-	// Level 6: auto — opted in (binary label present) AND assigned to me.
+	// Level 6: auto — opted in (binary label present) AND assigned to me, and
+	// not deferred. Deferral is NOT a rung of its own: a deferred item is open,
+	// unblocked, free and opted in, and what is true of it is that
+	// auto-selection will not take it — exactly the boundary `available`
+	// already marks. Urgency is the field that says which of the two an
+	// `available` item is.
+	if b.labels.UrgencyOf(lblNames) == flow.UrgencyDeferred {
+		return flow.AvailAvailable, nil
+	}
 	// The binary label is applied during seeding. Unseeded items whose type IS
 	// accepted fall to available, not auto.
 	if hasLabel(lblNames, b.labels.Binary(string(binary))) {
