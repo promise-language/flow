@@ -1,7 +1,9 @@
 {
-  "unformatted_files":    {"direction": "at_most", "cap": 0},
-  "unbuildable_packages": {"direction": "at_most", "cap": 0},
-  "vet_findings":         {"direction": "at_most", "cap": 0},
-  "failed_tests":         {"direction": "at_most", "cap": 0},
-  "failed_packages":      {"direction": "at_most", "cap": 0}
+  "unformatted_files":     {"direction": "at_most",  "cap": 0},
+  "unbuildable_packages":  {"direction": "at_most",  "cap": 0},
+  "vet_findings":          {"direction": "at_most",  "cap": 0},
+  "failed_tests":          {"direction": "at_most",  "cap": 0},
+  "failed_packages":       {"direction": "at_most",  "cap": 0},
+  "worktree_free_bytes":   {"direction": "at_least", "cap": 2147483648},
+  "build_cache_free_bytes": {"direction": "at_least", "cap": 2147483648}
 }

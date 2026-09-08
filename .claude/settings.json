@@ -15,7 +15,7 @@
             "type": "command"
           }
         ],
-        "matcher": "Bash|Edit|Write|Task|Skill|mcp__.*"
+        "matcher": "*"
       }
     ],
     "PreToolUse": [
@@ -28,7 +28,7 @@
             "type": "command"
           }
         ],
-        "matcher": "Bash|Edit|Write|NotebookEdit|Task|Skill|mcp__.*"
+        "matcher": "*"
       }
     ]
   }

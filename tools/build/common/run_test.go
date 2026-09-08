@@ -126,12 +126,14 @@ func TestJudge_NothingCappedIsAcceptableAndSaysNothingWasJudged(t *testing.T) {
 }
 
 // fit's measurements are reported and not judged when the manifest has no
-// entry for them. The manifest format can now express floors (at_least), but
-// this project's manifest has no entry for fit — populating specific floor
-// values is separate follow-up work.
+// entry for them: a metric nothing caps cannot fail. This is the judge's
+// behaviour against an empty manifest, not this project's — thresholds.json
+// declares floors for both fit metrics, and TestJudge_AtLeastDirection is
+// what exercises a floor.
 //
-// What keeps that from being vacuous is the incomplete path, above: a machine
-// whose toolchain cannot be reached is already refused without any floor.
+// What keeps the no-floor case from being vacuous is the incomplete path,
+// above: a machine whose toolchain cannot be reached is refused without any
+// floor.
 func TestJudge_FitIsReportedAndNotJudgedWhenNoFloorExists(t *testing.T) {
 	env := Envelope{Gate: "fit", Metrics: []Metric{
 		Size("worktree_free_bytes", 12582912, "bytes"),
