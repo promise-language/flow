@@ -2,7 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -12,6 +17,7 @@ import (
 func TestReportQuota_PrintsOnFailure(t *testing.T) {
 	// Set CLAUDE_CONFIG_DIR to a nonexistent path and strip PATH so both
 	// file-based and Keychain credential discovery fail deterministically.
+	useTempQuotaCache(t)
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv("PATH", t.TempDir())
 	var buf bytes.Buffer
@@ -28,6 +34,7 @@ func TestReportQuota_PrintsOnFailure(t *testing.T) {
 func TestReportQuota_NotGatedByRunner(t *testing.T) {
 	// reportQuota no longer checks FLOW_DISPATCHED_BY_RUNNER; call sites gate
 	// display. Verify it prints even when runner env is set.
+	useTempQuotaCache(t)
 	t.Setenv(dispatchedByRunnerEnv, "1")
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv("PATH", t.TempDir())
@@ -646,6 +653,116 @@ func TestParseUsageResponse_OnlySevenDay(t *testing.T) {
 	}
 	if math.Abs(result[0].Used-0.62) > 0.001 {
 		t.Errorf("used = %v, want 0.62", result[0].Used)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		header string
+		want   time.Duration
+	}{
+		{"absent", "", 0},
+		{"delta seconds", "120", 2 * time.Minute},
+		{"delta seconds padded", "  45  ", 45 * time.Second},
+		{"http date", now.Add(90 * time.Second).UTC().Format(http.TimeFormat), 90 * time.Second},
+		{"http date in the past", now.Add(-time.Hour).UTC().Format(http.TimeFormat), 0},
+		{"garbage", "soon please", 0},
+		{"negative", "-30", 0},
+		{"zero", "0", 0},
+		{"capped", "604800", quotaRetryAfterCap},
+		{"capped past a Duration's range", "9223372036854775807", quotaRetryAfterCap},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseRetryAfter(tt.header, now); got != tt.want {
+				t.Errorf("parseRetryAfter(%q) = %v, want %v", tt.header, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFetchUsage_RefusalCarriesRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	_, err := fetchUsage(srv.URL, "tok")
+	if err == nil {
+		t.Fatal("expected a refusal")
+	}
+	if got := err.Error(); got != "rejected — HTTP 429" {
+		t.Errorf("message = %q, want the unchanged operator-facing text", got)
+	}
+	var refusal *quotaRefusal
+	if !errors.As(err, &refusal) {
+		t.Fatalf("error is %T, want *quotaRefusal", err)
+	}
+	if refusal.retryAfter != time.Minute {
+		t.Errorf("retryAfter = %v, want 1m", refusal.retryAfter)
+	}
+	if got := quotaBackoffFor(err); got != time.Minute {
+		t.Errorf("quotaBackoffFor = %v, want the header's 1m", got)
+	}
+}
+
+func TestFetchUsage_RefusalWithoutRetryAfterTakesTheDefault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	_, err := fetchUsage(srv.URL, "tok")
+	if err == nil {
+		t.Fatal("expected a refusal")
+	}
+	if !strings.Contains(err.Error(), "credentials may be expired") {
+		t.Errorf("401 should still name the likely cause; got %q", err)
+	}
+	if got := quotaBackoffFor(err); got != quotaFailureBackoff {
+		t.Errorf("quotaBackoffFor = %v, want the default %v", got, quotaFailureBackoff)
+	}
+}
+
+func TestFetchUsage_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
+			t.Errorf("Authorization = %q", got)
+		}
+		fmt.Fprint(w, `{"five_hour":{"utilization":47,"resets_at":"2026-09-01T14:24:00Z"}}`)
+	}))
+	defer srv.Close()
+
+	usage, err := fetchUsage(srv.URL, "tok")
+	if err != nil {
+		t.Fatalf("fetchUsage: %v", err)
+	}
+	if len(usage) != 1 || math.Abs(usage[0].Used-0.47) > 0.001 {
+		t.Errorf("usage = %+v, want one window at 0.47", usage)
+	}
+}
+
+func TestWindowUsage_RoundTripsThroughJSON(t *testing.T) {
+	// The cache stores these, so the tags have to survive a round trip.
+	want := windowUsage{
+		Label:    "7d",
+		Length:   7 * 24 * time.Hour,
+		Used:     0.31,
+		ResetsAt: time.Date(2026, 9, 4, 16, 0, 0, 0, time.UTC),
+	}
+	b, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got windowUsage
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Label != want.Label || got.Length != want.Length || got.Used != want.Used || !got.ResetsAt.Equal(want.ResetsAt) {
+		t.Errorf("round trip = %+v, want %+v", got, want)
 	}
 }
 

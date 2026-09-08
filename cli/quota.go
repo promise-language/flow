@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -32,25 +33,40 @@ func readQuota() ([]windowUsage, error) {
 
 // reportQuota prints Claude subscription window utilisation to w.
 // Failure never blocks the run — prints the reason and returns.
+//
+// It reads through the machine-wide cache, which is what makes the seven
+// display call sites free: `resolve` prints the block at startup and again on
+// every terminal outcome, and none of those prints costs a request now.
+//
+// A reading served past its refresh interval because the endpoint is refusing
+// gets one extra line. Without it the change would newly print stale figures as
+// if they were current and swallow the "rejected — HTTP 429" diagnostic
+// operators read today; the numbers are still the best estimate available,
+// which is why they are printed at all.
 func reportQuota(w io.Writer) {
-	usage, err := readQuota()
+	r, err := quotaNow()
 	if err != nil {
 		fmt.Fprintf(w, "quota: %s\n", err)
 		return
 	}
 
 	now := time.Now()
-	for _, win := range usage {
+	for _, win := range r.Usage {
 		printWindow(w, win, now)
+	}
+	if r.Failure != "" {
+		fmt.Fprintf(w, "quota: figures are %s old — refresh failing: %s\n",
+			formatDurationCompact(now.Sub(r.ReadAt)), r.Failure)
 	}
 }
 
-// windowUsage is the parsed response for one subscription window.
+// windowUsage is the parsed response for one subscription window. It is also
+// what the machine-wide cache stores, hence the tags.
 type windowUsage struct {
-	Label    string // "5h" or "7d"
-	Length   time.Duration
-	Used     float64   // fraction [0,1], or -1 if absent
-	ResetsAt time.Time // when the window resets
+	Label    string        `json:"label"` // "5h" or "7d"
+	Length   time.Duration `json:"length"`
+	Used     float64       `json:"used"`      // fraction [0,1], or -1 if absent
+	ResetsAt time.Time     `json:"resets_at"` // when the window resets
 }
 
 func printWindow(w io.Writer, win windowUsage, now time.Time) {
@@ -222,13 +238,68 @@ func fetchUsage(apiBase, token string) ([]windowUsage, error) {
 	}
 
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		return nil, fmt.Errorf("rejected — HTTP %d (credentials may be expired; re-run claude to refresh)", resp.StatusCode)
+		return nil, newQuotaRefusal(resp,
+			fmt.Sprintf("rejected — HTTP %d (credentials may be expired; re-run claude to refresh)", resp.StatusCode))
 	}
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("rejected — HTTP %d", resp.StatusCode)
+		return nil, newQuotaRefusal(resp, fmt.Sprintf("rejected — HTTP %d", resp.StatusCode))
 	}
 
 	return parseUsageResponse(body)
+}
+
+// quotaRefusal is an answer the usage endpoint gave that was not a reading,
+// carrying how long it asked the caller to wait before asking again. The wait
+// is what the machine-wide cache backs off on: a 429 that every process ignored
+// is the amplifier, and the endpoint has already said how to stop being one.
+//
+// Message-compatible with the plain errors it replaces — the text an operator
+// sees is unchanged.
+type quotaRefusal struct {
+	msg        string
+	retryAfter time.Duration // 0 when the response carried no usable Retry-After
+}
+
+func (e *quotaRefusal) Error() string { return e.msg }
+
+func newQuotaRefusal(resp *http.Response, msg string) error {
+	return &quotaRefusal{msg: msg, retryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())}
+}
+
+// parseRetryAfter reads RFC 9110's Retry-After in both of its forms —
+// delta-seconds, and an HTTP date — and returns how long to wait. Returns 0 for
+// an absent, unparseable, or already-elapsed header, which means "no
+// instruction" and leaves the caller on its own default.
+//
+// The result is capped at quotaRetryAfterCap. The header is honoured because
+// the endpoint knows its own limits, but nothing it sends may take pacing off
+// the air for longer than the reading would age out on its own.
+func parseRetryAfter(header string, now time.Time) time.Duration {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return 0
+	}
+	var d time.Duration
+	if secs, err := strconv.Atoi(header); err == nil {
+		// Capped before the multiplication, not only after it: a delta-seconds
+		// large enough to overflow a Duration would otherwise wrap into a small
+		// or negative wait, which is the opposite of what it asked for.
+		if secs > int(quotaRetryAfterCap/time.Second) {
+			return quotaRetryAfterCap
+		}
+		d = time.Duration(secs) * time.Second
+	} else if when, err := http.ParseTime(header); err == nil {
+		d = when.Sub(now)
+	} else {
+		return 0
+	}
+	if d <= 0 {
+		return 0
+	}
+	if d > quotaRetryAfterCap {
+		return quotaRetryAfterCap
+	}
+	return d
 }
 
 // parseUsageResponse extracts window usage from the API response. The response
