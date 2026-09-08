@@ -84,6 +84,18 @@ func TestBackend_ListAutoSelectable_OmitsADeferredItem(t *testing.T) {
 	if !slices.Equal(got, selectionOrder) {
 		t.Errorf("order = %v, want %v — dropping the deferred item must not disturb the rest", got, selectionOrder)
 	}
+
+	// At scope `auto` the listing IS the selectable set, so it leaves the same
+	// item out. Two answers to "what runs next" that disagreed would send an
+	// operator reading `list --scope auto` after an item no `resolve` will take.
+	auto, err := b.List(t.Context(), flow.ScopeAuto, "implement", func(flow.ItemType) bool { return true })
+	if err != nil {
+		t.Fatalf("List(auto): %v", err)
+	}
+	listed := displaysOf(auto, func(i flow.ItemInfo) string { return i.Ref.Display })
+	if !slices.Equal(listed, got) {
+		t.Errorf("scope auto = %v, want the selectable set %v", listed, got)
+	}
 }
 
 // A label whose suffix names no member is no label at all: the item is STILL
@@ -386,5 +398,35 @@ func TestEditor_RefusesAnAxisStagedWithABlocker(t *testing.T) {
 	}
 	if contains(mock.labelNames(), "flow:priority:high") {
 		t.Errorf("labels = %v, want nothing written", mock.labelNames())
+	}
+}
+
+// An axis label is a marker this orchestrator maintains, not a binary name.
+// otherBinaryLabel reads every `flow:`-prefixed label it does not recognise as
+// another flow binary owning the item, so a label the axes introduced and it
+// does not skip turns Claim into a permanent "owned by other flow binary"
+// refusal — and auto-selection would hand the highest-priority item to a
+// runner that then declines it, every time, for as long as the label is there.
+func TestBackend_Claim_AnAxisLabelIsNotAnotherBinarysMarker(t *testing.T) {
+	for _, label := range []string{
+		"flow:priority:critical",
+		"flow:priority:high",
+		"flow:priority:low",
+		"flow:urgency:next",
+		"flow:urgency:deferred",
+	} {
+		t.Run(label, func(t *testing.T) {
+			b, mock, rec := newClaimPrecondBackend(t)
+			scriptCleanWorktree(rec)
+			mock.issueLabels = []string{"flow:implement", label}
+
+			if _, err := b.Claim(t.Context(), b.refFromIssue(42), nil); err != nil {
+				var refused flow.ErrClaimRefused
+				if errors.As(err, &refused) && refused.Code == "other-binary" {
+					t.Fatalf("Claim refused %s as another binary's marker: %s", label, refused.Reason)
+				}
+				t.Fatalf("Claim: %v", err)
+			}
+		})
 	}
 }

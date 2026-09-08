@@ -546,7 +546,14 @@ func (b *Orchestrator) otherBinaryLabel(names []string) (string, bool) {
 			strings.HasPrefix(rest, labelSuffixClaimPrefix),
 			strings.HasPrefix(rest, labelSuffixStalePrefix),
 			strings.HasPrefix(rest, labelSuffixBudgetExhPref),
-			strings.HasPrefix(rest, labelSuffixTypePrefix):
+			strings.HasPrefix(rest, labelSuffixTypePrefix),
+			// The two selection axes. Anything under the prefix this list does
+			// not skip is read as a binary name, so an unlisted marker turns
+			// Claim into a standing other-binary refusal — and auto-selection
+			// would hand the highest-priority item to a runner that declines it
+			// for as long as the label is there.
+			strings.HasPrefix(rest, labelSuffixPriorityPrefix),
+			strings.HasPrefix(rest, labelSuffixUrgencyPrefix):
 			continue
 		}
 		// What's left is a binary-name label.

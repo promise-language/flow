@@ -10,14 +10,20 @@ import (
 	"github.com/promise-language/flow"
 )
 
-// constNamesOfType parses wire.go and returns the names of all package-level
+// constNamesOfType parses `file` and returns the names of all package-level
 // constants declared with the given type name, in source order.
-func constNamesOfType(t *testing.T, typeName string) []string {
+//
+// The file is a parameter because every closed vocabulary in this package needs
+// the same check and they are not all in one file — the wire enums are in
+// wire.go, the selection axes in orchestrator.go. One walker, because a second
+// copy would drift from this one and each would guard only what it was written
+// for.
+func constNamesOfType(t *testing.T, file, typeName string) []string {
 	t.Helper()
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "wire.go", nil, 0)
+	f, err := parser.ParseFile(fset, file, nil, 0)
 	if err != nil {
-		t.Fatalf("parse wire.go: %v", err)
+		t.Fatalf("parse %s: %v", file, err)
 	}
 	var names []string
 	for _, decl := range f.Decls {
@@ -50,7 +56,7 @@ func constNamesOfType(t *testing.T, typeName string) []string {
 }
 
 func TestAllParkKinds_ExhaustiveAgainstAST(t *testing.T) {
-	declared := constNamesOfType(t, "ParkKind")
+	declared := constNamesOfType(t, "wire.go", "ParkKind")
 	if len(declared) == 0 {
 		t.Fatal("found no ParkKind constants in wire.go")
 	}
@@ -73,7 +79,7 @@ func TestAllParkKinds_ExhaustiveAgainstAST(t *testing.T) {
 }
 
 func TestAllInvocationStatuses_ExhaustiveAgainstAST(t *testing.T) {
-	declared := constNamesOfType(t, "InvocationStatus")
+	declared := constNamesOfType(t, "wire.go", "InvocationStatus")
 	if len(declared) == 0 {
 		t.Fatal("found no InvocationStatus constants in wire.go")
 	}
@@ -106,5 +112,46 @@ func TestAllInvocationStatuses_ExhaustiveAgainstAST(t *testing.T) {
 		if !slices.Contains(got, val) {
 			t.Errorf("AllInvocationStatuses() is missing %q (from constant %s)", val, name)
 		}
+	}
+}
+
+// The two selection axes, checked the same way — they are in orchestrator.go
+// rather than wire.go, which is the only difference.
+//
+// For these the check is load-bearing rather than hygienic: THE ENUMERATOR
+// DOUBLES AS THE RANK. A priority's position in AllPriorities is its rank, so a
+// member declared without joining the list would not fail to compile — it would
+// read as the neutral value and sort where an unassessed item sorts, which is
+// the one failure a closed vocabulary exists to prevent.
+func TestAllPrioritiesAndUrgencies_ExhaustiveAgainstAST(t *testing.T) {
+	priorities := constNamesOfType(t, "orchestrator.go", "Priority")
+	urgencies := constNamesOfType(t, "orchestrator.go", "Urgency")
+	if len(priorities) == 0 || len(urgencies) == 0 {
+		t.Fatal("found no Priority/Urgency constants in orchestrator.go; the parse is wrong, not the code")
+	}
+	if got := flow.AllPriorities(); len(got) != len(priorities) {
+		t.Errorf("AllPriorities() returns %d members, but orchestrator.go declares %d Priority constants: %v",
+			len(got), len(priorities), priorities)
+	}
+	if got := flow.AllUrgencies(); len(got) != len(urgencies) {
+		t.Errorf("AllUrgencies() returns %d members, but orchestrator.go declares %d Urgency constants: %v",
+			len(got), len(urgencies), urgencies)
+	}
+	// And neither list repeats a member. A duplicate keeps the count right
+	// while pushing another member out, where its rank is -1 and it sorts ahead
+	// of everything — the same silent misordering the count guards against.
+	seenP := map[flow.Priority]bool{}
+	for _, p := range flow.AllPriorities() {
+		seenP[p] = true
+	}
+	if len(seenP) != len(flow.AllPriorities()) {
+		t.Errorf("AllPriorities() contains duplicates: %v", flow.AllPriorities())
+	}
+	seenU := map[flow.Urgency]bool{}
+	for _, u := range flow.AllUrgencies() {
+		seenU[u] = true
+	}
+	if len(seenU) != len(flow.AllUrgencies()) {
+		t.Errorf("AllUrgencies() contains duplicates: %v", flow.AllUrgencies())
 	}
 }

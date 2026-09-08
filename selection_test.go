@@ -1,53 +1,14 @@
 package flow
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"slices"
 	"testing"
 	"time"
 )
 
-// The enumerator DOUBLES AS THE RANK — priorityRank and urgencyRank are a
-// position in AllPriorities / AllUrgencies — so a member declared without
-// joining the list would not fail to compile. It would silently read as the
-// neutral value and sort where an unassessed item sorts, which is the one
-// failure a closed vocabulary exists to prevent. Hence a parse of the source.
-func TestAllPrioritiesAndUrgenciesMatchTheDeclaredConstants(t *testing.T) {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "orchestrator.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse orchestrator.go: %v", err)
-	}
-	declared := map[string][]string{}
-	ast.Inspect(f, func(n ast.Node) bool {
-		vs, ok := n.(*ast.ValueSpec)
-		if !ok || len(vs.Names) != 1 {
-			return true
-		}
-		id, ok := vs.Type.(*ast.Ident)
-		if !ok {
-			return true
-		}
-		if id.Name == "Priority" || id.Name == "Urgency" {
-			declared[id.Name] = append(declared[id.Name], vs.Names[0].Name)
-		}
-		return true
-	})
-
-	if len(declared["Priority"]) == 0 || len(declared["Urgency"]) == 0 {
-		t.Fatal("found no Priority/Urgency constants; the parse is wrong, not the code")
-	}
-	if got, want := len(declared["Priority"]), len(AllPriorities()); got != want {
-		t.Errorf("orchestrator.go declares %d priorities (%v) but AllPriorities returns %d",
-			got, declared["Priority"], want)
-	}
-	if got, want := len(declared["Urgency"]), len(AllUrgencies()); got != want {
-		t.Errorf("orchestrator.go declares %d urgencies (%v) but AllUrgencies returns %d",
-			got, declared["Urgency"], want)
-	}
-}
+// The enumerator-against-the-source check for these two lives in
+// wire_enum_test.go, beside the one for the wire enums and using the same
+// walker: the check is the same check, and a second copy of it would drift.
 
 // OrNeutral is "what an item has when nothing has said otherwise". Anything not
 // naming a member reads as the neutral one — a misspelling included, so a
