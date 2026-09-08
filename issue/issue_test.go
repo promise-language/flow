@@ -872,15 +872,32 @@ func TestDetectWaitsOn(t *testing.T) {
 		{
 			// The `#` is the shape's, not the reference's: what comes out is what
 			// ResolveRef takes, which is the bare number and never `#12` — the
-			// GitHub orchestrator rejects the latter as not a number.
+			// GitHub orchestrator rejects the latter as not a number. The strip
+			// is of that one prefix, so a cross-orchestrator identifier survives
+			// inside it.
 			"several refs, notes and blank lines",
-			"PLAN-WAITS-ON: waits on three\n```\n#12 parser\n\n#13\towner/repo#14 is not this line's ref\nowner/repo#14\n```",
+			"PLAN-WAITS-ON: waits on three\n```\n#12 parser\n\n#13\towner/repo#14 is not this line's ref\n#owner/repo#14\n```",
 			"waits on three", []string{"12", "13", "owner/repo#14"}, true,
 		},
 		{
-			"a token written without the # passes through as it is",
+			// The reported defect (#280): the note ran onto a second line, whose
+			// first word is prose. Reading it as a reference sent `(same` to the
+			// tracker and killed the step.
+			"a note that wraps is not a reference",
+			"PLAN-WAITS-ON: waits on the migration\n```\n#231 migrate issueflow to the new parser\n(same work as #232)\n```",
+			"waits on the migration", []string{"231"}, true,
+		},
+		{
+			"a line without the # is a note, not a reference",
 			"PLAN-WAITS-ON: needs the parser\n```\n12 the parser\n```",
-			"needs the parser", []string{"12"}, true,
+			"", nil, false,
+		},
+		{
+			// A block that is all prose names no item, so it is not a sentinel
+			// and scanning continues — the documented skip, not a failure.
+			"a block of pure prose names nothing",
+			"PLAN-WAITS-ON: needs the parser\n```\nthe parser this builds on is not filed yet\n```",
+			"", nil, false,
 		},
 		{
 			"a bare # names nothing",
@@ -944,10 +961,16 @@ func TestDetectWaitsOn(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			summary, refs, ok := detectWaitsOn(tc.in)
+			summary, refs, block, ok := detectWaitsOn(tc.in)
 			if ok != tc.wantOK || summary != tc.wantSummary || !reflect.DeepEqual(refs, tc.wantRefs) {
 				t.Errorf("detectWaitsOn(%q) = (%q, %v, %v), want (%q, %v, %v)",
 					tc.in, summary, refs, ok, tc.wantSummary, tc.wantRefs, tc.wantOK)
+			}
+			// The block comes back so a caller can show it; a detected sentinel
+			// that returned no block would leave the failure as mystifying as
+			// the one token it quotes.
+			if ok && block == "" {
+				t.Errorf("detectWaitsOn(%q) returned no block alongside %v", tc.in, refs)
 			}
 		})
 	}

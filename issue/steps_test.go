@@ -2802,11 +2802,74 @@ func TestPlanStepWaitsOnUnresolvableRefFailsNamingIt(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "99") || !strings.Contains(err.Error(), "no such issue") {
 		t.Fatalf("err = %v, want a failure naming the token and the orchestrator's answer", err)
 	}
+	// And the block itself: one token quoted alone does not tell an operator
+	// what the agent wrote, where the lines they wrote do.
+	if !strings.Contains(err.Error(), "#99 a typo") {
+		t.Errorf("err = %v, want the block echoed so an operator can see the lines the parser read", err)
+	}
 	if len(ctx.waitedOn) != 0 {
 		t.Errorf("waited on %+v, want nothing declared when one token does not resolve", ctx.waitedOn)
 	}
 	if ctx.park != nil || ctx.didResolve {
 		t.Errorf("park %+v resolved %v, want neither", ctx.park, ctx.didResolve)
+	}
+	// The step still fails — a malformed sentinel is what a retry re-derives —
+	// but the turn is not lost: the retry resumes from the reasoning it paid for.
+	if len(ctx.wipSaves) == 0 {
+		t.Fatal("no work in progress saved — the plan turn is lost to the retry")
+	}
+	if last := ctx.wipSaves[len(ctx.wipSaves)-1]; !strings.Contains(last, WaitsOnSentinel) {
+		t.Errorf("work in progress = %q, want the agent's waits-on text", last)
+	}
+}
+
+// The reported defect (#280), end to end: a note that wrapped onto a second
+// line is prose, not a reference. Reading it as one sent `(same` to the tracker
+// and killed the step on an item whose declaration was perfectly well formed.
+func TestPlanStepWaitsOnWrappedNoteIsNotARef(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{
+		"PLAN-WAITS-ON: waits on the migration\n```\n" +
+			"#12 migrate issueflow to the new parser\n(same work as #13)\n#13 the lexer it reads\n```",
+	}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	err := waitingBuilder(t, nil).stepPlan(ctx)
+	if err == nil {
+		t.Fatal("want the step to stop on the items it waits on")
+	}
+	got := make([]string, 0, len(ctx.waitedOn))
+	for _, ref := range ctx.waitedOn {
+		got = append(got, ref.Display)
+	}
+	if want := []string{"owner/repo#12", "owner/repo#13"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("waited on %v, want %v — the wrapped note is not a reference", got, want)
+	}
+	if ctx.park != nil || ctx.didResolve {
+		t.Errorf("park %+v resolved %v, want neither", ctx.park, ctx.didResolve)
+	}
+}
+
+// The accepted consequence of requiring the `#`: a block that names no
+// reference is not a sentinel, so scanning continues and a turn that also
+// submitted a plan resolves it. On the record as a decision — the alternative
+// is failing a step over a sentinel that declared nothing.
+func TestPlanStepWaitsOnBlockWithNoRefsResolvesThePlan(t *testing.T) {
+	agent := &scriptedAgent{
+		replies: []string{
+			"PLAN-WAITS-ON: waits on something\n```\nthe parser this builds on is not filed yet\n```",
+		},
+		plans: []planReply{{submitted: true, text: "# Plan\n\nDo the work."}},
+	}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	if err := waitingBuilder(t, nil).stepPlan(ctx); err != nil {
+		t.Fatalf("stepPlan: %v — a block naming no item is not a sentinel", err)
+	}
+	if len(ctx.waitedOn) != 0 {
+		t.Errorf("waited on %+v, want nothing — the block named no item", ctx.waitedOn)
+	}
+	if !ctx.didResolve {
+		t.Error("did not resolve the plan artifact — the submitted plan is the turn's deliverable")
 	}
 }
 

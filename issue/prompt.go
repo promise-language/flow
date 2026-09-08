@@ -203,7 +203,10 @@ why it is waited on. The shape (shown indented here; write yours flush left):
     PLAN-WAITS-ON: <one-line summary>
     ` + "```" + `
     #<n>  <why this item is waited on>
-    ` + "```" + ``
+    ` + "```" + `
+
+Every reference line must begin with #<n>. A line that does not is a note and
+is ignored, so a note may wrap onto as many lines as it needs.`
 
 // repoRelativePaths is carried by every default prompt whose product is
 // published on the item.
