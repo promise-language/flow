@@ -2,6 +2,7 @@ package flow
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -22,8 +23,48 @@ func TestInvocationResult_JSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(b, &out); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if out != in {
+	if !reflect.DeepEqual(out, in) {
 		t.Errorf("round-trip: %+v != %+v", out, in)
+	}
+	// A result that did not stop on items carries neither block field: the
+	// wire is byte-identical to what it was before they existed.
+	for _, key := range []string{"block_kind", "blocked_by"} {
+		if strings.Contains(string(b), key) {
+			t.Errorf("JSON %s carries %q on a result that did not stop on items", b, key)
+		}
+	}
+}
+
+// A stop on the item's own blockers carries the kind and the declared
+// blockers, each with its status, as data — never only prose.
+func TestInvocationResult_BlockedOnItemsRoundTrip(t *testing.T) {
+	in := InvocationResult{
+		Flow:      "implement",
+		Item:      "owner/repo#42",
+		Step:      "plan",
+		Status:    "blocked",
+		Reason:    "waiting on unfinished dependencies",
+		BlockKind: WaitsOnItems,
+		BlockedBy: []Blocker{
+			{Ref: ItemRef{OrchestratorName: "github", Display: "owner/repo#7", Ref: json.RawMessage(`{"issue":7}`)}, Status: StatusTerminal},
+			{Ref: ItemRef{OrchestratorName: "github", Display: "owner/repo#8", Ref: json.RawMessage(`{"issue":8}`)}, Status: StatusOpen},
+		},
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	for _, key := range []string{`"block_kind":"waits-on-items"`, `"blocked_by":[`} {
+		if !strings.Contains(string(b), key) {
+			t.Errorf("JSON %s lacks %s", b, key)
+		}
+	}
+	var out InvocationResult
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(out, in) {
+		t.Errorf("round-trip:\n  out = %+v\n  in  = %+v", out, in)
 	}
 }
 

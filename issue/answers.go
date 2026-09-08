@@ -158,6 +158,64 @@ func detectRefusal(lastText string) (kind RefusalKind, summary string, evidence 
 	return "", "", "", false
 }
 
+// WaitsOnSentinel is how a plan agent signals that the work is real and waits
+// on other items — ones that exist, or ones it filed — rather than that the
+// item should not be done.
+//
+// Structurally identical to RefusalSentinel: a column-zero token, a one-line
+// summary after the colon, and a fenced block after that. The block is
+// REQUIRED, because it is where the references go: each non-blank line's first
+// whitespace-delimited token is an item reference in whatever form the
+// orchestrator's ResolveRef accepts, and the rest of the line is a free note
+// for a person. A sentinel whose block names no item is not a sentinel, and
+// scanning continues — waiting on nothing is not a state an item can be in.
+//
+// It is not a fifth refusal, and the refusal set stays closed. A refusal means
+// no answer and no change will help, and a person decides; this means the work
+// exists elsewhere and will land, and nobody touches this item until it does
+// (docs/issue-flow.md § Planning can conclude that there is no plan).
+const WaitsOnSentinel = "PLAN-WAITS-ON:"
+
+// detectWaitsOn looks for the waits-on sentinel in an agent's final message and
+// returns its summary and the item references its block names, in order, each
+// stripped of its note.
+//
+// It scans from the END, same rationale as detectRefusal: the operative line is
+// the agent's last word. A sentinel with no summary, with no fenced block, or
+// with a block naming no item is skipped and scanning continues.
+func detectWaitsOn(lastText string) (summary string, refs []string, ok bool) {
+	lines := strings.Split(lastText, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		// Column zero, deliberately not trimmed first — see WaitsOnSentinel.
+		if !strings.HasPrefix(lines[i], WaitsOnSentinel) {
+			continue
+		}
+		summary = strings.TrimSpace(strings.TrimPrefix(lines[i], WaitsOnSentinel))
+		if summary == "" {
+			continue // a bare token says nothing checkable
+		}
+		refs = refTokens(fencedBlockAfter(lines[i+1:]))
+		if len(refs) == 0 {
+			continue // no block, or a block naming no item — not a wait
+		}
+		return summary, refs, true
+	}
+	return "", nil, false
+}
+
+// refTokens takes the first whitespace-delimited token of every non-blank line
+// of a waits-on block: the reference. The rest of each line is the note, which
+// nothing parses.
+func refTokens(block string) []string {
+	var out []string
+	for _, line := range strings.Split(block, "\n") {
+		if fields := strings.Fields(line); len(fields) > 0 {
+			out = append(out, fields[0])
+		}
+	}
+	return out
+}
+
 // AskSentinel is how an agent signals that it needs a human decision.
 //
 // The canonical steps own the convention rather than each project inventing

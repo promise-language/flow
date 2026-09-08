@@ -72,7 +72,16 @@ type Item struct {
 	// since finished stays listed until someone retracts it: a set that quietly
 	// dropped satisfied entries could not be edited, because nothing could see
 	// what was there to remove.
+	//
+	// Blocked and BlockKind are the derived answer to "is this blocked right
+	// now, and who must act" — the same meaning as on ItemInfo, derived by the
+	// same rule, and stored nowhere. Load carries them because the advance
+	// reads them before every dispatch (docs/resolution.md § Blocked on
+	// items): an Item that could not say would send the dispatch to Get for a
+	// fact it has just loaded the inputs to.
 	BlockedBy   []Blocker
+	Blocked     bool
+	BlockKind   BlockKind
 	BlockReason string
 
 	// Finalized marks the item's flow run as complete — the sole terminal "no

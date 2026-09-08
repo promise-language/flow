@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -852,6 +853,114 @@ func TestDetectRefusal(t *testing.T) {
 					tc.wantKind, tc.wantSummary, tc.wantEvidence, tc.wantOK)
 			}
 		})
+	}
+}
+
+func TestDetectWaitsOn(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		in          string
+		wantSummary string
+		wantRefs    []string
+		wantOK      bool
+	}{
+		{
+			"one ref with a note",
+			"I read the tree.\nPLAN-WAITS-ON: needs the parser first\n```\n#12  the parser this builds on\n```",
+			"needs the parser first", []string{"#12"}, true,
+		},
+		{
+			"several refs, notes and blank lines",
+			"PLAN-WAITS-ON: waits on three\n```\n#12 parser\n\n#13\towner/repo#14 is not this line's ref\nowner/repo#14\n```",
+			"waits on three", []string{"#12", "#13", "owner/repo#14"}, true,
+		},
+		{
+			"bare sentinel",
+			"PLAN-WAITS-ON:",
+			"", nil, false,
+		},
+		{
+			"summary without a block",
+			"PLAN-WAITS-ON: needs the parser",
+			"", nil, false,
+		},
+		{
+			"empty block names nothing",
+			"PLAN-WAITS-ON: needs the parser\n```\n\n```",
+			"", nil, false,
+		},
+		{
+			"sentinel not at column zero",
+			"    PLAN-WAITS-ON: needs the parser\n```\n#12\n```",
+			"", nil, false,
+		},
+		{
+			"mid-line mention does not trip",
+			"the convention is PLAN-WAITS-ON: <summary> at line start\n```\n#12\n```",
+			"", nil, false,
+		},
+		{
+			"multiple sentinels — last one wins",
+			"PLAN-WAITS-ON: first guess\n```\n#7\n```\nPLAN-WAITS-ON: the real finding\n```\n#12 the parser\n```",
+			"the real finding", []string{"#12"}, true,
+		},
+		{
+			"later sentinel without a block falls through to the earlier one",
+			"PLAN-WAITS-ON: with block\n```\n#7\n```\nPLAN-WAITS-ON: no block here",
+			"with block", []string{"#7"}, true,
+		},
+		{
+			"indented example ignored, real one honored",
+			"    PLAN-WAITS-ON: <one-line summary>\n    ```\n    #<n>  <why>\n    ```\nPLAN-WAITS-ON: needs the parser\n```\n#12\n```",
+			"needs the parser", []string{"#12"}, true,
+		},
+		{
+			"blank lines before fence tolerated",
+			"PLAN-WAITS-ON: needs the parser\n\n\n```\n#12\n```",
+			"needs the parser", []string{"#12"}, true,
+		},
+		{
+			"unterminated fence keeps remainder",
+			"PLAN-WAITS-ON: needs the parser\n```\n#12 never closes",
+			"needs the parser", []string{"#12"}, true,
+		},
+		{
+			"empty text",
+			"",
+			"", nil, false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			summary, refs, ok := detectWaitsOn(tc.in)
+			if ok != tc.wantOK || summary != tc.wantSummary || !reflect.DeepEqual(refs, tc.wantRefs) {
+				t.Errorf("detectWaitsOn(%q) = (%q, %v, %v), want (%q, %v, %v)",
+					tc.in, summary, refs, ok, tc.wantSummary, tc.wantRefs, tc.wantOK)
+			}
+		})
+	}
+}
+
+// The plan prompt teaches the waits-on sentinel the handler enforces, with the
+// illustration indented so an echo of it cannot self-trigger — and it draws
+// the line against `duplicate`, the refusal #181's plan reached for instead.
+func TestPlanStepResolutionTeachesWaitsOn(t *testing.T) {
+	pc := PromptContext{}
+	pc.AskGuidance = askGuidancePartial
+	pc.PlanStepResolution = planResolutionPartial
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	body := pc.PlanStepResolution
+	if !strings.Contains(body, WaitsOnSentinel) {
+		t.Fatal("PlanStepResolution must teach the waits-on sentinel that detectWaitsOn actually enforces")
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, WaitsOnSentinel) {
+			t.Errorf("PlanStepResolution shows the waits-on sentinel at column zero: %q — an echo would self-trigger", line)
+		}
+	}
+	if !strings.Contains(body, "replaces this one") {
+		t.Error("the duplicate refusal must be sharpened to the item that replaces this one, or it swallows waits-on")
 	}
 }
 

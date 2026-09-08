@@ -761,7 +761,7 @@ func (b *Orchestrator) loadLocked(rec *itemRecord) *flow.Item {
 	it.Priority = rec.item.Priority.OrNeutral()
 	it.Urgency = rec.item.Urgency.OrNeutral()
 	it.BlockedBy = b.blockersOf(rec)
-	_, _, it.BlockReason = b.blockednessOf(rec)
+	it.Blocked, it.BlockKind, it.BlockReason = b.blockednessOf(rec)
 	it.Artifacts = make(map[flow.ArtifactId]flow.ArtifactRecord, len(rec.artifacts))
 	for k, v := range rec.artifacts {
 		it.Artifacts[k] = *v

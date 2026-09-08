@@ -2382,6 +2382,437 @@ func TestRunOne_PlainErrorOnUnfitMachineReportsBlocked(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Blocked on items (docs/resolution.md § Blocked on items).
+// ---------------------------------------------------------------------------
+
+// blockOn declares `blocker` as a blocker of `item` through the editor — the
+// contract's one way to record a dependency.
+func blockOn(t *testing.T, be flow.Orchestrator, item, blocker flow.ItemRef) {
+	t.Helper()
+	ed, err := be.Edit(context.Background(), item)
+	if err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+	ed.AddBlocker(blocker)
+	if err := ed.Commit(context.Background()); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+}
+
+// openBlockerDisplays is what a result says the item still waits on.
+func openBlockerDisplays(res flow.InvocationResult) []string {
+	return blockerDisplays(res.BlockedBy)
+}
+
+// The check before dispatch. An item waiting on an unfinished item stops
+// clean: blocked, kind waits-on-items, naming the blockers and the pending
+// step — and nothing else happens. No handler, no seed, no invocation, no
+// park, no running record, and the claim is kept.
+func TestRunOne_BlockedOnItemsStopsBeforeDispatch(t *testing.T) {
+	t.Setenv("FLOW_DIR", filepath.Join(t.TempDir(), ".flow"))
+	handlerRan := false
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			handlerRan = true
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
+	blockOn(t, be, claim.ItemRef, be.Ref("2"))
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusBlocked) {
+		t.Fatalf("status = %q, want blocked; res=%+v", res.Status, res)
+	}
+	if res.BlockKind != flow.WaitsOnItems {
+		t.Errorf("BlockKind = %q, want %q", res.BlockKind, flow.WaitsOnItems)
+	}
+	if got := openBlockerDisplays(res); len(got) != 1 || got[0] != "2" {
+		t.Errorf("open blockers = %v, want [2]", got)
+	}
+	if res.Step != "plan" || res.Flow != "implement" {
+		t.Errorf("res names step %q on flow %q, want the pending step %q on %q", res.Step, res.Flow, "plan", "implement")
+	}
+	if res.Reason == "" || strings.Contains(res.Reason, "2") {
+		t.Errorf("Reason = %q, want the orchestrator's kind-naming reason, never the blocker copied into prose", res.Reason)
+	}
+	if res.Park != nil {
+		t.Errorf("Park = %+v, want nil — the stop is not a park", res.Park)
+	}
+	if res.InvocationID != "" || res.CostUSD != nil || res.DurationSeconds != 0 {
+		t.Errorf("res = %+v carries dispatch-time fields, but nothing was dispatched", res)
+	}
+	if handlerRan {
+		t.Error("the handler ran on a blocked item — an agent turn was spent on work that cannot proceed")
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if state.HasRequiredArtifacts() {
+		t.Error("the item was seeded — a blocked stop records nothing")
+	}
+	if rec := state.Artifact("plan"); rec.Invocations != 0 {
+		t.Errorf("Invocations = %d, want 0", rec.Invocations)
+	}
+	if be.ParkRequest("1") != nil {
+		t.Errorf("park recorded: %+v — a blocked stop is not a park", be.ParkRequest("1"))
+	}
+	if held, _ := be.LookupActiveClaim(context.Background()); held == nil {
+		t.Error("the claim was released — it is an arena reservation, and the stop keeps it")
+	}
+	if running, _ := clistate.LoadRunning(); running != nil {
+		t.Errorf("running record left behind: %+v", running)
+	}
+}
+
+// Both directions, without anyone touching the item. The blocker landing makes
+// the item workable at the next read; reopened, it blocks again at the next
+// read — from where the route now stands, since the plan ran in between. The
+// claim survives all of it.
+func TestRunOne_BlockerLandingAndReopeningIsSymmetric(t *testing.T) {
+	planRuns := 0
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			planRuns++
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+		f.AddStep("record commit", "commit", func(ctx flow.StepCtx) error {
+			t.Fatal("the commit step must not run while the item is blocked")
+			return nil
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
+	blockOn(t, be, claim.ItemRef, be.Ref("2"))
+
+	run := func(when string) flow.InvocationResult {
+		t.Helper()
+		res, err := RunOne(context.Background(), app, claim)
+		if err != nil {
+			t.Fatalf("%s: RunOne: %v", when, err)
+		}
+		if held, _ := be.LookupActiveClaim(context.Background()); held == nil {
+			t.Errorf("%s: the claim was released", when)
+		}
+		return res
+	}
+
+	if res := run("blocked"); res.Status != "blocked" || res.Step != "plan" {
+		t.Fatalf("blocked: res = %+v, want blocked at plan", res)
+	}
+	// Nobody touches the item: the blocker lands.
+	be.SetStatus("2", flow.StatusTerminal, "done")
+	if res := run("blocker landed"); res.Status != "done" || res.Step != "plan" || planRuns != 1 {
+		t.Fatalf("blocker landed: res = %+v (plan ran %d times), want the plan to run", res, planRuns)
+	}
+	// Nobody touches the item: the blocker is reopened.
+	be.SetStatus("2", flow.StatusOpen, "reopened")
+	res := run("blocker reopened")
+	if res.Status != "blocked" || res.BlockKind != flow.WaitsOnItems {
+		t.Fatalf("blocker reopened: res = %+v, want blocked on items again", res)
+	}
+	if res.Step != "commit" {
+		t.Errorf("blocker reopened: pending step = %q, want %q — the route stood where the plan left it", res.Step, "commit")
+	}
+	if planRuns != 1 {
+		t.Errorf("plan ran %d times, want 1 — a re-block does not rewind the route", planRuns)
+	}
+}
+
+// An item both waiting on items and awaiting an answer reports waits-on-items:
+// the precedence the derivation gives it, so the report agrees with `status`.
+// The preflight never runs.
+func TestRunOne_BlockedOnItemsOutranksAnUnansweredQuestion(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			t.Fatal("handler must not run")
+			return nil
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	preflightRan := false
+	app.Preflight = func(context.Context, *flow.Item) error {
+		preflightRan = true
+		return fmt.Errorf("answer needed on %q: %w", "plan", flow.ErrBlocked)
+	}
+	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
+	blockOn(t, be, claim.ItemRef, be.Ref("2"))
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "blocked" || res.BlockKind != flow.WaitsOnItems {
+		t.Fatalf("res = %+v, want blocked on items", res)
+	}
+	if strings.Contains(res.Reason, "preflight") {
+		t.Errorf("Reason = %q is the preflight's, want the item's own blockedness first", res.Reason)
+	}
+	if preflightRan {
+		t.Error("the preflight ran on an item already blocked on items")
+	}
+}
+
+// The check sits after the no-flow block: an item with no pending step has
+// nothing to be blocked from, and still finalizes.
+func TestRunOne_BlockedItemWithNoPendingStepStillFinalizes(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.RequireSignal("pr-open") // never set, so no step is ever pending
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			return ctx.ResolveMarkdown("ignored")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
+	blockOn(t, be, claim.ItemRef, be.Ref("2"))
+	wrapped := &finalizingBackend{Orchestrator: be}
+	app.Orchestrator = wrapped
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "done" || wrapped.finalizeCalls != 1 {
+		t.Errorf("res = %+v (finalize calls %d), want the finalize path", res, wrapped.finalizeCalls)
+	}
+}
+
+// A step declares the blockers it finds and stops on them. The blocker is
+// recorded on the item, the stop is the same clean stop the pre-dispatch check
+// makes: blocked, kind waits-on-items, no park, no invocation charged, the
+// artifact unresolved, and the step's work in progress kept for the resume.
+func TestRunOne_HandlerWaitsOnItemsRecordsTheBlockerAndStopsClean(t *testing.T) {
+	handlerRuns := 0
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			handlerRuns++
+			if err := ctx.RecordWorkInProgress("half a plan"); err != nil {
+				return err
+			}
+			return ctx.WaitOnItems(itemRefFor("2"))
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "blocked" || res.BlockKind != flow.WaitsOnItems {
+		t.Fatalf("res = %+v, want blocked on items", res)
+	}
+	if got := openBlockerDisplays(res); len(got) != 1 || got[0] != "2" {
+		t.Errorf("open blockers = %v, want [2] — the report comes from the reloaded item", got)
+	}
+	if res.Park != nil || be.ParkRequest("1") != nil {
+		t.Errorf("parked (%+v / %+v) — the stop is not a park", res.Park, be.ParkRequest("1"))
+	}
+	if res.CostUSD == nil {
+		t.Error("CostUSD = nil, want the dispatched step's spend reported — the handler ran")
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if !state.Blocked || len(state.BlockedBy) != 1 || state.BlockedBy[0].Ref.Display != "2" {
+		t.Errorf("item = blocked %v by %+v, want the declared blocker recorded on the item", state.Blocked, state.BlockedBy)
+	}
+	rec := state.Artifact("plan")
+	if rec.Invocations != 0 {
+		t.Errorf("Invocations = %d, want 0 — a wait is not charged", rec.Invocations)
+	}
+	if rec.Resolved {
+		t.Error("the artifact resolved on a stop")
+	}
+	if wip, _ := be.LoadWorkInProgress(context.Background(), claim.ItemRef, "plan"); wip != "half a plan" {
+		t.Errorf("work in progress = %q, want it kept for the resume", wip)
+	}
+	// The next advance finds the item blocked before dispatch: no second turn.
+	res2, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("second RunOne: %v", err)
+	}
+	if res2.Status != "blocked" || handlerRuns != 1 {
+		t.Errorf("second run = %+v with the handler run %d times, want blocked before dispatch", res2, handlerRuns)
+	}
+	// And once the blocker lands, the step runs from where it stood.
+	be.SetStatus("2", flow.StatusTerminal, "done")
+	if res3, _ := RunOne(context.Background(), app, claim); res3.Status != "blocked" || handlerRuns != 2 {
+		t.Errorf("after the blocker landed: %+v with the handler run %d times, want it dispatched again", res3, handlerRuns)
+	}
+}
+
+// Declared blockers that have already finished are accepted — naming an item
+// that has landed is not an error — and the item then reads unblocked. The
+// stop is still reported, from the derivation, and the next advance runs the
+// step.
+func TestRunOne_HandlerWaitsOnFinishedItemsIsReportedAndTheNextAdvanceRuns(t *testing.T) {
+	handlerRuns := 0
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			handlerRuns++
+			if handlerRuns == 1 {
+				return ctx.WaitOnItems(itemRefFor("2"))
+			}
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	be.AddItem("2", flow.Item{Type: "task", Title: "already landed"})
+	be.SetStatus("2", flow.StatusTerminal, "done")
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "blocked" || res.Park != nil {
+		t.Fatalf("res = %+v, want a blocked stop with no park", res)
+	}
+	if res.BlockKind != "" || len(res.BlockedBy) != 1 || res.BlockedBy[0].Status != flow.StatusTerminal {
+		t.Errorf("res = %+v, want the derivation's answer: no kind, the declared blocker listed as terminal", res)
+	}
+	if !strings.Contains(res.Reason, "finished") {
+		t.Errorf("Reason = %q, want it to say the declared blockers have finished", res.Reason)
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if rec := state.Artifact("plan"); rec.Invocations != 0 {
+		t.Errorf("Invocations = %d, want 0", rec.Invocations)
+	}
+	if res2, _ := RunOne(context.Background(), app, claim); res2.Status != "done" || handlerRuns != 2 {
+		t.Errorf("next run = %+v with the handler run %d times, want the step to run and complete", res2, handlerRuns)
+	}
+}
+
+// A ref the orchestrator refuses to record fails the step, naming the ref.
+// Nothing else is recorded: no blocker, no park.
+func TestRunOne_WaitOnItemsUnresolvableRefFailsNamingIt(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			return ctx.WaitOnItems(itemRefFor("nope"))
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "failed" {
+		t.Fatalf("status = %q, want failed; res=%+v", res.Status, res)
+	}
+	if !strings.Contains(res.Reason, "nope") {
+		t.Errorf("Reason = %q, want it to name the ref that could not be recorded", res.Reason)
+	}
+	if res.BlockKind != "" || len(res.BlockedBy) != 0 || res.Park != nil {
+		t.Errorf("res = %+v, want no block fields and no park on a failure", res)
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if len(state.BlockedBy) != 0 || be.ParkRequest("1") != nil {
+		t.Errorf("recorded blockers %+v / park %+v, want nothing recorded", state.BlockedBy, be.ParkRequest("1"))
+	}
+}
+
+// Blockers recorded before the refused one stay: adding one is idempotent, and
+// retracting them would be a second write that could fail the same way.
+func TestRunOne_WaitOnItemsKeepsBlockersRecordedBeforeARefusedOne(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			return ctx.WaitOnItems(itemRefFor("2"), itemRefFor("nope"))
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "failed" || !strings.Contains(res.Reason, "nope") {
+		t.Fatalf("res = %+v, want failed naming %q", res, "nope")
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if len(state.BlockedBy) != 1 || state.BlockedBy[0].Ref.Display != "2" {
+		t.Errorf("BlockedBy = %+v, want the blocker recorded before the refusal to stay", state.BlockedBy)
+	}
+}
+
+// blockerEditsBackend records what each committed edit staged as blockers, so
+// a test can see that refs land one edit apiece — the GitHub editor refuses
+// more than one dependency change per commit.
+type blockerEditsBackend struct {
+	*fake.Orchestrator
+	commits [][]flow.ItemRef
+}
+
+func (b *blockerEditsBackend) Edit(ctx context.Context, ref flow.ItemRef) (flow.ItemEditor, error) {
+	inner, err := b.Orchestrator.Edit(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	return &blockerEditsEditor{ItemEditor: inner, be: b}, nil
+}
+
+type blockerEditsEditor struct {
+	flow.ItemEditor
+	be     *blockerEditsBackend
+	staged []flow.ItemRef
+}
+
+func (e *blockerEditsEditor) AddBlocker(ref flow.ItemRef) {
+	e.staged = append(e.staged, ref)
+	e.ItemEditor.AddBlocker(ref)
+}
+
+func (e *blockerEditsEditor) Commit(ctx context.Context) error {
+	e.be.commits = append(e.be.commits, e.staged)
+	return e.ItemEditor.Commit(ctx)
+}
+
+func TestRunOne_WaitOnItemsCommitsOneEditPerRef(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			return ctx.WaitOnItems(itemRefFor("2"), itemRefFor("3"))
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	be.AddItem("2", flow.Item{Type: "task", Title: "first"})
+	be.AddItem("3", flow.Item{Type: "task", Title: "second"})
+	recording := &blockerEditsBackend{Orchestrator: be}
+	app.Orchestrator = recording
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "blocked" {
+		t.Fatalf("res = %+v, want blocked", res)
+	}
+	if len(recording.commits) != 2 {
+		t.Fatalf("committed %d edits, want 2 — one per ref", len(recording.commits))
+	}
+	for i, want := range []string{"2", "3"} {
+		if len(recording.commits[i]) != 1 || recording.commits[i][0].Display != want {
+			t.Errorf("edit %d staged %+v, want exactly %q", i, recording.commits[i], want)
+		}
+	}
+	if got := openBlockerDisplays(res); len(got) != 2 {
+		t.Errorf("open blockers = %v, want both recorded", got)
+	}
+}
+
+// Waiting on nothing is not a state an item can be in.
+func TestRunOne_WaitOnItemsWithNoRefsIsAnError(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			return ctx.WaitOnItems()
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "failed" || !strings.Contains(res.Reason, "no items") {
+		t.Fatalf("res = %+v, want failed for a wait on nothing", res)
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if len(state.BlockedBy) != 0 || state.Blocked {
+		t.Errorf("item = blocked %v by %+v, want nothing recorded", state.Blocked, state.BlockedBy)
+	}
+}
+
 // Counterpart to the unfit catch-all: a plain error on a fit machine follows
 // the normal failure path — status failed, budget consumed.
 func TestRunOne_PlainErrorOnFitMachineStillFails(t *testing.T) {

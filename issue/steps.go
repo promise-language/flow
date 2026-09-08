@@ -63,27 +63,37 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 		// combined record so the resumed step has both the submitted plan
 		// and the reasoning that led to the question.
 		if resp != nil && strings.TrimSpace(resp.PlanText) != "" {
-			combined := "## Submitted plan\n\n" + resp.PlanText +
-				"\n\n---\n\n## Agent reasoning\n\n" + resp.LastText
-			if wipErr := ctx.RecordWorkInProgress(combined); wipErr != nil {
+			if wipErr := ctx.RecordWorkInProgress(planWorkInProgress(resp)); wipErr != nil {
 				ctx.Notify("", "could not persist plan as work in progress: "+wipErr.Error())
 			}
 		}
 		return err
 	}
+	// The work is real and waits on other items. Read before the refusal: a
+	// turn that both declares blockers and refuses has said two things, and
+	// the one that clears itself is the one to act on — a refusal is a park a
+	// person must clear, while this stop clears when the blockers land
+	// (docs/issue-flow.md § Planning can conclude that there is no plan).
+	if _, tokens, ok := detectWaitsOn(resp.LastText); ok {
+		refs := make([]flow.ItemRef, 0, len(tokens))
+		for _, tok := range tokens {
+			// Through the orchestrator, which is the one place a typed value
+			// becomes an identity. A token that does not resolve fails the step
+			// naming it: falling through to the plan-shape check would publish
+			// the sentinel text as the plan.
+			ref, err := b.backend.ResolveRef(ctx.Context(), tok)
+			if err != nil {
+				return fmt.Errorf("plan waits on %q, which does not resolve to an item: %w", tok, err)
+			}
+			refs = append(refs, ref)
+		}
+		keepPlanReasoning(ctx, resp, "waits-on")
+		return ctx.WaitOnItems(refs...)
+	}
 	// A refusal is the step's work — the agent read enough to conclude the
 	// item should not be done. It blocks rather than resolves.
 	if kind, summary, _, ok := detectRefusal(resp.LastText); ok {
-		// Save the full agent output as WIP so the reasoning survives if
-		// the refusal is cleared and the step resumes.
-		combined := resp.LastText
-		if strings.TrimSpace(resp.PlanText) != "" {
-			combined = "## Submitted plan\n\n" + resp.PlanText +
-				"\n\n---\n\n## Agent reasoning\n\n" + resp.LastText
-		}
-		if wipErr := ctx.RecordWorkInProgress(combined); wipErr != nil {
-			ctx.Notify("", "could not record refusal reasoning: "+wipErr.Error())
-		}
+		keepPlanReasoning(ctx, resp, "refusal")
 		return ctx.Park(flow.ParkRequest{
 			Kind:    flow.ParkBlocked,
 			Reason:  fmt.Sprintf("plan refused (%s): %s", kind, summary),
@@ -143,6 +153,30 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 			firstLine(plan))
 	}
 	return b.resolveMarkdown(ctx, pc, resp.SessionID, plan)
+}
+
+// planWorkInProgress is what the plan step keeps when it stops short: the
+// agent's final message, and the plan it submitted when it submitted one. A
+// plan-mode turn submits and THEN continues to reason, so both can exist, and
+// the resumed step needs both — the deliverable and the reasoning behind
+// stopping.
+func planWorkInProgress(resp *flow.AgentResponse) string {
+	if strings.TrimSpace(resp.PlanText) == "" {
+		return resp.LastText
+	}
+	return "## Submitted plan\n\n" + resp.PlanText +
+		"\n\n---\n\n## Agent reasoning\n\n" + resp.LastText
+}
+
+// keepPlanReasoning stashes planWorkInProgress as this step's work in
+// progress, so the reasoning behind a stop survives to the resume. Best-effort:
+// a stash that failed costs a re-derivation, and turning it into a step failure
+// would lose the stop as well as the work. `what` names the stop for the
+// notice.
+func keepPlanReasoning(ctx flow.StepCtx, resp *flow.AgentResponse, what string) {
+	if err := ctx.RecordWorkInProgress(planWorkInProgress(resp)); err != nil {
+		ctx.Notify("", "could not record "+what+" reasoning: "+err.Error())
+	}
 }
 
 // planProseFloor is the length above which unstructured text is accepted as a

@@ -132,7 +132,7 @@ Returned by `Load`. Nothing in it is a state value: an item's states are `ItemSt
 | `Requires` | Its placement restrictions, as on `ItemInfo` — an editor can change them, so a `Load` that omitted them would mean editing blind. |
 | `Tags` | Every `TagId` it carries. |
 | `Priority`, `Urgency` | Its priority and urgency. Same meaning as on `ItemInfo`. |
-| `BlockedBy`, `BlockReason` | Its blockers, each with its own `ItemStatus`, and why it is blocked. Same meaning as on `ItemInfo`. |
+| `BlockedBy`, `Blocked`, `BlockKind`, `BlockReason` | Its blockers, each with its own `ItemStatus`; whether it is blocked right now; who must act and on what; and why. Same meaning as on `ItemInfo`. |
 | `Finalized` | Whether the **flow** is done with it, and with which `Disposition`. `Load` **must** report this truthfully; `Finalize` is the only thing that sets it. |
 | `Manual` | Whether an operator has taken hand control. `Load` **must** report this truthfully. |
 | `Journal` | The journal whole: every completed step execution, in order, each entry as `AppendEntry` recorded it. |
@@ -232,7 +232,7 @@ Every orchestrator implements the `Orchestrator` interface. The methods group by
 
 | Method | Contract |
 |---|---|
-| `Load(ctx, ItemRef)` → `(*Item, error)` | The item and everything the flow has recorded on it — journal, ledger, signals, questions and park — in one round. Signals are refreshed by orchestrator-internal polling. **Addressed by ref, not by claim**: reading an item is not a privileged act, and the item is what is being loaded. An orchestrator wanting the shortcut a held claim affords looks up its own — `LookupActiveClaim` takes no argument, so it can always find it. Carries no availability and no blockers; those come from `Get`. |
+| `Load(ctx, ItemRef)` → `(*Item, error)` | The item and everything the flow has recorded on it — journal, ledger, signals, questions and park — in one round. Signals are refreshed by orchestrator-internal polling. **Addressed by ref, not by claim**: reading an item is not a privileged act, and the item is what is being loaded. An orchestrator wanting the shortcut a held claim affords looks up its own — `LookupActiveClaim` takes no argument, so it can always find it. Carries no availability; that comes from `Get`. |
 | `Reset(ctx, ItemRef)` → `error` | Clears the flow's whole record on the item — journal, ledger, park, questions' outstanding marker, drafts — so the next resolution starts from an empty journal. Operator-initiated only; the SDK never calls it automatically. An orchestrator that cannot clear its record refuses; the refusal is typed, so a caller can tell *not supported* from a transient failure. |
 
 **`Load` and `Get` are not two readings of one thing.** `Item` carries the item and what the *flow* wrote onto it: artifacts it produced, signals observed for it, questions it asked, why it parked. `ItemInfo` is the item's standing in the *orchestrator's* own world: open or closed, held, tagged, blocked. One is the flow's record, the other the tracker's, and an item has both independently — a finished flow on a reopened issue, or an untouched item that is already blocked. `status` asks both because an operator's question spans both. Only `Get` needs a `BinaryName` and the predicate, because availability depends on who is asking and lifecycle state does not.
@@ -418,7 +418,9 @@ Dependencies are the orchestrator's knowledge. The SDK carries the references an
 
 ### What an orchestrator reports
 
-`ItemInfo` carries `BlockReason` and `BlockedBy`. Both reads return them — `List` for a listing, `Get` for a single item — so `list` and `status` report the same fact through the same field. There is no third read: an item's blockers are obtained the same way its availability and tags are.
+`ItemInfo` carries `BlockReason` and `BlockedBy`. Both reads return them — `List` for a listing, `Get` for a single item — so `list` and `status` report the same fact through the same field. There is no separate read for blockers: an item's blockers are obtained the same way its tags are.
+
+`Item` carries the same fields, and `Load` derives blockedness **by the same rule as `Get`**: the advance reads it before every dispatch ([resolution.md](resolution.md) § Blocked on items), so a `Load` that answered differently from `Get` would have the advance and the listing disagree about whether the item can run. A failed blocker read fails the load, as it fails `Get`, because an item that cannot say whether it is blocked must not read as unblocked.
 
 **`BlockedBy` is every blocker declared on the item, each carrying its own `ItemStatus`.** It is the recorded dependency set — what `AddBlocker` put there and `RemoveBlocker` takes away — so a blocker that has since gone `terminal` stays listed until someone retracts it. A set that quietly dropped satisfied entries could not be edited, because nothing could see what was there to remove.
 

@@ -30,6 +30,55 @@ func itemRef(id string) flow.ItemRef {
 	}
 }
 
+// Load reports the same three block fields Get does. The advance reads them off
+// Load before every dispatch and the listing reads Get, so a Load that
+// disagreed with Get would have the advance and the listing disagree about
+// whether the item can run. Nothing is stored: the blocker finishing is visible
+// at the next read, and reopening it blocks the item again, with nobody
+// touching the item either time.
+func TestBackend_LoadAgreesWithGetOnBlockedness(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := addItem(b, "item")
+	blocker := addItem(b, "blocker")
+	ed, err := b.Edit(ctx, ref)
+	if err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+	ed.AddBlocker(blocker)
+	if err := ed.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	agree := func(when string, wantBlocked bool, wantKind flow.BlockKind) {
+		t.Helper()
+		info, err := b.Get(ctx, ref, "binary", nil)
+		if err != nil {
+			t.Fatalf("%s: Get: %v", when, err)
+		}
+		item, err := b.Load(ctx, ref)
+		if err != nil {
+			t.Fatalf("%s: Load: %v", when, err)
+		}
+		if item.Blocked != info.Blocked || item.BlockKind != info.BlockKind || item.BlockReason != info.BlockReason {
+			t.Errorf("%s: Load(blocked %v kind %q reason %q) disagrees with Get(blocked %v kind %q reason %q)",
+				when, item.Blocked, item.BlockKind, item.BlockReason, info.Blocked, info.BlockKind, info.BlockReason)
+		}
+		if item.Blocked != wantBlocked || item.BlockKind != wantKind {
+			t.Errorf("%s: Load reports blocked=%v kind=%q, want blocked=%v kind=%q",
+				when, item.Blocked, item.BlockKind, wantBlocked, wantKind)
+		}
+		if len(item.BlockedBy) != 1 || item.BlockedBy[0].Ref.Display != "blocker" {
+			t.Errorf("%s: BlockedBy = %+v, want the one declared blocker, whatever its status", when, item.BlockedBy)
+		}
+	}
+	agree("blocker open", true, flow.WaitsOnItems)
+	b.SetStatus("blocker", flow.StatusTerminal, "done")
+	agree("blocker landed", false, "")
+	b.SetStatus("blocker", flow.StatusOpen, "reopened")
+	agree("blocker reopened", true, flow.WaitsOnItems)
+}
+
 func TestBackend_ClaimAndLookup(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()

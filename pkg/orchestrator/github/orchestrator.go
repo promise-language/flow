@@ -277,13 +277,18 @@ func (b *Orchestrator) loadItem(ctx context.Context, issueNum int, cachedComment
 	}
 
 	// Blockers travel with their own statuses, and blockedness is derived from
-	// them on every read. A failure here is not fatal to the load: the item's
-	// own fields are what Load is for, and `Get` is the read that answers "is
-	// this blocked".
-	if blockers, berr := b.blockersOf(ctx, issueNum); berr == nil {
-		state.BlockedBy = blockers
-		_, _, state.BlockReason = b.blockedness(blockers, lbls)
+	// them on every read — by the same rule Get applies, so the advance's check
+	// before dispatch and the listing cannot disagree about whether the item
+	// can run. A failed read FAILS THE LOAD: an item that cannot say whether it
+	// is blocked must not read as unblocked, or a dispatch would start on work
+	// that cannot proceed. A repository without the dependency feature answers
+	// 404/410, which blockersOf already reads as no blockers.
+	blockers, err := b.blockersOf(ctx, issueNum)
+	if err != nil {
+		return nil, err
 	}
+	state.BlockedBy = blockers
+	state.Blocked, state.BlockKind, state.BlockReason = b.blockedness(blockers, lbls)
 
 	// State comment.
 	stateBody, stateID, err := b.fetchStateComment(ctx, issueNum, cachedCommentID)

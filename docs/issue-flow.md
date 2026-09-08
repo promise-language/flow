@@ -83,7 +83,7 @@ So the step's deliverable is a plan **or** a refusal, and a refusal names which 
 | Refusal | Means | Evidence it carries | What a person does |
 |---|---|---|---|
 | **already done** | The change exists, or the desired state already holds | Where it is already true | Close the item |
-| **duplicate** | The work is pending under another item | The item that covers it | Redirect to that item |
+| **duplicate** | The work is pending under another item that replaces this one | The item that covers it | Redirect to that item |
 | **conflicts** | The item asks for something the normative documents forbid | The document and what it says | Change the item, or the document |
 | **not viable** | The work cannot be done as asked | The specific reason | Rethink or close |
 
@@ -94,6 +94,8 @@ So the step's deliverable is a plan **or** a refusal, and a refusal names which 
 A refusal **blocks the resolution on a named reason.** It is not a route and not a dead end: the flow stops, the reason says what would unblock it, and when a person acts on that reason the resolution continues from where it stopped. An item found to duplicate another is usually closed instead — but if the finding was wrong, clearing the block resumes the work rather than starting it again.
 
 The set is closed. A refusal fitting none of these means the vocabulary is wrong, not that a fifth may be invented in prose.
+
+**Waiting on items is not a refusal.** A plan that finds the work pending under other items — behaviour this item needs that is being built elsewhere, or a change that cannot be made until something else has landed — declares those items as blockers and stops as blocked on them ([resolution.md](resolution.md) § Blocked on items). It is not `duplicate`: a duplicate says this item is redundant and a person redirects, where a blocked item is still this item's work, waiting. And it is not a fifth refusal, because nobody decides anything: the blockers land, and the plan runs again from where it stood with nobody having acted. The line is who acts — a refusal means no change will help and a person decides; blocked on items means the work exists elsewhere and will arrive.
 
 **Not knowing enough to plan is different and is not a refusal.** An item that could be planned given an answer asks the question and parks, which is a resumable state — the plan step will run again with the answer in hand. Refusing means no answer would help.
 
