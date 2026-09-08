@@ -10,6 +10,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/promise-language/flow"
+	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
 
 func captureReportQuota(t *testing.T) string {
@@ -302,6 +305,46 @@ func TestQuotaNow_DefaultBackoffWhenNoRetryAfter(t *testing.T) {
 	}
 }
 
+func TestQuotaNow_RepeatedRefusalRenewsTheBackoff(t *testing.T) {
+	// The backoff elapsed, the retry was refused again. If the second refusal
+	// did not push RetryAt forward, the machine would be back to asking on every
+	// call — the amplifier, restored one backoff after it was removed.
+	dir := useTempQuotaCache(t)
+	seedRecord(t, dir, quotaRecord{
+		Usage:   usageAt(0.91),
+		ReadAt:  time.Now().Add(-10 * time.Minute),
+		Failure: "rejected — HTTP 429",
+		RetryAt: time.Now().Add(-time.Second), // the first backoff just elapsed
+	})
+	s := installFetch(t, func() ([]windowUsage, error) {
+		return nil, &quotaRefusal{msg: "rejected — HTTP 503"}
+	})
+
+	r, err := quotaNow()
+	if err != nil {
+		t.Fatalf("a second refusal over a good reading must not error: %v", err)
+	}
+	if got := firstUsed(t, r); got != 0.91 {
+		t.Errorf("used = %v, want the preserved 0.91", got)
+	}
+	if !strings.Contains(r.Failure, "503") {
+		t.Errorf("failure = %q, want the refusal just earned", r.Failure)
+	}
+	rec := readRecord(t, dir)
+	if wait := time.Until(rec.RetryAt); wait < quotaFailureBackoff-time.Minute || wait > quotaFailureBackoff {
+		t.Errorf("RetryAt is %v away, want a renewed ~%v", wait, quotaFailureBackoff)
+	}
+	if s.count() != 1 {
+		t.Fatalf("fetches = %d, want 1", s.count())
+	}
+	if _, err := quotaNow(); err != nil {
+		t.Fatalf("quotaNow inside the renewed backoff: %v", err)
+	}
+	if s.count() != 1 {
+		t.Errorf("fetches = %d, want the renewed backoff to hold at 1", s.count())
+	}
+}
+
 func TestQuotaNow_AncientReadingIsDropped(t *testing.T) {
 	dir := useTempQuotaCache(t)
 	seedRecord(t, dir, quotaRecord{Usage: usageAt(0.42), ReadAt: time.Now().Add(-quotaStaleBound - time.Minute)})
@@ -328,6 +371,31 @@ func TestQuotaNow_FutureDatedReadingIsAMiss(t *testing.T) {
 	}
 	if s.count() != 1 {
 		t.Errorf("fetches = %d, want 1", s.count())
+	}
+}
+
+func TestQuotaNow_FirstRunCreatesTheCacheDirectory(t *testing.T) {
+	// Flow has no machine-wide state directory today, so on every machine the
+	// first read is this one: the directory does not exist yet. It has to be
+	// created, or the reading is taken and thrown away and the second process
+	// pays for it again.
+	dir := filepath.Join(t.TempDir(), "flow")
+	prev := quotaCacheDir
+	quotaCacheDir = func() (string, bool) { return dir, true }
+	t.Cleanup(func() { quotaCacheDir = prev })
+	s := installFetch(t, func() ([]windowUsage, error) { return usageAt(0.42), nil })
+
+	if _, err := quotaNow(); err != nil {
+		t.Fatalf("quotaNow: %v", err)
+	}
+	if rec := readRecord(t, dir); len(rec.Usage) == 0 || rec.Usage[0].Used != 0.42 {
+		t.Errorf("record = %+v, want the first reading cached", rec)
+	}
+	if _, err := quotaNow(); err != nil {
+		t.Fatalf("quotaNow: %v", err)
+	}
+	if s.count() != 1 {
+		t.Errorf("fetches = %d, want 1 — the second read is served from what the first stored", s.count())
 	}
 }
 
@@ -679,6 +747,25 @@ func TestUserQuotaCacheDir(t *testing.T) {
 	}
 }
 
+func TestQuotaCache_TestsNeverUseTheRealLocation(t *testing.T) {
+	// The doctrine App.Quota's comment carries, asserted rather than trusted.
+	// TestMain redirects the cache for the whole package; if that redirect is
+	// ever dropped, every test in cli starts reading and writing the operator's
+	// real record — pacing the next real run against numbers a test made up —
+	// and nothing else here would notice.
+	operators, ok := userQuotaCacheDir()
+	if !ok {
+		t.Skip("machine has no user cache directory")
+	}
+	dir, ok := quotaCacheDir()
+	if !ok {
+		t.Fatal("the cli tests must have a cache directory of their own")
+	}
+	if dir == operators {
+		t.Fatalf("the cli tests are pointed at the real quota cache %q", dir)
+	}
+}
+
 func TestUserQuotaCacheDir_NoneOnThisMachine(t *testing.T) {
 	// No HOME and no XDG_CACHE_HOME: nowhere to cache is a machine without a
 	// cache, not an error.
@@ -787,6 +874,59 @@ func TestCachedQuota_PassesTheFailureThrough(t *testing.T) {
 	}
 }
 
+func TestRunWithArgs_InstallsTheCacheBackedReader(t *testing.T) {
+	// The wiring, from the binary's entry point: with App.Quota nil, the reader
+	// Run installs is the one that goes through the cache. Asserted through the
+	// seam it must reach — the run is runner-dispatched, so the display sites
+	// are suppressed and the only thing that can call quotaFetch is the pacing
+	// read in resolve's loop. A reader that went to the network instead would
+	// make no call at all and print "quota unreadable" for a machine with a
+	// perfectly good reading available.
+	t.Setenv(dispatchedByRunnerEnv, "1")
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	app, _, errBuf := resolveTestApp(t, be)
+	app.Quota = nil
+	s := installFetch(t, func() ([]windowUsage, error) { return usageAt(0.42), nil })
+
+	if code := RunWithArgs(*app, []string{"resolve", "1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if s.count() != 1 {
+		t.Errorf("fetches = %d, want 1 — the installed reader must read through the cache", s.count())
+	}
+	if out := errBuf.String(); strings.Contains(out, "quota unreadable") {
+		t.Errorf("pacing was disabled on a run that had a reading; got:\n%s", out)
+	}
+}
+
+func TestRunWithArgs_OneResolveMakesOneRequest(t *testing.T) {
+	// The defect, end to end: one resolve made up to 52 requests — a display
+	// print at startup, one per step, another on the terminal outcome. It makes
+	// one now, and the display sites still print the figures they printed
+	// before.
+	t.Setenv(dispatchedByRunnerEnv, "")
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	app, _, errBuf := resolveTestApp(t, be)
+	app.Quota = nil
+	s := installFetch(t, func() ([]windowUsage, error) { return usageAt(0.42), nil })
+
+	if code := RunWithArgs(*app, []string{"resolve", "1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if s.count() != 1 {
+		t.Errorf("fetches = %d over one whole resolve, want 1", s.count())
+	}
+	out := errBuf.String()
+	if n := strings.Count(out, "42% used"); n < 2 {
+		t.Errorf("want the quota block at startup and on the outcome (≥2); got %d in:\n%s", n, out)
+	}
+	if strings.Contains(out, "quota unreadable") {
+		t.Errorf("pacing was disabled on a run that had a reading; got:\n%s", out)
+	}
+}
+
 func TestReportQuota_ThreeShapes(t *testing.T) {
 	t.Run("failure only", func(t *testing.T) {
 		useTempQuotaCache(t)
@@ -827,8 +967,11 @@ func TestReportQuota_ThreeShapes(t *testing.T) {
 		if !strings.Contains(out, "refresh failing: rejected — HTTP 429") {
 			t.Errorf("the diagnostic operators read today must survive; got %q", out)
 		}
-		if !strings.Contains(out, "old") {
-			t.Errorf("the age of the figures must be stated; got %q", out)
+		// The age is the READING's, not the moment it was printed: "0s old"
+		// beside a ten-minute-old number is the silent staleness this line
+		// exists to prevent.
+		if !strings.Contains(out, "figures are 10m old") {
+			t.Errorf("the age of the figures must be stated, and be theirs; got %q", out)
 		}
 	})
 }

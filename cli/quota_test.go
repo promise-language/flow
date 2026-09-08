@@ -673,6 +673,9 @@ func TestParseRetryAfter(t *testing.T) {
 		{"zero", "0", 0},
 		{"capped", "604800", quotaRetryAfterCap},
 		{"capped past a Duration's range", "9223372036854775807", quotaRetryAfterCap},
+		// The date form takes the same cap as the delta form: a header naming a
+		// day next week must not take pacing off the air until then.
+		{"http date past the cap", now.Add(7 * 24 * time.Hour).UTC().Format(http.TimeFormat), quotaRetryAfterCap},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
