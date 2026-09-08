@@ -94,6 +94,7 @@ A handler may return these sentinels (as the `error`, with a nil `StepResult`) i
 |---|---|---|
 | `ctx.Park(ParkRequest) → error` | `ErrPark` | Structured park request forwarded to `Orchestrator.Park`. |
 | `ctx.AskQuestions(...AgentQuestion) → error` | `ErrQuestion` | One or more questions for the user. The orchestrator persists them; the flow parks until at least one is answered. |
+| `ctx.WaitOnItems(...ItemRef) → error` | `ErrWaitsOnItems` | The step's work waits on those items — ones that exist, or ones it filed. Each reference is recorded as a blocker on the item through the orchestrator's editor, and then the step stops: the invocation reports `blocked`, kind `waits-on-items`, naming the blockers. Nothing is parked, nothing is journaled, and the treasurer does not count the dispatch ([resolution.md](resolution.md) § Blocked on items). At least one reference is required; a reference the orchestrator refuses to record fails the step, naming it, with the references already recorded left in place. A declaration naming only items that have already finished is recorded and then fails the step too, charged as a dispatch: the item reads unblocked, so the step stopped on nothing, and the next advance runs it. |
 
 `ErrTransient` — returned (via `fmt.Errorf` wrapping) for infrastructure failures the handler observed. The orchestrator parks with `ParkInfraTransient`, and the treasurer does not count the attempt — a flapping runner does not spend the resolution's budget.
 
@@ -105,7 +106,7 @@ A handler may return these sentinels (as the `error`, with a nil `StepResult`) i
 
 - **`(nil, nil)`**: `ErrStepDidNotComplete`. A step that neither elected a route nor stopped for a named reason has not done its job.
 - **Non-nil error** (not a sentinel): failure. The dispatch counts in the treasurer's ledger.
-- **Sentinel errors** (`ErrPark`, `ErrQuestion`, `ErrTransient`, `ErrRefused`): handled specially as described above. None of them appends a journal entry.
+- **Sentinel errors** (`ErrPark`, `ErrQuestion`, `ErrWaitsOnItems`, `ErrTransient`, `ErrRefused`): handled specially as described above. None of them appends a journal entry.
 
 ## Drafts
 

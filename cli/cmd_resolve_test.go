@@ -1614,6 +1614,106 @@ func TestResolve_PreClaimTransientUnfitnessProceeds(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Blocked on items: the narration.
+// ---------------------------------------------------------------------------
+
+// blockedResolveApp is an app over an item blocked by one landed and one open
+// blocker — the shape that proves the `blocked by:` line lists only what is
+// still open.
+func blockedResolveApp(t *testing.T) (*App, *fake.Orchestrator, *bytes.Buffer, *bytes.Buffer, *bool) {
+	t.Helper()
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be.AddItem("2", flow.Item{Type: "task", Title: "landed"})
+	be.AddItem("3", flow.Item{Type: "task", Title: "still open"})
+	be.SetStatus("2", flow.StatusTerminal, "done")
+	blockOn(t, be, be.Ref("1"), be.Ref("2"))
+	blockOn(t, be, be.Ref("1"), be.Ref("3"))
+	ran := false
+	app, out, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+		ran = true
+		return ctx.ResolveMarkdown("the plan")
+	})
+	return app, be, out, errBuf, &ran
+}
+
+func TestCmdResolve_BlockedOnItemsNarratesTheBlockersAndKeepsTheClaim(t *testing.T) {
+	app, be, out, errBuf, ran := blockedResolveApp(t)
+
+	code := app.cmdResolve(context.Background(), []string{"1"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (a blocked item makes no progress until the blockers land); err=%q", code, errBuf.String())
+	}
+	got := errBuf.String()
+	if !strings.Contains(got, "resolve: plan → blocked — waiting on unfinished dependencies") {
+		t.Errorf("expected the step, the status and the kind-naming reason; got %q", got)
+	}
+	if !strings.Contains(got, "  blocked by: 3\n") {
+		t.Errorf("expected a `blocked by:` line naming the open blocker; got %q", got)
+	}
+	if strings.Contains(got, "blocked by: 2") || strings.Contains(got, "2, 3") {
+		t.Errorf("the landed blocker must not be listed; got %q", got)
+	}
+	if !strings.Contains(got, "1 is blocked") {
+		t.Errorf("expected the closing blocked line; got %q", got)
+	}
+	if *ran {
+		t.Error("the step ran on a blocked item")
+	}
+	if out.Len() != 0 {
+		t.Errorf("human mode wrote to stdout: %q", out.String())
+	}
+	if held, _ := be.LookupActiveClaim(context.Background()); held == nil {
+		t.Error("the claim was released — the stop keeps it")
+	}
+}
+
+func TestCmdResolve_BlockedOnItemsJSONCarriesTheKindAndBlockers(t *testing.T) {
+	t.Setenv(outputEnv, "")
+	app, _, out, errBuf, _ := blockedResolveApp(t)
+
+	code := app.cmdResolve(context.Background(), []string{"--json", "1"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
+	}
+	got := decodeResultStream(t, out.String())
+	if len(got) != 1 {
+		t.Fatalf("stdout carried %d results, want 1; got %q", len(got), out.String())
+	}
+	res := got[0]
+	if res.Status != "blocked" || res.Step != "plan" || res.BlockKind != flow.WaitsOnItems {
+		t.Errorf("result = %+v, want blocked at plan, kind waits-on-items", res)
+	}
+	if len(res.BlockedBy) != 2 {
+		t.Errorf("BlockedBy = %+v, want both declared blockers with their statuses", res.BlockedBy)
+	}
+	if !strings.Contains(errBuf.String(), "blocked by: 3") {
+		t.Errorf("JSON mode must still narrate the blockers; got %q", errBuf.String())
+	}
+}
+
+// A block from elsewhere — a preflight gate a person must clear — prints no
+// `blocked by:` line: there are no blockers to send the operator to.
+func TestCmdResolve_PreflightBlockPrintsNoBlockedByLine(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	app, _, errBuf := resolveTestApp(t, be)
+	app.Preflight = func(context.Context, *flow.Item) error {
+		return fmt.Errorf("answer needed on %q: %w", "plan", flow.ErrBlocked)
+	}
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "is blocked") {
+		t.Errorf("expected the blocked line; got %q", errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "blocked by:") {
+		t.Errorf("a preflight block names no blockers; got %q", errBuf.String())
+	}
+}
+
 func TestCmdResolve_QuotaPrintedAtStartAndFinalize(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv(dispatchedByRunnerEnv, "")

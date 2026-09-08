@@ -170,7 +170,7 @@ named reason; you do not close anything yourself. The four refusal kinds are a
 closed set — do not invent others:
 
 - already-done — the change exists or the desired state already holds.
-- duplicate — the work is pending under another item.
+- duplicate — the work is pending under another item that replaces this one.
 - conflicts — what the item asks for is forbidden by the normative documents.
 - not-viable — the item cannot be done as asked. The evidence requirement
   matters most here: a refusal that says only "this cannot be done" is
@@ -188,7 +188,22 @@ left):
 
 The evidence block is what makes the refusal checkable — without it a reader
 cannot tell whether the finding was correct. Not knowing enough to plan is
-different and is not a refusal: ask a question instead.`
+different and is not a refusal: ask a question instead.
+
+Work that is real but waits on other items is DECLARED, not refused. An item
+whose behaviour is pending under other items, or that cannot land until
+something else has, is blocked on them: the flow stops, and it resumes on its
+own when those items finish, with nobody having to act. That is not
+"duplicate" — a duplicate says this item is redundant and a person should
+redirect — and it is not a refusal, which says no change will help. Emit it
+flush against the left margin, with a one-line summary after the colon and a
+fenced block naming one item per line: the item's number as #<n> first, then
+why it is waited on. The shape (shown indented here; write yours flush left):
+
+    PLAN-WAITS-ON: <one-line summary>
+    ` + "```" + `
+    #<n>  <why this item is waited on>
+    ` + "```" + ``
 
 // repoRelativePaths is carried by every default prompt whose product is
 // published on the item.

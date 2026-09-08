@@ -358,6 +358,16 @@ type InvocationResult struct {
 	Reason       string       `json:"reason,omitempty"`
 	Park         *ParkRequest `json:"park,omitempty"`
 
+	// BlockKind and BlockedBy are set on a `blocked` result that stopped on the
+	// item's own blockedness — the check before dispatch, or a step declaring
+	// the blockers it found (docs/resolution.md § Blocked on items) — and on
+	// nothing else. BlockedBy is the declared set with each blocker's status,
+	// exactly as on Item, so a reader can tell the one still open from the ones
+	// that have landed. Both omitempty: every other result serialises
+	// byte-for-byte as it did without them.
+	BlockKind BlockKind `json:"block_kind,omitempty"`
+	BlockedBy []Blocker `json:"blocked_by,omitempty"`
+
 	// Finalized reports whether the flow run was RECORDED complete, which is
 	// not the same as reaching the end of the flow: Finalize refuses an item
 	// the orchestrator does not yet consider finished, so a run can legitimately

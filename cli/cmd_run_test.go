@@ -394,6 +394,68 @@ func TestCmdRun_BudgetParkNarratesAxes(t *testing.T) {
 	}
 }
 
+// A blocked stop on items prints the reason and the open blockers on their own
+// line, exits 1, and keeps the claim.
+func TestCmdRun_BlockedOnItemsNarratesTheBlockers(t *testing.T) {
+	t.Setenv(outputEnv, "")
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			t.Fatal("the step must not dispatch on a blocked item")
+			return nil
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	be.AddItem("2", flow.Item{Type: "task", Title: "landed"})
+	be.AddItem("3", flow.Item{Type: "task", Title: "still open"})
+	be.SetStatus("2", flow.StatusTerminal, "done")
+	blockOn(t, be, claim.ItemRef, be.Ref("2"))
+	blockOn(t, be, claim.ItemRef, be.Ref("3"))
+	out := &bytes.Buffer{}
+	app.Out = out
+
+	code := app.cmdRun(context.Background(), []string{"--human"})
+	if code != 1 {
+		t.Fatalf("cmdRun = %d, want 1 — a blocked item must not read as nothing to do", code)
+	}
+	got := out.String()
+	if !strings.Contains(got, "plan → blocked — waiting on unfinished dependencies") {
+		t.Errorf("expected the step, status and reason; got %q", got)
+	}
+	if !strings.Contains(got, "\n  blocked by: 3\n") {
+		t.Errorf("expected a `blocked by:` line naming only the open blocker; got %q", got)
+	}
+	if held, _ := be.LookupActiveClaim(context.Background()); held == nil {
+		t.Error("the claim was released — the stop keeps it")
+	}
+}
+
+func TestCmdRun_BlockedOnItemsJSONCarriesTheKindAndBlockers(t *testing.T) {
+	t.Setenv(outputEnv, "")
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			t.Fatal("the step must not dispatch on a blocked item")
+			return nil
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	be.AddItem("2", flow.Item{Type: "task", Title: "still open"})
+	blockOn(t, be, claim.ItemRef, be.Ref("2"))
+	out := &bytes.Buffer{}
+	app.Out = out
+
+	if code := app.cmdRun(context.Background(), []string{"--json"}); code != 1 {
+		t.Fatalf("cmdRun = %d, want 1", code)
+	}
+	var res flow.InvocationResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("stdout is not one JSON result: %v\n%s", err, out.String())
+	}
+	if res.Status != "blocked" || res.BlockKind != flow.WaitsOnItems {
+		t.Errorf("result = %+v, want blocked, kind waits-on-items", res)
+	}
+	if len(res.BlockedBy) != 1 || res.BlockedBy[0].Ref.Display != "2" || res.BlockedBy[0].Status != flow.StatusOpen {
+		t.Errorf("BlockedBy = %+v, want the open blocker with its status", res.BlockedBy)
+	}
+}
+
 func TestCmdRun_NonBudgetParkOmitsAxes(t *testing.T) {
 	t.Setenv(outputEnv, "")
 	app, _, _ := testApp(t, func(f *flow.Flow) {

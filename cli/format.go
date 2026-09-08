@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/promise-language/flow"
@@ -40,6 +41,23 @@ func formatDurationCompact(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%ds", secs)
 	}
+}
+
+// blockedByLine renders the `blocked by:` line for a result that stopped on
+// the item's own blockedness: the blockers still open, listed the way
+// blockerDisplays lists them for `list`, so the filter to unfinished blockers
+// exists once. Returns "" when the result did not stop on items, and when every
+// declared blocker has finished — printing those would send the operator to
+// work something already done.
+func blockedByLine(r flow.InvocationResult) string {
+	if r.BlockKind != flow.WaitsOnItems {
+		return ""
+	}
+	open := blockerDisplays(r.BlockedBy)
+	if len(open) == 0 {
+		return ""
+	}
+	return "blocked by: " + strings.Join(open, ", ")
 }
 
 // formatResultSuffix renders the duration/cost parenthetical for a step

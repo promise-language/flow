@@ -171,6 +171,25 @@ func TestBackend_LoadCarriesTheDeclaredBlockers(t *testing.T) {
 	if item.BlockReason == "" {
 		t.Error("Load reports no block reason for an item waiting on an unfinished dependency")
 	}
+	// The derived answer travels with the inputs. The advance reads it off
+	// Load before every dispatch, so an Item that carried the blockers and
+	// not the verdict would send the dispatch to Get for a fact it had just
+	// loaded the inputs to.
+	if !item.Blocked || item.BlockKind != flow.WaitsOnItems {
+		t.Errorf("Load reports blocked=%v kind=%q, want blocked on %q", item.Blocked, item.BlockKind, flow.WaitsOnItems)
+	}
+}
+
+// The advance reads blockedness off Load before every dispatch, so a Load that
+// could not read the blockers must fail rather than hand back an item reading
+// unblocked — a dispatch would start on work that cannot proceed. Mirrors the
+// Get rule: a failed read is not "no blockers".
+func TestBackend_AFailedDependencyReadFailsLoad(t *testing.T) {
+	_, b := dependingOrchestrator(t, []string{"flow:implement"}, http.StatusForbidden, nil)
+
+	if _, err := b.Load(t.Context(), b.refFromIssue(42)); err == nil {
+		t.Fatal("Load succeeded although the blockers could not be read")
+	}
 }
 
 // MUST NOT return a blocked item. The orchestrator that knows about the
@@ -219,6 +238,16 @@ func TestBackend_AnUnavailableDependencyEndpointReadsAsNoBlockers(t *testing.T) 
 			}
 			if info.Blocked || len(info.BlockedBy) != 0 {
 				t.Errorf("blocked=%v blockedBy=%+v, want an unblocked item with no blockers", info.Blocked, info.BlockedBy)
+			}
+			// Load reads the same endpoint and must load — unblocked — for the
+			// same reason: a repository without the feature is not one whose
+			// every dispatch fails.
+			item, err := b.Load(t.Context(), b.refFromIssue(42))
+			if err != nil {
+				t.Fatalf("Load: %v — an absent feature must not fail the load", err)
+			}
+			if item.Blocked || len(item.BlockedBy) != 0 {
+				t.Errorf("Load: blocked=%v blockedBy=%+v, want an unblocked item with no blockers", item.Blocked, item.BlockedBy)
 			}
 		})
 	}
@@ -308,5 +337,12 @@ func TestBackend_LoadAgreesWithGetWhereTheyOverlap(t *testing.T) {
 	}
 	if item.BlockReason != info.BlockReason {
 		t.Errorf("Load reason %q disagrees with Get reason %q", item.BlockReason, info.BlockReason)
+	}
+	// The derived pair too: the advance reads Load and the listing reads Get,
+	// and a disagreement here is the advance and the listing disagreeing about
+	// whether the item can run.
+	if item.Blocked != info.Blocked || item.BlockKind != info.BlockKind {
+		t.Errorf("Load(blocked %v kind %q) disagrees with Get(blocked %v kind %q)",
+			item.Blocked, item.BlockKind, info.Blocked, info.BlockKind)
 	}
 }

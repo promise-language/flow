@@ -135,6 +135,39 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		}, nil
 	}
 
+	// Blocked on items. Derived by the orchestrator on this very load from the
+	// item's declared blockers and read here, before anything is dispatched to
+	// the pending step (docs/resolution.md § Blocked on items). Nothing stores
+	// it: the item whose last blocker finishes is workable at the next read,
+	// and a blocker reopened blocks it again at the next read, with nobody
+	// having touched the item either time.
+	//
+	// Only waits-on-items stops here. The person and condition kinds are
+	// park-derived, and the answer preflight, the budget gate and the park
+	// machinery already own them.
+	//
+	// Before the preflight, so an item both waiting on items and awaiting an
+	// answer reports waits-on-items — the precedence the derivation itself
+	// gives it, so this report cannot disagree with `status`. After the
+	// no-flow block, so the finalize path is untouched: an item with no
+	// pending step has nothing to be blocked from.
+	//
+	// The stop is clean. No seed, no budget gate, no step context, no
+	// invocation bump, no park, no running record. The claim is kept — an
+	// arena reservation, not work — and the pending step stays pending, so
+	// when the last blocker lands the next advance runs it from here.
+	if state.Blocked && state.BlockKind == flow.WaitsOnItems {
+		li, err := lifecycleItemOf(f, nextName)
+		if err != nil {
+			return flow.InvocationResult{}, err
+		}
+		return blockedOnItems(state, flow.InvocationResult{
+			Flow: f.Name(),
+			Item: claim.ItemRef.Display,
+			Step: string(li.Result()),
+		}), nil
+	}
+
 	// Cross-flow preflight gate. Runs AFTER LoadState (fresh state) and
 	// AFTER the terminal-done check (so completed items finalize) but
 	// BEFORE seed / handler dispatch. Non-nil error → skipped, no handler
@@ -193,9 +226,9 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		}
 	}
 
-	li, ok := f.Item(nextName)
-	if !ok {
-		return flow.InvocationResult{}, fmt.Errorf("flow %q has no step %q", f.Name(), nextName)
+	li, err := lifecycleItemOf(f, nextName)
+	if err != nil {
+		return flow.InvocationResult{}, err
 	}
 
 	result := flow.InvocationResult{
@@ -338,6 +371,40 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 			Step:   li.Result(),
 			Reason: handlerErr.Error(),
 		}))
+	}
+
+	// The step declared the blockers it found (handler returned
+	// flow.ErrWaitsOnItems through ctx.WaitOnItems) and stopped on them. Not a
+	// park, not a failure, not a refusal: the same clean stop the check before
+	// dispatch makes, reported from the same derivation — the item is reloaded
+	// so the report carries what the orchestrator now says, blockers and
+	// statuses included. No BumpInvocations: the work exists elsewhere and will
+	// land, and charging the wait would spend the budget on nothing. The
+	// artifact stays unresolved, and work in progress is kept for the resume,
+	// as with a question.
+	//
+	// The reload decides, under the same condition as the check before
+	// dispatch. A step can declare items that have all finished already — the
+	// orchestrator accepts those, since naming an item that has landed is not
+	// an error — and the item then reads unblocked. That is not a stop on
+	// anything: nothing waits, the next advance would run the step, and a
+	// `blocked` report on an item nothing blocks would tell the operator to
+	// wait for nothing (docs/resolution.md § Reporting names the kind, and
+	// there is none). It is the step not doing its job — a turn spent to
+	// declare a wait that does not hold — and it falls through as the failure
+	// it is, charged as one, the reason naming what was declared.
+	var waits flow.ErrWaitsOnItems
+	if errors.As(handlerErr, &waits) {
+		state, err = app.Orchestrator.Load(ctx, ref)
+		if err != nil {
+			return flow.InvocationResult{}, fmt.Errorf("reload after declaring blockers: %w", err)
+		}
+		if state.Blocked && state.BlockKind == flow.WaitsOnItems {
+			return sctx.stampResult(blockedOnItems(state, result), nil)
+		}
+		handlerErr = fmt.Errorf(
+			"step declared it %s, but every item it named has already finished and nothing blocks the item — the step stopped on no wait",
+			waits.Error())
 	}
 
 	// Post-handler fitness catch-all: any unclassified handler failure on an
@@ -583,6 +650,33 @@ func checkWriteContract(ctx context.Context, wt flow.Worktree, snap *writeSnapsh
 		}
 	}
 	return ""
+}
+
+// lifecycleItemOf looks a step up on its flow by name. The name came from
+// SelectFlow over this same flow, so a miss is a defect in the flow, not a
+// state of the item.
+func lifecycleItemOf(f *flow.Flow, name string) (flow.LifecycleItem, error) {
+	li, ok := f.Item(name)
+	if !ok {
+		return flow.LifecycleItem{}, fmt.Errorf("flow %q has no step %q", f.Name(), name)
+	}
+	return li, nil
+}
+
+// blockedOnItems is the report for a stop on the item's own blockedness, built
+// from the loaded item and from nothing else: status blocked, the
+// orchestrator's reason, the kind, and the declared blockers with their
+// statuses. Both stops — the check before dispatch, and a step declaring the
+// blockers it found — report through this one function, so the report and
+// `status` come from one derivation. RunOne never inspects blocker statuses
+// itself. Only ever called on an item the orchestrator reports blocked on
+// items: both callers check that first.
+func blockedOnItems(state *flow.Item, result flow.InvocationResult) flow.InvocationResult {
+	result.Status = string(flow.StatusBlocked)
+	result.Reason = state.BlockReason
+	result.BlockKind = state.BlockKind
+	result.BlockedBy = state.BlockedBy
+	return result
 }
 
 func parkAndReturn(
@@ -918,6 +1012,34 @@ func (s *stepCtx) AskQuestions(qs ...flow.AgentQuestion) error {
 		recorded = append(recorded, rec)
 	}
 	return flow.ErrQuestion{Questions: qs, Recorded: recorded}
+}
+
+// WaitOnItems records each ref as a blocker on the item and returns the
+// sentinel RunOne reads as a clean stop on the item's own blockedness.
+//
+// One edit per ref, not one edit carrying all of them: the GitHub editor
+// refuses more than one dependency change per commit — each is its own
+// request, so two cannot land atomically (pkg/orchestrator/github/edit.go) —
+// and an editor that could take them together gains nothing from it. A commit
+// refusal (an unresolvable ref, a cycle, the item named as its own blocker)
+// returns as an ordinary error naming the ref, so the step fails visibly.
+// Blockers already committed stay: adding one is idempotent, and retracting
+// them would be a second write that could fail the same way.
+func (s *stepCtx) WaitOnItems(refs ...flow.ItemRef) error {
+	if len(refs) == 0 {
+		return errors.New("ctx.WaitOnItems called with no items")
+	}
+	for _, ref := range refs {
+		ed, err := s.app.Orchestrator.Edit(s.ctx, s.claim.ItemRef)
+		if err != nil {
+			return fmt.Errorf("record %s as a blocker: %w", ref.Display, err)
+		}
+		ed.AddBlocker(ref)
+		if err := ed.Commit(s.ctx); err != nil {
+			return fmt.Errorf("record %s as a blocker: %w", ref.Display, err)
+		}
+	}
+	return flow.ErrWaitsOnItems{Refs: refs}
 }
 
 // ParkedOn reports the park this dispatch is resuming from, from the state

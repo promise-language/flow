@@ -292,6 +292,12 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		if res.Park != nil && len(res.Park.Axes) > 0 {
 			fmt.Fprintf(app.Err, "  axes: %s\n", flow.FormatAxes(res.Park.Axes))
 		}
+		// A stop on the item's own blockers names them on their own line, as
+		// the axes line does for a budget park: the reason says the kind, and
+		// the references say what to go work instead.
+		if line := blockedByLine(res); line != "" {
+			fmt.Fprintf(app.Err, "  %s\n", line)
+		}
 
 		switch flow.InvocationStatus(res.Status) {
 		case flow.StatusFailed:

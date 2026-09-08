@@ -117,6 +117,22 @@ The pending step is read from the journal — the route its last entry elected �
 
 A step runs when the route names it, and for no other reason. There is no eligibility beside the route: no step is latched done, none is skipped by a marker, and reaching a step a second time is not an anomaly but a route — rework arrives as an ordinary election, carrying the reasons in its message.
 
+### Blocked on items
+
+An item may wait on other items: blockers declared on the item itself, each with its own state ([orchestrator.md](orchestrator.md) § Dependencies). Whether it waits *right now* is **derived before every dispatch, at every step, under both drive models**. Once the pending step is known and before anything is dispatched to it, the item's blockedness is read from its declared blockers and their current states, and nothing stores the answer. Selection, claiming and advancing read the same derived fact — so an item cannot be selectable and blocked at once, and a blocker landing is visible to the next read without anyone touching the item.
+
+Blocking is not settled when the item is picked. Between any two steps, from outside the resolution, a dependency can be declared on the item after it was claimed, a blocker that was closed can be reopened, a blocker's own resolution can revert. And from within it, by a step's own work: a plan finds the work is pending elsewhere, a step files items the resolution then waits on, a later step finds that what it must build on has not landed. Every one of these is the same state, met at whatever step the route stands on.
+
+> **An item waiting on an unfinished item is `blocked`, kind `waits-on-items`, and the advance stops clean: nothing is dispatched, nothing is spent, nothing is recorded, the claim is kept, and the pending step stays pending.**
+
+Clean means exactly that. No agent turn runs. Nothing is written beside the journal or in it — a park, a skip and a failure append nothing (§ The journal), and neither does this. The claim is not released: it is an arena reservation, not work, and a blocked item still belongs to the arena that holds it. The pending step is still the pending step. When the last blocker lands, the next advance runs it from where the route stood; a blocker reopened blocks the item again at the next read. Both happen without anyone touching the item, which is the whole meaning of a derived fact.
+
+**A step may declare the blockers it finds, and stop on them.** A step whose work turns out to wait on other items — ones that already exist, or ones it filed — records them on the item as blockers and completes by stopping as blocked on them. That stop is the same state the check before dispatch produces: not a park, not a failure, not a refusal. It appends nothing, charges nothing, resolves nothing, and keeps the step's draft for the resume (§ Drafts).
+
+The line between stopping on items and refusing is **who acts**. A refusal says no answer and no change will help, and a person decides. Blocked on items says the work exists elsewhere and will land, and nobody touches this item until it does. A step that used a refusal to say *waits on those items* would turn a self-clearing condition into one a person must clear, and spend the turn it took to do it.
+
+What a fleet does with an arena whose claim is held by a blocked item — release it to free the machine, or keep it so the same worktree resumes — is policy above the flow. The flow's rule is only that the stop does not break the claim.
+
 ### Routing
 
 A step's possible routes are **declared at registration**, and the route it elects at runtime must be one of them: its declared successors, and whether it may finalize, with which dispositions. The declaration is what makes the graph a reviewable object — every route an item can take, including every handback and every role boundary, is visible before anything runs — and it is what bounds election at runtime: a handler talked into an arbitrary jump by whatever influenced its turn has no such route to elect.
@@ -396,5 +412,7 @@ That is why every stopping outcome names what would clear it. The name is not do
 Every invocation reports exactly one status: `done`, `skipped`, `parked`, `blocked`, or `failed`. These five are the vocabulary, and anything mirroring them mirrors all five.
 
 `skipped` is the status of an invocation that stopped **before any dispatch**: a pre-dispatch check found nothing runnable — an unanswered question, a manual hold — so nothing ran, nothing was spent, and the item reads exactly as it did. No handler can produce it: a handler that has run has been dispatched, and a dispatched step's stop is one of the named outcomes (§ Every outcome leads somewhere), never a bare "no progress".
+
+A `blocked` report that stopped on the item's own blockedness names the block kind, and for `waits-on-items` it names the blockers **as references** — the declared items, each with its own state — and the pending step it will resume at, never only prose about them (§ Blocked on items).
 
 The report says what happened to **one step**, not to the item. An item's overall state is derived from its journal, never from the last report.

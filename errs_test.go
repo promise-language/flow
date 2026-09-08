@@ -57,3 +57,34 @@ func TestErrClaimRefused_ErrorsAs(t *testing.T) {
 		t.Errorf("Check = %q, want git-identity", target.Check)
 	}
 }
+
+func TestErrWaitsOnItems_Error(t *testing.T) {
+	refs := []flow.ItemRef{{Display: "o/r#7"}, {Display: "o/r#8"}}
+	if got, want := (flow.ErrWaitsOnItems{Refs: refs}).Error(), "waits on items: o/r#7, o/r#8"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+	if got, want := (flow.ErrWaitsOnItems{}).Error(), "waits on items: (none)"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+// The sentinel survives wrapping, carries its refs through, and is none of the
+// other sentinels: a branch that read it as a refusal would park what should
+// clear on its own.
+func TestErrWaitsOnItems_ErrorsAs(t *testing.T) {
+	original := flow.ErrWaitsOnItems{Refs: []flow.ItemRef{{Display: "o/r#7"}}}
+	wrapped := fmt.Errorf("plan: %w", original)
+
+	var target flow.ErrWaitsOnItems
+	if !errors.As(wrapped, &target) {
+		t.Fatal("errors.As failed on wrapped ErrWaitsOnItems")
+	}
+	if len(target.Refs) != 1 || target.Refs[0].Display != "o/r#7" {
+		t.Errorf("Refs = %+v, want the one ref carried through", target.Refs)
+	}
+	for _, other := range []error{flow.ErrRefused, flow.ErrTransient, flow.ErrUnfit} {
+		if errors.Is(wrapped, other) {
+			t.Errorf("errors.Is(%v, %v) = true — the stop would take that branch instead", wrapped, other)
+		}
+	}
+}

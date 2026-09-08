@@ -3,6 +3,7 @@ package flow
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ErrUnsupported and ErrUnavailable are the two refusals an orchestrator has.
@@ -142,6 +143,37 @@ func (e ErrQuestion) Error() string {
 		return "question: " + e.Questions[0].Text
 	}
 	return fmt.Sprintf("questions: %d pending (first: %s)", len(e.Questions), e.Questions[0].Text)
+}
+
+// ErrWaitsOnItems — handler-returned sentinel from ctx.WaitOnItems: the step's
+// work waits on the items named, which the call has already recorded as
+// blockers on the item. The orchestrator reloads the item and translates this
+// to:
+//
+//	InvocationResult{Status: "blocked", BlockKind: WaitsOnItems, BlockedBy: ...}
+//
+// and SKIPS the BumpInvocations call: the work exists elsewhere and will land,
+// and nobody touches this item until it does — a dispatch charged for finding
+// that out would spend the budget on a wait.
+//
+// It is neither a park nor a refusal. A park names a step and a person clears
+// it; a refusal says no change will help. This stop clears itself when the last
+// blocker goes terminal, with nobody acting on this item at all — the same stop
+// the advance makes before dispatch when it finds the item blocked, reported
+// the same way (docs/resolution.md § Blocked on items).
+type ErrWaitsOnItems struct {
+	Refs []ItemRef
+}
+
+func (e ErrWaitsOnItems) Error() string {
+	if len(e.Refs) == 0 {
+		return "waits on items: (none)"
+	}
+	names := make([]string, 0, len(e.Refs))
+	for _, r := range e.Refs {
+		names = append(names, r.Display)
+	}
+	return "waits on items: " + strings.Join(names, ", ")
 }
 
 // ErrTypeMismatch — handler called the wrong Resolve* for its declared

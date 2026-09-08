@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -321,6 +322,8 @@ type fakeCtx struct {
 	resolved   flow.ArtifactBody
 	didResolve bool
 	asked      []flow.AgentQuestion
+	// waitedOn is every ref the step declared through WaitOnItems, in order.
+	waitedOn []flow.ItemRef
 	// wip is this step's work-in-progress record. wipErr / wipSaveErr model a
 	// backend that cannot read or cannot write one — the paths that must cost
 	// context and nothing more.
@@ -409,6 +412,10 @@ func (c *fakeCtx) MarkStale(flow.ArtifactId) error { return nil }
 func (c *fakeCtx) Park(req flow.ParkRequest) error {
 	c.park = &req
 	return errors.New("parked")
+}
+func (c *fakeCtx) WaitOnItems(refs ...flow.ItemRef) error {
+	c.waitedOn = append(c.waitedOn, refs...)
+	return errors.New("waits on items")
 }
 func (c *fakeCtx) AskQuestions(qs ...flow.AgentQuestion) error {
 	idx := c.askCalls
@@ -2664,6 +2671,197 @@ func TestPlanStepRefusalParksBlocked(t *testing.T) {
 				t.Errorf("WIP = %q, want it to contain the agent's refusal text", ctx.wipSaves[len(ctx.wipSaves)-1])
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Plan step waits on items (docs/issue-flow.md § Planning can conclude that
+// there is no plan, "Waiting on items is not a refusal").
+// ---------------------------------------------------------------------------
+
+// refResolver is the one orchestrator method the waits-on branch reaches:
+// turning the agent's token into an identity. fail names tokens that resolve
+// to nothing.
+//
+// It is as strict as the GitHub orchestrator's ResolveRef about the shape it
+// takes: a bare identifier, never `#12`. The sentinel's block is written the
+// tracker's way, `#<n>`, so a step that handed the token over unstripped would
+// fail every declaration on the real orchestrator — and a resolver here that
+// quietly accepted `#12` would hide exactly that.
+type refResolver struct {
+	flow.Orchestrator
+	fail map[string]error
+}
+
+func (r *refResolver) ResolveRef(_ context.Context, in string) (flow.ItemRef, error) {
+	if strings.HasPrefix(in, "#") {
+		return flow.ItemRef{}, fmt.Errorf("%q is not a valid issue number", in)
+	}
+	if err := r.fail[in]; err != nil {
+		return flow.ItemRef{}, err
+	}
+	return itemRefFor(in), nil
+}
+
+func waitingBuilder(t *testing.T, fail map[string]error) *builder {
+	t.Helper()
+	b := testBuilder(t)
+	b.backend = &refResolver{fail: fail}
+	return b
+}
+
+const waitsOnReply = "I read the tree; the parser this needs is #12's work.\n" +
+	"PLAN-WAITS-ON: needs the parser first\n```\n#12  the parser this builds on\n#13  the lexer it reads\n```"
+
+// A plan that finds the work pending under other items declares them and
+// stops: no park, no refusal, no artifact, and the reasoning kept.
+func TestPlanStepWaitsOnItemsDeclaresThemAndStops(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{waitsOnReply}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	err := waitingBuilder(t, nil).stepPlan(ctx)
+	if err == nil {
+		t.Fatal("want the step to stop on the items it waits on")
+	}
+	got := make([]string, 0, len(ctx.waitedOn))
+	for _, ref := range ctx.waitedOn {
+		got = append(got, ref.Display)
+	}
+	if want := []string{"owner/repo#12", "owner/repo#13"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("waited on %v, want %v — every ref, resolved through the orchestrator, in order", got, want)
+	}
+	if ctx.park != nil {
+		t.Errorf("parked (%+v) — waiting on items is not a park", ctx.park)
+	}
+	if ctx.didResolve {
+		t.Error("resolved the plan artifact on a wait — downstream steps must not run")
+	}
+	if len(ctx.wipSaves) == 0 {
+		t.Fatal("no work in progress saved — the reasoning behind the wait is lost")
+	}
+	if last := ctx.wipSaves[len(ctx.wipSaves)-1]; !strings.Contains(last, WaitsOnSentinel) {
+		t.Errorf("work in progress = %q, want the agent's waits-on text", last)
+	}
+	if agent.calls != 1 {
+		t.Errorf("agent ran %d times, want 1", agent.calls)
+	}
+}
+
+// A question still wins: runAgent detects it first, wherever it sits in the
+// text, and a step that needs an answer is not one that can say what it waits
+// on.
+func TestPlanStepQuestionBeatsWaitsOn(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{
+		"NEEDS-ANSWER: is the parser in scope?\n```\nthe item is unclear\n```\n" + waitsOnReply,
+	}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	err := waitingBuilder(t, nil).stepPlan(ctx)
+	if err == nil {
+		t.Fatal("want the step to stop")
+	}
+	if len(ctx.asked) != 1 {
+		t.Fatalf("asked %d questions, want 1", len(ctx.asked))
+	}
+	if len(ctx.waitedOn) != 0 {
+		t.Errorf("waited on %+v while a question was pending", ctx.waitedOn)
+	}
+}
+
+// Waiting beats refusing. A turn that said both has said two things, and the
+// one that clears itself is the one to act on — a refusal is a park a person
+// must clear.
+func TestPlanStepWaitsOnBeatsRefusal(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{
+		waitsOnReply + "\nPLAN-REFUSAL: duplicate Covered by #12\n```\nissue #12 tracks the parser\n```",
+	}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	err := waitingBuilder(t, nil).stepPlan(ctx)
+	if err == nil {
+		t.Fatal("want the step to stop")
+	}
+	if len(ctx.waitedOn) != 2 {
+		t.Errorf("waited on %+v, want both declared items", ctx.waitedOn)
+	}
+	if ctx.park != nil {
+		t.Errorf("parked (%+v) — the refusal must not win over the wait", ctx.park)
+	}
+}
+
+// A token that does not resolve fails the step naming it, and declares
+// nothing: falling through to the plan-shape check would publish the sentinel
+// text as the plan.
+func TestPlanStepWaitsOnUnresolvableRefFailsNamingIt(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{
+		"PLAN-WAITS-ON: needs the parser\n```\n#12 the parser\n#99 a typo\n```",
+	}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	err := waitingBuilder(t, map[string]error{"99": errors.New("no such issue")}).stepPlan(ctx)
+	if err == nil || !strings.Contains(err.Error(), "99") || !strings.Contains(err.Error(), "no such issue") {
+		t.Fatalf("err = %v, want a failure naming the token and the orchestrator's answer", err)
+	}
+	if len(ctx.waitedOn) != 0 {
+		t.Errorf("waited on %+v, want nothing declared when one token does not resolve", ctx.waitedOn)
+	}
+	if ctx.park != nil || ctx.didResolve {
+		t.Errorf("park %+v resolved %v, want neither", ctx.park, ctx.didResolve)
+	}
+}
+
+// A plan-mode turn submits and THEN continues to reason, so a wait can arrive
+// beside a submitted plan. What is kept is both — the deliverable and the
+// reasoning behind stopping — the way a question keeps them: a resume that got
+// only the reasoning would re-derive a plan it already had.
+func TestPlanStepWaitsOnWithPlanTextCombinesWIP(t *testing.T) {
+	agent := &scriptedAgent{
+		replies: []string{waitsOnReply},
+		plans:   []planReply{{submitted: true, text: "the submitted plan"}},
+	}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	if err := waitingBuilder(t, nil).stepPlan(ctx); err == nil {
+		t.Fatal("want the step to stop on the items it waits on")
+	}
+	if len(ctx.waitedOn) != 2 {
+		t.Fatalf("waited on %+v, want both declared items", ctx.waitedOn)
+	}
+	if len(ctx.wipSaves) == 0 {
+		t.Fatal("no work in progress saved")
+	}
+	wip := ctx.wipSaves[len(ctx.wipSaves)-1]
+	if !strings.Contains(wip, "the submitted plan") || !strings.Contains(wip, WaitsOnSentinel) {
+		t.Errorf("work in progress = %q, want both the submitted plan and the agent's waits-on reasoning", wip)
+	}
+}
+
+// Keeping the reasoning is best-effort. A stash that cannot be written costs a
+// re-derivation on the resume; turning it into a step failure would lose the
+// stop as well — the item would fail instead of waiting, and a person would
+// have to notice.
+func TestPlanStepWaitsOnWIPSaveFailureStillStops(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{waitsOnReply}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+	ctx.wipSaveErr = errors.New("disk full")
+
+	if err := waitingBuilder(t, nil).stepPlan(ctx); err == nil {
+		t.Fatal("want the step to stop on the items it waits on")
+	}
+	if len(ctx.waitedOn) != 2 {
+		t.Errorf("waited on %+v, want both declared items — the failed stash must not prevent the stop", ctx.waitedOn)
+	}
+	if ctx.park != nil || ctx.didResolve {
+		t.Errorf("park %+v resolved %v, want neither", ctx.park, ctx.didResolve)
+	}
+	found := false
+	for _, n := range ctx.notices {
+		if strings.Contains(n, "disk full") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("notices = %v, want one mentioning the failed stash", ctx.notices)
 	}
 }
 

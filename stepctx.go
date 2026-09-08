@@ -79,6 +79,21 @@ type StepCtx interface {
 	// ctx.AskQuestions(q1) vs ctx.AskQuestions(q1, q2, q3).
 	AskQuestions(qs ...AgentQuestion) error
 
+	// WaitOnItems records each ref as a blocker on the item — through the
+	// orchestrator's editor, one edit per ref — and returns the
+	// ErrWaitsOnItems sentinel. The invocation reports blocked, kind
+	// waits-on-items, naming the blockers; nothing is parked, nothing is
+	// charged, and the step's artifact stays unresolved. It is how a step says
+	// "the work exists elsewhere and will land" without spending a refusal on
+	// it: a refusal is a park a person must clear, and this clears itself when
+	// the last blocker finishes (docs/resolution.md § Blocked on items).
+	//
+	// At least one ref is required. A ref the orchestrator refuses to record —
+	// unresolvable, a cycle, the item itself — returns as an ordinary error
+	// naming it, so the step fails visibly instead of stopping on a blocker
+	// nothing recorded; refs recorded before it stay recorded.
+	WaitOnItems(refs ...ItemRef) error
+
 	// Notify reports a sub-phase progress event ("running verify round 2",
 	// "capturing patch"). Forwarded to App.Telemetry.StepProgress when one
 	// is configured; otherwise a no-op. step defaults to the current
