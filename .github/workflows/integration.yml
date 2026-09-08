@@ -1,0 +1,46 @@
+name: integration
+
+# CI measures the tree; it never repairs it. `bin/verify` is a command: it
+# formats the tree with `gofmt -w` on its way to an answer, so a green run
+# says the tree was made correct, not that it is — an answer about a tree
+# that was repaired first is not an answer about the tree anyone proposed
+# (docs/gates-and-commands.md). `bin/run integration` runs the integration
+# gate, which modifies nothing, and judges what it measured against
+# thresholds.json: exit 0 iff every capped measurement is within its cap.
+#
+# Contributors still run `bin/verify` locally (CONTRIBUTING.md) — that is
+# where repair belongs, before the tree is proposed.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A PR that is pushed to twice does not need the first run's answer.
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # go.mod is the single source of the toolchain version, so bumping it
+      # moves CI too rather than leaving a second copy to drift.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # bin/ is gitignored, so a fresh checkout has no tools. ./make is
+      # committed shell text that builds them via `go run`, needing nothing but
+      # the toolchain above — which is what makes this reproducible off a clone.
+      - name: Build tools
+        run: ./make
+
+      # Measure and judge; nothing here writes to the tree.
+      - name: Integration gate
+        run: ./bin/run integration
