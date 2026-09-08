@@ -702,6 +702,80 @@ func TestBothRunnersAnnounceTheSameWay(t *testing.T) {
 	}
 }
 
+// The gates that loop over modules are what the defect was seen through, and
+// they are what a later reader would change to "fix" it. Each of them hands the
+// runner the ROOT alongside the directory the child runs in; a gate that handed
+// the child's own directory as the root instead — the shortening that looks
+// like a simplification, since the runner already has a directory — names both
+// modules "." and prints the identical pair #275 reports, with every test about
+// the printer itself still passing.
+func TestModuleGatesNameEachModuleTheChildRanIn(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		measure func(string) ([]Metric, string, error)
+	}{
+		{"builds", measureBuilds},
+		{"checked", measureChecked},
+		{"tested", measureTested},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fakeGo(t, "exit 0") // skips on Windows: a POSIX shell script
+			repoRoot, nested, _ := twoModules(t)
+			// modules() counts a directory as a module when it carries a
+			// go.mod, so this is what makes the loop run twice.
+			if err := os.WriteFile(filepath.Join(nested, "go.mod"), []byte("module example/tools/build\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			stderr := captureStream(t, &os.Stderr)
+			if _, _, err := c.measure(repoRoot); err != nil {
+				t.Fatalf("measure %s: %v", c.name, err)
+			}
+
+			lines := announcements(stderr())
+			if len(lines) != 2 {
+				t.Fatalf("want one announcement per module, got %d:\n%s", len(lines), strings.Join(lines, "\n"))
+			}
+			if !strings.HasSuffix(lines[0], "(.)") || !strings.HasSuffix(lines[1], "(tools/build)") {
+				t.Errorf("the pair does not say which module each half is:\n%s", strings.Join(lines, "\n"))
+			}
+		})
+	}
+}
+
+// The directory is added to the line, never printed in place of part of it. The
+// column the parenthetical starts at is a column and not a limit — a format
+// that cut the command to fit would drop exactly the arguments that tell two
+// runs of the same program apart, which is the confusion this line exists to
+// end rather than move.
+func TestAnnouncementDoesNotCutACommandLongerThanTheColumn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell script")
+	}
+	repoRoot, nested, script := twoModules(t)
+	args := []string{"-coverprofile=coverage.out", "./..."}
+
+	stderr := captureStream(t, &os.Stderr)
+	if _, err := gateOutput(repoRoot, nested, script, args...); err != nil {
+		t.Fatalf("gateOutput: %v", err)
+	}
+
+	lines := announcements(stderr())
+	if len(lines) != 1 {
+		t.Fatalf("want one announcement, got %d:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	command := script + " " + strings.Join(args, " ")
+	if len(command) <= announceColumn {
+		t.Fatalf("this test needs a command longer than the column; %q is %d characters", command, len(command))
+	}
+	if !strings.Contains(lines[0], command) {
+		t.Errorf("the announcement does not carry the whole command:\n%s\nwant it to contain %q", lines[0], command)
+	}
+	if !strings.HasSuffix(lines[0], "(tools/build)") {
+		t.Errorf("the announcement = %q, want the directory still named after a command that overflows the column", lines[0])
+	}
+}
+
 // The name on the line is derived from (repoRoot, dir), so the edge paths are a
 // table over the pure function — which is also what lets them run on Windows,
 // where the tests that spawn a shell script skip.
@@ -717,6 +791,11 @@ func TestRelToRepoNamesTheDirectoryTheWayTheRepositoryDoes(t *testing.T) {
 		// Never ".": a fallback answering with the root would claim the work
 		// happened in the repository when it did not.
 		{"a directory outside the root", filepath.Join(string(filepath.Separator), "elsewhere"), outsideRepo},
+		// The other refusal, and the one the "../" check cannot make: Rel
+		// answers with an error when there is no path from the root to the
+		// directory at all. A relative directory against an absolute root is
+		// that on every host; Windows' two volumes are the same branch.
+		{"a directory that cannot be resolved against the root", filepath.Join("tools", "build"), outsideRepo},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
