@@ -27,11 +27,17 @@ jobs:
   integration:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Both actions are pinned to majors that declare a native Node 24 runtime,
+      # so no Node runtime opt-in belongs in this workflow: an environment
+      # variable here would hold the workaround in place of the upgrade.
+      # `cla.yml` needs one only because its third-party action has no Node 24
+      # release to move to, and its comment carries the deprecation dates —
+      # they keep one home rather than being copied here.
+      - uses: actions/checkout@v7
 
       # go.mod is the single source of the toolchain version, so bumping it
       # moves CI too rather than leaving a second copy to drift.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
