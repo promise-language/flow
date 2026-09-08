@@ -295,7 +295,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		// A stop on the item's own blockers names them on their own line, as
 		// the axes line does for a budget park: the reason says the kind, and
 		// the references say what to go work instead.
-		if line := blockedByLine(res); line != "" {
+		if line := blockedByLine(openBlockers(res.BlockKind, res.BlockedBy)); line != "" {
 			fmt.Fprintf(app.Err, "  %s\n", line)
 		}
 

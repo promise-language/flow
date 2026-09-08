@@ -109,6 +109,8 @@ The journal is reported in order, and the pending step in exactly one state — 
 
 For a running step, `status` reports what is running: the step, and the identity of the process executing it, so an operator can find it, watch it, or end it.
 
+`status` reports the **block** when there is one: its kind, its reason, and — when the reason is an unfinished dependency — the blockers still open **as references**, the same fields `list` carries for the same item ([orchestrator.md](orchestrator.md) § Dependencies). An item whose next advance would stop on its blockers is not reported as ready to run either: an item that reads `blocked` in the listing and ready in `status` is one fact answered two ways, and the operator reading them has no way to tell which answer is the item's.
+
 ### Running is observed, never assumed
 
 A step is reported as running only when its process is **observed to be alive at the moment `status` runs**. A record saying a step is running is not evidence that it is.
@@ -156,6 +158,10 @@ A claim is refused when the item is already held, when the target worktree is un
 A refusal that another item might survive is distinguished from one that no item would survive, so `resolve`'s auto-selection knows whether trying the next item is meaningful.
 
 > Refusals are currently untyped prose, matched by substring — [#4](https://github.com/promise-language/flow/issues/4).
+
+**Open blockers do not refuse a claim.** A claim is an arena reservation — this worktree, this item — and taking one does no work, so there is nothing for a dependency to stop: `claim` succeeds and **warns**, naming the blockers still open, so the operator hears it here rather than from the refusal the next advance will give.
+
+A claim already held survives the item becoming blocked — a dependency declared after the claim, a blocker reopened. Blockedness is derived at every read and stored nowhere, so nothing has to lift the claim and nothing has to restore it: the next advance refuses, the claim stays where it is, and the item is workable again the moment its last blocker lands.
 
 `claim` never takes an item away from another person. An item assigned to, or owned by, someone else is refused unless the operator explicitly overrides, and the override is recorded.
 
@@ -277,6 +283,8 @@ It selects the item in one of three ways:
 Selecting nothing is not an error. No eligible item, or no item carrying the tags, exits 0.
 
 Auto-selection never picks a `blocked` item. An item waiting on a blocker that is still open is not merely undesirable to start — starting it wastes a claim and a run on work that cannot proceed, and the backend that knows about the dependency is the one that keeps it out of the selectable set.
+
+**Selection is not the only place the dependency counts.** `resolve <item-id>`, `resolve` on the active claim, and `run-step` each read the item's blockedness before anything is dispatched, and an item waiting on an unfinished item stops there: nothing dispatched, nothing spent, the claim kept, the pending step still pending, and the report naming the block kind and the blockers still open — exit 1, the code for a condition somebody must clear. Deferring withholds an item from auto-selection alone; a blocker withholds it from every route, whoever asked for it. What clears it is finishing the blockers — elsewhere, with nobody touching this item — and [resolution.md](resolution.md) § Blocked on items states the stop.
 
 Auto-selection never picks an `awaits` item either: a role this account cannot assume is somebody else's move, and placement restrictions this arena does not meet are somebody else's machine — claiming either would hold work its holder cannot advance.
 

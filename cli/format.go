@@ -43,17 +43,40 @@ func formatDurationCompact(d time.Duration) string {
 	}
 }
 
-// blockedByLine renders the `blocked by:` line for a result that stopped on
-// the item's own blockedness: the blockers still open, listed the way
-// blockerDisplays lists them for `list`, so the filter to unfinished blockers
-// exists once. Returns "" when the result did not stop on items, and when every
-// declared blocker has finished — printing those would send the operator to
-// work something already done.
-func blockedByLine(r flow.InvocationResult) string {
-	if r.BlockKind != flow.WaitsOnItems {
-		return ""
+// openBlockers is the predicate behind every "what does this item still wait
+// on?" report: the blockers still open, listed the way blockerDisplays lists
+// them for `list`, so the filter to unfinished blockers exists once. Returns
+// nothing for a block of any other kind — the kind decides, not the list, since
+// a park-derived block names no items — and nothing when every declared blocker
+// has finished, because printing those would send the operator to work
+// something already done.
+//
+// It takes the two fields rather than a result or an item: a result reports the
+// block a dispatch stopped on and an item reports the block it carries right
+// now, and both answer this question with the same pair.
+func openBlockers(kind flow.BlockKind, blockers []flow.Blocker) []string {
+	if kind != flow.WaitsOnItems {
+		return nil
 	}
-	open := blockerDisplays(r.BlockedBy)
+	return blockerDisplays(blockers)
+}
+
+// blockPayloadOf projects the four block fields onto the payload `list` and
+// `status` share. Two callers, one projection: the listing reads them off an
+// ItemInfo and `status` off the loaded Item, and a second literal would let the
+// two commands answer differently about the same item at the same moment.
+func blockPayloadOf(blocked bool, kind flow.BlockKind, reason string, blockers []flow.Blocker) blockPayload {
+	return blockPayload{
+		Blocked:     blocked,
+		BlockKind:   string(kind),
+		BlockReason: reason,
+		BlockedBy:   blockerDisplays(blockers),
+	}
+}
+
+// blockedByLine renders the `blocked by:` line for a set openBlockers returned.
+// Returns "" for an empty set, so a caller can print unconditionally.
+func blockedByLine(open []string) string {
 	if len(open) == 0 {
 		return ""
 	}

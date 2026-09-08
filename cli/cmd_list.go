@@ -72,10 +72,7 @@ func (app *App) cmdList(ctx context.Context, args []string) int {
 			Tags:         tagStrings(it.Tags),
 			Priority:     string(it.Priority),
 			Urgency:      string(it.Urgency),
-			Blocked:      it.Blocked,
-			BlockKind:    string(it.BlockKind),
-			BlockReason:  it.BlockReason,
-			BlockedBy:    blockerDisplays(it.BlockedBy),
+			blockPayload: blockPayloadOf(it.Blocked, it.BlockKind, it.BlockReason, it.BlockedBy),
 		})
 	}
 

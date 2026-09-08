@@ -697,3 +697,279 @@ func TestStatusRunningDoesNotOverrideResolved(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The block, as `status` reports it (docs/cli.md § Status).
+// ---------------------------------------------------------------------------
+
+// `blocked` displaces `eligible` and NOTHING else, because the question the
+// "flow:" line answers is "will the next advance run a step?" — and RunOne
+// stops on waits-on-items alone, after the no-flow branch. A finalized item is
+// finalized whatever it waits on; an item with no eligible step has nothing to
+// be blocked from; a park-derived block is reported through the park stanza
+// that names what would clear it.
+func TestStatusFlowState_BlockedDisplacesEligibleOnly(t *testing.T) {
+	doFlow := flow.NewFlow("do", []flow.ItemType{"task"})
+	seeded := map[flow.ArtifactId]flow.ArtifactRecord{"plan": {Id: "plan", Required: true}}
+	unseeded := map[flow.ArtifactId]flow.ArtifactRecord{}
+
+	tests := []struct {
+		name      string
+		state     flow.Item
+		eligible  *flow.Flow
+		typeFlow  *flow.Flow
+		wantState string
+		wantLine  string
+	}{
+		{
+			name:      "eligible and waiting on items",
+			state:     flow.Item{Artifacts: seeded, Blocked: true, BlockKind: flow.WaitsOnItems},
+			eligible:  doFlow,
+			typeFlow:  doFlow,
+			wantState: flowStateBlocked,
+			wantLine:  "do (blocked)",
+		},
+		{
+			name:      "eligible and unblocked",
+			state:     flow.Item{Artifacts: seeded},
+			eligible:  doFlow,
+			typeFlow:  doFlow,
+			wantState: flowStateEligible,
+			wantLine:  "do",
+		},
+		{
+			// A park-derived kind: the next advance runs the step, so the
+			// "flow:" line must not say otherwise.
+			name:      "eligible and waiting on a person",
+			state:     flow.Item{Artifacts: seeded, Blocked: true, BlockKind: flow.WaitsOnPerson},
+			eligible:  doFlow,
+			typeFlow:  doFlow,
+			wantState: flowStateEligible,
+			wantLine:  "do",
+		},
+		{
+			name:      "finalized still wins",
+			state:     flow.Item{Finalized: true, Artifacts: seeded, Blocked: true, BlockKind: flow.WaitsOnItems},
+			typeFlow:  doFlow,
+			wantState: flowStateFinalized,
+			wantLine:  "do (finalized)",
+		},
+		{
+			name:      "not seeded keeps",
+			state:     flow.Item{Artifacts: unseeded, Blocked: true, BlockKind: flow.WaitsOnItems},
+			typeFlow:  doFlow,
+			wantState: flowStateNotSeeded,
+			wantLine:  "do (not seeded)",
+		},
+		{
+			name:      "no eligible step keeps",
+			state:     flow.Item{Artifacts: seeded, Blocked: true, BlockKind: flow.WaitsOnItems},
+			typeFlow:  doFlow,
+			wantState: flowStateNoEligibleStep,
+			wantLine:  "do (no eligible step)",
+		},
+		{
+			name:      "no matching flow keeps",
+			state:     flow.Item{Artifacts: unseeded, Blocked: true, BlockKind: flow.WaitsOnItems},
+			wantState: flowStateNoMatchingFlow,
+			wantLine:  "(no matching flow)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// The two functions are the same decision rendered twice, so they
+			// are pinned together: one changing alone is the bug.
+			if got := statusFlowState(&tt.state, tt.eligible, tt.typeFlow); got != tt.wantState {
+				t.Errorf("statusFlowState = %q, want %q", got, tt.wantState)
+			}
+			if got := statusFlowLine(&tt.state, tt.eligible, tt.typeFlow); got != tt.wantLine {
+				t.Errorf("statusFlowLine = %q, want %q", got, tt.wantLine)
+			}
+		})
+	}
+}
+
+// blockStatusEnv is the park/grant scaffolding with one landed blocker and one
+// still open declared on the claimed item.
+func blockStatusEnv(t *testing.T) *parkGrantEnv {
+	t.Helper()
+	env := newParkGrantEnv(t)
+	env.be.AddItem("2", flow.Item{Type: "task", Title: "landed"})
+	env.be.AddItem("3", flow.Item{Type: "task", Title: "still open"})
+	env.be.SetStatus("2", flow.StatusTerminal, "done")
+	blockOn(t, env.be, env.claim.ItemRef, env.be.Ref("2"))
+	blockOn(t, env.be, env.claim.ItemRef, env.be.Ref("3"))
+	env.out.Reset()
+	return env
+}
+
+func TestStatusHuman_ReportsTheBlock(t *testing.T) {
+	env := blockStatusEnv(t)
+
+	if code := env.app.cmdStatus(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	out := env.out.String()
+	if !strings.Contains(out, "flow:  implement (blocked)\n") {
+		t.Errorf("status does not report the item blocked:\n%s", out)
+	}
+	if !strings.Contains(out, "\nblocked: waits-on-items — waiting on unfinished dependencies\n") {
+		t.Errorf("status has no blocked stanza with its kind and reason:\n%s", out)
+	}
+	if !strings.Contains(out, "\n  blocked by: 3\n") {
+		t.Errorf("status does not name the blocker still open:\n%s", out)
+	}
+	// The landed blocker is nowhere to send anybody. "2" appears nowhere else
+	// in this item's report.
+	if strings.Contains(out, "blocked by: 2") || strings.Contains(out, ", 2") {
+		t.Errorf("status names a blocker that has already landed:\n%s", out)
+	}
+}
+
+// The same four fields `list` carries, under the same keys, for the same item.
+func TestStatusJSON_ReportsTheBlock(t *testing.T) {
+	env := blockStatusEnv(t)
+
+	if code := env.app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	m := decode(t, env.out)
+	if m["flow_state"] != flowStateBlocked {
+		t.Errorf("flow_state = %v, want %q", m["flow_state"], flowStateBlocked)
+	}
+	if m["blocked"] != true {
+		t.Errorf("blocked = %v, want true", m["blocked"])
+	}
+	if m["block_kind"] != string(flow.WaitsOnItems) {
+		t.Errorf("block_kind = %v, want %q", m["block_kind"], flow.WaitsOnItems)
+	}
+	if m["block_reason"] == "" || m["block_reason"] == nil {
+		t.Errorf("block_reason = %v, want the backend's one line for a person", m["block_reason"])
+	}
+	by, _ := m["blocked_by"].([]any)
+	if len(by) != 1 || by[0] != "3" {
+		t.Errorf("blocked_by = %v, want the open blocker alone", m["blocked_by"])
+	}
+
+	// And `list` answers identically about the same item at the same moment —
+	// which is the whole reason the two share one payload.
+	env.out.Reset()
+	if code := env.app.cmdList(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdList = %d; stderr=%q", code, env.err.String())
+	}
+	l := decode(t, env.out)
+	items, _ := l["items"].([]any)
+	var it map[string]any
+	for _, raw := range items {
+		if row, _ := raw.(map[string]any); row["display"] == m["item"] {
+			it = row
+		}
+	}
+	if it == nil {
+		t.Fatalf("items = %v, want a row for %v", items, m["item"])
+	}
+	for _, key := range []string{"blocked", "block_kind", "block_reason", "blocked_by"} {
+		if fmt.Sprint(it[key]) != fmt.Sprint(m[key]) {
+			t.Errorf("%s: list = %v, status = %v — one fact, two answers", key, it[key], m[key])
+		}
+	}
+}
+
+// The last blocker lands and the item is workable again, with nobody having
+// touched it: blockedness is derived at every read and stored nowhere.
+func TestStatusJSON_LandedBlockersLeaveItEligible(t *testing.T) {
+	env := blockStatusEnv(t)
+	env.be.SetStatus("3", flow.StatusTerminal, "done")
+
+	if code := env.app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	m := decode(t, env.out)
+	if m["flow_state"] != flowStateEligible {
+		t.Errorf("flow_state = %v, want %q once every blocker has landed", m["flow_state"], flowStateEligible)
+	}
+	for _, key := range []string{"blocked", "block_kind", "block_reason", "blocked_by"} {
+		if _, present := m[key]; present {
+			t.Errorf("%s present on an unblocked item: %v", key, m[key])
+		}
+	}
+
+	env.out.Reset()
+	if code := env.app.cmdStatus(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	if out := env.out.String(); strings.Contains(out, "blocked") {
+		t.Errorf("status still reports a block once every blocker has landed:\n%s", out)
+	}
+}
+
+// A park-derived block is the orchestrator's own derivation and `list` already
+// reports it, so `status` reports it too — fields and all. It names no
+// references, and it does not displace `eligible`: the next advance runs.
+func TestStatusJSON_ParkDerivedBlockIsReportedWithoutReferences(t *testing.T) {
+	env := newParkGrantEnv(t)
+	env.park(t, budgetExhausted("plan", flow.AxisInvocations))
+	env.out.Reset()
+
+	if code := env.app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	m := decode(t, env.out)
+	if m["blocked"] != true || m["block_kind"] != string(flow.WaitsOnPerson) {
+		t.Errorf("blocked/block_kind = %v/%v, want true/%q", m["blocked"], m["block_kind"], flow.WaitsOnPerson)
+	}
+	if _, present := m["blocked_by"]; present {
+		t.Errorf("blocked_by = %v, want it absent — this block names no items", m["blocked_by"])
+	}
+	if m["flow_state"] != flowStateEligible {
+		t.Errorf("flow_state = %v, want %q — the next advance still runs the step", m["flow_state"], flowStateEligible)
+	}
+
+	env.out.Reset()
+	if code := env.app.cmdStatus(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	out := env.out.String()
+	blocked, parked := strings.Index(out, "\nblocked: "), strings.Index(out, "\nparked: ")
+	if blocked < 0 || parked < 0 {
+		t.Fatalf("want both a blocked and a parked stanza:\n%s", out)
+	}
+	// The block is derived FROM the park, and reads as the summary of it.
+	if blocked > parked {
+		t.Errorf("the blocked stanza follows the park it is derived from:\n%s", out)
+	}
+	if strings.Contains(out, "blocked by:") {
+		t.Errorf("a park-derived block names items:\n%s", out)
+	}
+}
+
+// The read-only path answers the same way: `status <id>` on an item nobody
+// holds still reports what it waits on.
+func TestCmdStatus_ByIdReportsTheBlockOnAnUnclaimedItem(t *testing.T) {
+	env := newParkGrantEnv(t)
+	ctx := context.Background()
+	env.be.AddItem("3", flow.Item{Type: "task", Title: "still open"})
+	env.be.AddItem("9", flow.Item{Type: "task", Title: "nobody holds this"})
+	if err := env.be.SeedState(ctx, env.be.Ref("9"), []flow.ArtifactSpec{
+		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
+	}); err != nil {
+		t.Fatalf("SeedState: %v", err)
+	}
+	blockOn(t, env.be, env.be.Ref("9"), env.be.Ref("3"))
+	env.out.Reset()
+
+	if code := env.app.cmdStatus(ctx, []string{"9", "--human"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	out := env.out.String()
+	if !strings.Contains(out, "owner: (unclaimed)") {
+		t.Errorf("the item is held by nobody, and the report should say so:\n%s", out)
+	}
+	if !strings.Contains(out, "flow:  implement (blocked)\n") {
+		t.Errorf("status does not report the unclaimed item blocked:\n%s", out)
+	}
+	if !strings.Contains(out, "\n  blocked by: 3\n") {
+		t.Errorf("status does not name the blocker still open:\n%s", out)
+	}
+}
