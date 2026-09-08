@@ -651,32 +651,22 @@ func (b *Orchestrator) claimContenders(names []string) []string {
 
 // otherBinaryLabel returns (binaryName, true) when the issue carries a
 // flow:<other-binary> label that doesn't match cfg.BinaryName.
+//
+// It reads BY EXCLUSION: every label under the prefix that structuralLabels
+// (label.go) does not name is a binary name. So a structural marker missing
+// from that table does not lose a feature — it turns Claim into a standing
+// other-binary refusal on every item carrying it, naming a binary nobody
+// wrote, and auto-selection would hand the highest-priority item to a runner
+// that declines it for as long as the label is there. That is why the skip
+// list is the table and not a second copy of it, and why the table has a
+// completeness test.
 func (b *Orchestrator) otherBinaryLabel(names []string) (string, bool) {
 	for _, n := range names {
-		if !strings.HasPrefix(n, b.labels.prefix) {
+		rest, ok := strings.CutPrefix(n, b.labels.prefix)
+		if !ok {
 			continue
 		}
-		rest := strings.TrimPrefix(n, b.labels.prefix)
-		// Skip known structural labels.
-		switch {
-		case rest == labelSuffixSeeded,
-			rest == labelSuffixBlocked,
-			rest == labelSuffixNeedsAnswer,
-			rest == labelSuffixDisabled,
-			rest == labelSuffixInfraTransient,
-			strings.HasPrefix(rest, labelSuffixOwnerPrefix),
-			strings.HasPrefix(rest, labelSuffixArenaPrefix),
-			strings.HasPrefix(rest, labelSuffixClaimPrefix),
-			strings.HasPrefix(rest, labelSuffixStalePrefix),
-			strings.HasPrefix(rest, labelSuffixBudgetExhPref),
-			strings.HasPrefix(rest, labelSuffixTypePrefix),
-			// The two selection axes. Anything under the prefix this list does
-			// not skip is read as a binary name, so an unlisted marker turns
-			// Claim into a standing other-binary refusal — and auto-selection
-			// would hand the highest-priority item to a runner that declines it
-			// for as long as the label is there.
-			strings.HasPrefix(rest, labelSuffixPriorityPrefix),
-			strings.HasPrefix(rest, labelSuffixUrgencyPrefix):
+		if _, structural := b.labels.structural(n); structural {
 			continue
 		}
 		// What's left is a binary-name label.

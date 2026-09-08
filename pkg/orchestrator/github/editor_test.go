@@ -136,6 +136,7 @@ func TestEditor_RefusesToRemoveAMarkerItMaintains(t *testing.T) {
 		"flow:needs-answer",
 		"flow:blocked",
 		"flow:manual",
+		"flow:infra-transient",
 		"flow:budget-exhausted:plan",
 		"flow:stale:plan",
 		"flow:implement", // the binary marker seeding maintains
@@ -173,6 +174,31 @@ func TestEditor_RefusesToRemoveAMarkerItMaintains(t *testing.T) {
 	}
 	if contains(mock.labelNames(), "area:api") {
 		t.Errorf("labels = %v, want the operator's own tag removed", mock.labelNames())
+	}
+}
+
+// The counterpart among the STRUCTURAL labels: one no operation writes is the
+// operator's to remove. flow:disabled is the stop switch, and RemoveTag is the
+// contract's only route to "re-enable it"; flow:type:<type> is a classification
+// nothing here maintains. Both are structural — neither may read as a binary's
+// name — and neither is maintained, which is the disabled and type: rows'
+// decision beside structuralLabels.
+func TestEditor_RemovesOperatorOwnedStructuralLabels(t *testing.T) {
+	for _, label := range []string{"flow:disabled", "flow:type:bug"} {
+		t.Run(label, func(t *testing.T) {
+			mock, b := editingOrchestrator(t, "flow:implement", label)
+			ed, err := b.Edit(t.Context(), b.refFromIssue(42))
+			if err != nil {
+				t.Fatalf("Edit: %v", err)
+			}
+			ed.RemoveTag(flow.TagId(label))
+			if err := ed.Commit(t.Context()); err != nil {
+				t.Fatalf("Commit refused to remove %q, a label no operation writes: %v", label, err)
+			}
+			if contains(mock.labelNames(), label) {
+				t.Errorf("labels = %v, want %q removed", mock.labelNames(), label)
+			}
+		})
 	}
 }
 
