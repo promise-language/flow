@@ -246,6 +246,70 @@ func TestBackend_Claim_RefusesAnItemAnotherArenaHoldsUnderTheSameAccount(t *test
 	}
 }
 
+// The comparison has to hold when the LEASE IS TAKEN, not only when the
+// preflight read it. Between the two sit the worktree preconditions, and the
+// first is `git fetch origin` — seconds on a real repository, against a token
+// race sized for two API calls. An arena that finishes its claim inside that
+// window is invisible to the settle, because the settle compares flow:claim:*
+// tokens and the holder removed its own token as the last act of Phase 3.
+//
+// So the second arena won its race uncontested and Phase 3 stripped the
+// holder's arena label as stale: a take-over with no override asked for. The
+// same defect as the reported one, reached through the fetch rather than
+// through selection.
+func TestBackend_Claim_RefusesAnArenaThatTookTheItemDuringOurPreconditions(t *testing.T) {
+	mock, one, two := twoArenas(t)
+
+	// Arena two's preflight sees an unclaimed item; arena one takes it while
+	// two is fetching.
+	fetched := false
+	two.rec.handlers["fetch origin"] = func([]string) ([]byte, error) {
+		if !fetched {
+			fetched = true
+			one.claimed(t)
+		}
+		return nil, nil
+	}
+
+	two.run(func() {
+		_, err := two.b.Claim(t.Context(), two.b.refFromIssue(42), nil)
+		if err == nil {
+			t.Fatal("a claim taken during our preconditions must not be overrun")
+		}
+		var refused flow.ErrClaimRefused
+		if !errors.As(err, &refused) {
+			t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+		}
+		if refused.Code != "already-held" || !refused.ItemScoped {
+			t.Errorf("refusal = %+v, want already-held and item-scoped", refused)
+		}
+	})
+	if !fetched {
+		t.Fatal("the fetch never ran, so the window this test is about never opened")
+	}
+
+	// The holder's record is intact, and no token of the refused claimer is
+	// left behind to block the next one.
+	after := mock.labelNames()
+	if !contains(after, one.b.labels.Arena(one.b.arenaFingerprint())) {
+		t.Errorf("labels = %v, want the holder's fingerprint untouched", after)
+	}
+	if contains(after, two.b.labels.Arena(two.b.arenaFingerprint())) {
+		t.Errorf("labels = %v, want no fingerprint for the refused claimer", after)
+	}
+	for _, name := range after {
+		if _, ok := two.b.labels.ClaimTokenFromLabel(name); ok {
+			t.Errorf("labels = %v, want the refused attempt's claim token removed", after)
+		}
+	}
+	// And the holder still holds it.
+	one.run(func() {
+		if _, err := one.b.Claim(t.Context(), one.b.refFromIssue(42), nil); err != nil {
+			t.Errorf("the holder's re-claim must still succeed: %v", err)
+		}
+	})
+}
+
 // --force still takes over, and the take-over DISPLACES the previous arena's
 // record. Under one account the owner label is byte-identical between the two,
 // so the arena label is the only thing that changes hands — and a take-over
@@ -531,6 +595,125 @@ func TestBackend_Release_RemovesTheArenaLabel(t *testing.T) {
 	one.run(func() {
 		if err := one.b.Release(t.Context(), one.b.refFromIssue(42)); err != nil {
 			t.Errorf("a second Release must not error on labels already gone: %v", err)
+		}
+	})
+}
+
+// The two removals are two requests, so one of them can be the last thing that
+// happens. Release is giving the lease UP, so the half it takes off first
+// decides what a failure between them leaves — and the item must stay reading
+// as HELD, because this arena's lease file is still on disk (Release returns
+// before clearing it) and an item reading free while an arena still holds a
+// lease on it is #210 again, by a different route.
+func TestBackend_Release_PartialFailureLeavesTheItemReadingHeld(t *testing.T) {
+	mock, one, two := twoArenas(t)
+	one.claimed(t)
+
+	// The arena half is the one that will not come off. Taking it off FIRST
+	// means nothing else is removed either; taking it off second means the
+	// owner half is already gone when this fails, and what is left on the item
+	// is an arena label alone.
+	mock.mu.Lock()
+	mock.failRemoveLabel = map[string]bool{one.b.labels.Arena(one.b.arenaFingerprint()): true}
+	mock.mu.Unlock()
+
+	one.run(func() {
+		if err := one.b.Release(t.Context(), one.b.refFromIssue(42)); err == nil {
+			t.Fatal("Release must surface the failed removal, not report success")
+		}
+		// The lease file is untouched, so this arena can retry the release —
+		// and, until it does, still re-claim its own item idempotently.
+		active, err := one.b.LookupActiveClaim(t.Context())
+		if err != nil || active == nil {
+			t.Fatalf("a failed Release must leave the lease file: (%v, %v)", active, err)
+		}
+	})
+
+	after := mock.labelNames()
+	if !contains(after, "flow:owner:alice") {
+		t.Fatalf("labels = %v, want the owner half still present — removed first, it leaves an arena "+
+			"label alone, which reads as unclaimed while this arena still holds the lease", after)
+	}
+	// What every other arena reads off that half-removed record: still held.
+	two.run(func() {
+		refs, err := two.b.ListAutoSelectable(t.Context(), nil)
+		if err != nil {
+			t.Fatalf("ListAutoSelectable: %v", err)
+		}
+		if len(refs) != 0 {
+			t.Errorf("got %v, want none — a half-released item is not free (labels %v)", refs, after)
+		}
+		if _, err := two.b.Claim(t.Context(), two.b.refFromIssue(42), nil); err == nil {
+			t.Error("a half-released item must not be claimable by another arena")
+		}
+	})
+}
+
+// The mirror of the rule above, read from the other end: Claim's rollback drops
+// the OWNER half first, because there the claim failed and the state to leave
+// is one that reads free. What that leaves behind is an arena label with no
+// owner label — half a record, and half a record is not a holder.
+func TestBackend_AnArenaLabelWithoutAnOwnerLabelIsNotAHolder(t *testing.T) {
+	mock, one, _ := twoArenas(t)
+	mock.mu.Lock()
+	mock.issueLabels = []string{"flow:implement", one.b.labels.Arena(one.b.arenaFingerprint())}
+	mock.mu.Unlock()
+
+	one.run(func() {
+		info, err := one.b.Get(t.Context(), one.b.refFromIssue(42), "implement", acceptsAllTypes)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if !info.Holder.Empty() {
+			t.Errorf("Holder = %+v, want empty — the record's other half is not there", info.Holder)
+		}
+		if info.Availability != flow.AvailAuto {
+			t.Errorf("Availability = %q, want %q: a Holder for an item the same read reports free "+
+				"is a contradiction a reader cannot settle", info.Availability, flow.AvailAuto)
+		}
+		if claim, err := one.b.LookupClaim(t.Context(), one.b.refFromIssue(42)); err != nil || claim != nil {
+			t.Errorf("LookupClaim = (%+v, %v), want (nil, nil)", claim, err)
+		}
+	})
+}
+
+// LookupClaim answers off the ITEM, never off this arena's lease file. A file
+// saying "I hold #42" is what an arena displaced by a take-over goes on saying,
+// and reporting ITSELF as the holder of an item another arena is running is the
+// same stale-authority reading Claim's preflight was fixed to stop making.
+func TestBackend_LookupClaim_DoesNotNameADisplacedArenaAsTheHolder(t *testing.T) {
+	_, one, two := twoArenas(t)
+	one.claimed(t)
+	two.run(func() {
+		if _, err := two.b.Claim(t.Context(), two.b.refFromIssue(42),
+			[]flow.ClaimOverride{flow.OverrideAlreadyHeld}); err != nil {
+			t.Fatalf("take-over: %v", err)
+		}
+	})
+
+	one.run(func() {
+		info, err := one.b.LookupClaim(t.Context(), one.b.refFromIssue(42))
+		if err != nil || info == nil {
+			t.Fatalf("LookupClaim = (%+v, %v), want the standing claim", info, err)
+		}
+		// The account is unchanged — one login, two arenas, which is the whole
+		// reason the account could not separate them.
+		if info.Account != "alice" {
+			t.Errorf("Account = %q, want alice", info.Account)
+		}
+		if !info.Arena.Empty() {
+			t.Errorf("Arena = %+v, want empty — this arena was displaced, and a foreign fingerprint "+
+				"names no arena", info.Arena)
+		}
+	})
+	// And the arena that DOES hold it still names itself.
+	two.run(func() {
+		info, err := two.b.LookupClaim(t.Context(), two.b.refFromIssue(42))
+		if err != nil || info == nil {
+			t.Fatalf("holder's LookupClaim = (%+v, %v)", info, err)
+		}
+		if info.Arena != two.b.arena() {
+			t.Errorf("Arena = %+v, want the holding arena %+v", info.Arena, two.b.arena())
 		}
 	})
 }

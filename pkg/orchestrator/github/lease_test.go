@@ -152,8 +152,9 @@ func TestBackend_Claim_NamesTheArenaItBinds(t *testing.T) {
 	if claim.Arena != b.arena() {
 		t.Errorf("Claim.Arena = %+v, want the arena this checkout is (%+v)", claim.Arena, b.arena())
 	}
-	// LookupClaim reports the arena too, but only because this checkout is the
-	// holder — no label records it, so there is nothing to report otherwise.
+	// LookupClaim reports the arena too, off flow:arena:<fingerprint> on the
+	// item — and only because this checkout is the holder, since a digest
+	// decides equality and names nothing.
 	info, err := b.LookupClaim(t.Context(), b.refFromIssue(42))
 	if err != nil || info == nil {
 		t.Fatalf("LookupClaim = %+v, %v", info, err)

@@ -374,7 +374,14 @@ func (b *Orchestrator) holderFromLabels(lblNames []string) (flow.Holder, string)
 			fingerprint = fp
 		}
 	}
-	if fingerprint != "" && fingerprint == b.arenaFingerprint() {
+	// An arena label with no owner label beside it is HALF a record, and half a
+	// record is not a holder: heldByAnotherArena reads it as unclaimed, and a
+	// Holder naming an arena for an item the same file reports free is a
+	// contradiction a reader cannot settle. The state is reachable — Claim's
+	// rollback removes the owner half first on purpose, so a rollback that
+	// stops between the two leaves exactly this — and `unclaimed` is the true
+	// reading of it, since the claim it was half of did not stand.
+	if h.Account != "" && fingerprint == b.arenaFingerprint() {
 		h.Arena = b.arena()
 	}
 	return h, fingerprint

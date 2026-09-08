@@ -63,6 +63,10 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 			Reason: fmt.Sprintf("issue #%d is owned by other flow binary %q", issueNum, otherBinary),
 		}
 	}
+	// Whether THIS arena is the holder, from its own lease file. Declared out
+	// here because the already-held comparison is made twice — once on the
+	// preflight read below, once on the Phase 2 re-read — and both need it.
+	weHold := false
 	if !slices.Contains(overrides, flow.OverrideAlreadyHeld) {
 		// Refuse when another person holds the issue via an assignee. The
 		// caller must pass OverrideAlreadyHeld to take over deliberately.
@@ -85,7 +89,6 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 		if err != nil {
 			return flow.Claim{}, fmt.Errorf("github.Claim: read active claim: %w", err)
 		}
-		weHold := false
 		if active != nil {
 			activeNum, err := b.issueNumber(active.ItemRef)
 			if err != nil {
@@ -213,6 +216,35 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 		_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
 		return flow.Claim{}, fmt.Errorf("get issue (post-claim): %w", err)
 	}
+	// The already-held comparison AGAIN, on the re-read — and it is the one
+	// that decides, because the preflight's is stale by the time the lease is
+	// taken. Between the two reads sit the worktree preconditions, and the
+	// first of those is `git fetch origin`: the window is seconds wide on a
+	// real repository, not the two API calls the token race is sized for.
+	//
+	// An arena that finished its own claim inside that window leaves a record
+	// this settle cannot see — the race settles among flow:claim:* tokens only,
+	// and the holder removed its token as the last act of Phase 3. So without
+	// this the second arena wins its race UNCONTESTED, strips the holder's
+	// flow:arena: label as stale in Phase 3, and takes over an item another
+	// arena is running with no override asked for and nothing refused. That is
+	// #210's failure reached through the fetch instead of through selection,
+	// and docs/orchestrator.md § What an orchestrator may refuse gives it no
+	// room: "a claim held by another — unless the operator passes the
+	// already-held override".
+	//
+	// It costs no request: issue2 is the read the race already makes.
+	if !slices.Contains(overrides, flow.OverrideAlreadyHeld) {
+		if reason, held := b.heldByAnotherArena(labelNamesOf(issue2.Labels), owner, weHold); held {
+			_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
+			return flow.Claim{}, flow.ErrClaimRefused{
+				Code: "already-held", ItemScoped: true,
+				Reason:   fmt.Sprintf("issue #%d %s", issueNum, reason),
+				Override: "force",
+			}
+		}
+	}
+
 	contenders := b.claimContenders(labelNamesOf(issue2.Labels))
 	// Collect abandoned tokens before settling. A claim attempt that died
 	// between posting its label and removing it again leaves a token no
@@ -341,7 +373,11 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 	// so LookupActiveClaim and the CLI commands that consume the active claim
 	// can find it.
 	if err := clistate.Save(c); err != nil {
-		// Best-effort rollback of the github-side ownership we just took.
+		// Best-effort rollback of the github-side ownership we just took. The
+		// owner half comes off first here — the reverse of Release, and for the
+		// same reason: this claim FAILED, so a rollback that stops halfway must
+		// leave the item reading as free, and an arena label with no owner
+		// label beside it is not a claim record (holderFromLabels).
 		_ = b.out.RemoveLabel(ctx, issueNum, b.labels.Owner(string(owner)))
 		_ = b.out.RemoveLabel(ctx, issueNum, b.labels.Arena(fingerprint))
 		_ = b.out.RemoveAssignees(ctx, issueNum, []string{string(owner)})
@@ -411,14 +447,27 @@ func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef) error {
 	if err != nil {
 		return err
 	}
-	if err := b.out.RemoveLabel(ctx, issueNum, b.labels.Owner(string(owner))); err != nil && !isNotFound(err) {
-		return fmt.Errorf("remove owner label: %w", err)
-	}
-	// The arena half of the same record. Left behind, it makes the item read as
-	// held by this arena forever, and every other arena — including this one
-	// after a re-claim from a different worktree — needs --force to touch it.
+	// The arena half comes off FIRST, and the order is the correctness of the
+	// pair — the two removals are separate requests, so one of them can be the
+	// last thing that happens. Release is GIVING THE LEASE UP, so the partial
+	// state to leave is the one that still reads as held: flow:owner:<login>
+	// with no arena label is held by every arena except the one whose own lease
+	// file says otherwise, and Release returns before clearing that file, so
+	// this arena retries and every other one stays off the item. The opposite
+	// order leaves flow:arena:<ours> standing alone, which every reader takes
+	// for unclaimed while this arena still holds a lease on it — two arenas on
+	// one item, the thing the pair exists to prevent.
+	//
+	// The rollback in Claim runs the same two removals the other way round for
+	// the same reason read from the other end: there the claim FAILED, so the
+	// state to leave is the one that reads free.
 	if err := b.out.RemoveLabel(ctx, issueNum, b.labels.Arena(b.arenaFingerprint())); err != nil && !isNotFound(err) {
 		return fmt.Errorf("remove arena label: %w", err)
+	}
+	// Left behind, the owner label makes the item read as held forever, and
+	// every other arena needs --force to touch it.
+	if err := b.out.RemoveLabel(ctx, issueNum, b.labels.Owner(string(owner))); err != nil && !isNotFound(err) {
+		return fmt.Errorf("remove owner label: %w", err)
 	}
 	if err := b.out.RemoveAssignees(ctx, issueNum, []string{string(owner)}); err != nil && !isNotFound(err) {
 		return fmt.Errorf("remove assignee: %w", err)
@@ -554,13 +603,20 @@ func (b *Orchestrator) LookupActiveClaim(ctx context.Context) (*flow.Claim, erro
 
 // LookupClaim reports who holds this item, without taking a lease.
 //
-// The account comes from the flow:owner:<account> label. The ARENA is reported
-// only when this checkout is the holder: flow:arena:<fingerprint> records WHICH
-// arena holds the item, but it records it as a digest, so it decides equality
-// and nothing else — a foreign fingerprint is comparable and unnameable. Naming
-// a remote holder's (HostId, ArenaId) needs a record this orchestrator does not
-// publish, and whether it may publish one is a disclosure question (#222, #164)
-// rather than something to settle here.
+// Both halves come off the ITEM, through holderFromLabels — the same read
+// `list` and the claim preflight make, so the three cannot disagree about who
+// holds what. The lease file is not consulted: it is this arena's own record of
+// what it believes it holds, and a belief the server has since overruled is
+// exactly what it goes on saying. An arena displaced by a take-over would
+// otherwise report ITSELF as the holder of an item another arena is running.
+//
+// The ARENA half is still reported only when this checkout is the holder —
+// flow:arena:<fingerprint> records WHICH arena holds the item, but records it
+// as a digest, so it decides equality and nothing else, and a foreign
+// fingerprint is comparable and unnameable. Naming a remote holder's
+// (HostId, ArenaId) needs a record this orchestrator does not publish, and
+// whether it may publish one is a disclosure question (#222, #164) rather than
+// something to settle here.
 func (b *Orchestrator) LookupClaim(ctx context.Context, ref flow.ItemRef) (*flow.ClaimInfo, error) {
 	issueNum, err := b.issueNumber(ref)
 	if err != nil {
@@ -570,21 +626,15 @@ func (b *Orchestrator) LookupClaim(ctx context.Context, ref flow.ItemRef) (*flow
 	if err != nil {
 		return nil, fmt.Errorf("get issue %d: %w", issueNum, err)
 	}
-	for _, lbl := range issue.Labels {
-		account, ok := b.labels.OwnerFromLabel(lbl.GetName())
-		if !ok {
-			continue
-		}
-		info := &flow.ClaimInfo{Account: account, ClaimedAt: issue.GetUpdatedAt().Time}
-		// The arena, when this checkout is the one holding it.
-		if active, aerr := b.LookupActiveClaim(ctx); aerr == nil && active != nil {
-			if activeNum, nerr := b.issueNumber(active.ItemRef); nerr == nil && activeNum == issueNum {
-				info.Arena = active.Arena
-			}
-		}
-		return info, nil
+	holder, _ := b.holderFromLabels(labelNamesOf(issue.Labels))
+	if holder.Account == "" {
+		return nil, nil
 	}
-	return nil, nil
+	return &flow.ClaimInfo{
+		Arena:     holder.Arena,
+		Account:   holder.Account,
+		ClaimedAt: issue.GetUpdatedAt().Time,
+	}, nil
 }
 
 // claimContenders returns the random hex parts of all flow:claim:* labels
