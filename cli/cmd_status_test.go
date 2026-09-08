@@ -973,3 +973,49 @@ func TestCmdStatus_ByIdReportsTheBlockOnAnUnclaimedItem(t *testing.T) {
 		t.Errorf("status does not name the blocker still open:\n%s", out)
 	}
 }
+
+// blockLine renders whatever the backend reported, and a reason is not
+// something it owes: BlockReason is prose for a person, and nothing may infer a
+// state from it — "not from its wording and not from whether it is empty"
+// (orchestrator.go, ItemInfo). So a block that arrives without one renders as
+// the kind alone, with no dangling separator hanging off it, and the references
+// still reach the operator.
+func TestBlockLine(t *testing.T) {
+	tests := []struct {
+		name string
+		b    blockPayload
+		want string
+	}{
+		{
+			name: "kind, reason and the blockers still open",
+			b: blockPayload{
+				BlockKind:   string(flow.WaitsOnItems),
+				BlockReason: "waiting on unfinished dependencies",
+				BlockedBy:   []string{"3", "4"},
+			},
+			want: "waits-on-items — waiting on unfinished dependencies\n  blocked by: 3, 4",
+		},
+		{
+			// A park-derived block: a reason, and no references — the reason
+			// never names an item, and this kind has none to name.
+			name: "kind and reason",
+			b: blockPayload{
+				BlockKind:   string(flow.WaitsOnPerson),
+				BlockReason: "budget exhausted",
+			},
+			want: "waits-on-person — budget exhausted",
+		},
+		{
+			name: "no reason",
+			b:    blockPayload{BlockKind: string(flow.WaitsOnItems), BlockedBy: []string{"3"}},
+			want: "waits-on-items\n  blocked by: 3",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := blockLine(tt.b); got != tt.want {
+				t.Errorf("blockLine = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

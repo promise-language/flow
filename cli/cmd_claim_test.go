@@ -242,6 +242,35 @@ func TestCmdClaim_LandedBlockersWarnNothing(t *testing.T) {
 	}
 }
 
+// A block NOBODY declared items for warns nothing. The kind decides — a
+// park-derived block is somebody's move on this item, not somewhere else to go,
+// and the next advance runs straight through it (blockedFromAdvancing). Saying
+// "the next advance will stop on them" about it would be false twice over: no
+// them, and no stop.
+func TestCmdClaim_ParkDerivedBlockWarnsNothing(t *testing.T) {
+	env := newClaimEnv(t)
+	if err := env.be.Park(context.Background(), env.be.Ref("1"), budgetExhausted("plan", flow.AxisInvocations)); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+
+	if code := env.app.cmdClaim(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("cmdClaim = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	// The item IS blocked — the backend derives waits-on-person from the park —
+	// and the claim still says nothing about unfinished items.
+	state, err := env.be.Load(context.Background(), env.be.Ref("1"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !state.Blocked || state.BlockKind != flow.WaitsOnPerson {
+		t.Fatalf("item = blocked %v kind %q, want the park's waits-on-person — the test proves nothing otherwise",
+			state.Blocked, state.BlockKind)
+	}
+	if got := env.err.String(); got != "" {
+		t.Errorf("stderr = %q, want nothing — this block names no items to wait on", got)
+	}
+}
+
 // unreadableBackend mints claims normally and then cannot read the item back.
 type unreadableBackend struct{ *fake.Orchestrator }
 
@@ -249,21 +278,43 @@ func (b unreadableBackend) Load(context.Context, flow.ItemRef) (*flow.Item, erro
 	return nil, errors.New("backend unavailable")
 }
 
-// The warning is best-effort BECAUSE the lease is already minted: reporting the
-// failed read would leave an arena holding an item the operator was told they
-// did not get.
-func TestCmdClaim_LoadFailureAfterClaimIsSilentAndStillSucceeds(t *testing.T) {
-	env := newClaimEnv(t)
-	env.app.Orchestrator = unreadableBackend{env.be}
+// itemlessBackend answers the read with no item and no error — the shape a
+// third-party orchestrator can return, since Load's contract does not forbid
+// it, and the one that dereferences to a panic if nothing checks.
+type itemlessBackend struct{ *fake.Orchestrator }
 
-	if code := env.app.cmdClaim(context.Background(), []string{"1"}); code != 0 {
-		t.Fatalf("cmdClaim = %d, want 0 — a failed warning read is not a failed claim; stderr=%q", code, env.err.String())
+func (b itemlessBackend) Load(context.Context, flow.ItemRef) (*flow.Item, error) {
+	return nil, nil
+}
+
+// The warning is best-effort BECAUSE the lease is already minted: a read that
+// comes back with no item — failed, or empty — prints nothing and changes
+// nothing. Reporting it as a failure would leave an arena holding an item the
+// operator was told they did not get, and panicking on it would leave the same
+// arena holding an item behind a stack trace.
+func TestCmdClaim_AWarningReadThatYieldsNoItemIsSilentAndStillSucceeds(t *testing.T) {
+	tests := []struct {
+		name string
+		wrap func(*fake.Orchestrator) flow.Orchestrator
+	}{
+		{"the read fails", func(be *fake.Orchestrator) flow.Orchestrator { return unreadableBackend{be} }},
+		{"the read returns no item", func(be *fake.Orchestrator) flow.Orchestrator { return itemlessBackend{be} }},
 	}
-	if got := env.out.String(); !strings.Contains(got, "claimed 1 as ") {
-		t.Errorf("stdout = %q, want the claim result", got)
-	}
-	if got := env.err.String(); got != "" {
-		t.Errorf("stderr = %q, want nothing — the read failed, and the claim did not", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := newClaimEnv(t)
+			env.app.Orchestrator = tt.wrap(env.be)
+
+			if code := env.app.cmdClaim(context.Background(), []string{"1"}); code != 0 {
+				t.Fatalf("cmdClaim = %d, want 0 — a warning read that yields nothing is not a failed claim; stderr=%q", code, env.err.String())
+			}
+			if got := env.out.String(); !strings.Contains(got, "claimed 1 as ") {
+				t.Errorf("stdout = %q, want the claim result", got)
+			}
+			if got := env.err.String(); got != "" {
+				t.Errorf("stderr = %q, want nothing — the read yielded nothing, and the claim did not fail", got)
+			}
+		})
 	}
 }
 
