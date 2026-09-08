@@ -550,12 +550,38 @@ func (b *Orchestrator) blockednessOf(rec *itemRecord) (bool, flow.BlockKind, str
 	if rec.parkRequest != nil {
 		switch rec.parkRequest.Kind {
 		case flow.ParkQuestion:
-			return true, flow.WaitsOnPerson, "waiting for an answer"
+			// Read the QUESTIONS, not the bare park. The park outlives the
+			// answer on purpose — it carries the ask time the resumed step
+			// reads its replies through (see PostAnswer) — so a park alone no
+			// longer means anybody is waiting. Deciding on the park would leave
+			// an item whose every question is answered reported blocked and
+			// skipped by ListAutoSelectable forever: never selected, so the
+			// asking step never resumes, so the park never clears.
+			//
+			// This is the rule the GitHub orchestrator already applies: its
+			// blockedness reads the needs-answer marker, and PostAnswer drops
+			// that marker with the last answer while leaving the park.
+			//
+			// A question park that registered NO question still waits: there is
+			// nothing to have answered, so nobody has.
+			if len(rec.questions) == 0 || anyPending(rec.questions) {
+				return true, flow.WaitsOnPerson, "waiting for an answer"
+			}
 		case flow.ParkBudgetExhausted:
 			return true, flow.WaitsOnPerson, "budget exhausted"
 		}
 	}
 	return false, "", ""
+}
+
+// anyPending reports whether any recorded question is still unanswered.
+func anyPending(qs []flow.Question) bool {
+	for _, q := range qs {
+		if q.Answer == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -1106,9 +1132,13 @@ func (b *Orchestrator) AnswerQuestion(itemID string, qID flow.QuestionId, answer
 	return fmt.Errorf("fake: question %q not found on item %q", qID, itemID)
 }
 
-// PostAnswer records the answer AGAINST THE QUESTION IT ANSWERS, and clears the
-// park only when no pending question remains — answering one of three is not
-// answering the item.
+// PostAnswer records the answer AGAINST THE QUESTION IT ANSWERS.
+//
+// It does NOT clear the park, matching the GitHub backend: the park says which
+// step stopped and carries the `asked-at` window the resumed step reads its
+// answers through, so clearing it on the answer deletes the answer's own
+// delivery. It is dropped when the asking step completes, when another park
+// supersedes it, or on a reset.
 func (b *Orchestrator) PostAnswer(ctx context.Context, ref flow.ItemRef, id flow.QuestionId, text string) error {
 	itemID, err := refID(ref)
 	if err != nil {
@@ -1135,19 +1165,7 @@ func (b *Orchestrator) PostAnswer(ctx context.Context, ref flow.ItemRef, id flow
 	}
 	now := b.clock()
 	rec.questions[idx].UserAnswer = flow.UserAnswer{Answer: text, AnsweredAt: &now}
-	if !anyPending(rec.questions) && rec.parkRequest != nil && rec.parkRequest.Kind == flow.ParkQuestion {
-		rec.parkRequest = nil
-	}
 	return nil
-}
-
-func anyPending(qs []flow.Question) bool {
-	for _, q := range qs {
-		if q.Answer == "" {
-			return true
-		}
-	}
-	return false
 }
 
 // ---------------------------------------------------------------------------

@@ -292,6 +292,275 @@ func TestBackend_AskQuestionsAssignsIDsAndAnswerFlow(t *testing.T) {
 	}
 }
 
+// PostAnswer records the answer against the question it answers AND LEAVES THE
+// PARK, the same rule the GitHub backend obeys.
+//
+// The park carries the ask time, which is the only window a resumed step reads
+// its answers through: an orchestrator that cleared it here would delete the
+// answer's own delivery, and the resumed step would re-derive the question it
+// was just answered. Both orchestrators are asserted against the rule because a
+// fake that disagreed with the backend is how the loop stayed invisible to
+// every test.
+func TestBackend_PostAnswerRecordsTheAnswerAndLeavesThePark(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := addItem(b, "1")
+	if _, err := b.Claim(ctx, ref, nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	first, err := b.AskQuestion(ctx, ref, flow.AskText("base", "Which base branch?"))
+	if err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+	if _, err := b.AskQuestion(ctx, ref, flow.AskYesNo("ship", "Ship it?")); err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+	if err := b.Park(ctx, ref, flow.ParkRequest{
+		Kind: flow.ParkQuestion, Step: "plan", Reason: "question: " + first.Header,
+		Details: flow.MarkQuestionAsked(first.AskedAt),
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+
+	if err := b.PostAnswer(ctx, ref, first.ID, "main"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+	state, err := b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	answered := false
+	for _, q := range state.Questions {
+		if q.ID == first.ID {
+			answered = q.Answer == "main"
+		}
+	}
+	if !answered {
+		t.Errorf("questions = %+v, want the answer recorded against %q", state.Questions, first.ID)
+	}
+	// Answering one of two is not answering the item.
+	if got := len(state.PendingQuestions()); got != 1 {
+		t.Errorf("PendingQuestions = %d, want 1 — the second question is still waiting", got)
+	}
+	if state.Park == nil {
+		t.Fatal("the park cleared on the answer")
+	}
+	// The marker is RFC3339, so the stamp comes back truncated to the second.
+	wantAskedAt := first.AskedAt.UTC().Truncate(time.Second)
+	if got := flow.QuestionAskedAt(state.Park); !got.Equal(wantAskedAt) {
+		t.Errorf("asked-at = %v, want %v (the window the resume reads answers through)", got, wantAskedAt)
+	}
+
+	// And the LAST answer — the one that used to take the park with it — leaves
+	// it standing too. Only the asking step completing, a superseding park, or
+	// a reset drops it.
+	for _, q := range state.PendingQuestions() {
+		if err := b.PostAnswer(ctx, ref, q.ID, "yes"); err != nil {
+			t.Fatalf("PostAnswer: %v", err)
+		}
+	}
+	state, err = b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.PendingQuestions()) != 0 {
+		t.Fatalf("PendingQuestions = %d, want 0", len(state.PendingQuestions()))
+	}
+	if state.Park == nil {
+		t.Error("the park cleared with the last answer — the resume has no answer window left")
+	}
+}
+
+// An unknown id is refused, and an already-answered one too: either accepted
+// silently would report an answer that moved nothing.
+func TestBackend_PostAnswerRefusesUnknownAndAnsweredQuestions(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := addItem(b, "1")
+	if _, err := b.Claim(ctx, ref, nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	q, err := b.AskQuestion(ctx, ref, flow.AskText("base", "Which base branch?"))
+	if err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+	if err := b.PostAnswer(ctx, ref, "no-such-question", "main"); err == nil {
+		t.Error("PostAnswer accepted an id naming no question on the item")
+	}
+	if err := b.PostAnswer(ctx, ref, q.ID, "main"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+	if err := b.PostAnswer(ctx, ref, q.ID, "the release branch"); err == nil {
+		t.Error("PostAnswer accepted a second answer to one question")
+	}
+	state, err := b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.Questions[0].Answer != "main" {
+		t.Errorf("Answer = %q, want the first answer kept", state.Questions[0].Answer)
+	}
+}
+
+// "Waiting for an answer" is decided by the QUESTIONS, not by the presence of a
+// question park.
+//
+// The park now outlives the answer — it carries the window the resume reads its
+// replies through. Blockedness read off the bare park would therefore report an
+// item whose every question is answered as still waiting on a person, and
+// ListAutoSelectable would skip it: never selected, so the asking step never
+// resumes, so the park never clears. The stall the park was kept to prevent,
+// moved one step later.
+func TestBackend_AnsweringUnblocksTheItemWhileTheParkStands(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := addItem(b, "1")
+	if _, err := b.Claim(ctx, ref, nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	q, err := b.AskQuestion(ctx, ref, flow.AskText("base", "Which base branch?"))
+	if err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+	if err := b.Park(ctx, ref, flow.ParkRequest{
+		Kind: flow.ParkQuestion, Step: "plan", Reason: "question: " + q.Header,
+		Details: flow.MarkQuestionAsked(q.AskedAt),
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+
+	// Unanswered: blocked, and off the selectable list.
+	state, err := b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.BlockReason == "" {
+		t.Error("an item with an unanswered question reports no block reason")
+	}
+	selectable, err := b.ListAutoSelectable(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListAutoSelectable: %v", err)
+	}
+	if len(selectable) != 0 {
+		t.Errorf("ListAutoSelectable = %v, want nothing while the question is unanswered", selectable)
+	}
+
+	if err := b.PostAnswer(ctx, ref, q.ID, "main"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+
+	state, err = b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.BlockReason != "" {
+		t.Errorf("BlockReason = %q after the answer, want none — the human has acted", state.BlockReason)
+	}
+	selectable, err = b.ListAutoSelectable(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListAutoSelectable: %v", err)
+	}
+	if len(selectable) != 1 {
+		t.Errorf("ListAutoSelectable = %v, want the answered item back — nothing else can resume the step", selectable)
+	}
+	// And the park is still there for the resume to read its answer through.
+	if state.Park == nil {
+		t.Error("the park cleared with the answer")
+	}
+}
+
+// A question park that registered no question is still waiting: there is
+// nothing to have answered, so nobody has. Without this the "answered" rule
+// above would report the unanswerable park of flow#166 as workable.
+func TestBackend_AQuestionParkWithNoQuestionStaysBlocked(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := addItem(b, "1")
+	if _, err := b.Claim(ctx, ref, nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if err := b.Park(ctx, ref, flow.ParkRequest{
+		Kind: flow.ParkQuestion, Step: "plan", Reason: "question: which base branch?",
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+	state, err := b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.BlockReason == "" {
+		t.Error("a question park with no registered question reports no block reason")
+	}
+	selectable, err := b.ListAutoSelectable(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListAutoSelectable: %v", err)
+	}
+	if len(selectable) != 0 {
+		t.Errorf("ListAutoSelectable = %v, want nothing — the park still needs a person", selectable)
+	}
+}
+
+// ANSWERING ONE OF TWO IS NOT ANSWERING THE ITEM.
+//
+// Blockedness is now derived from the questions, so it inherits the rule the
+// needs-answer marker already obeys: the wait ends with the LAST answer and not
+// before. A derivation that unblocked on the first — "somebody has replied" —
+// would put the item back on the selectable list with a question still
+// outstanding, and the resumed step would spend a turn re-asking the one nobody
+// answered. That is the reported loop, reached by another road.
+func TestBackend_AnsweringOneOfTwoLeavesTheItemBlocked(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := addItem(b, "1")
+	if _, err := b.Claim(ctx, ref, nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	first, err := b.AskQuestion(ctx, ref, flow.AskText("base", "Which base branch?"))
+	if err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+	second, err := b.AskQuestion(ctx, ref, flow.AskYesNo("ship", "Ship it?"))
+	if err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+	if err := b.Park(ctx, ref, flow.ParkRequest{
+		Kind: flow.ParkQuestion, Step: "plan", Reason: "question: " + first.Header,
+		Details: flow.MarkQuestionAsked(first.AskedAt),
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+
+	if err := b.PostAnswer(ctx, ref, first.ID, "main"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+	state, err := b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.BlockReason == "" {
+		t.Error("BlockReason cleared with one question still unanswered")
+	}
+	selectable, err := b.ListAutoSelectable(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListAutoSelectable: %v", err)
+	}
+	if len(selectable) != 0 {
+		t.Errorf("ListAutoSelectable = %v, want nothing — %q is still unanswered", selectable, second.ID)
+	}
+
+	// The last answer is what ends the wait.
+	if err := b.PostAnswer(ctx, ref, second.ID, "yes"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+	state, err = b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.BlockReason != "" {
+		t.Errorf("BlockReason = %q after both answers, want none", state.BlockReason)
+	}
+}
+
 func TestBackend_ParkRecordsRequest(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()

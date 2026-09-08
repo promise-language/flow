@@ -13,15 +13,31 @@ type step struct {
 	run  func(repoRoot string) error
 }
 
-// RunVerify is the commit gate: format → vet → build → test. It always prints a
-// summary block (even on failure) so an agent tailing the output sees the
-// result without re-running, and the process exit code is the only contract.
+// RunVerify is the commit gate: format → vet → build → test → record. It
+// always prints a summary block (even on failure) so an agent tailing the
+// output sees the result without re-running, and the process exit code is the
+// only contract.
+//
+// The trailing record step is the writing end of the verified-tree contract
+// (verifiedtree.go): the exit status says the tree is sound, and the record
+// says which tree that was, so the precommit-guard can refuse a commit of any
+// other one.
 //
 // This is an EXAMPLE pipeline. For a Go project it runs real go tooling; for
 // anything else it runs harmless stubs. Replace verifySteps with your project's
 // real commands.
 func RunVerify(repoRoot string, args []string) error {
-	steps := verifySteps(repoRoot)
+	// A stale blessing left behind is the one outcome the verified-tree check
+	// must never produce, so failing to clear fails the run outright.
+	if err := clearVerifiedTree(repoRoot); err != nil {
+		return fmt.Errorf("clearing %s: %w", verifiedTreeRecord, err)
+	}
+	return runVerifySteps(repoRoot, verifyPipeline(repoRoot))
+}
+
+// runVerifySteps runs the steps in order, stopping at the first failure, and
+// always prints the summary block.
+func runVerifySteps(repoRoot string, steps []step) error {
 	start := time.Now()
 
 	type result struct {
@@ -59,6 +75,14 @@ func RunVerify(repoRoot string, args []string) error {
 	}
 	fmt.Println("✅ OK to Commit")
 	return nil
+}
+
+// verifyPipeline is the full run: the project's steps, then the unconditional
+// trailing record step. Appended here rather than inside verifySteps so it is
+// last on the Go and stub pipelines alike, and being a step gets the
+// break-on-first-failure for free — a red step leaves nothing blessed.
+func verifyPipeline(repoRoot string) []step {
+	return append(verifySteps(repoRoot), step{"record", recordVerifiedTree})
 }
 
 func verifySteps(repoRoot string) []step {

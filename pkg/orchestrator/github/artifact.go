@@ -401,7 +401,17 @@ func (b *Orchestrator) removeParkLabel(ctx context.Context, ref flow.ItemRef, la
 //
 // THE OUTSTANDING-QUESTION MARKER CLEARS ONLY WHEN NO PENDING QUESTION REMAINS.
 // Answering one of three is not answering the item, and clearing on the first
-// resumes a flow still waiting on two. The park clears with it, and only then.
+// resumes a flow still waiting on two.
+//
+// THE PARK IS NOT THE MARKER AND DOES NOT CLEAR HERE. The marker records that a
+// human must act; the park records which step stopped and what it resumes from,
+// and is dropped by the three triggers docs/github-schema.md:113 names — the
+// asking step completing (see ResolveArtifact), a park of another kind
+// superseding it, or a reset. Answering is not one of them, and an answer that
+// cleared the park would delete its own delivery: the park carries `asked-at`,
+// the only window a resumed step has for finding replies (see
+// flow.QuestionAskedAt), so the resume read an empty answers block, re-derived
+// the same question, and parked again — once per resume, indefinitely.
 //
 // An unknown or already-answered id is REFUSED: silently accepting either would
 // report an answer that moved nothing.
@@ -453,11 +463,6 @@ func (b *Orchestrator) PostAnswer(ctx context.Context, ref flow.ItemRef, id flow
 			return fmt.Errorf("github: question %q not found in state doc on issue #%d", id, issueNum)
 		}
 		pendingRemains = anyPendingDoc(doc.Questions)
-		// The park is what the questions were waiting on, so it clears with the
-		// last of them and not before.
-		if !pendingRemains && doc.Park != nil && flow.ParkKind(doc.Park.Kind) == flow.ParkQuestion {
-			doc.Park = nil
-		}
 		return nil
 	}); err != nil {
 		return err

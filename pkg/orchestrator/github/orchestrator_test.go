@@ -70,6 +70,16 @@ type ghMock struct {
 	nextCommentID int64
 	comments      []ghMockComment
 
+	// commentClock stamps each created comment, advancing a second per post.
+	//
+	// GitHub's own timestamps are per-comment, fixed at creation and ordered by
+	// it; a mock stamping time.Now() at *serialisation* time gives one comment a
+	// different created_at on every read, and a whole test's comments the same
+	// second. Both matter here: ReadAnswers takes replies strictly after the
+	// question's own timestamp, so same-second comments would make a reply
+	// posted after a question indistinguishable from the question itself.
+	commentClock time.Time
+
 	// permissions (for Doctor)
 	perms map[string]bool
 
@@ -118,9 +128,10 @@ type ghMockFile struct {
 }
 
 type ghMockComment struct {
-	ID   int64
-	Body string
-	User string
+	ID        int64
+	Body      string
+	User      string
+	CreatedAt time.Time
 }
 
 func newGHMock(t *testing.T) *ghMock {
@@ -133,6 +144,7 @@ func newGHMock(t *testing.T) *ghMock {
 		issueBody:     "Add hello()",
 		issueState:    "open",
 		nextCommentID: 1000,
+		commentClock:  time.Now().UTC().Truncate(time.Second),
 		perms:         map[string]bool{"push": true, "pull": true, "admin": false},
 		orphanFiles:   map[string]ghMockFile{},
 	}
@@ -356,7 +368,8 @@ func (m *ghMock) handleIssueComments(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		m.nextCommentID++
-		c := ghMockComment{ID: m.nextCommentID, Body: doc.Body, User: "alice"}
+		m.commentClock = m.commentClock.Add(time.Second)
+		c := ghMockComment{ID: m.nextCommentID, Body: doc.Body, User: "alice", CreatedAt: m.commentClock}
 		m.comments = append(m.comments, c)
 		writeJSON(w, ghCommentJSON(c))
 		return
@@ -655,12 +668,18 @@ func (m *ghMock) handleContents(w http.ResponseWriter, r *http.Request) {
 }
 
 func ghCommentJSON(c ghMockComment) map[string]any {
+	// A comment seeded straight into m.comments carries no creation time; it
+	// reads as posted now, which is what such a test means by it.
+	created := c.CreatedAt
+	if created.IsZero() {
+		created = time.Now().UTC()
+	}
 	return map[string]any{
 		"id":         c.ID,
 		"body":       c.Body,
 		"user":       map[string]string{"login": c.User},
 		"html_url":   fmt.Sprintf("https://github.com/o/r/issues/42#issuecomment-%d", c.ID),
-		"created_at": time.Now().UTC().Format(time.RFC3339),
+		"created_at": created.Format(time.RFC3339),
 		"updated_at": time.Now().UTC().Format(time.RFC3339),
 	}
 }
