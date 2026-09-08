@@ -92,7 +92,7 @@ A handler may return these sentinels (as the `error`, with a nil `StepResult`) i
 
 | Method | Error type | Meaning |
 |---|---|---|
-| `ctx.Park(ParkRequest) → error` | `ErrPark` | Structured park request forwarded to `Orchestrator.Park`. |
+| `ctx.Park(ParkRequest) → error` | `ErrPark` | Structured park request forwarded to `Orchestrator.Park`. **Never `question`:** a question park is answerable only through a question the orchestrator registered, this route registers none, and `answer` has no `QuestionId` to record against — so a `question` kind here **fails the step**, naming `ctx.AskQuestions`. A decision needed **asks**. |
 | `ctx.AskQuestions(...AgentQuestion) → error` | `ErrQuestion` | One or more questions for the user. The orchestrator persists them; the flow parks until at least one is answered. |
 | `ctx.WaitOnItems(...ItemRef) → error` | `ErrWaitsOnItems` | The step's work waits on those items — ones that exist, or ones it filed. Each reference is recorded as a blocker on the item through the orchestrator's editor, and then the step stops: the invocation reports `blocked`, kind `waits-on-items`, naming the blockers. Nothing is parked, nothing is journaled, and the treasurer does not count the dispatch ([resolution.md](resolution.md) § Blocked on items). At least one reference is required; a reference the orchestrator refuses to record fails the step, naming it, with the references already recorded left in place. A declaration naming only items that have already finished is recorded and then fails the step too, charged as a dispatch: the item reads unblocked, so the step stopped on nothing, and the next advance runs it. |
 

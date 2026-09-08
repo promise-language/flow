@@ -67,6 +67,12 @@ type StepCtx interface {
 	// Sentinel returns — wrap typed errors the SDK translates to InvocationResult.
 	Skip(reason string) error
 	MarkStale(id ArtifactId) error
+
+	// Park stops the item on the given request. Never ParkQuestion: a question
+	// park is answerable only through a question the orchestrator registered,
+	// this route registers none, and `answer` has no QuestionId to record
+	// against — so a question kind here fails the step, naming AskQuestions. A
+	// decision needed asks.
 	Park(req ParkRequest) error
 
 	// AskQuestions surfaces one or more questions for the user. The call

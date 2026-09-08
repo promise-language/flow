@@ -2067,11 +2067,11 @@ func TestRunOne_AskQuestionWithoutAnIdFailsInsteadOfParking(t *testing.T) {
 	}
 }
 
-// A question park raised through ctx.Park must carry the ask time, exactly as
-// the ctx.AskQuestions route does. Without it a reader scanning for answers has
-// no boundary and takes every comment already on the item — including ones
-// written long before the question — for a reply.
-func TestRunOne_HandlerQuestionParkCarriesAskTime(t *testing.T) {
+// ctx.Park registers no question, so a question park raised through it leaves
+// an item `answer` cannot clear — the same unanswerable state the ask route is
+// guarded against above, through the other door. The step must fail instead,
+// naming the route that works.
+func TestRunOne_HandlerQuestionParkFailsTheStep(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("asks", "plan", func(ctx flow.StepCtx) error {
 			return ctx.Park(flow.ParkRequest{
@@ -2085,14 +2085,54 @@ func TestRunOne_HandlerQuestionParkCarriesAskTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
-	if res.Park == nil || res.Park.Kind != flow.ParkQuestion {
-		t.Fatalf("res = %+v, want a question park", res)
+	assertQuestionParkRefused(t, be, claim, res)
+}
+
+// The sentinel is exported, so a handler can return it without going through
+// ctx.Park. The guard lives at the translation site — the write site — and so
+// catches this door too; this test fails if it is ever moved into stepCtx.Park.
+func TestRunOne_HandBuiltQuestionParkSentinelFailsTheStep(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("asks", "plan", func(ctx flow.StepCtx) error {
+			return flow.ErrPark{Req: flow.ParkRequest{
+				Kind:   flow.ParkQuestion,
+				Reason: "which database?",
+			}}
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
 	}
-	if flow.QuestionAskedAt(res.Park).IsZero() {
-		t.Errorf("Details = %q, want an asked-at marker", res.Park.Details)
+	assertQuestionParkRefused(t, be, claim, res)
+}
+
+// assertQuestionParkRefused: the step failed naming ctx.AskQuestions, and
+// nothing reached the orchestrator — no park written, no question registered.
+func assertQuestionParkRefused(t *testing.T, be *fake.Orchestrator, claim flow.Claim, res flow.InvocationResult) {
+	t.Helper()
+	if res.Status != "failed" {
+		t.Errorf("status = %q, want failed", res.Status)
 	}
-	if flow.QuestionAskedAt(be.ParkRequest("1")).IsZero() {
-		t.Error("the marker did not reach the backend")
+	if res.Park != nil {
+		t.Errorf("Park = %+v, want nothing parked", res.Park)
+	}
+	if !strings.Contains(res.Reason, "ctx.AskQuestions") {
+		t.Errorf("reason = %q, want it to name ctx.AskQuestions as the route that works", res.Reason)
+	}
+	if req := be.ParkRequest("1"); req != nil {
+		t.Errorf("the backend was parked with %+v, want the park never written", req)
+	}
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.Parked() {
+		t.Errorf("item parked on %+v, want no park", state.Park)
+	}
+	if qs := state.PendingQuestions(); len(qs) != 0 {
+		t.Errorf("PendingQuestions = %+v, want none registered", qs)
 	}
 }
 
