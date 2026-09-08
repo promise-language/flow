@@ -408,16 +408,22 @@ func axesLine(axes []axisReportPayload) string {
 // nothing that needs the whole string loses it.
 const statusTitleMax = 72
 
-// titleLine renders a title as ONE bounded line: every whitespace run
-// (newlines and tabs included) collapses to a single space so a multi-line
-// title cannot break the header block, and the result is clipped to
+// oneLine collapses free backend text onto ONE line: every whitespace run
+// (newlines and tabs included) becomes a single space and the ends are
+// trimmed. Returns "" for text that is empty or all whitespace. It is the
+// collapse behind titleLine, and the human listing row applies it to every
+// cell it fills with backend text — there tab is the column separator, so an
+// uncollapsed tab would shift every cell after it.
+func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// titleLine renders a title as ONE bounded line: oneLine's collapse, so a
+// multi-line title cannot break the header block, then clipped to
 // statusTitleMax RUNES — not bytes, which would split a multi-byte character
 // mid-sequence and print a replacement glyph. Returns "" for a title that is
 // empty or all whitespace; the caller drops the line entirely. The human
-// listing row's title cell uses it too: there the collapse matters twice over,
-// because tab is the row's column separator.
+// listing row's title cell uses it too.
 func titleLine(title string) string {
-	s := strings.Join(strings.Fields(title), " ")
+	s := oneLine(title)
 	if s == "" {
 		return ""
 	}

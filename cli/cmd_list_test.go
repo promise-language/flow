@@ -117,6 +117,30 @@ func TestCmdList_HumanRowBoundsTheTitle(t *testing.T) {
 	})
 }
 
+// The tags cell is bounded the same way. The tag floor keeps a tag single-line
+// but not tab-free, and the GitHub backend passes label names through
+// verbatim — so a tag carrying a tab must collapse like a title does, or it
+// shifts every cell after it and a `cut -f` reader gets the wrong column. The
+// tag is NOT clipped, whatever its length: tags are reported in full.
+func TestCmdList_HumanRowBoundsTheTags(t *testing.T) {
+	be := fake.New()
+	long := strings.Repeat("x", statusTitleMax+10)
+	be.AddItem("1", flow.Item{
+		Type:  "task",
+		Title: "t",
+		Tags:  []flow.TagId{"needs\treview", flow.TagId(long)},
+	})
+	app, out := selectionApp(t, be)
+
+	if code := app.cmdList(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdList = %d", code)
+	}
+	want := "1\tauto\tdefault\tmedium\t—\tneeds review," + long + "\tt\n"
+	if got := out.String(); got != want {
+		t.Errorf("row = %q, want %q", got, want)
+	}
+}
+
 // An item with no title and no tags still fills every cell: owner, tags and
 // title each render as "—", so the row keeps its column count and a reader
 // can tell an absent value from a dropped column.

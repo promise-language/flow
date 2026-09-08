@@ -92,22 +92,34 @@ func (app *App) cmdList(ctx context.Context, args []string) int {
 				avail = "?"
 			}
 			// Ref and availability lead, for addressability and scanning; the
-			// title takes the flexible tail; tags sit compact between, joined
-			// with a bare comma so the cell reads as one token and the eye
-			// lands on the title after it. Every tag prints verbatim, in the
-			// backend's order — the listing reports them in full, not only
-			// those a flow recognises. The title goes through titleLine, which
-			// bounds free backend prose to one line: tab is the column
-			// separator, so a tab in a title would otherwise shift the row.
+			// title takes the flexible tail; tags sit compact between. The
+			// title goes through titleLine, which bounds free backend prose to
+			// one line: tab is the column separator, so a tab in a title would
+			// otherwise shift the row.
 			//
 			// The order the orchestrator returned is preserved as it came: at
 			// scope `auto` that IS the selection order, and re-sorting here
 			// would answer "what runs next" with the CLI's own opinion.
 			fmt.Fprintf(app.Out, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				it.Display, avail, it.Urgency, it.Priority,
-				orDash(it.Owner), orDash(strings.Join(it.Tags, ",")), orDash(titleLine(it.Title)))
+				orDash(it.Owner), orDash(tagsCell(it.Tags)), orDash(titleLine(it.Title)))
 		}
 	})
+}
+
+// tagsCell renders an item's tags as one compact cell: every tag, in the
+// backend's order, joined with a bare comma so the cell reads as one token and
+// the eye lands on the title after it. Nothing is clipped or filtered — the
+// listing reports tags in full, not only those a flow recognises. Each tag does
+// go through oneLine: the tag floor keeps a tag single-line but not tab-free,
+// and backends pass label names through verbatim, so a tag carrying a tab would
+// otherwise shift every cell after it.
+func tagsCell(tags []string) string {
+	cells := make([]string, 0, len(tags))
+	for _, t := range tags {
+		cells = append(cells, oneLine(t))
+	}
+	return strings.Join(cells, ",")
 }
 
 // orDash renders an absent listing cell as "—", so a row never carries an
