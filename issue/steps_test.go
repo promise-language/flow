@@ -2823,6 +2823,46 @@ func TestPlanStepWaitsOnUnresolvableRefFailsNamingIt(t *testing.T) {
 	}
 }
 
+// What the echo is FOR (#280 ask 3). A token quoted alone reads as a fact about
+// the tracker — `"(same" is not a valid issue number` — when the thing that
+// went wrong is two lines above it in the agent's own text. The lines the
+// parser SKIPPED are the diagnosis, so the block that reaches the operator has
+// to be the block as written, prose and all, and not the references distilled
+// out of it.
+//
+// And the turn survives the failure: the plan the agent submitted before it
+// named an unresolvable item is kept beside the reasoning, so the retry resumes
+// from work that was already paid for rather than re-deriving it (#280 ask 4 —
+// the observed run lost $0.90 to this).
+func TestPlanStepWaitsOnUnresolvableRefEchoesTheProseItSkipped(t *testing.T) {
+	agent := &scriptedAgent{
+		replies: []string{
+			"PLAN-WAITS-ON: waits on the migration\n```\n" +
+				"#231 migrate issueflow to the new parser\n(same work as #232)\n#99 a typo\n```",
+		},
+		plans: []planReply{{submitted: true, text: "# Plan\n\nDo the work."}},
+	}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	err := waitingBuilder(t, map[string]error{"99": errors.New("no such issue")}).stepPlan(ctx)
+	if err == nil {
+		t.Fatal("want the step to fail on the reference that does not resolve")
+	}
+	if !strings.Contains(err.Error(), "(same work as #232)") {
+		t.Errorf("err = %v, want the skipped prose line echoed — it is what tells an operator their note wrapped", err)
+	}
+	if len(ctx.wipSaves) == 0 {
+		t.Fatal("no work in progress saved — the plan turn is lost to the retry")
+	}
+	wip := ctx.wipSaves[len(ctx.wipSaves)-1]
+	if !strings.Contains(wip, "Do the work.") || !strings.Contains(wip, WaitsOnSentinel) {
+		t.Errorf("work in progress = %q, want both the submitted plan and the reasoning behind the stop", wip)
+	}
+	if ctx.didResolve {
+		t.Error("resolved the plan artifact on a failed wait — the plan is kept as work in progress, not published")
+	}
+}
+
 // The reported defect (#280), end to end: a note that wrapped onto a second
 // line is prose, not a reference. Reading it as one sent `(same` to the tracker
 // and killed the step on an item whose declaration was perfectly well formed.

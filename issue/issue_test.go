@@ -901,6 +901,17 @@ func TestDetectWaitsOn(t *testing.T) {
 			"", nil, "", false,
 		},
 		{
+			// The `#` has to OPEN THE TOKEN, not the line: an agent that indents
+			// the contents of its own fenced block is writing references, and a
+			// rule expressed as `strings.HasPrefix(line, "#")` would drop every
+			// one of them — #280 inverted, the wait silently unread instead of
+			// the step killed. Whitespace before the token is not prose.
+			"an indented reference line is still a reference",
+			"PLAN-WAITS-ON: needs the parser\n```\n#12 the parser\n  #13  the lexer it reads\n\tthe note that wrapped\n```",
+			"needs the parser", []string{"12", "13"},
+			"#12 the parser\n  #13  the lexer it reads\n\tthe note that wrapped", true,
+		},
+		{
 			// A block that is all prose names no item, so it is not a sentinel
 			// and scanning continues — the documented skip, not a failure.
 			"a block of pure prose names nothing",
