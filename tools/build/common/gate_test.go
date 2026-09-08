@@ -653,7 +653,11 @@ func TestAnnouncementNamesTheModuleTheChildRanIn(t *testing.T) {
 // commit guard refuses an absolute home path, so a transcript of a run pasted
 // into an issue or a pull request body would be refused — twice already
 // (#224, #226). This is what catches a later simplification to printing `dir`.
-func TestAnnouncementNeverCarriesTheAbsolutePath(t *testing.T) {
+//
+// It is about the root this naming introduces, not about every byte on the
+// line: a command's own arguments still carry whatever path the caller built
+// into them, which is a separate question from the directory.
+func TestAnnouncementNeverCarriesTheAbsoluteRoot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell script")
 	}

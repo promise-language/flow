@@ -563,13 +563,14 @@ func announce(repoRoot, dir, name string, args []string) {
 func relToRepo(repoRoot, dir string) string {
 	rel, err := filepath.Rel(repoRoot, dir)
 	// Rel fails when there is no path from one to the other — different volumes
-	// on Windows. IsLocal rejects a path that escapes the root; it also rejects
-	// ".", which is the root itself and the commonest answer here. Neither
-	// branch is reachable from this file's callers today: they exist so that no
-	// later caller can turn this line back into the path it was written to keep
-	// out, and answering with a name rather than "." is what keeps such a caller
-	// from claiming work happened in the repository when it did not.
-	if err != nil || (rel != "." && !filepath.IsLocal(rel)) {
+	// on Windows. When it succeeds for a directory outside the root it answers
+	// with a "../" path, which is what IsLocal refuses; "." is the root itself
+	// and IsLocal accepts it, so the commonest answer here needs no exception.
+	// Neither refusal is reachable from this file's callers today: they exist so
+	// that no later caller can turn this line back into the path it was written
+	// to keep out, and answering with a name rather than "." is what keeps such
+	// a caller from claiming work happened in the repository when it did not.
+	if err != nil || !filepath.IsLocal(rel) {
 		return outsideRepo
 	}
 	return filepath.ToSlash(rel)
