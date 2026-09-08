@@ -74,7 +74,7 @@ func TestCmdList_JSONCarriesBothAxesOnEveryItem(t *testing.T) {
 }
 
 // The human line carries them too: display, availability, urgency, priority,
-// owner.
+// owner, tags, title.
 func TestCmdList_HumanLineShowsBothAxes(t *testing.T) {
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "both set", Priority: flow.PriorityHigh, Urgency: flow.UrgencyNext})
