@@ -74,7 +74,7 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 	// the one that clears itself is the one to act on — a refusal is a park a
 	// person must clear, while this stop clears when the blockers land
 	// (docs/issue-flow.md § Planning can conclude that there is no plan).
-	if _, tokens, ok := detectWaitsOn(resp.LastText); ok {
+	if _, tokens, block, ok := detectWaitsOn(resp.LastText); ok {
 		refs := make([]flow.ItemRef, 0, len(tokens))
 		for _, tok := range tokens {
 			// Through the orchestrator, which is the one place a typed value
@@ -83,7 +83,14 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 			// the sentinel text as the plan.
 			ref, err := b.backend.ResolveRef(ctx.Context(), tok)
 			if err != nil {
-				return fmt.Errorf("plan waits on %q, which does not resolve to an item: %w", tok, err)
+				// The block comes with it: one token quoted alone does not tell
+				// an operator what the agent wrote, and the turn's plan and
+				// reasoning are kept so the retry resumes from them rather than
+				// re-deriving a plan that was already paid for.
+				keepPlanReasoning(ctx, resp, "unresolvable wait")
+				return fmt.Errorf(
+					"plan waits on %q, which does not resolve to an item: %w — the block was:\n%s",
+					tok, err, block)
 			}
 			refs = append(refs, ref)
 		}

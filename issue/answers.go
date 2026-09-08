@@ -164,14 +164,16 @@ func detectRefusal(lastText string) (kind RefusalKind, summary string, evidence 
 //
 // Structurally identical to RefusalSentinel: a column-zero token, a one-line
 // summary after the colon, and a fenced block after that. The block is
-// REQUIRED, because it is where the references go: each non-blank line's first
+// REQUIRED, because it is where the references go: a reference line's first
 // whitespace-delimited token is an item reference written as `#<n>` — the way
 // the tracker itself writes one — and the rest of the line is a free note for
 // a person. The `#` is the sentinel's syntax, not part of the reference: it is
 // stripped before the token reaches the orchestrator's ResolveRef, which takes
-// the bare identifier and not a rendering of it. A sentinel whose block names
-// no item is not a sentinel, and scanning continues — waiting on nothing is
-// not a state an item can be in.
+// the bare identifier and not a rendering of it. A line whose first token does
+// NOT begin with `#` is prose and is skipped, so a note may wrap onto further
+// lines without those lines being read as references. A sentinel whose block
+// names no item is not a sentinel, and scanning continues — waiting on nothing
+// is not a state an item can be in.
 //
 // It is not a fifth refusal, and the refusal set stays closed. A refusal means
 // no answer and no change will help, and a person decides; this means the work
@@ -180,13 +182,17 @@ func detectRefusal(lastText string) (kind RefusalKind, summary string, evidence 
 const WaitsOnSentinel = "PLAN-WAITS-ON:"
 
 // detectWaitsOn looks for the waits-on sentinel in an agent's final message and
-// returns its summary and the item references its block names, in order, each
-// stripped of its note.
+// returns its summary, the item references its block names, in order, each
+// stripped of its note, and the block itself.
+//
+// The block comes back so a caller that cannot use a reference can show an
+// operator the lines it read: one token quoted out of context does not tell
+// anyone their note wrapped, and the block does, immediately.
 //
 // It scans from the END, same rationale as detectRefusal: the operative line is
 // the agent's last word. A sentinel with no summary, with no fenced block, or
 // with a block naming no item is skipped and scanning continues.
-func detectWaitsOn(lastText string) (summary string, refs []string, ok bool) {
+func detectWaitsOn(lastText string) (summary string, refs []string, block string, ok bool) {
 	lines := strings.Split(lastText, "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		// Column zero, deliberately not trimmed first — see WaitsOnSentinel.
@@ -197,27 +203,38 @@ func detectWaitsOn(lastText string) (summary string, refs []string, ok bool) {
 		if summary == "" {
 			continue // a bare token says nothing checkable
 		}
-		refs = refTokens(fencedBlockAfter(lines[i+1:]))
+		block = fencedBlockAfter(lines[i+1:])
+		refs = refTokens(block)
 		if len(refs) == 0 {
 			continue // no block, or a block naming no item — not a wait
 		}
-		return summary, refs, true
+		return summary, refs, block, true
 	}
-	return "", nil, false
+	return "", nil, "", false
 }
 
-// refTokens takes the first whitespace-delimited token of every non-blank line
-// of a waits-on block, less the `#` the sentinel's shape puts in front of it:
-// the reference, as ResolveRef takes it. The rest of each line is the note,
-// which nothing parses. A token written without the `#` passes through as it
-// is — the strip is of the shape's prefix, never of the identifier.
+// refTokens takes the first whitespace-delimited token of every line of a
+// waits-on block that BEGINS with the `#` the sentinel's shape puts in front of
+// a reference, less that `#`: the reference, as ResolveRef takes it. The rest
+// of each line is the note, which nothing parses.
+//
+// The `#` is required because it is the only thing that separates a reference
+// from prose. A note that wraps onto a second line starts that line with a
+// word, and a parser that took the first word of every line read the word as a
+// reference and handed it to the tracker, which answered that it was not an
+// issue number and failed the step (#280). So a line that does not open with
+// `#<something>` is a note — and prose is the one thing a note is allowed to
+// be. The strip is still of the shape's prefix and never of the identifier:
+// `#owner/repo#14` yields `owner/repo#14`, and a bare `#` names nothing.
 func refTokens(block string) []string {
 	var out []string
 	for _, line := range strings.Split(block, "\n") {
-		if fields := strings.Fields(line); len(fields) > 0 {
-			if ref := strings.TrimPrefix(fields[0], "#"); ref != "" {
-				out = append(out, ref)
-			}
+		fields := strings.Fields(line)
+		if len(fields) == 0 || !strings.HasPrefix(fields[0], "#") {
+			continue
+		}
+		if ref := strings.TrimPrefix(fields[0], "#"); ref != "" {
+			out = append(out, ref)
 		}
 	}
 	return out
