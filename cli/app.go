@@ -80,7 +80,10 @@ type App struct {
 	// tree perfectly sound.
 	//
 	// Run installs the real reader when it is nil, so the binary paces and a
-	// unit test calling a command directly does not.
+	// unit test calling a command directly does not. That reader reads through
+	// the machine-wide cache (cli/quota_cache.go) — the cache belongs behind
+	// the installed reader, never in this field's contract, so nil still means
+	// no pacing and no reading of any kind.
 	Quota func() ([]windowUsage, error)
 
 	// VerifyCmd is the project's verify command (e.g. "bin/verify --wasm" or
@@ -132,7 +135,7 @@ func RunWithArgs(app App, args []string) int {
 		app.Name = deriveBinaryName(os.Args)
 	}
 	if app.Quota == nil {
-		app.Quota = readQuota
+		app.Quota = cachedQuota
 	}
 	// A startup refusal stops every command but one. `doctor` is the diagnosis,
 	// and a refusal can still rest on a fact about the MACHINE: a binary whose

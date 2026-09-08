@@ -35,9 +35,12 @@ func resolveTestApp(t *testing.T, be flow.Orchestrator) (*App, *bytes.Buffer, *b
 func resolveTestAppStep(t *testing.T, be flow.Orchestrator, step func(flow.StepCtx) error) (*App, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	// Isolate from real credential discovery (Keychain, claude binary) so
-	// reportQuota's exec calls don't hang or hit the network.
+	// reportQuota's exec calls don't hang or hit the network, and from the
+	// quota cache so one resolve test's recorded failure is not another's
+	// served reading.
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv("PATH", t.TempDir())
+	useTempQuotaCache(t)
 	out := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}
 	app := &App{
