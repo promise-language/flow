@@ -2810,6 +2810,61 @@ func TestPlanStepWaitsOnUnresolvableRefFailsNamingIt(t *testing.T) {
 	}
 }
 
+// A plan-mode turn submits and THEN continues to reason, so a wait can arrive
+// beside a submitted plan. What is kept is both — the deliverable and the
+// reasoning behind stopping — the way a question keeps them: a resume that got
+// only the reasoning would re-derive a plan it already had.
+func TestPlanStepWaitsOnWithPlanTextCombinesWIP(t *testing.T) {
+	agent := &scriptedAgent{
+		replies: []string{waitsOnReply},
+		plans:   []planReply{{submitted: true, text: "the submitted plan"}},
+	}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+
+	if err := waitingBuilder(t, nil).stepPlan(ctx); err == nil {
+		t.Fatal("want the step to stop on the items it waits on")
+	}
+	if len(ctx.waitedOn) != 2 {
+		t.Fatalf("waited on %+v, want both declared items", ctx.waitedOn)
+	}
+	if len(ctx.wipSaves) == 0 {
+		t.Fatal("no work in progress saved")
+	}
+	wip := ctx.wipSaves[len(ctx.wipSaves)-1]
+	if !strings.Contains(wip, "the submitted plan") || !strings.Contains(wip, WaitsOnSentinel) {
+		t.Errorf("work in progress = %q, want both the submitted plan and the agent's waits-on reasoning", wip)
+	}
+}
+
+// Keeping the reasoning is best-effort. A stash that cannot be written costs a
+// re-derivation on the resume; turning it into a step failure would lose the
+// stop as well — the item would fail instead of waiting, and a person would
+// have to notice.
+func TestPlanStepWaitsOnWIPSaveFailureStillStops(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{waitsOnReply}}
+	ctx := ctxWithPlan(newFakeWorktree(), agent)
+	ctx.wipSaveErr = errors.New("disk full")
+
+	if err := waitingBuilder(t, nil).stepPlan(ctx); err == nil {
+		t.Fatal("want the step to stop on the items it waits on")
+	}
+	if len(ctx.waitedOn) != 2 {
+		t.Errorf("waited on %+v, want both declared items — the failed stash must not prevent the stop", ctx.waitedOn)
+	}
+	if ctx.park != nil || ctx.didResolve {
+		t.Errorf("park %+v resolved %v, want neither", ctx.park, ctx.didResolve)
+	}
+	found := false
+	for _, n := range ctx.notices {
+		if strings.Contains(n, "disk full") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("notices = %v, want one mentioning the failed stash", ctx.notices)
+	}
+}
+
 // planBody is a minimally-structured real plan. The malformed-refusal tests
 // below pair it with a sentinel that must NOT be detected: what they assert is
 // that detectRefusal declines and the step then resolves normally. They

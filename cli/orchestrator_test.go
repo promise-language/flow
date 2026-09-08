@@ -2829,6 +2829,107 @@ func TestRunOne_WaitOnItemsWithNoRefsIsAnError(t *testing.T) {
 	}
 }
 
+// Only waits-on-items stops before dispatch. A person-kind block — here a
+// question park still awaiting its answer, which the orchestrator derives as
+// blocked, kind waits-on-person — belongs to the answer preflight and the park
+// machinery, and the check leaves it to them: a guard on `Blocked` alone would
+// report every parked item as blocked on nothing and never dispatch the step
+// that reads the answer.
+func TestRunOne_PersonKindBlockIsNotStoppedBeforeDispatch(t *testing.T) {
+	handlerRuns := 0
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			handlerRuns++
+			if handlerRuns == 1 {
+				return ctx.AskQuestions(flow.AskYesNo("ship", "Ship it?"))
+			}
+			return ctx.ResolveMarkdown("the plan")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "parked" {
+		t.Fatalf("first run = %+v, %v; want a question park", res, err)
+	}
+	// The premise: the orchestrator reads the unanswered question as a block
+	// of the person kind, so the item IS blocked when the second advance loads
+	// it — just not on items.
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if !state.Blocked || state.BlockKind != flow.WaitsOnPerson {
+		t.Fatalf("item = blocked %v kind %q, want blocked on a person — the fake's derivation changed under this test",
+			state.Blocked, state.BlockKind)
+	}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("second RunOne: %v", err)
+	}
+	if res.Status != "done" || handlerRuns != 2 {
+		t.Errorf("second run = %+v with the handler run %d times, want the step dispatched and completing", res, handlerRuns)
+	}
+	if res.BlockKind != "" || len(res.BlockedBy) != 0 {
+		t.Errorf("res = %+v carries block fields on a result that did not stop on items", res)
+	}
+}
+
+// armedLoadFailureBackend fails Load once armed. The handler arms it, so the
+// load that fails is the one after the handler ran — the reload a declared
+// stop reads its report from.
+type armedLoadFailureBackend struct {
+	*fake.Orchestrator
+	armed bool
+}
+
+func (b *armedLoadFailureBackend) Load(ctx context.Context, ref flow.ItemRef) (*flow.Item, error) {
+	if b.armed {
+		return nil, errors.New("tracker unreachable")
+	}
+	return b.Orchestrator.Load(ctx, ref)
+}
+
+// A reload that fails after the blockers were declared is an error of the
+// advance, not a result: the stop reports from that reload, and with no item
+// to read there is nothing to report — a made-up `blocked` would claim a
+// derivation nothing performed, and a `failed` would charge the step for the
+// tracker's outage. The declaration itself survived the failed report: the
+// next advance, with the orchestrator answering again, finds the blocker
+// before dispatch and spends no second turn.
+func TestRunOne_ReloadFailureAfterDeclaringBlockersIsAnError(t *testing.T) {
+	var wrapped *armedLoadFailureBackend
+	handlerRuns := 0
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			handlerRuns++
+			wrapped.armed = true
+			return ctx.WaitOnItems(itemRefFor("2"))
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
+	wrapped = &armedLoadFailureBackend{Orchestrator: be}
+	app.Orchestrator = wrapped
+
+	_, err := RunOne(context.Background(), app, claim)
+	if err == nil || !strings.Contains(err.Error(), "reload after declaring blockers") || !strings.Contains(err.Error(), "tracker unreachable") {
+		t.Fatalf("err = %v, want the reload failure, named as such", err)
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if len(state.BlockedBy) != 1 || state.BlockedBy[0].Ref.Display != "2" {
+		t.Errorf("BlockedBy = %+v, want the declared blocker recorded before the reload failed", state.BlockedBy)
+	}
+	if rec := state.Artifact("plan"); rec.Invocations != 0 {
+		t.Errorf("Invocations = %d, want 0 — nothing is charged for a report that could not be made", rec.Invocations)
+	}
+
+	wrapped.armed = false
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("second RunOne: %v", err)
+	}
+	if res.Status != "blocked" || res.BlockKind != flow.WaitsOnItems || handlerRuns != 1 {
+		t.Errorf("second run = %+v with the handler run %d times, want blocked before dispatch on the blocker already recorded",
+			res, handlerRuns)
+	}
+}
+
 // Counterpart to the unfit catch-all: a plain error on a fit machine follows
 // the normal failure path — status failed, budget consumed.
 func TestRunOne_PlainErrorOnFitMachineStillFails(t *testing.T) {
