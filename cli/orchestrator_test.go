@@ -2585,6 +2585,10 @@ func TestRunOne_HandlerWaitsOnItemsRecordsTheBlockerAndStopsClean(t *testing.T) 
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 			handlerRuns++
+			if handlerRuns > 1 {
+				// The resume: the blocker has landed, and the step finishes.
+				return ctx.ResolveMarkdown("the plan")
+			}
 			if err := ctx.RecordWorkInProgress("half a plan"); err != nil {
 				return err
 			}
@@ -2633,16 +2637,19 @@ func TestRunOne_HandlerWaitsOnItemsRecordsTheBlockerAndStopsClean(t *testing.T) 
 	}
 	// And once the blocker lands, the step runs from where it stood.
 	be.SetStatus("2", flow.StatusTerminal, "done")
-	if res3, _ := RunOne(context.Background(), app, claim); res3.Status != "blocked" || handlerRuns != 2 {
-		t.Errorf("after the blocker landed: %+v with the handler run %d times, want it dispatched again", res3, handlerRuns)
+	if res3, _ := RunOne(context.Background(), app, claim); res3.Status != "done" || handlerRuns != 2 {
+		t.Errorf("after the blocker landed: %+v with the handler run %d times, want it dispatched again and completing", res3, handlerRuns)
 	}
 }
 
 // Declared blockers that have already finished are accepted — naming an item
-// that has landed is not an error — and the item then reads unblocked. The
-// stop is still reported, from the derivation, and the next advance runs the
-// step.
-func TestRunOne_HandlerWaitsOnFinishedItemsIsReportedAndTheNextAdvanceRuns(t *testing.T) {
+// that has landed is not an error — and the item then reads unblocked. That is
+// a stop on nothing: reported `blocked`, it would tell the operator to wait
+// for nothing, on an item `status` says is not blocked. It is the step's
+// failure — a turn spent declaring a wait that does not hold — charged as one,
+// with no block fields and no park. The blocker stays recorded (it is
+// harmless and retractable), and the next advance runs the step.
+func TestRunOne_HandlerWaitsOnFinishedItemsFailsAndTheNextAdvanceRuns(t *testing.T) {
 	handlerRuns := 0
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
@@ -2660,18 +2667,27 @@ func TestRunOne_HandlerWaitsOnFinishedItemsIsReportedAndTheNextAdvanceRuns(t *te
 	if err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
-	if res.Status != "blocked" || res.Park != nil {
-		t.Fatalf("res = %+v, want a blocked stop with no park", res)
+	if res.Status != "failed" || res.Park != nil {
+		t.Fatalf("res = %+v, want a failure with no park — nothing blocks the item, so nothing stopped the step", res)
 	}
-	if res.BlockKind != "" || len(res.BlockedBy) != 1 || res.BlockedBy[0].Status != flow.StatusTerminal {
-		t.Errorf("res = %+v, want the derivation's answer: no kind, the declared blocker listed as terminal", res)
+	if res.BlockKind != "" || len(res.BlockedBy) != 0 {
+		t.Errorf("res = %+v, want no block fields on a failure", res)
 	}
-	if !strings.Contains(res.Reason, "finished") {
-		t.Errorf("Reason = %q, want it to say the declared blockers have finished", res.Reason)
+	if !strings.Contains(res.Reason, "2") || !strings.Contains(res.Reason, "finished") {
+		t.Errorf("Reason = %q, want it to name what was declared and that it has finished", res.Reason)
 	}
 	state, _ := be.Load(context.Background(), claim.ItemRef)
-	if rec := state.Artifact("plan"); rec.Invocations != 0 {
-		t.Errorf("Invocations = %d, want 0", rec.Invocations)
+	if state.Blocked {
+		t.Errorf("item reads blocked (%+v) — every declared blocker has finished", state.BlockedBy)
+	}
+	if len(state.BlockedBy) != 1 || state.BlockedBy[0].Status != flow.StatusTerminal {
+		t.Errorf("BlockedBy = %+v, want the declared blocker recorded, listed as terminal", state.BlockedBy)
+	}
+	if rec := state.Artifact("plan"); rec.Invocations != 1 {
+		t.Errorf("Invocations = %d, want 1 — a turn that declared a wait that does not hold is charged like any failure", rec.Invocations)
+	}
+	if be.ParkRequest("1") != nil {
+		t.Errorf("park recorded: %+v — a failure is not a park", be.ParkRequest("1"))
 	}
 	if res2, _ := RunOne(context.Background(), app, claim); res2.Status != "done" || handlerRuns != 2 {
 		t.Errorf("next run = %+v with the handler run %d times, want the step to run and complete", res2, handlerRuns)

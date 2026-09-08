@@ -381,15 +381,30 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// statuses included. No BumpInvocations: the work exists elsewhere and will
 	// land, and charging the wait would spend the budget on nothing. The
 	// artifact stays unresolved, and work in progress is kept for the resume,
-	// as with a question. Declared blockers that are already terminal read as
-	// not blocked, so the next advance runs the step.
+	// as with a question.
+	//
+	// The reload decides, under the same condition as the check before
+	// dispatch. A step can declare items that have all finished already — the
+	// orchestrator accepts those, since naming an item that has landed is not
+	// an error — and the item then reads unblocked. That is not a stop on
+	// anything: nothing waits, the next advance would run the step, and a
+	// `blocked` report on an item nothing blocks would tell the operator to
+	// wait for nothing (docs/resolution.md § Reporting names the kind, and
+	// there is none). It is the step not doing its job — a turn spent to
+	// declare a wait that does not hold — and it falls through as the failure
+	// it is, charged as one, the reason naming what was declared.
 	var waits flow.ErrWaitsOnItems
 	if errors.As(handlerErr, &waits) {
 		state, err = app.Orchestrator.Load(ctx, ref)
 		if err != nil {
 			return flow.InvocationResult{}, fmt.Errorf("reload after declaring blockers: %w", err)
 		}
-		return sctx.stampResult(blockedOnItems(state, result), nil)
+		if state.Blocked && state.BlockKind == flow.WaitsOnItems {
+			return sctx.stampResult(blockedOnItems(state, result), nil)
+		}
+		handlerErr = fmt.Errorf(
+			"step declared it %s, but every item it named has already finished and nothing blocks the item — the step stopped on no wait",
+			waits.Error())
 	}
 
 	// Post-handler fitness catch-all: any unclassified handler failure on an
@@ -654,21 +669,13 @@ func lifecycleItemOf(f *flow.Flow, name string) (flow.LifecycleItem, error) {
 // statuses. Both stops — the check before dispatch, and a step declaring the
 // blockers it found — report through this one function, so the report and
 // `status` come from one derivation. RunOne never inspects blocker statuses
-// itself.
-//
-// A step can declare blockers that have all finished already. The orchestrator
-// accepts those — naming an item that has landed is not an error — and the
-// item then reads unblocked, with no reason of the orchestrator's to carry. The
-// stop still happened and is still reported, with a reason of this function's
-// own; the next advance runs the step.
+// itself. Only ever called on an item the orchestrator reports blocked on
+// items: both callers check that first.
 func blockedOnItems(state *flow.Item, result flow.InvocationResult) flow.InvocationResult {
 	result.Status = string(flow.StatusBlocked)
 	result.Reason = state.BlockReason
 	result.BlockKind = state.BlockKind
 	result.BlockedBy = state.BlockedBy
-	if !state.Blocked {
-		result.Reason = "the step declared blockers that have all finished, so nothing blocks the item — the next advance runs the step"
-	}
 	return result
 }
 

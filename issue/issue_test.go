@@ -867,12 +867,25 @@ func TestDetectWaitsOn(t *testing.T) {
 		{
 			"one ref with a note",
 			"I read the tree.\nPLAN-WAITS-ON: needs the parser first\n```\n#12  the parser this builds on\n```",
-			"needs the parser first", []string{"#12"}, true,
+			"needs the parser first", []string{"12"}, true,
 		},
 		{
+			// The `#` is the shape's, not the reference's: what comes out is what
+			// ResolveRef takes, which is the bare number and never `#12` — the
+			// GitHub orchestrator rejects the latter as not a number.
 			"several refs, notes and blank lines",
 			"PLAN-WAITS-ON: waits on three\n```\n#12 parser\n\n#13\towner/repo#14 is not this line's ref\nowner/repo#14\n```",
-			"waits on three", []string{"#12", "#13", "owner/repo#14"}, true,
+			"waits on three", []string{"12", "13", "owner/repo#14"}, true,
+		},
+		{
+			"a token written without the # passes through as it is",
+			"PLAN-WAITS-ON: needs the parser\n```\n12 the parser\n```",
+			"needs the parser", []string{"12"}, true,
+		},
+		{
+			"a bare # names nothing",
+			"PLAN-WAITS-ON: needs the parser\n```\n# the parser\n```",
+			"", nil, false,
 		},
 		{
 			"bare sentinel",
@@ -902,27 +915,27 @@ func TestDetectWaitsOn(t *testing.T) {
 		{
 			"multiple sentinels — last one wins",
 			"PLAN-WAITS-ON: first guess\n```\n#7\n```\nPLAN-WAITS-ON: the real finding\n```\n#12 the parser\n```",
-			"the real finding", []string{"#12"}, true,
+			"the real finding", []string{"12"}, true,
 		},
 		{
 			"later sentinel without a block falls through to the earlier one",
 			"PLAN-WAITS-ON: with block\n```\n#7\n```\nPLAN-WAITS-ON: no block here",
-			"with block", []string{"#7"}, true,
+			"with block", []string{"7"}, true,
 		},
 		{
 			"indented example ignored, real one honored",
 			"    PLAN-WAITS-ON: <one-line summary>\n    ```\n    #<n>  <why>\n    ```\nPLAN-WAITS-ON: needs the parser\n```\n#12\n```",
-			"needs the parser", []string{"#12"}, true,
+			"needs the parser", []string{"12"}, true,
 		},
 		{
 			"blank lines before fence tolerated",
 			"PLAN-WAITS-ON: needs the parser\n\n\n```\n#12\n```",
-			"needs the parser", []string{"#12"}, true,
+			"needs the parser", []string{"12"}, true,
 		},
 		{
 			"unterminated fence keeps remainder",
 			"PLAN-WAITS-ON: needs the parser\n```\n#12 never closes",
-			"needs the parser", []string{"#12"}, true,
+			"needs the parser", []string{"12"}, true,
 		},
 		{
 			"empty text",

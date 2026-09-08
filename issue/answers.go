@@ -165,10 +165,13 @@ func detectRefusal(lastText string) (kind RefusalKind, summary string, evidence 
 // Structurally identical to RefusalSentinel: a column-zero token, a one-line
 // summary after the colon, and a fenced block after that. The block is
 // REQUIRED, because it is where the references go: each non-blank line's first
-// whitespace-delimited token is an item reference in whatever form the
-// orchestrator's ResolveRef accepts, and the rest of the line is a free note
-// for a person. A sentinel whose block names no item is not a sentinel, and
-// scanning continues — waiting on nothing is not a state an item can be in.
+// whitespace-delimited token is an item reference written as `#<n>` — the way
+// the tracker itself writes one — and the rest of the line is a free note for
+// a person. The `#` is the sentinel's syntax, not part of the reference: it is
+// stripped before the token reaches the orchestrator's ResolveRef, which takes
+// the bare identifier and not a rendering of it. A sentinel whose block names
+// no item is not a sentinel, and scanning continues — waiting on nothing is
+// not a state an item can be in.
 //
 // It is not a fifth refusal, and the refusal set stays closed. A refusal means
 // no answer and no change will help, and a person decides; this means the work
@@ -204,13 +207,17 @@ func detectWaitsOn(lastText string) (summary string, refs []string, ok bool) {
 }
 
 // refTokens takes the first whitespace-delimited token of every non-blank line
-// of a waits-on block: the reference. The rest of each line is the note, which
-// nothing parses.
+// of a waits-on block, less the `#` the sentinel's shape puts in front of it:
+// the reference, as ResolveRef takes it. The rest of each line is the note,
+// which nothing parses. A token written without the `#` passes through as it
+// is — the strip is of the shape's prefix, never of the identifier.
 func refTokens(block string) []string {
 	var out []string
 	for _, line := range strings.Split(block, "\n") {
 		if fields := strings.Fields(line); len(fields) > 0 {
-			out = append(out, fields[0])
+			if ref := strings.TrimPrefix(fields[0], "#"); ref != "" {
+				out = append(out, ref)
+			}
 		}
 	}
 	return out

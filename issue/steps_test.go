@@ -2682,16 +2682,25 @@ func TestPlanStepRefusalParksBlocked(t *testing.T) {
 // refResolver is the one orchestrator method the waits-on branch reaches:
 // turning the agent's token into an identity. fail names tokens that resolve
 // to nothing.
+//
+// It is as strict as the GitHub orchestrator's ResolveRef about the shape it
+// takes: a bare identifier, never `#12`. The sentinel's block is written the
+// tracker's way, `#<n>`, so a step that handed the token over unstripped would
+// fail every declaration on the real orchestrator — and a resolver here that
+// quietly accepted `#12` would hide exactly that.
 type refResolver struct {
 	flow.Orchestrator
 	fail map[string]error
 }
 
 func (r *refResolver) ResolveRef(_ context.Context, in string) (flow.ItemRef, error) {
+	if strings.HasPrefix(in, "#") {
+		return flow.ItemRef{}, fmt.Errorf("%q is not a valid issue number", in)
+	}
 	if err := r.fail[in]; err != nil {
 		return flow.ItemRef{}, err
 	}
-	return itemRefFor(strings.TrimPrefix(in, "#")), nil
+	return itemRefFor(in), nil
 }
 
 func waitingBuilder(t *testing.T, fail map[string]error) *builder {
@@ -2789,8 +2798,8 @@ func TestPlanStepWaitsOnUnresolvableRefFailsNamingIt(t *testing.T) {
 	}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	err := waitingBuilder(t, map[string]error{"#99": errors.New("no such issue")}).stepPlan(ctx)
-	if err == nil || !strings.Contains(err.Error(), "#99") || !strings.Contains(err.Error(), "no such issue") {
+	err := waitingBuilder(t, map[string]error{"99": errors.New("no such issue")}).stepPlan(ctx)
+	if err == nil || !strings.Contains(err.Error(), "99") || !strings.Contains(err.Error(), "no such issue") {
 		t.Fatalf("err = %v, want a failure naming the token and the orchestrator's answer", err)
 	}
 	if len(ctx.waitedOn) != 0 {

@@ -197,8 +197,8 @@ own when those items finish, with nobody having to act. That is not
 "duplicate" — a duplicate says this item is redundant and a person should
 redirect — and it is not a refusal, which says no change will help. Emit it
 flush against the left margin, with a one-line summary after the colon and a
-fenced block naming one item per line: the item reference first, then why it
-is waited on. The shape (shown indented here; write yours flush left):
+fenced block naming one item per line: the item's number as #<n> first, then
+why it is waited on. The shape (shown indented here; write yours flush left):
 
     PLAN-WAITS-ON: <one-line summary>
     ` + "```" + `
