@@ -16,7 +16,7 @@ The graph declares two roles ([resolution.md](resolution.md) § Accounts, capabi
 | **contributor** | push | Producing and proposing a change, or filing the items that resolve the issue |
 | **maintainer** | push, merge | Judging a proposal: integrating it, returning it for rework, or rejecting it |
 
-One principal whose capabilities cover both crosses the boundary without a handoff — that is carry-through, declared per [resolution-standalone.md](resolution-standalone.md). Two principals are the split: the contributor's part ends at the proposal, and the item awaits the maintainer.
+One principal covering both roles, on an account that backs both, crosses the boundary without a handoff — that is carry-through ([resolution.md](resolution.md) § One principal, several roles). Two principals are the split: the contributor's part ends at the proposal, and the item awaits the maintainer.
 
 ## The graph
 

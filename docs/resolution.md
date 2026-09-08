@@ -30,11 +30,13 @@ A resolution involves people, and the flow knows who they are. Three layers, eac
 
 - An **account** is an identity in the backend's own namespace. Two accounts matter to every item — the **creator**, who filed it, and the **runner**, whose credentials the current resolution acts as — and one more per role, below.
 - A **capability** is a verifiable fact about an account on the repository: it can push, it can merge, it can approve. Capabilities are **detected from the backend, never declared** — an account's word for what it may do is worth exactly what the backend will actually permit, so the backend is asked rather than told.
-- A **role** is a part the flow defines — contributor, maintainer, reviewer — and the vocabulary it routes and authorizes by. Every step is tagged with the role that performs it. A role names the capabilities it requires, and the roles a runner may assume are **derived from its detected capabilities**, never assigned by hand and never assumed by assertion.
+- A **role** is a part the flow defines — contributor, maintainer, reviewer — and the vocabulary it routes and authorizes by. Every step is tagged with the role that performs it. A role names the capabilities it requires. The roles a runner *could* assume are **derived from its detected capabilities**, never assigned by hand and never assumed by assertion; the roles it *may* assume are those narrowed by the **coverage** it declares — the roles it is meant to play. Capability is the ceiling and coverage is the choice within it: a runner may decline a role its account could back, and nothing it declares can add a role its account cannot.
 
 > **Every step belongs to exactly one role, and only a runner that may assume that role executes it.**
 
-The role check is what keeps a resolution from starting work it cannot finish; the backend's own permissions are the enforcement of last resort — an account without the merge capability cannot merge, whatever it believes its role to be. The two layers agree by construction, because the first is derived from the second.
+> **A role is assumable only where the runner both declares it and its account backs it.**
+
+The role check is what keeps a resolution from starting work it cannot finish; the backend's own permissions are the enforcement of last resort — an account without the merge capability cannot merge, whatever it believes its role to be. The two layers agree by construction, because the first is derived from the second. Coverage only ever narrows, so it cannot disagree with either: a declared role the account cannot back is simply not assumable — a handoff at that boundary, not a misconfiguration.
 
 The creator's account matters beyond attribution: the creator's detected standing is an input a step may route on, which is how a flow gives an untrusted source's item a stricter route than a maintainer's own.
 
@@ -50,7 +52,7 @@ The first entry a runner appends in a role binds its account as that role's **ac
 
 ### One principal, several roles
 
-A runner whose capabilities cover the roles on both sides of a boundary crosses it without a handoff: the same resolution continues, the claim is kept, and the phases remain distinct in the journal — the change is still proposed, the record still shows which role performed each step. Carrying an item through from proposal to integration is this, and nothing more: a principal holding both roles, crossing the boundary its capabilities span. Whether a binary intends to carry through is declared where the binary is configured, not inferred from capability — see [resolution-standalone.md](resolution-standalone.md) for what declaring it requires.
+A runner whose capabilities cover the roles on both sides of a boundary crosses it without a handoff: the same resolution continues, the claim is kept, and the phases remain distinct in the journal — the change is still proposed, the record still shows which role performed each step. Carrying an item through from proposal to integration is this, and nothing more: a principal covering both roles, on an account that backs both, crossing the boundary. Nothing declares carrying through as such, and nothing selects a flow that does it: the runner covers both roles or it does not, and the boundary is a step in the one graph like any other. Where a standalone binary declares its coverage, and what it must say about it at runtime, is [resolution-standalone.md](resolution-standalone.md) § Declaring what a binary may do.
 
 ## Claiming
 
