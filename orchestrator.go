@@ -1046,7 +1046,14 @@ type RequestManager interface {
 	// May trigger orchestrator signals (e.g. pr-open).
 	Open(ctx context.Context, base BranchName, title, body string) (RequestUrl, error)
 
-	// Merge merges the pull request named by that URL.
+	// Merge merges the pull request named by that URL. IT MERGES; IT DOES NOT
+	// QUEUE A MERGE: when it returns nil the request is merged and FindPR can
+	// read the merge commit it produced, which is the only place a caller
+	// recording what landed can read it from. An implementation that returns
+	// having only asked for the merge answers for a landing that has not
+	// happened — and because a merge completes a signal rather than an
+	// artifact, nothing waits on it: the step is dispatched again.
+	// May trigger orchestrator signals (e.g. pr-merged).
 	Merge(ctx context.Context, url RequestUrl) error
 
 	// FindPR returns the pull request for the current claim branch.
