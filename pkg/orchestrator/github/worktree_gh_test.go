@@ -102,6 +102,85 @@ func TestGhMergeIsSynchronousSquash(t *testing.T) {
 	}
 }
 
+// The merge happens inside the call now, so gh's exit status IS the answer to
+// whether the request landed — and the pr-merged signal this backend writes as
+// a side effect of Merge has to follow that status in both directions.
+//
+// Set over a merge that did not happen, the signal is #148: the step reports
+// done, the recording step after it looks for a merge commit that does not
+// exist, and resolve re-dispatches until the runaway guard stops it. Unset
+// after a merge that did happen, the flow re-merges an already-merged request
+// forever. And a refusal has to carry gh's own words out, because "the base
+// moved — rebase and measure again" is now an ordinary outcome and the operator
+// cannot tell it from a genuinely stuck request without them.
+func TestMergeSignalTracksWhetherGhMerged(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		ghErr    error
+		ghStderr string
+		wantSet  bool
+	}{
+		{name: "merged", wantSet: true},
+		{
+			name:     "refused",
+			ghErr:    errors.New("exit status 1"),
+			ghStderr: "Pull request is not mergeable: the base branch has moved",
+			wantSet:  false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := newGHMock(t)
+			srv := mock.server()
+			defer srv.Close()
+			b := newMockedOrchestrator(t, mock, srv)
+			ctx := t.Context()
+
+			// A claim and a seeded state comment, because the signal write
+			// edits that document — with none there is nothing to observe.
+			claim, err := b.Claim(ctx, b.refFromIssue(42), nil)
+			if err != nil {
+				t.Fatalf("Claim: %v", err)
+			}
+			if err := b.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
+				{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
+			}); err != nil {
+				t.Fatalf("SeedState: %v", err)
+			}
+
+			git := b.git.runner
+			b.git.runner = func(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
+				if name == "gh" {
+					return nil, []byte(tc.ghStderr), tc.ghErr
+				}
+				return git(ctx, dir, name, args...)
+			}
+
+			wt, err := b.Worktree(ctx, claim.ItemRef)
+			if err != nil {
+				t.Fatalf("Worktree: %v", err)
+			}
+			mergeErr := wt.Request().Merge(ctx, "https://github.com/o/r/pull/1")
+
+			switch {
+			case tc.ghErr == nil && mergeErr != nil:
+				t.Fatalf("Merge: %v, want nil — gh merged", mergeErr)
+			case tc.ghErr != nil && mergeErr == nil:
+				t.Fatal("Merge returned nil though gh refused the merge — the caller records a landing that did not happen")
+			case tc.ghErr != nil && !strings.Contains(mergeErr.Error(), tc.ghStderr):
+				t.Errorf("Merge error = %q, want it to carry what gh said (%q)", mergeErr, tc.ghStderr)
+			}
+
+			state, err := b.Load(ctx, claim.ItemRef)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := state.SignalSet("pr-merged"); got != tc.wantSet {
+				t.Errorf("pr-merged = %v, want %v", got, tc.wantSet)
+			}
+		})
+	}
+}
+
 func TestGhOpenTargetsTheBranchAndBase(t *testing.T) {
 	// --repo removes the dependency on the process working directory, which the
 	// runner never sets — so the branch and base must be named explicitly or gh
