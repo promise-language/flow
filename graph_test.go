@@ -280,6 +280,21 @@ func TestValidateGraph_AcceptsSignalWaitWithNoRole(t *testing.T) {
 	wantGraphOK(t, f)
 }
 
+// The other side of that exemption, and where it stops. A SIGNAL STEP is not a
+// wait: it has a handler, it performs the act that raises the signal, and
+// AddSignalStep accepts the empty Role where AwaitSignal panics on any — so the
+// only thing standing between an untagged one and an item awaiting nobody is
+// this refusal. An exemption written on the kind rather than on the wait would
+// take both with it and nothing else would notice.
+func TestValidateGraph_RefusesSignalStepWithNoRole(t *testing.T) {
+	f := soloFlow("x")
+	f.AddSignalStep("create pr", "pr-open", noopHandler, StepConfig{
+		Entry:       true,
+		MayFinalize: []Disposition{DispositionResolved},
+	})
+	wantGraphError(t, f, "create pr", "pr-open", "declares no Role", "solo")
+}
+
 // A declared role no step is tagged with is NOT refused. Coverage is the
 // runner's business, not the graph's: a flow declaring a role its own steps do
 // not perform is over-declared, not broken, and refusing it would make the

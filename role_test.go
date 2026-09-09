@@ -29,6 +29,26 @@ func TestRole_DeclarationOrderIsKept(t *testing.T) {
 	}
 }
 
+// A declaration may follow the steps that carry its name. Order against the
+// step registrations is not enforced, deliberately: whether a tag names a
+// declaration is knowable only once registration has ended, so pinning it to a
+// registrar would turn a legal assembly order into a panic on a flow that is
+// whole by the time anything reads it.
+func TestRole_MayBeDeclaredAfterTheStepsThatCarryIt(t *testing.T) {
+	f := NewFlow("resolve", nil)
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Role:        "contributor",
+		Entry:       true,
+		MayFinalize: []Disposition{DispositionResolved},
+	})
+	f.Role("contributor", CapPush) // after the step that names it
+
+	if err := f.ValidateGraph(); err != nil {
+		t.Errorf("ValidateGraph() = %v, want nil — the declaration arrived before validation, "+
+			"which is the only point the check is made at", err)
+	}
+}
+
 // The declaration is copied in and cloned out, symmetrically. A caller holding
 // either end must not be able to rewrite what startup validation certified.
 func TestRole_DeclarationsAreCloned(t *testing.T) {

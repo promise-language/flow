@@ -624,6 +624,16 @@ func TestBuildApp_CarryThroughOnAnAccountBackingNoRoleIsRefused(t *testing.T) {
 	if !strings.Contains(err.Error(), "CarryThrough") {
 		t.Errorf("err = %q, want it to name the field that fixes it", err)
 	}
+	// And it says what the account backs in WORDS. The role that got here is the
+	// empty one, which the obvious %q renders as a bare pair of quotes — an
+	// operator reads that as a bug in the message rather than as the standing
+	// that refused them.
+	if !strings.Contains(err.Error(), roleOrNone("")) {
+		t.Errorf("err = %q, want it to say the account backs %q", err, roleOrNone(""))
+	}
+	if strings.Contains(err.Error(), `""`) {
+		t.Errorf("err = %q, renders the empty role as an empty quoted string", err)
+	}
 }
 
 func TestBuildApp_ContributorSliceWiresUp(t *testing.T) {
