@@ -328,7 +328,18 @@ func (o *outward) OpenPullRequest(ctx context.Context, base, head, title, body s
 	return prURL, nil
 }
 
-// MergePullRequest queues an auto-squash-merge of the PR at prURL.
+// MergePullRequest squash-merges the PR at prURL, synchronously.
+//
+// The merge happens now or fails now; it is not queued. The caller's next step
+// reads the merge commit this produced, and the step before it already ran the
+// integration gate on the merge result — so there is nothing left to wait for,
+// and deferring to GitHub's own checks (`--auto`) would only separate what the
+// flow measured from what eventually lands. A failure here because the base
+// moved is the ordinary outcome, and the answer to it is to bring the branch up
+// and measure again — the landing loop of docs/gates-and-commands.md, whose
+// arbiter is the landing step (there, the push) because it is the only one
+// atomic with respect to other people landing. Merging the request is that same
+// act by the other route.
 //
 // The URL is stated `item`: GitHub issued it, and it is already published
 // there.
@@ -336,7 +347,7 @@ func (o *outward) MergePullRequest(ctx context.Context, prURL string) error {
 	d := flow.Disclosure{Act: flow.ActMerge, Text: stated(flow.OriginItem, prURL)}
 	return o.publish(ctx, d, func(ctx context.Context) error {
 		// --repo, not -C: see OpenPullRequest. gh has no -C flag.
-		args := []string{"--repo", o.repoFullName(), "pr", "merge", prURL, "--squash", "--auto"}
+		args := []string{"--repo", o.repoFullName(), "pr", "merge", prURL, "--squash"}
 		_, stderr, err := o.git.runner(ctx, "", "gh", args...)
 		if err != nil {
 			return fmt.Errorf("gh pr merge: %w (stderr=%s)", err, strings.TrimSpace(string(stderr)))

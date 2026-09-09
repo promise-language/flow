@@ -91,9 +91,14 @@ func (b *builder) stepRecordMerge(ctx flow.StepCtx) error {
 		return fmt.Errorf("could not find the pull request for the claim branch: %w", err)
 	}
 	if info.MergeCommitSHA == "" {
+		// Reaching this step means pr-merged is set — a merge is what elects
+		// it, whether the flow performed it or a human integrated by hand. So
+		// this is not a merge still queued behind something: Merge merges, and
+		// returns having done it. It is the commit not yet readable, which a
+		// later pass reads once the backend reports it.
 		return fmt.Errorf(
-			"the pull request at %s has not merged yet — the --auto flag may have queued it "+
-				"but CI has not finished; the next LoadState cycle will refresh the pr-merged signal",
+			"the pull request at %s is merged but reports no merge commit yet — "+
+				"the backend has not published it; a later pass records it",
 			info.URL)
 	}
 	return ctx.ResolveCommitHash(string(info.MergeCommitSHA))

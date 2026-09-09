@@ -387,7 +387,7 @@ The optional pull-request surface exposed via `Worktree.Request()`. It is one ca
 | Method | Contract |
 |---|---|
 | `Open(ctx, BranchName, title, body string)` → `(RequestUrl, error)` | Opens a pull request and returns its URL. **This is the only place a pull-request URL originates** — `Merge` and `FindPR` consume what this produced. May trigger orchestrator signals (e.g. `pr-open`). |
-| `Merge(ctx, RequestUrl)` → `error` | Merges the pull request named by that URL. |
+| `Merge(ctx, RequestUrl)` → `error` | Merges the pull request named by that URL. **It merges; it does not queue a merge** — on return the request is merged and `FindPR` can read the merge commit it produced, which is the only place a caller recording what landed can read it from. An implementation that returns having only asked for the merge answers for a landing that has not happened, and because a merge completes a signal rather than an artifact, nothing waits on it: the step is dispatched again. May trigger orchestrator signals (e.g. `pr-merged`). |
 | `FindPR(ctx)` → `(PRInfo, error)` | The pull request for the current claim branch. |
 | `PrepareMergeResult(ctx, BranchName)` → `error` | Set the tree to reflect the merge result, so a gate measures what will actually land rather than the branch in isolation. |
 | `RevertMergePrep(ctx)` → `error` | Undo that preparation. |
