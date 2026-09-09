@@ -394,10 +394,10 @@ func (app *App) validate() error {
 
 	// The graph, whole. Registration refuses what a single declaration can be
 	// wrong about on its own (Flow.prepareStep); this is the rest — successor
-	// existence, one entry, reachability, finalization, and the role tags
-	// against the declared set — and none of it is knowable until every
-	// registration is in. docs/cli.md § Startup, docs/flow-registration.md
-	// § Startup validation.
+	// existence, one entry, one successor on every signal wait, reachability,
+	// finalization, and the roles against the declared set — and none of it is
+	// knowable until every registration is in. docs/cli.md § Startup,
+	// docs/flow-registration.md § Startup validation.
 	//
 	// Last, not first: the checks above are each about ONE declaration's own
 	// references, this one is about how the declarations fit together, and

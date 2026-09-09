@@ -239,8 +239,8 @@ func TestRunWithArgs_DoctorReportsABrokenGraph(t *testing.T) {
 // Those checks are each about ONE declaration's own references; this one is
 // about how the declarations fit together, and docs/cli.md § Startup lists them
 // in that order. An App wrong both ways reports the reference — which is what
-// the four TestApp_Validate_Rejects… fixtures above depend on, none of which
-// declares a routable graph.
+// the four TestApp_Validate_Rejects… fixtures in orchestrator_test.go depend
+// on, none of which declares a routable graph.
 func TestApp_Validate_RunsTheGraphCheckAfterReferenceChecks(t *testing.T) {
 	app := graphApp(fake.New(), func(f *flow.Flow) {
 		f.AddStep("write plan", "missing-artifact", inertStep, flow.StepConfig{
