@@ -24,7 +24,7 @@ func TestRunOne_ParksBeforeDispatchWhenTheCostCapIsSpent(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Error("the handler ran for a step whose cost cap is already spent")
 			return flow.StepResult{}, nil
-		}, flow.StepConfig{Entry: true})
+		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxCostUSD: 2}}
 
@@ -78,7 +78,7 @@ func TestRunOne_ASignalStepsDispatchesAndTimeReachTheLedger(t *testing.T) {
 				})
 			}
 			return ctx.Finalize(flow.DispositionResolved, "the change is proposed"), nil
-		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	ctx := context.Background()

@@ -284,7 +284,9 @@ func (a *runTrapAgent) Run(context.Context, flow.AgentRequest) (*flow.AgentRespo
 
 func newDummyFlow(name string) *flow.Flow {
 	f := flow.NewFlow(name, nil)
-	f.AddStep("step", "plan", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{Entry: true})
+	f.Role("contributor", flow.CapPush)
+	f.AddStep("step", "plan", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil },
+		flow.StepConfig{Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	return f
 }
 

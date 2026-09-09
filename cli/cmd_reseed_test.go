@@ -19,7 +19,7 @@ func reseedTestSetup(t *testing.T) (*App, *fake.Orchestrator, *bytes.Buffer, *by
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 
 	appendMarkdown(t, be, claim.ItemRef, "plan", "next", "the plan")

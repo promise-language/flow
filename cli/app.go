@@ -391,7 +391,25 @@ func (app *App) validate() error {
 			return fmt.Errorf("flow %q RequireSignal(%q) is not declared in App.Signals", f.Name(), sig)
 		}
 	}
-	return nil
+
+	// The graph, whole. Registration refuses what a single declaration can be
+	// wrong about on its own (Flow.prepareStep); this is the rest — successor
+	// existence, one entry, reachability, finalization, and the role tags
+	// against the declared set — and none of it is knowable until every
+	// registration is in. docs/cli.md § Startup, docs/flow-registration.md
+	// § Startup validation.
+	//
+	// Last, not first: the checks above are each about ONE declaration's own
+	// references, this one is about how the declarations fit together, and
+	// docs/cli.md § Startup lists them in that order.
+	//
+	// Not scoped to the invoked command. § Startup scopes validation to what a
+	// command needs, and the carve-out it names is gate declarations — because
+	// gate availability is read off the machine, which is why that check lives
+	// in requireRunnable and exits 1. Graph validity is the opposite: pure
+	// configuration, free to check, and named in the exit-2 list. A binary
+	// whose graph does not hang together is misconfigured for every command.
+	return f.ValidateGraph()
 }
 
 // repairUnbuiltTools is what a missing declaration tells the reader to run. It
