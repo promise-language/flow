@@ -89,12 +89,6 @@ func TestResolveRole_DetectsFromCapabilities(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			be := &stubBackend{caps: tc.caps}
 			got, err := resolveRole(context.Background(), Config{}, be)
-			if tc.want == "" {
-				if err == nil {
-					t.Fatalf("resolveRole = %q, want a refusal — %v covers no declared role", got, tc.caps)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatalf("resolveRole: %v", err)
 			}
@@ -110,20 +104,23 @@ func TestResolveRole_DetectsFromCapabilities(t *testing.T) {
 	}
 }
 
-// An account that can assume no declared role is a startup error naming what
-// was detected. Calling it a contributor — which the old permissions collapse
-// did for a read-only account — starts a resolution that dies at its first
-// push, several steps from the misconfiguration.
-func TestResolveRole_RefusesAnAccountCoveringNoRole(t *testing.T) {
+// An account that can assume no declared role is an ANSWER — the empty role —
+// not an error: it is a handoff, not a misconfiguration
+// (docs/resolution-standalone.md § Declaring what a binary may do). What it must
+// not become is a contributor, which is what the old permissions collapse did
+// for a read-only account: that starts a resolution that dies at its first push,
+// several steps from the missing access.
+func TestResolveRole_AnAccountCoveringNoRoleResolvesToNone(t *testing.T) {
 	be := &stubBackend{caps: nil}
-	_, err := resolveRole(context.Background(), Config{}, be)
-	if err == nil {
-		t.Fatal("want an error when the account can assume no declared role")
+	got, err := resolveRole(context.Background(), Config{}, be)
+	if err != nil {
+		t.Fatalf("resolveRole = %v, want the empty role and no error", err)
 	}
-	for _, want := range []string{"Config.Role", string(RoleContributor), string(flow.CapPush)} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error = %q, want it to mention %q", err, want)
-		}
+	if got != "" {
+		t.Errorf("role = %q, want the empty role — nothing was detected", got)
+	}
+	if be.capsCalls != 1 {
+		t.Errorf("DetectCapabilities called %d time(s), want exactly one", be.capsCalls)
 	}
 }
 
@@ -577,6 +574,58 @@ func TestBuildApp_MaintainerBuildsButRefusesOnDispatch(t *testing.T) {
 	}
 }
 
+// An account that backs no declared role builds too, and refuses at DISPATCH
+// for the same reason the maintainer stand-in does. Refusing construction would
+// leave a read-only clone unable to run `list`, `status`, `answer` or `doctor` —
+// and `doctor` is the command that would have named the missing push access.
+func TestBuildApp_NoAssumableRoleBuildsButRefusesOnDispatch(t *testing.T) {
+	// Role UNSET, so it is detected; the backend reports an account with
+	// nothing on the repository.
+	be := &stubBackend{caps: nil}
+	app, err := BuildApp(context.Background(), Config{
+		BaseBranch: "main", VerifyCmd: []string{"true"},
+	}, Deps{Orchestrator: be, Agent: stubAgent{}})
+	if err != nil {
+		t.Fatalf("BuildApp = %v, want an app that still serves read-only commands", err)
+	}
+	if _, ok := app.Flow.Item("merge pull request"); ok {
+		t.Error("the integrating graph was built for an account that cannot push")
+	}
+	if _, ok := app.Flow.Item("write plan"); !ok {
+		t.Error("want the contributor set built — the least this lifecycle can be")
+	}
+	// And nothing of it can run: every dispatch is refused, blocked rather than
+	// failed, naming what the account needs and where it is reported.
+	err = app.Preflight(context.Background(), &flow.Item{})
+	if err == nil {
+		t.Fatal("Preflight = nil, want every dispatch refused")
+	}
+	if !errors.Is(err, flow.ErrBlocked) {
+		t.Errorf("err = %v, want it to wrap flow.ErrBlocked", err)
+	}
+	for _, want := range []string{string(flow.CapPush), "doctor", "Config.Role"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to mention %q", err, want)
+		}
+	}
+}
+
+// CarryThrough is the exception, and it is configuration rather than
+// environment: an operator asking this binary to integrate on an account that
+// backs no role has written something that cannot work, so it is refused at
+// startup naming the field — never dropped on the way to a contributor run.
+func TestBuildApp_CarryThroughOnAnAccountBackingNoRoleIsRefused(t *testing.T) {
+	_, err := BuildApp(context.Background(), Config{
+		BaseBranch: "main", VerifyCmd: []string{"true"}, CarryThrough: true,
+	}, Deps{Orchestrator: &stubBackend{caps: nil}, Agent: stubAgent{}})
+	if err == nil {
+		t.Fatal("BuildApp = nil error, want CarryThrough refused on an account that cannot integrate")
+	}
+	if !strings.Contains(err.Error(), "CarryThrough") {
+		t.Errorf("err = %q, want it to name the field that fixes it", err)
+	}
+}
+
 func TestBuildApp_ContributorSliceWiresUp(t *testing.T) {
 	app, err := BuildApp(context.Background(), Config{
 		BinaryName: "issue",
@@ -652,6 +701,12 @@ func TestBuildApp_PreflightChain(t *testing.T) {
 		{name: "the role gate refuses ahead of the answer gate",
 			cfg: Config{Role: RoleMaintainer}, item: asked,
 			want: missingMaintainerSteps, notWant: "which database?"},
+		// Role unset, and stubBackend detects nothing: the account backs no
+		// declared role, so this gate stands in the same slot and answers first
+		// for the same reason.
+		{name: "the no-role gate refuses ahead of the answer gate",
+			cfg: Config{}, item: asked,
+			want: noAssumableRole, notWant: "which database?"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

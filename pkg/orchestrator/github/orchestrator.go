@@ -434,9 +434,11 @@ func (b *Orchestrator) Doctor(ctx context.Context) error {
 // because the ambient bag cannot answer for anybody else.
 //
 // Both paths land on capabilitiesFrom, so the two cannot disagree about what a
-// permission means: the named path widens its single level into the same bag
+// permission means: the named path widens the level it read into the same bag
 // the ambient one reads, rather than mapping levels onto capabilities a second
-// time.
+// time. Which level that is, of the two the collaborator endpoint answers with,
+// is permissionsForCollaborator's business — and getting it wrong is precisely
+// how the two paths WOULD disagree about the same account.
 func (b *Orchestrator) DetectCapabilities(ctx context.Context, account flow.AccountId) ([]flow.Capability, error) {
 	if account == "" {
 		perms, err := b.RepoPermissions(ctx)
@@ -445,12 +447,12 @@ func (b *Orchestrator) DetectCapabilities(ctx context.Context, account flow.Acco
 		}
 		return capabilitiesFrom(perms), nil
 	}
-	level, err := b.out.CollaboratorPermission(ctx, string(account))
+	roleName, permission, err := b.out.CollaboratorPermission(ctx, string(account))
 	if err != nil {
 		return nil, fmt.Errorf("repository %s/%s: permission of %q: %w",
 			b.cfg.Owner, b.cfg.Repo, account, err)
 	}
-	return capabilitiesFrom(permissionsFromLevel(level)), nil
+	return capabilitiesFrom(permissionsForCollaborator(roleName, permission)), nil
 }
 
 // capabilitiesFrom is the ONE mapping from GitHub's permission bag onto flow's
@@ -486,28 +488,54 @@ func capabilitiesFrom(p flow.RepoPermissions) []flow.Capability {
 	return out
 }
 
-// permissionsFromLevel widens the collaborator endpoint's single permission
-// LEVEL into the cumulative bag GET /repos returns, so the named-account path
-// reaches capabilitiesFrom with the same input shape the ambient one does.
+// permissionsForCollaborator reads the collaborator endpoint's two answers in
+// the order of their precision.
 //
-// A level this does not recognise — "none", and whatever GitHub adds later —
-// reads as no permission at all. Detection is the ceiling on what a runner may
-// assume, so an unrecognised answer must narrow it: guessing wide would hand a
-// role to an account the backend never said could hold it.
-func permissionsFromLevel(level string) flow.RepoPermissions {
+// `role_name` FIRST, because it is the account's actual role and `permission`
+// reports only the closest legacy base role — one of admin/write/read/none, in
+// which a maintainer appears as "write" and a triager as "read". Reading
+// `permission` first would deny merge to exactly the accounts a repository with
+// maintainers has, and the ambient path (GET /repos, whose bag carries `maintain`
+// as its own flag) would then disagree with this one about the same account.
+//
+// `permission` as the FALLBACK, because `role_name` can be an organisation's
+// custom role, which names no base level at all: falling back to the base role
+// GitHub itself collapsed it onto detects the write access such an account
+// really holds, where insisting on the unrecognised name would report nothing.
+func permissionsForCollaborator(roleName, permission string) flow.RepoPermissions {
+	if perms, known := permissionsFromLevel(roleName); known {
+		return perms
+	}
+	perms, _ := permissionsFromLevel(permission)
+	return perms
+}
+
+// permissionsFromLevel widens one permission LEVEL into the cumulative bag GET
+// /repos returns, so the named-account path reaches capabilitiesFrom with the
+// same input shape the ambient one does. The bool reports whether the level was
+// one this knows — what lets a caller fall back rather than act on a zero it
+// cannot distinguish from "none".
+//
+// A level this does not recognise — a custom role, and whatever GitHub adds
+// later — reads as no permission at all. Detection is the ceiling on what a
+// runner may assume, so an unrecognised answer must narrow it: guessing wide
+// would hand a role to an account the backend never said could hold it.
+func permissionsFromLevel(level string) (flow.RepoPermissions, bool) {
 	switch level {
 	case "admin":
-		return flow.RepoPermissions{Admin: true, Maintain: true, Push: true, Triage: true, Pull: true}
+		return flow.RepoPermissions{Admin: true, Maintain: true, Push: true, Triage: true, Pull: true}, true
 	case "maintain":
-		return flow.RepoPermissions{Maintain: true, Push: true, Triage: true, Pull: true}
+		return flow.RepoPermissions{Maintain: true, Push: true, Triage: true, Pull: true}, true
 	case "write":
-		return flow.RepoPermissions{Push: true, Triage: true, Pull: true}
+		return flow.RepoPermissions{Push: true, Triage: true, Pull: true}, true
 	case "triage":
-		return flow.RepoPermissions{Triage: true, Pull: true}
+		return flow.RepoPermissions{Triage: true, Pull: true}, true
 	case "read":
-		return flow.RepoPermissions{Pull: true}
+		return flow.RepoPermissions{Pull: true}, true
+	case "none":
+		return flow.RepoPermissions{}, true
 	}
-	return flow.RepoPermissions{}
+	return flow.RepoPermissions{}, false
 }
 
 // RepoPermissions reports what the authenticated user may do on the repo.

@@ -546,31 +546,30 @@ func (o *outward) ListBlockedBy(ctx context.Context, issue int) ([]*github.Issue
 	return out, nil
 }
 
-// CollaboratorPermission returns one account's permission level on the
-// repository — "admin", "maintain", "write", "triage", "read" or "none" — via
+// CollaboratorPermission returns one account's standing on the repository via
 // GET /repos/{owner}/{repo}/collaborators/{login}/permission.
 //
-// Built through the client's own NewRequest/Do pair, like ListBlockedBy, so
-// this file stays the only thing in the package that talks to GitHub.
+// BOTH fields the endpoint answers with are returned, because they say
+// different things and only one of them is precise. `role_name` is the account's
+// actual role — "admin", "maintain", "write", "triage", "read", or an
+// organisation's custom role — while `permission` reports only the closest
+// LEGACY base role, which is one of "admin", "write", "read" and "none": a
+// maintainer comes back as "write" there and a triager as "read". A caller
+// reading `permission` alone would deny the merge capability to exactly the
+// accounts a repository with maintainers has, and one reading `role_name` alone
+// would read a custom role as no permission at all.
 //
 // A refusal is a refusal. A 403 (the token may not read collaborators) and a
 // 404 (no such account, or none this token can see) are returned as errors
 // rather than as an empty permission, because the two readings are not the
 // same: "detected nothing" is a fact about the account that role derivation
 // acts on, and "could not ask" is a fact about the caller that it must not.
-func (o *outward) CollaboratorPermission(ctx context.Context, login string) (string, error) {
-	u := fmt.Sprintf("repos/%v/%v/collaborators/%v/permission", o.owner, o.repo, url.PathEscape(login))
-	req, err := o.client.NewRequest("GET", u, nil)
+func (o *outward) CollaboratorPermission(ctx context.Context, login string) (roleName, permission string, err error) {
+	lvl, _, err := o.client.Repositories.GetPermissionLevel(ctx, o.owner, o.repo, login)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	var out struct {
-		Permission string `json:"permission"`
-	}
-	if _, err := o.client.Do(ctx, req, &out); err != nil {
-		return "", err
-	}
-	return out.Permission, nil
+	return lvl.GetRoleName(), lvl.GetPermission(), nil
 }
 
 func (o *outward) GetRepo(ctx context.Context) (*github.Repository, error) {

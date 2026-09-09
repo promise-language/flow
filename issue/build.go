@@ -12,11 +12,16 @@ import (
 
 // BuildApp assembles the cli.App for a consuming project.
 //
-// Everything that can fail does so here, at startup, before any item is
-// claimed: an unknown role, a backend that cannot report the one it needs, an
-// undetectable base branch. A flow binary that starts is a flow binary that can
-// run, which matters because the alternative is discovering a misconfiguration
-// partway through a claimed item.
+// Every CONFIGURATION that cannot work fails here, at startup, before any item
+// is claimed: an unknown role, a backend that cannot report what it needs, an
+// undetectable base branch, carrying through on an account that cannot
+// integrate. That matters because the alternative is discovering a
+// misconfiguration partway through a claimed item.
+//
+// What a step set cannot PERFORM is a different question and is refused at
+// dispatch, by a gate: a binary whose account backs no role, or whose role's
+// steps do not exist yet, still answers `list`, `status`, `grant`, `answer` and
+// `doctor` — the commands an operator reaches for precisely then.
 //
 // One caveat worth stating plainly: when Config.Role is UNSET, BuildApp makes a
 // live call to detect it, and BuildApp runs before every command — so on an
@@ -71,14 +76,34 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 		return cli.App{}, err
 	}
 
-	// CarryThrough with RoleContributor asks to integrate without the
-	// capability to integrate. That is a configuration that cannot produce
-	// correct behaviour, so it is a startup error naming the field.
-	if cfg.CarryThrough && role == RoleContributor {
+	// CarryThrough on anything but the maintainer role asks to integrate without
+	// the capability to integrate. That is a configuration that cannot produce
+	// correct behaviour, so it is a startup error naming the field — the empty
+	// role included, where the same sentence is true and the alternative would
+	// be a configuration silently dropped.
+	if cfg.CarryThrough && role != RoleMaintainer {
 		return cli.App{}, fmt.Errorf(
 			"issue: Config.CarryThrough requires maintainer capability, "+
-				"but the resolved role is %q — a binary that intends to integrate "+
-				"must be able to", RoleContributor)
+				"but the account this binary acts as backs %s — a binary that "+
+				"intends to integrate must be able to", roleOrNone(role))
+	}
+
+	// An account that backs none of the declared roles resolves to the empty
+	// role, and that is a HANDOFF rather than a misconfiguration: "a covered
+	// role the account cannot back is the ordinary split the boundary exists to
+	// produce, not a misconfiguration" (docs/resolution-standalone.md
+	// § Declaring what a binary may do). So this binary starts and refuses at
+	// DISPATCH — the judgement the missing maintainer step set makes below, for
+	// the same reason: refusing construction would take `list`, `status`,
+	// `grant`, `answer` and `doctor` down with it, the commands an operator
+	// reaches for precisely when the credentials are wrong, and `doctor` is
+	// where the missing permission is reported (docs/cli.md § Doctor).
+	//
+	// The contributor set is what gets built — the least this lifecycle can be —
+	// and nothing of it can run while the gate stands.
+	noRole := role == ""
+	if noRole {
+		role = RoleContributor
 	}
 
 	b := &builder{cfg: cfg, role: role, backend: deps.Orchestrator}
@@ -105,6 +130,9 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 	// not exist. Nil for the roles whose steps do.
 	var roleGate flow.PreflightFunc
 	switch {
+	case noRole:
+		f = b.contributorFlow(cfg)
+		roleGate = noAssumableRoleGate
 	case cfg.CarryThrough:
 		f = b.carryThroughFlow(cfg)
 	case role == RoleMaintainer:
