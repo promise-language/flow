@@ -679,6 +679,27 @@ type Orchestrator interface {
 	// holds many claims at once, and no single return value is the right one.
 	LookupActiveClaim(ctx context.Context) (*Claim, error)
 
+	// DetectCapabilities reports what the named account can do on the
+	// repository. For the ambient account it feeds role derivation before a
+	// claim; for an item's creator it feeds routing on the source's standing.
+	//
+	// DETECTED, NEVER DECLARED: the answer is the backend's, and an
+	// orchestrator that cannot ask reports that rather than guessing. An
+	// account's word for what it may do is worth exactly what the backend will
+	// actually permit (docs/resolution.md § Accounts, capabilities and roles).
+	//
+	// THE EMPTY AccountId NAMES THE ACCOUNT THIS ORCHESTRATOR ACTS AS. The
+	// account is ambient exactly as it is for Claim — fixed by where the call
+	// runs — and this is the one question asked BEFORE a claim exists, so
+	// LookupActiveClaim, the only other route to that account, has nothing to
+	// answer with yet. A caller-supplied ambient account could only agree or be
+	// wrong.
+	//
+	// An account with nothing on the repository is (nil, nil), not an error:
+	// "this account may do nothing here" is an answer, and the caller deciding
+	// a role needs to be able to act on it.
+	DetectCapabilities(ctx context.Context, account AccountId) ([]Capability, error)
+
 	// ---- State ----
 
 	// Load returns the item and everything the flow has recorded on it —

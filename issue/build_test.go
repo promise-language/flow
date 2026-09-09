@@ -2,6 +2,7 @@ package issue
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -214,6 +215,17 @@ type buildTestBackend struct {
 
 func (b *buildTestBackend) Name() flow.OrchestratorName { return "stub" }
 func (b *buildTestBackend) ArenaRoot() string           { return "" }
+
+// DetectCapabilities answers with exactly what the double's role requires, read
+// from the one roleDecls table. A double that invented its own mapping could
+// report a capability set no declared role covers, and every BuildApp test
+// would fail on a permission model that exists nowhere but here.
+func (b *buildTestBackend) DetectCapabilities(context.Context, flow.AccountId) ([]flow.Capability, error) {
+	if b.role == "" {
+		return nil, nil
+	}
+	return roleDeclFor(b.role).Capabilities, nil
+}
 func (b *buildTestBackend) SupportedSignals() []flow.SignalDef {
 	return []flow.SignalDef{
 		flow.Signal("pr-open", "pull request is open"),
@@ -354,9 +366,80 @@ func wantGraph(t *testing.T, f *flow.Flow, edges map[flow.StepId]flow.StepId, en
 			}
 		}
 	}
+	// ValidateGraph is what proves every registered step carries a DECLARED
+	// role: it refuses an untagged step and a tag naming no declaration, so a
+	// composition that passes it has both halves lined up.
 	if err := f.ValidateGraph(); err != nil {
 		t.Errorf("ValidateGraph() = %v, want nil", err)
 	}
+}
+
+// wantRoles asserts a composition declares exactly these roles, each with the
+// capabilities roleDecls gives it, and that every step carries the expected
+// tag. ValidateGraph says the tags line up with SOMETHING declared; this says
+// WHICH — that the merge steps sit behind the merge capability and the rest do
+// not.
+func wantRoles(t *testing.T, f *flow.Flow, declared []Role, tags map[flow.StepId]Role) {
+	t.Helper()
+	var want []flow.RoleName
+	for _, r := range declared {
+		want = append(want, flow.RoleName(r))
+	}
+	if got := f.RoleNames(); !slices.Equal(got, want) {
+		t.Errorf("declared roles = %v, want %v", got, want)
+	}
+	for _, d := range f.Roles() {
+		if wantCaps := roleDeclFor(Role(d.Name)).Capabilities; !slices.Equal(d.Capabilities, wantCaps) {
+			t.Errorf("role %q requires %v, want %v from roleDecls", d.Name, d.Capabilities, wantCaps)
+		}
+	}
+	for _, li := range f.Items() {
+		if got, want := li.Role, flow.RoleName(tags[li.Result()]); got != want {
+			t.Errorf("step %q is tagged %q, want %q", li.Result(), got, want)
+		}
+	}
+}
+
+// The contributor composition performs one role and declares one. Declaring
+// the maintainer here too would put a name on the graph that no step of it can
+// perform.
+func TestContributorFlow_DeclaresAndTagsOneRole(t *testing.T) {
+	b := &builder{cfg: Config{}, role: RoleContributor}
+	wantRoles(t, b.contributorFlow(Config{}), []Role{RoleContributor}, map[flow.StepId]Role{
+		flow.StepId(StepPlan):        RoleContributor,
+		flow.StepId(StepBranch):      RoleContributor,
+		flow.StepId(StepImplement):   RoleContributor,
+		flow.StepId(StepReview):      RoleContributor,
+		flow.StepId(StepCoverage):    RoleContributor,
+		flow.StepId(StepOpenPR):      RoleContributor,
+		flow.StepId(StepCloseBranch): RoleContributor,
+	})
+}
+
+// Carrying through is one principal covering both roles and crossing the
+// boundary without a handoff — and the boundary is still declared. Closing the
+// branch stays the contributor's: it needs nothing the merge needed.
+func TestCarryThroughFlow_DeclaresBothRolesAndTagsTheBoundary(t *testing.T) {
+	b := &builder{cfg: Config{}, role: RoleMaintainer}
+	wantRoles(t, b.carryThroughFlow(Config{}), []Role{RoleContributor, RoleMaintainer}, map[flow.StepId]Role{
+		flow.StepId(StepPlan):        RoleContributor,
+		flow.StepId(StepBranch):      RoleContributor,
+		flow.StepId(StepImplement):   RoleContributor,
+		flow.StepId(StepReview):      RoleContributor,
+		flow.StepId(StepCoverage):    RoleContributor,
+		flow.StepId(StepOpenPR):      RoleContributor,
+		flow.StepId(StepVerifyMerge): RoleMaintainer,
+		flow.StepId(StepMerge):       RoleMaintainer,
+		flow.StepId(StepRecordMerge): RoleMaintainer,
+		flow.StepId(StepCloseBranch): RoleContributor,
+	})
+}
+
+func TestMaintainerStubFlow_DeclaresAndTagsTheMaintainer(t *testing.T) {
+	b := &builder{cfg: Config{}, role: RoleMaintainer}
+	wantRoles(t, b.unimplementedMaintainerFlow(Config{}), []Role{RoleMaintainer}, map[flow.StepId]Role{
+		flow.StepId(StepReviewMaint): RoleMaintainer,
+	})
 }
 
 func TestContributorFlow_DeclaresItsRoutes(t *testing.T) {

@@ -624,35 +624,6 @@ func TestRegistration_PanicNamesTheRegistrarThatWasCalled(t *testing.T) {
 	}
 }
 
-// DeclaresRole is the one predicate for "does this flow declare that role" —
-// the check every role reference is refused by when it names nothing.
-func TestDeclaresRole(t *testing.T) {
-	f := NewFlow("resolve", nil)
-	f.AddStep("write plan", "plan", noopHandler, StepConfig{Role: "contributor"})
-	f.AddStep("review the work", "review", noopHandler, StepConfig{Role: "contributor"})
-	f.AddStep("record the merge", "merge-commit", noopHandler, StepConfig{Role: "maintainer"})
-
-	if !f.DeclaresRole("contributor") || !f.DeclaresRole("maintainer") {
-		t.Error("a role some registered step carries must be declared")
-	}
-	if f.DeclaresRole("reviewer") {
-		t.Error("a role no step carries must not be declared")
-	}
-	// The empty name is never declared: an untagged step declares nothing, so a
-	// lookup on "" would otherwise match every flow with one.
-	if f.DeclaresRole("") {
-		t.Error("the empty role name must never be declared")
-	}
-}
-
-func TestDeclaresRole_UntaggedFlowDeclaresNone(t *testing.T) {
-	f := NewFlow("resolve", nil)
-	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
-	if f.DeclaresRole("contributor") {
-		t.Error("a flow whose steps carry no role tag declares no roles")
-	}
-}
-
 // The step label is a DESCRIPTION, not a name: display text, never an identity.
 func TestLifecycleItem_CarriesTheDescription(t *testing.T) {
 	f := NewFlow("resolve", nil)

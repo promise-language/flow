@@ -12,11 +12,16 @@ import (
 
 // BuildApp assembles the cli.App for a consuming project.
 //
-// Everything that can fail does so here, at startup, before any item is
-// claimed: an unknown role, a backend that cannot report the one it needs, an
-// undetectable base branch. A flow binary that starts is a flow binary that can
-// run, which matters because the alternative is discovering a misconfiguration
-// partway through a claimed item.
+// Every CONFIGURATION that cannot work fails here, at startup, before any item
+// is claimed: an unknown role, a backend that cannot report what it needs, an
+// undetectable base branch, carrying through on an account that cannot
+// integrate. That matters because the alternative is discovering a
+// misconfiguration partway through a claimed item.
+//
+// What a step set cannot PERFORM is a different question and is refused at
+// dispatch, by a gate: a binary whose account backs no role, or whose role's
+// steps do not exist yet, still answers `list`, `status`, `grant`, `answer` and
+// `doctor` — the commands an operator reaches for precisely then.
 //
 // One caveat worth stating plainly: when Config.Role is UNSET, BuildApp makes a
 // live call to detect it, and BuildApp runs before every command — so on an
@@ -71,14 +76,34 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 		return cli.App{}, err
 	}
 
-	// CarryThrough with RoleContributor asks to integrate without the
-	// capability to integrate. That is a configuration that cannot produce
-	// correct behaviour, so it is a startup error naming the field.
-	if cfg.CarryThrough && role == RoleContributor {
+	// CarryThrough on anything but the maintainer role asks to integrate without
+	// the capability to integrate. That is a configuration that cannot produce
+	// correct behaviour, so it is a startup error naming the field — the empty
+	// role included, where the same sentence is true and the alternative would
+	// be a configuration silently dropped.
+	if cfg.CarryThrough && role != RoleMaintainer {
 		return cli.App{}, fmt.Errorf(
 			"issue: Config.CarryThrough requires maintainer capability, "+
-				"but the resolved role is %q — a binary that intends to integrate "+
-				"must be able to", RoleContributor)
+				"but the account this binary acts as backs %s — a binary that "+
+				"intends to integrate must be able to", roleOrNone(role))
+	}
+
+	// An account that backs none of the declared roles resolves to the empty
+	// role, and that is a HANDOFF rather than a misconfiguration: "a covered
+	// role the account cannot back is the ordinary split the boundary exists to
+	// produce, not a misconfiguration" (docs/resolution-standalone.md
+	// § Declaring what a binary may do). So this binary starts and refuses at
+	// DISPATCH — the judgement the missing maintainer step set makes below, for
+	// the same reason: refusing construction would take `list`, `status`,
+	// `grant`, `answer` and `doctor` down with it, the commands an operator
+	// reaches for precisely when the credentials are wrong, and `doctor` is
+	// where the missing permission is reported (docs/cli.md § Doctor).
+	//
+	// The contributor set is what gets built — the least this lifecycle can be —
+	// and nothing of it can run while the gate stands.
+	noRole := role == ""
+	if noRole {
+		role = RoleContributor
 	}
 
 	b := &builder{cfg: cfg, role: role, backend: deps.Orchestrator}
@@ -105,6 +130,9 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 	// not exist. Nil for the roles whose steps do.
 	var roleGate flow.PreflightFunc
 	switch {
+	case noRole:
+		f = b.contributorFlow(cfg)
+		roleGate = noAssumableRoleGate
 	case cfg.CarryThrough:
 		f = b.carryThroughFlow(cfg)
 	case role == RoleMaintainer:
@@ -144,9 +172,24 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 	return app, nil
 }
 
+// declareRoles declares the named roles on f, from the one roleDecls table.
+//
+// A composition declares only the roles its own steps perform. Declaring the
+// whole vocabulary everywhere would put a role on a graph no step of which can
+// be tagged with it — a boundary written down that nothing crosses, and a name
+// ErrUnknownRole would then accept from a handler asking who holds a role this
+// binary never runs.
+func declareRoles(f *flow.Flow, roles ...Role) {
+	for _, r := range roles {
+		d := roleDeclFor(r)
+		f.Role(d.Name, d.Capabilities...)
+	}
+}
+
 // contributorFlow is the canonical contributor step set, in order.
 func (b *builder) contributorFlow(cfg Config) *flow.Flow {
 	f := flow.NewFlow("resolve", itemTypes(cfg))
+	declareRoles(f, RoleContributor)
 	b.addContributorSteps(f, flow.StepId(StepCloseBranch))
 	b.addCloseBranch(f)
 	return f
@@ -165,32 +208,38 @@ func (b *builder) contributorFlow(cfg Config) *flow.Flow {
 func (b *builder) addContributorSteps(f *flow.Flow, afterRequest flow.StepId) {
 	f.AddStep("write plan", flow.ArtifactId(StepPlan), b.stepPlan,
 		flow.StepConfig{
+			Role:  contributorRole,
 			Entry: true,
 			Next:  []flow.StepId{flow.StepId(StepBranch)},
 		})
 	f.AddStep("open branch", flow.ArtifactId(StepBranch), b.stepOpenBranch,
 		flow.StepConfig{
+			Role:   contributorRole,
 			Next:   []flow.StepId{flow.StepId(StepImplement)},
 			Writes: flow.WriteContract{MayBranch: true, MayCommit: true},
 		})
 	f.AddStep("implement the change", flow.ArtifactId(StepImplement), b.stepImplement,
 		flow.StepConfig{
+			Role:   contributorRole,
 			Next:   []flow.StepId{flow.StepId(StepReview)},
 			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true},
 		})
 	f.AddStep("review the work", flow.ArtifactId(StepReview), b.stepReview,
 		flow.StepConfig{
+			Role:   contributorRole,
 			Next:   []flow.StepId{flow.StepId(StepCoverage)},
 			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true},
 		})
 	f.AddStep("analyze coverage", flow.ArtifactId(StepCoverage), b.stepCoverage,
 		flow.StepConfig{
+			Role:   contributorRole,
 			Next:   []flow.StepId{flow.StepId(StepOpenPR)},
 			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true},
 		})
 	f.AddSignalStep("create pull request", flow.SignalId(StepOpenPR),
 		func(ctx flow.StepCtx) (flow.StepResult, error) { return b.stepOpenPR(ctx, afterRequest) },
 		flow.StepConfig{
+			Role:   contributorRole,
 			Next:   []flow.StepId{afterRequest},
 			Writes: flow.WriteContract{MayBranch: true, MayCommit: true},
 		})
@@ -201,13 +250,14 @@ func (b *builder) addContributorSteps(f *flow.Flow, afterRequest flow.StepId) {
 func (b *builder) addIntegrationSteps(f *flow.Flow) {
 	f.AddStep("verify merge result", flow.ArtifactId(StepVerifyMerge), b.stepVerifyMerge,
 		flow.StepConfig{
+			Role:   maintainerRole,
 			Next:   []flow.StepId{flow.StepId(StepMerge)},
 			Writes: flow.WriteContract{MayBranch: true, MayCommit: true},
 		})
 	f.AddSignalStep("merge pull request", flow.SignalId(StepMerge), b.stepMerge,
-		flow.StepConfig{Next: []flow.StepId{flow.StepId(StepRecordMerge)}})
+		flow.StepConfig{Role: maintainerRole, Next: []flow.StepId{flow.StepId(StepRecordMerge)}})
 	f.AddStep("record merge commit", flow.ArtifactId(StepRecordMerge), b.stepRecordMerge,
-		flow.StepConfig{Next: []flow.StepId{flow.StepId(StepCloseBranch)}})
+		flow.StepConfig{Role: maintainerRole, Next: []flow.StepId{flow.StepId(StepCloseBranch)}})
 }
 
 // addCloseBranch registers the step both compositions end at. It is the one
@@ -217,6 +267,12 @@ func (b *builder) addIntegrationSteps(f *flow.Flow) {
 func (b *builder) addCloseBranch(f *flow.Flow) {
 	f.AddStep("close branch", flow.ArtifactId(StepCloseBranch), b.stepCloseBranch,
 		flow.StepConfig{
+			// The contributor's, in both compositions. Returning the worktree
+			// to its base is housekeeping on the branch the contributor cut —
+			// it needs nothing the merge needed, so tagging it maintainer in
+			// the carry-through graph would put a capability requirement on the
+			// one step that has none.
+			Role:        contributorRole,
 			MayFinalize: []flow.Disposition{flow.DispositionResolved},
 			Writes:      flow.WriteContract{MayBranch: true},
 		})
@@ -226,6 +282,11 @@ func (b *builder) addCloseBranch(f *flow.Flow) {
 // into one flow that ends at a merged change rather than a proposed one.
 func (b *builder) carryThroughFlow(cfg Config) *flow.Flow {
 	f := flow.NewFlow("resolve", itemTypes(cfg))
+	// Both roles, because this graph performs both: carrying through is one
+	// principal covering both roles and crossing the boundary without a handoff
+	// (docs/resolution.md § One principal, several roles), and the boundary is
+	// still a role boundary in the declaration.
+	declareRoles(f, RoleContributor, RoleMaintainer)
 	b.addContributorSteps(f, flow.StepId(StepVerifyMerge))
 	b.addIntegrationSteps(f)
 	b.addCloseBranch(f)
@@ -269,6 +330,7 @@ func missingMaintainerStepsGate(context.Context, *flow.Item) error {
 // rather than resolve.
 func (b *builder) unimplementedMaintainerFlow(cfg Config) *flow.Flow {
 	f := flow.NewFlow("review", itemTypes(cfg))
+	declareRoles(f, RoleMaintainer)
 	f.AddStep("review the implementation", flow.ArtifactId(StepReviewMaint),
 		func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, fmt.Errorf("issue: %s", missingMaintainerSteps)
@@ -279,6 +341,7 @@ func (b *builder) unimplementedMaintainerFlow(cfg Config) *flow.Flow {
 		// first — because a graph that could not end is not a stub, it is a
 		// graph that never terminates.
 		flow.StepConfig{
+			Role:        maintainerRole,
 			Entry:       true,
 			MayFinalize: []flow.Disposition{flow.DispositionResolved},
 		})

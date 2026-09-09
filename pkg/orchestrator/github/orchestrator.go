@@ -444,13 +444,125 @@ func (b *Orchestrator) Doctor(ctx context.Context) error {
 	return nil
 }
 
+// DetectCapabilities reports what the named account can do on this repository.
+//
+// The EMPTY AccountId names the account this backend acts as, and it takes the
+// ambient read — GET /repos, whose `permissions` bag is already about the
+// authenticated user. A named account takes the collaborator read instead,
+// because the ambient bag cannot answer for anybody else.
+//
+// Both paths land on capabilitiesFrom, so the two cannot disagree about what a
+// permission means: the named path widens the level it read into the same bag
+// the ambient one reads, rather than mapping levels onto capabilities a second
+// time. Which level that is, of the two the collaborator endpoint answers with,
+// is permissionsForCollaborator's business — and getting it wrong is precisely
+// how the two paths WOULD disagree about the same account.
+func (b *Orchestrator) DetectCapabilities(ctx context.Context, account flow.AccountId) ([]flow.Capability, error) {
+	if account == "" {
+		perms, err := b.RepoPermissions(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return capabilitiesFrom(perms), nil
+	}
+	roleName, permission, err := b.out.CollaboratorPermission(ctx, string(account))
+	if err != nil {
+		return nil, fmt.Errorf("repository %s/%s: permission of %q: %w",
+			b.cfg.Owner, b.cfg.Repo, account, err)
+	}
+	return capabilitiesFrom(permissionsForCollaborator(roleName, permission)), nil
+}
+
+// capabilitiesFrom is the ONE mapping from GitHub's permission bag onto flow's
+// closed capability set. Every detection path goes through it, so the ambient
+// account and a named one cannot read the same permissions differently.
+//
+// push ← push, maintain or admin, the three levels that carry write access.
+//
+// merge ← maintain or admin only. The line is drawn there and not at push
+// because merging someone else's pull request is the act that separates the
+// two, and push alone does not confer it on a protected default branch — which
+// is exactly the configuration a repository with maintainers has.
+//
+// approve ← write access. A read-only account can leave the words of a review,
+// but only a writer's approval counts toward a protected branch's required
+// reviews, and it is the counting that a role requiring the capability is
+// after.
+//
+// Returned in AllCapabilities order, so the answer is stable and two calls
+// against the same account compare equal.
+func capabilitiesFrom(p flow.RepoPermissions) []flow.Capability {
+	write := p.Push || p.Maintain || p.Admin
+	var out []flow.Capability
+	if write {
+		out = append(out, flow.CapPush)
+	}
+	if p.Maintain || p.Admin {
+		out = append(out, flow.CapMerge)
+	}
+	if write {
+		out = append(out, flow.CapApprove)
+	}
+	return out
+}
+
+// permissionsForCollaborator reads the collaborator endpoint's two answers in
+// the order of their precision.
+//
+// `role_name` FIRST, because it is the account's actual role and `permission`
+// reports only the closest legacy base role — one of admin/write/read/none, in
+// which a maintainer appears as "write" and a triager as "read". Reading
+// `permission` first would deny merge to exactly the accounts a repository with
+// maintainers has, and the ambient path (GET /repos, whose bag carries `maintain`
+// as its own flag) would then disagree with this one about the same account.
+//
+// `permission` as the FALLBACK, because `role_name` can be an organisation's
+// custom role, which names no base level at all: falling back to the base role
+// GitHub itself collapsed it onto detects the write access such an account
+// really holds, where insisting on the unrecognised name would report nothing.
+func permissionsForCollaborator(roleName, permission string) flow.RepoPermissions {
+	if perms, known := permissionsFromLevel(roleName); known {
+		return perms
+	}
+	perms, _ := permissionsFromLevel(permission)
+	return perms
+}
+
+// permissionsFromLevel widens one permission LEVEL into the cumulative bag GET
+// /repos returns, so the named-account path reaches capabilitiesFrom with the
+// same input shape the ambient one does. The bool reports whether the level was
+// one this knows — what lets a caller fall back rather than act on a zero it
+// cannot distinguish from "none".
+//
+// A level this does not recognise — a custom role, and whatever GitHub adds
+// later — reads as no permission at all. Detection is the ceiling on what a
+// runner may assume, so an unrecognised answer must narrow it: guessing wide
+// would hand a role to an account the backend never said could hold it.
+func permissionsFromLevel(level string) (flow.RepoPermissions, bool) {
+	switch level {
+	case "admin":
+		return flow.RepoPermissions{Admin: true, Maintain: true, Push: true, Triage: true, Pull: true}, true
+	case "maintain":
+		return flow.RepoPermissions{Maintain: true, Push: true, Triage: true, Pull: true}, true
+	case "write":
+		return flow.RepoPermissions{Push: true, Triage: true, Pull: true}, true
+	case "triage":
+		return flow.RepoPermissions{Triage: true, Pull: true}, true
+	case "read":
+		return flow.RepoPermissions{Pull: true}, true
+	case "none":
+		return flow.RepoPermissions{}, true
+	}
+	return flow.RepoPermissions{}, false
+}
+
 // RepoPermissions reports what the authenticated user may do on the repo.
 //
 // GitHub returns these as a bag of booleans that are cumulative in practice —
 // an admin also carries maintain/push/triage/pull — so callers deciding a role
 // should test from the most privileged flag down rather than expecting exactly
-// one to be set. Doctor uses it as a health check; the issue package uses it to
-// pick a step set (see issue.RoleProber).
+// one to be set. Doctor uses it as a health check; DetectCapabilities reads it
+// for the ambient account.
 func (b *Orchestrator) RepoPermissions(ctx context.Context) (flow.RepoPermissions, error) {
 	repo, err := b.out.GetRepo(ctx)
 	if err != nil {

@@ -80,8 +80,25 @@ type ghMock struct {
 	// posted after a question indistinguishable from the question itself.
 	commentClock time.Time
 
-	// permissions (for Doctor)
+	// permissions (for Doctor and the ambient half of DetectCapabilities)
 	perms map[string]bool
+
+	// collaboratorPerms is the named-account half: login → the account's role as
+	// the endpoint's `role_name` field reports it ("admin", "maintain", "write",
+	// "triage", "read", "none", or an organisation's custom role). A login absent
+	// from the map is served 404, which is what GitHub does for an account it
+	// cannot see.
+	collaboratorPerms map[string]string
+	// collaboratorBase overrides the legacy `permission` field, which is
+	// otherwise DERIVED from the role the way GitHub derives it (legacyPermission
+	// — a maintainer reads "write", a triager "read"). Only a custom role needs
+	// the override: GitHub collapses one onto whichever base role it was built
+	// from, and nothing in the name says which.
+	collaboratorBase map[string]string
+	// collaboratorPermsForbidden makes the endpoint answer 403 for every
+	// login — a token without the rights to read collaborators, which is a
+	// fact about the CALLER rather than about the account asked about.
+	collaboratorPermsForbidden bool
 
 	// orphan branch state for the artifacts spillover
 	orphanBranchSHA string                // commit SHA at heads/flow-artifacts
@@ -144,18 +161,43 @@ type ghMockComment struct {
 
 func newGHMock(t *testing.T) *ghMock {
 	return &ghMock{
-		t:             t,
-		owner:         "o",
-		repo:          "r",
-		issueNum:      42,
-		issueTitle:    "Test issue",
-		issueBody:     "Add hello()",
-		issueState:    "open",
-		nextCommentID: 1000,
-		commentClock:  time.Now().UTC().Truncate(time.Second),
-		perms:         map[string]bool{"push": true, "pull": true, "admin": false},
-		orphanFiles:   map[string]ghMockFile{},
+		t:                 t,
+		owner:             "o",
+		repo:              "r",
+		issueNum:          42,
+		issueTitle:        "Test issue",
+		issueBody:         "Add hello()",
+		issueState:        "open",
+		nextCommentID:     1000,
+		commentClock:      time.Now().UTC().Truncate(time.Second),
+		perms:             map[string]bool{"push": true, "pull": true, "admin": false},
+		orphanFiles:       map[string]ghMockFile{},
+		collaboratorPerms: map[string]string{},
+		collaboratorBase:  map[string]string{},
 	}
+}
+
+// legacyPermission is how GitHub fills the collaborator endpoint's `permission`
+// field: the closest LEGACY base role, which is one of admin/write/read/none
+// only — so `maintain` collapses to "write" and `triage` to "read", and the
+// finer role survives solely in `role_name`. The mock derives it rather than
+// taking it from the test, because a mock that let the two fields be set
+// independently could not catch a caller reading the wrong one.
+//
+// A custom role collapses onto whichever base role it was built from, which its
+// name does not say: those cases set ghMock.collaboratorBase instead.
+func legacyPermission(roleName string) string {
+	switch roleName {
+	case "admin":
+		return "admin"
+	case "maintain", "write":
+		return "write"
+	case "triage", "read":
+		return "read"
+	case "none":
+		return "none"
+	}
+	return ""
 }
 
 func (m *ghMock) server() *httptest.Server {
@@ -247,6 +289,38 @@ func (m *ghMock) server() *httptest.Server {
 			}
 			http.NotFound(w, r)
 		}
+	})
+
+	// GET /repos/{o}/{r}/collaborators/{login}/permission — the named-account
+	// half of DetectCapabilities. An unknown login is 404, like the real API.
+	mux.HandleFunc(prefix+"/collaborators/", func(w http.ResponseWriter, r *http.Request) {
+		rest := strings.TrimPrefix(r.URL.Path, prefix+"/collaborators/")
+		login, ok := strings.CutSuffix(rest, "/permission")
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		m.mu.Lock()
+		role, known := m.collaboratorPerms[login]
+		base, overridden := m.collaboratorBase[login]
+		forbidden := m.collaboratorPermsForbidden
+		m.mu.Unlock()
+		if forbidden {
+			http.Error(w, `{"message":"Must have push access to view collaborator permission."}`, http.StatusForbidden)
+			return
+		}
+		if !known {
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+			return
+		}
+		if !overridden {
+			base = legacyPermission(role)
+		}
+		writeJSON(w, map[string]any{
+			"permission": base,
+			"role_name":  role,
+			"user":       map[string]any{"login": login},
+		})
 	})
 
 	// GET /repos/{o}/{r}/pulls
@@ -3452,5 +3526,212 @@ func TestBackend_Claim_AbandonedTokenIsNotOwnershipRecovery(t *testing.T) {
 	mock.mu.Unlock()
 	if !contains(assignees, "bob") {
 		t.Errorf("assignees = %v, want bob still assigned", assignees)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DetectCapabilities — the ambient account and a named one, through one
+// mapping.
+// ---------------------------------------------------------------------------
+
+// The empty AccountId names the account this backend acts as, read from the
+// repository's own permissions bag. The three cases that matter are the three
+// sides of the merge line: admin carries everything, plain push carries
+// everything but merge, and read carries nothing.
+func TestBackend_DetectCapabilities_AmbientAccount(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		perms map[string]bool
+		want  []flow.Capability
+	}{
+		{
+			name:  "admin",
+			perms: map[string]bool{"admin": true, "maintain": true, "push": true, "triage": true, "pull": true},
+			want:  []flow.Capability{flow.CapPush, flow.CapMerge, flow.CapApprove},
+		},
+		{
+			// The line: push alone does not confer merge, because a protected
+			// default branch is exactly where it does not.
+			name:  "push without maintain",
+			perms: map[string]bool{"push": true, "pull": true},
+			want:  []flow.Capability{flow.CapPush, flow.CapApprove},
+		},
+		{
+			name:  "maintain",
+			perms: map[string]bool{"maintain": true, "push": true, "pull": true},
+			want:  []flow.Capability{flow.CapPush, flow.CapMerge, flow.CapApprove},
+		},
+		{
+			name:  "read only",
+			perms: map[string]bool{"pull": true},
+			want:  nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := newGHMock(t)
+			mock.perms = tc.perms
+			srv := mock.server()
+			defer srv.Close()
+			b := newMockedOrchestrator(t, mock, srv)
+
+			got, err := b.DetectCapabilities(t.Context(), "")
+			if err != nil {
+				t.Fatalf("DetectCapabilities: %v", err)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("DetectCapabilities(ambient) = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A named account is read from the collaborator endpoint, and its ROLE lands on
+// the same capabilities the ambient bag would: one mapping, so the two paths
+// cannot disagree about the same account.
+//
+// `maintain` is the case that makes the field choice load-bearing. The endpoint's
+// legacy `permission` field collapses it to "write", so a reader of that field
+// alone would report a maintainer as unable to merge — while the ambient path,
+// reading a bag that carries `maintain` as its own flag, would say it can.
+func TestBackend_DetectCapabilities_NamedAccount(t *testing.T) {
+	for _, tc := range []struct {
+		role string
+		// The same standing, as the ambient bag reports it — cumulative, the way
+		// GET /repos returns it.
+		perms map[string]bool
+		want  []flow.Capability
+	}{
+		{"admin", map[string]bool{"admin": true, "maintain": true, "push": true, "triage": true, "pull": true},
+			[]flow.Capability{flow.CapPush, flow.CapMerge, flow.CapApprove}},
+		{"maintain", map[string]bool{"maintain": true, "push": true, "triage": true, "pull": true},
+			[]flow.Capability{flow.CapPush, flow.CapMerge, flow.CapApprove}},
+		{"write", map[string]bool{"push": true, "triage": true, "pull": true},
+			[]flow.Capability{flow.CapPush, flow.CapApprove}},
+		{"triage", map[string]bool{"triage": true, "pull": true}, nil},
+		{"read", map[string]bool{"pull": true}, nil},
+		{"none", map[string]bool{}, nil},
+	} {
+		t.Run(tc.role, func(t *testing.T) {
+			mock := newGHMock(t)
+			mock.collaboratorPerms = map[string]string{"bob": tc.role}
+			mock.perms = tc.perms
+			srv := mock.server()
+			defer srv.Close()
+			b := newMockedOrchestrator(t, mock, srv)
+
+			got, err := b.DetectCapabilities(t.Context(), "bob")
+			if err != nil {
+				t.Fatalf("DetectCapabilities(bob): %v", err)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("DetectCapabilities(bob) as %q = %v, want %v", tc.role, got, tc.want)
+			}
+			// The same standing read the other way agrees. Two readings of one
+			// account diverging is the failure this shares a mapping to avoid.
+			ambient, err := b.DetectCapabilities(t.Context(), "")
+			if err != nil {
+				t.Fatalf("DetectCapabilities(ambient): %v", err)
+			}
+			if !slices.Equal(ambient, got) {
+				t.Errorf("standing %q read ambient = %v, named = %v — the two paths disagree",
+					tc.role, ambient, got)
+			}
+		})
+	}
+}
+
+// An organisation's CUSTOM role names no base level, and GitHub reports it in
+// `role_name` while collapsing it onto its base role in `permission`. The base
+// role is what the account really holds, so it is what detection falls back to —
+// insisting on the unrecognised name would report a writer as able to do nothing.
+func TestBackend_DetectCapabilities_CustomRoleFallsBackToItsBaseRole(t *testing.T) {
+	mock := newGHMock(t)
+	mock.collaboratorPerms = map[string]string{"bob": "release-manager"}
+	mock.collaboratorBase = map[string]string{"bob": "write"}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+
+	got, err := b.DetectCapabilities(t.Context(), "bob")
+	if err != nil {
+		t.Fatalf("DetectCapabilities(bob): %v", err)
+	}
+	if want := []flow.Capability{flow.CapPush, flow.CapApprove}; !slices.Equal(got, want) {
+		t.Errorf("DetectCapabilities(bob) on a write-based custom role = %v, want %v", got, want)
+	}
+}
+
+// Neither field recognised — whatever GitHub adds later — reads as nothing.
+// Detection is the ceiling on what a runner may assume, so an answer this cannot
+// interpret must narrow it.
+func TestBackend_DetectCapabilities_UnknownLevelGrantsNothing(t *testing.T) {
+	mock := newGHMock(t)
+	mock.collaboratorPerms = map[string]string{"bob": "custom-role"}
+	mock.collaboratorBase = map[string]string{"bob": "something-new"}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+
+	got, err := b.DetectCapabilities(t.Context(), "bob")
+	if err != nil {
+		t.Fatalf("DetectCapabilities(bob): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("DetectCapabilities(bob) at an unknown level = %v, want nothing", got)
+	}
+}
+
+// "Could not ask" is not "detected nothing". A 404 (no such account, or none
+// this token can see) is returned as an error, because role derivation acts on
+// an empty set — it would call the account read-only and refuse startup naming
+// permissions nobody ever read.
+func TestBackend_DetectCapabilities_UnknownAccountIsAnError(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+
+	got, err := b.DetectCapabilities(t.Context(), "nobody")
+	if err == nil {
+		t.Fatalf("DetectCapabilities(nobody) = %v, want an error rather than an empty set", got)
+	}
+	if !strings.Contains(err.Error(), "nobody") {
+		t.Errorf("error = %q, want it to name the account asked about", err)
+	}
+}
+
+// The ambient read can fail too — an expired token, a repository that moved —
+// and it is reported rather than read as "this account may do nothing", which
+// role derivation would turn into a startup refusal naming permissions nobody
+// ever managed to read.
+func TestBackend_DetectCapabilities_AmbientReadFailureIsAnError(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	b := newMockedOrchestrator(t, mock, srv)
+	srv.Close() // the repository read now cannot happen at all
+
+	got, err := b.DetectCapabilities(t.Context(), "")
+	if err == nil {
+		t.Fatalf("DetectCapabilities(ambient) = %v, want an error rather than an empty set", got)
+	}
+	if !strings.Contains(err.Error(), mock.owner+"/"+mock.repo) {
+		t.Errorf("error = %q, want it to name the repository", err)
+	}
+}
+
+// The same distinction from the other side: a token that may not read
+// collaborators is a fact about the caller, and answering "no capabilities"
+// would attribute the caller's blindness to the account.
+func TestBackend_DetectCapabilities_ForbiddenIsAnError(t *testing.T) {
+	mock := newGHMock(t)
+	mock.collaboratorPerms = map[string]string{"bob": "admin"}
+	mock.collaboratorPermsForbidden = true
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+
+	got, err := b.DetectCapabilities(t.Context(), "bob")
+	if err == nil {
+		t.Fatalf("DetectCapabilities(bob) = %v, want an error rather than an empty set", got)
 	}
 }

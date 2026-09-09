@@ -40,10 +40,15 @@ func main() {
 	}
 
 	verifyFlow := flow.NewFlow("verify", []flow.ItemType{"task"})
+	// One role, because the one step performs one. A role names the
+	// capabilities an account must hold to assume it, and running the tests on
+	// an item's branch needs the branch — so push, and nothing more.
+	verifyFlow.Role("contributor", flow.CapPush)
 	// One step, so it is the entry and the only way the item can end: it
 	// finalizes. A handler elects its route, and a graph with no election that
 	// ends it is a graph that never finishes.
 	verifyFlow.AddStep("run go test", "test-output", stepRunTests, flow.StepConfig{
+		Role:        "contributor",
 		Entry:       true,
 		MayFinalize: []flow.Disposition{flow.DispositionResolved},
 	})

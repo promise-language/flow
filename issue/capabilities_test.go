@@ -11,7 +11,6 @@ import (
 // answers unreadable), so assert it at compile time.
 func TestGithubBackendSatisfiesCapabilities(t *testing.T) {
 	var b *ghbackend.Orchestrator
-	var _ RoleProber = b
 	var _ BranchDetector = b
 	var _ AnswerReader = b
 	var _ Principal = b

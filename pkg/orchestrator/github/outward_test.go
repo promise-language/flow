@@ -257,19 +257,20 @@ func outwardWrites() map[string]func(context.Context, *outward) error {
 // outwardReads names the methods on *outward that only read. Every exported
 // method must be in exactly one of these two sets.
 var outwardReads = map[string]bool{
-	"GetAuthenticatedUser": true,
-	"SearchIssues":         true,
-	"GetIssue":             true,
-	"GetComment":           true,
-	"ListCommentsPage":     true,
-	"ListIssues":           true,
-	"GetRepo":              true,
-	"DownloadContents":     true,
-	"GetContents":          true,
-	"GetRef":               true,
-	"ListPullRequests":     true,
-	"ListReviews":          true,
-	"ListBlockedBy":        true,
+	"GetAuthenticatedUser":   true,
+	"SearchIssues":           true,
+	"GetIssue":               true,
+	"GetComment":             true,
+	"ListCommentsPage":       true,
+	"ListIssues":             true,
+	"GetRepo":                true,
+	"DownloadContents":       true,
+	"GetContents":            true,
+	"GetRef":                 true,
+	"ListPullRequests":       true,
+	"ListReviews":            true,
+	"ListBlockedBy":          true,
+	"CollaboratorPermission": true,
 }
 
 // The load-bearing test. docs/disclosure.md requires the guard to be

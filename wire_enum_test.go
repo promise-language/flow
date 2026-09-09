@@ -156,13 +156,13 @@ func TestAllPrioritiesAndUrgencies_ExhaustiveAgainstAST(t *testing.T) {
 	}
 }
 
-// The four vocabularies this file guards for the step-model amendment. Same
-// AST check as the ones above, and load-bearing for the same reason the
-// selection axes are: each of these has a DEFINED ZERO — StepConfig.normalized
-// maps the empty string onto the loosest member — so a member declared without
-// joining its enumerator would not fail to compile. It would simply never be
-// Valid(), and every registration naming it would panic as though it were a
-// typo.
+// The vocabularies this file guards for the step-model amendment. Same AST
+// check as the ones above, and load-bearing for the same reason the selection
+// axes are: a member declared without joining its enumerator would not fail to
+// compile. It would simply never be Valid(), and every declaration naming it
+// would panic as though it were a typo — for the first four because
+// StepConfig.normalized maps the empty string onto the loosest member, so the
+// hole is invisible until something spells the member out.
 func TestStepModelEnums_ExhaustiveAgainstAST(t *testing.T) {
 	cases := []struct {
 		file    string
@@ -173,6 +173,12 @@ func TestStepModelEnums_ExhaustiveAgainstAST(t *testing.T) {
 		{"step.go", "CaptureSource", stringsOf(flow.AllCaptureSources())},
 		{"step.go", "NeedsState", stringsOf(flow.AllNeedsStates())},
 		{"step.go", "LeavesState", stringsOf(flow.AllLeavesStates())},
+		// Capability has no defined zero, but the enumerator is still the only
+		// thing standing between a declared member and a role that can never be
+		// assumed: Flow.Role validates a declaration against AllCapabilities,
+		// so a constant left out of it is refused at the registration that
+		// names it.
+		{"role.go", "Capability", stringsOf(flow.AllCapabilities())},
 	}
 	for _, tc := range cases {
 		t.Run(tc.typ, func(t *testing.T) {

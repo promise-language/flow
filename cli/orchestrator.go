@@ -1015,7 +1015,10 @@ func (s *stepCtx) Role() flow.RoleName { return s.li.Role }
 // (docs/resolution.md § Whose move it is).
 func (s *stepCtx) RoleAccount(role flow.RoleName) (flow.AccountId, error) {
 	if !s.flow.DeclaresRole(role) {
-		return "", flow.ErrUnknownRole{Role: role}
+		// The declared set travels with the refusal. The raiser can enumerate
+		// it here, and a handler told only that its name is unknown has to go
+		// and read the registration to find out what it should have asked for.
+		return "", flow.ErrUnknownRole{Role: role, Declared: s.flow.RoleNames()}
 	}
 	return s.state.AccountForRole(role), nil
 }
