@@ -144,7 +144,7 @@ var githubSupportedArtifacts = []flow.ArtifactDef{
 	flow.Artifact("branch-closed", flow.ArtifactFlag).WithDoc("The worktree was returned to the base branch after the resolution completed."),
 	// github/PR-specific artifacts — the contributor→maintainer pull-request
 	// lifecycle this backend is built around.
-	flow.Artifact("review-maint", flow.ArtifactMarkdown).WithDoc("Maintainer-side review of the PR before merge."),
+	flow.Artifact("proposal-review", flow.ArtifactMarkdown).WithDoc("Maintainer-side judgement of the proposal as what will land."),
 	flow.Artifact("verify-merge", flow.ArtifactMarkdown).WithDoc("Maintainer-side pre-merge verification output."),
 	flow.Artifact("merge-commit", flow.ArtifactCommitHash).WithDoc("Hash of the merge commit on the default branch after the PR merges."),
 	flow.Artifact("test-output", flow.ArtifactMarkdown).WithDoc("Captured output of a test run."),

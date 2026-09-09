@@ -61,57 +61,6 @@ func TestCarryThroughMaintainerAccepted(t *testing.T) {
 	}
 }
 
-func TestCarryThroughFlowComposition(t *testing.T) {
-	cfg := Config{
-		BinaryName:   "test",
-		VerifyCmd:    []string{"bin/verify"},
-		Role:         RoleMaintainer,
-		CarryThrough: true,
-	}
-	deps := Deps{
-		Orchestrator: &buildTestBackend{role: RoleMaintainer},
-		Agent:        &scriptedAgent{},
-	}
-
-	app, err := BuildApp(context.Background(), cfg, deps)
-	if err != nil {
-		t.Fatalf("BuildApp: %v", err)
-	}
-
-	items := app.Flow.Items()
-	// contributor steps: plan, branch, implement, review, coverage, openPR
-	// integration steps: verifyMerge, merge, recordMerge
-	// closeBranch
-	wantCount := 10
-	if len(items) != wantCount {
-		names := make([]string, len(items))
-		for i, li := range items {
-			names[i] = li.Description
-		}
-		t.Fatalf("flow has %d steps %v, want %d", len(items), names, wantCount)
-	}
-
-	// Check that the integration steps come after contributor steps and before
-	// closeBranch.
-	wantOrder := []string{
-		"write plan",
-		"open branch",
-		"implement the change",
-		"review the work",
-		"analyze coverage",
-		"create pull request",
-		"verify merge result",
-		"merge pull request",
-		"record merge commit",
-		"close branch",
-	}
-	for i, want := range wantOrder {
-		if items[i].Description != want {
-			t.Errorf("step %d = %q, want %q", i, items[i].Description, want)
-		}
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Budgets are the project's policy, handed to the SDK — not step declarations.
 // ---------------------------------------------------------------------------
@@ -149,21 +98,21 @@ func TestBuildApp_BudgetsBecomeAppPolicy(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The maintainer stand-in refuses before it seeds.
+// A maintainer binary stops where the contributor's work begins.
 // ---------------------------------------------------------------------------
 
-// A maintainer-capability binary without carry-through has no step set, and
-// what it must NOT do is seed the item on its way to saying so.
-//
-// Seeding is one-shot. An item checklisted with the `review-maint` artifact
-// would never re-seed, so an admin who ran this once and then set
-// Config.Role to contributor would find an item carrying none of the
-// contributor artifacts, with every step dead on "artifact not seeded" and no
-// way back short of hand-editing the state comment.
+// The graph is the same one every build registers, so what stops a
+// maintainer-capability binary on a fresh item is COVERAGE: the entry step is
+// the contributor's, and this binary does not perform it.
 //
 // The verdict is `blocked`, not `failed`: nothing failed, and no later cycle
-// passes until a person sets Config.Role.
-func TestMaintainerStandInBlocksWithoutSeeding(t *testing.T) {
+// passes until a runner that covers the contributor role picks the item up —
+// which is the handoff the boundary exists to produce.
+//
+// It must also stop CLEANLY, writing nothing. A dispatch would run the plan
+// step under a maintainer's account and record it, which is precisely the
+// crossing the coverage declaration exists to decline.
+func TestMaintainerBinaryBlocksAtTheContributorEntry(t *testing.T) {
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "test#1"})
 
@@ -190,17 +139,21 @@ func TestMaintainerStandInBlocksWithoutSeeding(t *testing.T) {
 	if res.Status != string(flow.StatusBlocked) {
 		t.Errorf("status = %q, want %q; res = %+v", res.Status, flow.StatusBlocked, res)
 	}
-	if !strings.Contains(res.Reason, missingMaintainerSteps) {
-		t.Errorf("reason = %q, want it to carry %q", res.Reason, missingMaintainerSteps)
+	for _, want := range []string{string(StepPlan), string(RoleContributor), string(RoleMaintainer)} {
+		if !strings.Contains(res.Reason, want) {
+			t.Errorf("reason = %q, want it to name %q", res.Reason, want)
+		}
 	}
 
 	state, err := be.Load(ctx, be.Ref("1"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+	if len(state.Journal) != 0 {
+		t.Errorf("journal = %+v — a pre-dispatch stop records nothing", state.Journal)
+	}
 	if len(state.Artifacts) != 0 {
-		t.Errorf("item was seeded with %d artifact record(s) %v — seeding is one-shot, "+
-			"so this permanently checklists the issue for a step set that does not exist",
+		t.Errorf("item carries %d artifact record(s) %v — nothing ran, so nothing was captured",
 			len(state.Artifacts), state.Artifacts)
 	}
 }
@@ -240,7 +193,7 @@ func (b *buildTestBackend) SupportedArtifacts() []flow.ArtifactDef {
 		flow.Artifact("review", flow.ArtifactMarkdown),
 		flow.Artifact("coverage", flow.ArtifactMarkdown),
 		flow.Artifact("branch-closed", flow.ArtifactFlag),
-		flow.Artifact("review-maint", flow.ArtifactMarkdown),
+		flow.Artifact("proposal-review", flow.ArtifactMarkdown),
 		flow.Artifact("verify-merge", flow.ArtifactMarkdown),
 		flow.Artifact("merge-commit", flow.ArtifactCommitHash),
 	}
@@ -332,48 +285,58 @@ func (b *buildTestBackend) ResolveRef(_ context.Context, input string) (flow.Ite
 var _ flow.Orchestrator = (*buildTestBackend)(nil)
 
 // ---------------------------------------------------------------------------
-// The graph the shipped compositions declare.
+// The graph the shipped flow declares.
 // ---------------------------------------------------------------------------
 
-// wantGraph asserts the edges a composition writes down: one entry, one
-// successor per step, and the one step that may finalize. A handler cannot
-// elect a successor the flow does not declare, so these ARE the routes the
-// shipped handlers take.
-func wantGraph(t *testing.T, f *flow.Flow, edges map[flow.StepId]flow.StepId, entry, finalizer flow.StepId) {
+// wantGraph asserts the edges the flow writes down: one entry, each step's
+// declared successors, and which steps may finalize with which dispositions. A
+// handler cannot elect a successor the flow does not declare, so these ARE the
+// routes the shipped handlers take.
+//
+// Successors are a SET per step, not one each, because the graph has a step
+// that decides between routes — review the proposal declares three outcomes and
+// picks one at runtime, which is the whole reason routes are declared rather
+// than sequenced. Finalizers are likewise a map: two steps may end the item, on
+// different dispositions, and a graph with one hard-coded finalizer could not
+// express a rejection at all.
+func wantGraph(t *testing.T, f *flow.Flow, entry flow.StepId,
+	edges map[flow.StepId][]flow.StepId, finalizers map[flow.StepId][]flow.Disposition) {
 	t.Helper()
+	seen := map[flow.StepId]bool{}
 	for _, li := range f.Items() {
-		if li.Entry != (li.Result() == entry) {
+		id := li.Result()
+		seen[id] = true
+		if li.Entry != (id == entry) {
 			t.Errorf("step %q Entry = %t, want %t — exactly one step is where an empty journal starts",
-				li.Result(), li.Entry, li.Result() == entry)
+				id, li.Entry, id == entry)
 		}
-		want, isFinalizer := edges[li.Result()], li.Result() == finalizer
-		switch {
-		case isFinalizer:
-			if len(li.Next) != 0 {
-				t.Errorf("finalizing step %q declares successors %v", li.Result(), li.Next)
-			}
-			if len(li.MayFinalize) != 1 || li.MayFinalize[0] != flow.DispositionResolved {
-				t.Errorf("step %q MayFinalize = %v, want [resolved]", li.Result(), li.MayFinalize)
-			}
-		default:
-			if len(li.Next) != 1 || li.Next[0] != want {
-				t.Errorf("step %q declares Next %v, want [%s]", li.Result(), li.Next, want)
-			}
-			if len(li.MayFinalize) != 0 {
-				t.Errorf("step %q may finalize as %v — only the last step ends the item",
-					li.Result(), li.MayFinalize)
-			}
+		if want := edges[id]; !slices.Equal(li.Next, want) {
+			t.Errorf("step %q declares Next %v, want %v", id, li.Next, want)
+		}
+		if want := finalizers[id]; !slices.Equal(li.MayFinalize, want) {
+			t.Errorf("step %q MayFinalize = %v, want %v", id, li.MayFinalize, want)
 		}
 	}
-	// ValidateGraph is what proves every registered step carries a DECLARED
-	// role: it refuses an untagged step and a tag naming no declaration, so a
-	// composition that passes it has both halves lined up.
+	for id := range edges {
+		if !seen[id] {
+			t.Errorf("the table declares edges out of %q, which the flow does not register", id)
+		}
+	}
+	for id := range finalizers {
+		if !seen[id] {
+			t.Errorf("the table says %q may finalize, and the flow does not register it", id)
+		}
+	}
+	// ValidateGraph is what proves the declaration hangs together: every
+	// successor names something registered, every step is reachable from the
+	// entry, finalization is reachable from every step, and every step carries a
+	// DECLARED role.
 	if err := f.ValidateGraph(); err != nil {
 		t.Errorf("ValidateGraph() = %v, want nil", err)
 	}
 }
 
-// wantRoles asserts a composition declares exactly these roles, each with the
+// wantRoles asserts the flow declares exactly these roles, each with the
 // capabilities roleDecls gives it, and that every step carries the expected
 // tag. ValidateGraph says the tags line up with SOMETHING declared; this says
 // WHICH — that the merge steps sit behind the merge capability and the rest do
@@ -399,82 +362,142 @@ func wantRoles(t *testing.T, f *flow.Flow, declared []Role, tags map[flow.StepId
 	}
 }
 
-// The contributor composition performs one role and declares one. Declaring
-// the maintainer here too would put a name on the graph that no step of it can
-// perform.
-func TestContributorFlow_DeclaresAndTagsOneRole(t *testing.T) {
+// The routes docs/issue-flow.md § The graph writes down, whole: the
+// contributor's run to a proposal, the boundary at close branch, and the
+// maintainer's judgement with its three outcomes.
+func TestResolveFlow_DeclaresTheDocumentedGraph(t *testing.T) {
 	b := &builder{cfg: Config{}, role: RoleContributor}
-	wantRoles(t, b.contributorFlow(Config{}), []Role{RoleContributor}, map[flow.StepId]Role{
-		flow.StepId(StepPlan):        RoleContributor,
-		flow.StepId(StepBranch):      RoleContributor,
-		flow.StepId(StepImplement):   RoleContributor,
-		flow.StepId(StepReview):      RoleContributor,
-		flow.StepId(StepCoverage):    RoleContributor,
-		flow.StepId(StepOpenPR):      RoleContributor,
-		flow.StepId(StepCloseBranch): RoleContributor,
-	})
+	wantGraph(t, b.resolveFlow(Config{}), flow.StepId(StepPlan),
+		map[flow.StepId][]flow.StepId{
+			flow.StepId(StepPlan):      {flow.StepId(StepBranch)},
+			flow.StepId(StepBranch):    {flow.StepId(StepImplement)},
+			flow.StepId(StepImplement): {flow.StepId(StepReview)},
+			flow.StepId(StepReview):    {flow.StepId(StepCoverage)},
+			flow.StepId(StepCoverage):  {flow.StepId(StepOpenPR)},
+			flow.StepId(StepOpenPR):    {flow.StepId(StepCloseBranch)},
+			// The role boundary: the contributor's part ends by handing the
+			// proposal to the maintainer, not by finalizing.
+			flow.StepId(StepCloseBranch): {flow.StepId(StepReviewProposal)},
+			// The one branching step, and the rework edge back to implement is
+			// the reason the advance cannot be a checklist: implement's result
+			// is already recorded by the time this route is elected.
+			flow.StepId(StepReviewProposal): {
+				flow.StepId(StepVerifyMerge),
+				flow.StepId(StepImplement),
+			},
+			flow.StepId(StepVerifyMerge): {flow.StepId(StepMerge)},
+			flow.StepId(StepMerge):       {flow.StepId(StepRecordMerge)},
+			// record merge commit declares none: it ends the item.
+		},
+		map[flow.StepId][]flow.Disposition{
+			flow.StepId(StepReviewProposal): {flow.DispositionRejected},
+			flow.StepId(StepRecordMerge):    {flow.DispositionResolved},
+		})
 }
 
-// Carrying through is one principal covering both roles and crossing the
-// boundary without a handoff — and the boundary is still declared. Closing the
-// branch stays the contributor's: it needs nothing the merge needed.
-func TestCarryThroughFlow_DeclaresBothRolesAndTagsTheBoundary(t *testing.T) {
-	b := &builder{cfg: Config{}, role: RoleMaintainer}
-	wantRoles(t, b.carryThroughFlow(Config{}), []Role{RoleContributor, RoleMaintainer}, map[flow.StepId]Role{
-		flow.StepId(StepPlan):        RoleContributor,
-		flow.StepId(StepBranch):      RoleContributor,
-		flow.StepId(StepImplement):   RoleContributor,
-		flow.StepId(StepReview):      RoleContributor,
-		flow.StepId(StepCoverage):    RoleContributor,
-		flow.StepId(StepOpenPR):      RoleContributor,
-		flow.StepId(StepVerifyMerge): RoleMaintainer,
-		flow.StepId(StepMerge):       RoleMaintainer,
-		flow.StepId(StepRecordMerge): RoleMaintainer,
-		flow.StepId(StepCloseBranch): RoleContributor,
-	})
-}
-
-func TestMaintainerStubFlow_DeclaresAndTagsTheMaintainer(t *testing.T) {
-	b := &builder{cfg: Config{}, role: RoleMaintainer}
-	wantRoles(t, b.unimplementedMaintainerFlow(Config{}), []Role{RoleMaintainer}, map[flow.StepId]Role{
-		flow.StepId(StepReviewMaint): RoleMaintainer,
-	})
-}
-
-func TestContributorFlow_DeclaresItsRoutes(t *testing.T) {
+// Eleven tags, and the boundary is the edge between them: close branch is the
+// contributor's last step, review the proposal the maintainer's first.
+func TestResolveFlow_TagsEveryStepAndDeclaresBothRoles(t *testing.T) {
 	b := &builder{cfg: Config{}, role: RoleContributor}
-	wantGraph(t, b.contributorFlow(Config{}), map[flow.StepId]flow.StepId{
-		flow.StepId(StepPlan):      flow.StepId(StepBranch),
-		flow.StepId(StepBranch):    flow.StepId(StepImplement),
-		flow.StepId(StepImplement): flow.StepId(StepReview),
-		flow.StepId(StepReview):    flow.StepId(StepCoverage),
-		flow.StepId(StepCoverage):  flow.StepId(StepOpenPR),
-		// The one edge that differs between the compositions.
-		flow.StepId(StepOpenPR): flow.StepId(StepCloseBranch),
-	}, flow.StepId(StepPlan), flow.StepId(StepCloseBranch))
+	f := b.resolveFlow(Config{})
+	wantRoles(t, f, []Role{RoleContributor, RoleMaintainer}, map[flow.StepId]Role{
+		flow.StepId(StepPlan):           RoleContributor,
+		flow.StepId(StepBranch):         RoleContributor,
+		flow.StepId(StepImplement):      RoleContributor,
+		flow.StepId(StepReview):         RoleContributor,
+		flow.StepId(StepCoverage):       RoleContributor,
+		flow.StepId(StepOpenPR):         RoleContributor,
+		flow.StepId(StepCloseBranch):    RoleContributor,
+		flow.StepId(StepReviewProposal): RoleMaintainer,
+		flow.StepId(StepVerifyMerge):    RoleMaintainer,
+		flow.StepId(StepMerge):          RoleMaintainer,
+		flow.StepId(StepRecordMerge):    RoleMaintainer,
+	})
+	// The boundary itself, asserted as an edge rather than inferred from the
+	// tags: a graph whose roles were right but whose contributor half did not
+	// reach the maintainer half would be two graphs in one registration.
+	closeBranch, ok := f.ItemByResult(flow.StepId(StepCloseBranch))
+	if !ok {
+		t.Fatal("the flow does not register close branch")
+	}
+	if !slices.Contains(closeBranch.Next, flow.StepId(StepReviewProposal)) {
+		t.Errorf("close branch declares %v, want the maintainer's review among them", closeBranch.Next)
+	}
 }
 
-func TestCarryThroughFlow_DeclaresItsRoutes(t *testing.T) {
-	b := &builder{cfg: Config{}, role: RoleMaintainer}
-	wantGraph(t, b.carryThroughFlow(Config{}), map[flow.StepId]flow.StepId{
-		flow.StepId(StepPlan):      flow.StepId(StepBranch),
-		flow.StepId(StepBranch):    flow.StepId(StepImplement),
-		flow.StepId(StepImplement): flow.StepId(StepReview),
-		flow.StepId(StepReview):    flow.StepId(StepCoverage),
-		flow.StepId(StepCoverage):  flow.StepId(StepOpenPR),
-		// Carrying through, the request hands to the integration phase.
-		flow.StepId(StepOpenPR):      flow.StepId(StepVerifyMerge),
-		flow.StepId(StepVerifyMerge): flow.StepId(StepMerge),
-		flow.StepId(StepMerge):       flow.StepId(StepRecordMerge),
-		flow.StepId(StepRecordMerge): flow.StepId(StepCloseBranch),
-	}, flow.StepId(StepPlan), flow.StepId(StepCloseBranch))
+// The worktree contract, step by step, as docs/issue-flow.md § The branching
+// sequence is declared writes it: read along any route, each step's Leaves
+// hands its successor the state its Needs requires.
+func TestResolveFlow_DeclaresTheBranchingSequence(t *testing.T) {
+	want := map[flow.StepId]struct {
+		needs  flow.NeedsState
+		leaves flow.LeavesState
+	}{
+		flow.StepId(StepPlan):           {flow.NeedsAny, flow.LeavesAsFound},
+		flow.StepId(StepBranch):         {flow.NeedsAny, flow.LeavesItemBranch},
+		flow.StepId(StepImplement):      {flow.NeedsItemBranch, flow.LeavesItemBranch},
+		flow.StepId(StepReview):         {flow.NeedsItemBranch, flow.LeavesItemBranch},
+		flow.StepId(StepCoverage):       {flow.NeedsItemBranch, flow.LeavesItemBranch},
+		flow.StepId(StepOpenPR):         {flow.NeedsItemBranch, flow.LeavesItemBranch},
+		flow.StepId(StepCloseBranch):    {flow.NeedsItemBranch, flow.LeavesBase},
+		flow.StepId(StepReviewProposal): {flow.NeedsAny, flow.LeavesAsFound},
+		flow.StepId(StepVerifyMerge):    {flow.NeedsItemBranch, flow.LeavesAsFound},
+		flow.StepId(StepMerge):          {flow.NeedsAny, flow.LeavesAsFound},
+		flow.StepId(StepRecordMerge):    {flow.NeedsAny, flow.LeavesAsFound},
+	}
+	b := &builder{cfg: Config{}, role: RoleContributor}
+	items := (&builder{cfg: b.cfg, role: b.role}).resolveFlow(Config{}).Items()
+	if len(items) != len(want) {
+		t.Fatalf("the flow registers %d steps, and the branching sequence covers %d", len(items), len(want))
+	}
+	for _, li := range items {
+		w, ok := want[li.Result()]
+		if !ok {
+			t.Errorf("step %q declares no branching state in the document's table", li.Result())
+			continue
+		}
+		if li.Needs != w.needs || li.Leaves != w.leaves {
+			t.Errorf("step %q needs %q and leaves %q, want %q and %q",
+				li.Result(), li.Needs, li.Leaves, w.needs, w.leaves)
+		}
+	}
 }
 
-// A graph of one: the stub is the entry and the only way out, so what it may
-// do is finalize. A stub that could not end the flow is not a stub — it is a
-// graph an item never leaves.
-func TestMaintainerStubFlow_IsAValidGraph(t *testing.T) {
-	b := &builder{cfg: Config{}, role: RoleMaintainer}
-	f := b.unimplementedMaintainerFlow(Config{})
-	wantGraph(t, f, nil, flow.StepId(StepReviewMaint), flow.StepId(StepReviewMaint))
+// The graph does not vary by who is running. Coverage is what narrows a
+// binary's part of it, at dispatch; building a different graph per role would
+// decide the processing before the journal begins, with nothing recording why —
+// and would put the boundary outside the one object that is supposed to show
+// it.
+func TestResolveFlow_IsTheSameGraphForEveryRole(t *testing.T) {
+	shape := func(f *flow.Flow) []flow.LifecycleItem { return f.Items() }
+	base := shape((&builder{cfg: Config{}, role: RoleContributor}).resolveFlow(Config{}))
+	for _, tc := range []struct {
+		name         string
+		role         Role
+		carryThrough bool
+	}{
+		{"contributor", RoleContributor, false},
+		{"maintainer", RoleMaintainer, false},
+		{"maintainer carrying through", RoleMaintainer, true},
+		// The account that backs nothing builds the same graph too: the gate
+		// that stops it is a preflight, not a missing step.
+		{"no role", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{CarryThrough: tc.carryThrough}
+			got := shape((&builder{cfg: cfg, role: tc.role}).resolveFlow(cfg))
+			if len(got) != len(base) {
+				t.Fatalf("registers %d steps, want the %d every other build registers", len(got), len(base))
+			}
+			for i := range got {
+				a, want := got[i], base[i]
+				if a.Description != want.Description || a.Result() != want.Result() ||
+					a.Kind != want.Kind || a.Role != want.Role || a.Entry != want.Entry ||
+					!slices.Equal(a.Next, want.Next) || !slices.Equal(a.MayFinalize, want.MayFinalize) ||
+					a.Needs != want.Needs || a.Leaves != want.Leaves || a.Writes != want.Writes {
+					t.Errorf("step %d differs from the contributor build:\n got %+v\nwant %+v", i, a, want)
+				}
+			}
+		})
+	}
 }

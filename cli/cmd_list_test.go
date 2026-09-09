@@ -513,6 +513,6 @@ func makeTestFlow(t *testing.T) *flow.Flow {
 	f := flow.NewFlow("implement", []flow.ItemType{"task"})
 	f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-	}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	return f
 }

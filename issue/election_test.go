@@ -10,9 +10,9 @@ import (
 
 // A handler completes by electing its route, and the election is what the next
 // step is run on: the successor, and the message telling it why. These assert
-// the edges the shipped compositions declare — a handler that elected anything
-// else would be refused at capture, which is the whole point of writing the
-// edges down (issue/build.go addContributorSteps).
+// the edges the shipped graph declares — a handler that elected anything else
+// would be refused at capture, which is the whole point of writing the edges
+// down (issue/build.go resolveFlow).
 
 // wantNext is the one assertion shape: the elected successor, and a message
 // that is not empty — "every election carries its message"
@@ -77,25 +77,18 @@ func TestElection_CoverageRoutesToTheRequest(t *testing.T) {
 	wantNext(t, res, flow.StepId(StepOpenPR))
 }
 
-// The pull request's successor is the one edge that differs between the two
-// compositions, and the handler elects whichever one it was registered with —
-// so the declaration and the election cannot disagree.
-func TestElection_TheRequestRoutesWhereItsCompositionSays(t *testing.T) {
-	for name, want := range map[string]flow.StepId{
-		"proposing":     flow.StepId(StepCloseBranch),
-		"carry-through": flow.StepId(StepVerifyMerge),
-	} {
-		t.Run(name, func(t *testing.T) {
-			ctx := ctxWithPlan(resumedWorktree(), &scriptedAgent{})
-			res, err := testBuilder(t).stepOpenPR(ctx, want)
-			if err != nil {
-				t.Fatalf("stepOpenPR: %v", err)
-			}
-			wantNext(t, res, want)
-			if res.Payload != nil {
-				t.Errorf("payload = %+v — a signal step produces none", res.Payload)
-			}
-		})
+// The request has ONE successor now: the contributor's part ends at the
+// proposal whoever is running it, so there is no composition for the edge to
+// differ between.
+func TestElection_TheRequestRoutesToCloseBranch(t *testing.T) {
+	ctx := ctxWithPlan(resumedWorktree(), &scriptedAgent{})
+	res, err := testBuilder(t).stepOpenPR(ctx)
+	if err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	wantNext(t, res, flow.StepId(StepCloseBranch))
+	if res.Payload != nil {
+		t.Errorf("payload = %+v — a signal step produces none", res.Payload)
 	}
 }
 
@@ -112,18 +105,18 @@ func TestElection_TheRequestElectsAfterAPushRepair(t *testing.T) {
 	}
 	wt.openErrs = []error{refusal, nil}
 
-	res, err := testBuilder(t).stepOpenPR(ctxWithPlan(wt, &scriptedAgent{}), flow.StepId(StepCloseBranch))
+	res, err := testBuilder(t).stepOpenPR(ctxWithPlan(wt, &scriptedAgent{}))
 	if err != nil {
 		t.Fatalf("stepOpenPR: %v", err)
 	}
 	wantNext(t, res, flow.StepId(StepCloseBranch))
 }
 
-// The integration phase's three edges. They are declared by the carry-through
-// composition alone (issue/build_test.go TestCarryThroughFlow_DeclaresItsRoutes),
-// and these are the handlers electing them: a handler and a declaration that
-// disagree fail the step at capture, and the step that fails is the one that
-// already merged.
+// The integration phase's edges. They are declared by the one graph
+// (issue/build_test.go TestResolveFlow_DeclaresTheDocumentedGraph), and these
+// are the handlers electing them: a handler and a declaration that disagree
+// fail the step at capture, and the step that fails is the one that already
+// merged.
 func TestElection_VerifyMergeRoutesToTheMerge(t *testing.T) {
 	wt := newIntegrationWorktree()
 	wt.envelope = []byte(`{"coverage": 95}`)
@@ -147,25 +140,15 @@ func TestElection_MergeRoutesToRecordingTheCommit(t *testing.T) {
 	}
 }
 
-func TestElection_RecordMergeRoutesToClosingTheBranch(t *testing.T) {
+// Recording the merge commit is where the item ends resolved. Finalizing is the
+// one way a flow completes — there is no checklist that decides it.
+func TestElection_RecordMergeFinalizes(t *testing.T) {
 	wt := newIntegrationWorktree()
 	wt.prMergeCommitSHA = "abc123"
 
 	res, err := testBuilder(t).stepRecordMerge(newIntegrationCtx(wt))
 	if err != nil {
 		t.Fatalf("stepRecordMerge: %v", err)
-	}
-	wantNext(t, res, flow.StepId(StepCloseBranch))
-}
-
-// Closing the branch is where both compositions end, and finalizing is the one
-// way a flow completes: there is no checklist that decides it.
-func TestElection_CloseBranchFinalizes(t *testing.T) {
-	wt := resumedWorktree()
-	wt.exists["main"] = true
-	res, err := testBuilder(t).stepCloseBranch(ctxWithPlan(wt, &scriptedAgent{}))
-	if err != nil {
-		t.Fatalf("stepCloseBranch: %v", err)
 	}
 	if res.Route.Finalize != flow.DispositionResolved {
 		t.Errorf("finalized as %q, want resolved", res.Route.Finalize)
@@ -175,5 +158,24 @@ func TestElection_CloseBranchFinalizes(t *testing.T) {
 	}
 	if strings.TrimSpace(res.Message) == "" {
 		t.Error("finalized with no closing reasons")
+	}
+	if !strings.Contains(res.Message, "abc123") {
+		t.Errorf("message = %q, want it to name what landed", res.Message)
+	}
+}
+
+// Closing the branch hands the proposal to the maintainer instead of ending the
+// item: the contributor's part is complete, the item's is not. Where the
+// maintainer is another principal this election is the handoff.
+func TestElection_CloseBranchRoutesToTheProposalReview(t *testing.T) {
+	wt := resumedWorktree()
+	wt.exists["main"] = true
+	res, err := testBuilder(t).stepCloseBranch(ctxWithPlan(wt, &scriptedAgent{}))
+	if err != nil {
+		t.Fatalf("stepCloseBranch: %v", err)
+	}
+	wantNext(t, res, flow.StepId(StepReviewProposal))
+	if res.Route.Finalize != "" {
+		t.Errorf("close branch finalized as %q — the proposal has not been judged yet", res.Route.Finalize)
 	}
 }

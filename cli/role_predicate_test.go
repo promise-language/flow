@@ -59,7 +59,7 @@ func roleApp(t *testing.T) (*App, *recordingRoleBackend) {
 		f.Role("maintainer", flow.CapMerge)
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	be.SetCapabilities("", flow.CapPush)
 	rec := &recordingRoleBackend{Orchestrator: be}
@@ -158,7 +158,7 @@ func TestSelection_AnAwaitsItemIsNeverAutoSelected(t *testing.T) {
 	if err != nil || claim == nil {
 		t.Fatalf("LookupActiveClaim = (%+v, %v), want the claim testApp took", claim, err)
 	}
-	e := resultEntry("plan", 1, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"})
+	e := resultEntry("plan", "next", 1, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"})
 	e.Awaits = flow.Awaits{Role: "maintainer"}
 	if err := be.AppendEntry(ctx, claim.ItemRef, e); err != nil {
 		t.Fatalf("AppendEntry: %v", err)

@@ -3,6 +3,8 @@ package issue
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/promise-language/flow"
 )
@@ -109,10 +111,98 @@ func roleOrNone(r Role) string {
 	return fmt.Sprintf("the %q role", r)
 }
 
+// performedRoles is the COVERAGE this binary declares: the roles it may assume,
+// derived once from the two config fields that already mean it.
+//
+// "Capability is the ceiling and coverage is the choice within it: a runner may
+// decline a role its account could back, and nothing it declares can add a role
+// its account cannot" (docs/resolution.md § Accounts, capabilities and roles).
+// So `role` — detected, or set by an operator who is deliberately declining —
+// is the ceiling, and CarryThrough is the one choice available inside it: a
+// maintainer-capable binary either continues across the boundary or stops at
+// the proposal like any contributor.
+//
+// It is the ONE derivation. Coverage decides what this binary refuses at
+// dispatch, and a second reading of the same two fields somewhere else would be
+// a second answer to what this binary may do.
+//
+// The empty role covers nothing. That is the honest answer for an account that
+// backs no declared role, and it is a handoff rather than a misconfiguration —
+// BuildApp answers it ahead of this gate with the access the operator is
+// missing, which is the more useful sentence.
+func performedRoles(role Role, carryThrough bool) []flow.RoleName {
+	switch {
+	case role == RoleContributor:
+		return []flow.RoleName{contributorRole}
+	case role == RoleMaintainer && carryThrough:
+		// One principal covering the roles on both sides, crossing without a
+		// handoff (docs/resolution.md § One principal, several roles). Nothing
+		// declares carrying through as such: it is exactly this coverage.
+		return []flow.RoleName{contributorRole, maintainerRole}
+	case role == RoleMaintainer:
+		return []flow.RoleName{maintainerRole}
+	}
+	return nil
+}
+
+// coverageGate refuses, before any dispatch, a pending step whose role this
+// binary does not cover.
+//
+// This is what keeps the one graph honest. With three graphs, a binary simply
+// did not have the steps it may not perform; with one, every step is present
+// and coverage is what says which are this binary's — so without this gate,
+// collapsing the graphs would turn every maintainer-capable operator into a
+// carry-through runner with no way to decline, and a contributor binary would
+// walk straight past the proposal into the merge.
+//
+// The refusal names the step, the role it belongs to, and what this binary
+// performs, because those three are what an operator needs to decide between
+// re-running elsewhere and changing the configuration. It wraps flow.ErrBlocked:
+// nothing failed, and no later cycle passes until a runner that covers the role
+// picks the item up — which is a handoff, exactly what the boundary exists to
+// produce.
+//
+// A finalized position and a Position error both pass through. RunOne's own
+// branches own those: the first finalizes and releases, the second is the flow's
+// defect and is reported as one, and answering either here would be this gate
+// deciding something that is not its question.
+func coverageGate(f *flow.Flow, covered []flow.RoleName) flow.PreflightFunc {
+	return func(_ context.Context, item *flow.Item) error {
+		pos, err := f.Position(item)
+		if err != nil || pos.Finalized {
+			return nil
+		}
+		if slices.Contains(covered, pos.Step.Role) {
+			return nil
+		}
+		return fmt.Errorf(
+			"issue: %q is the %q role's step, and this binary performs %s — "+
+				"the item awaits a runner that covers %q: %w",
+			pos.Step.Result(), pos.Step.Role, performedList(covered), pos.Step.Role, flow.ErrBlocked)
+	}
+}
+
+// performedList renders a coverage set for that refusal. The empty set is a
+// sentence rather than an empty list, for the reason roleOrNone exists: "%v" on
+// nothing prints a pair of brackets, which reads as a bug in the message rather
+// than as the binary's standing.
+func performedList(covered []flow.RoleName) string {
+	switch len(covered) {
+	case 0:
+		return "no role this lifecycle declares"
+	case 1:
+		return fmt.Sprintf("the %q role", covered[0])
+	}
+	quoted := make([]string, len(covered))
+	for i, r := range covered {
+		quoted[i] = fmt.Sprintf("%q", r)
+	}
+	return "the " + strings.Join(quoted, " and ") + " roles"
+}
+
 // noAssumableRole is the one wording for "this binary's account backs none of
-// the roles this lifecycle declares", named rather than inlined for the reason
-// missingMaintainerSteps is: the refusal and the test that asserts what an
-// operator is told read the same sentence.
+// the roles this lifecycle declares", named rather than inlined so the refusal
+// and the test that asserts what an operator is told read the same sentence.
 //
 // It names what the least privileged role needs and sends the reader to
 // `doctor` rather than reciting what was detected: `doctor` is where the missing
@@ -127,13 +217,18 @@ var noAssumableRole = fmt.Sprintf(
 // noAssumableRoleGate refuses every dispatch when the account backs no declared
 // role.
 //
-// Refusing here rather than at construction is the same judgement
-// missingMaintainerStepsGate makes, for the same reason: a binary that cannot
-// perform a step can still answer `list`, `status`, `grant`, `answer` and
-// `doctor`, and those are exactly the commands an operator reaches for on a
-// machine whose credentials are wrong. It wraps flow.ErrBlocked, so the
-// invocation reports `blocked` rather than `failed` — nothing failed, and no
-// later cycle passes until a person grants the access.
+// Refusing here rather than at construction is the same judgement coverageGate
+// makes, for the same reason: a binary that cannot perform a step can still
+// answer `list`, `status`, `grant`, `answer` and `doctor`, and those are exactly
+// the commands an operator reaches for on a machine whose credentials are wrong.
+// It wraps flow.ErrBlocked, so the invocation reports `blocked` rather than
+// `failed` — nothing failed, and no later cycle passes until a person grants the
+// access.
+//
+// It runs AHEAD of coverageGate, whose refusal would also be true here and is
+// the less useful of the two: an operator whose account backs nothing needs to
+// be told about the access, not about which role's step the route happens to
+// stand on.
 func noAssumableRoleGate(context.Context, *flow.Item) error {
 	return fmt.Errorf("issue: %s: %w", noAssumableRole, flow.ErrBlocked)
 }

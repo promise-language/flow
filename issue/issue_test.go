@@ -546,10 +546,15 @@ func TestBuildApp_RequiresVerifyCmd(t *testing.T) {
 	}
 }
 
-// The maintainer step set refuses at DISPATCH, not at construction. Failing
-// BuildApp would take status / list / grant / doctor down with it — the
-// commands a maintainer most needs to see what a contributor's run left.
-func TestBuildApp_MaintainerBuildsButRefusesOnDispatch(t *testing.T) {
+// A maintainer binary builds the SAME graph as every other and refuses at
+// DISPATCH. Failing BuildApp would take status / list / grant / doctor down
+// with it — the commands a maintainer most needs to see what a contributor's
+// run left.
+//
+// What refuses is coverage, not a missing step: the contributor's steps exist
+// here and are simply not this binary's to perform. Silently running them would
+// have a maintainer opening a pull request against their own review.
+func TestBuildApp_MaintainerBuildsTheSameGraphAndRefusesTheContributorEntry(t *testing.T) {
 	app, err := BuildApp(context.Background(), Config{
 		Role: RoleMaintainer, BaseBranch: "main", VerifyCmd: []string{"true"},
 	}, Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
@@ -557,20 +562,26 @@ func TestBuildApp_MaintainerBuildsButRefusesOnDispatch(t *testing.T) {
 		t.Fatalf("BuildApp = %v, want an app that still serves read-only commands", err)
 	}
 	if app.Flow == nil {
-		t.Fatal("BuildApp returned no flow, want the stand-in")
+		t.Fatal("BuildApp returned no flow")
 	}
-	// Silently running the contributor set would have a maintainer opening a
-	// pull request against their own review, so the step must refuse.
-	li, ok := app.Flow.Item("review the implementation")
-	if !ok {
-		t.Fatal("stand-in flow has no maintainer step")
+	for _, want := range []string{"write plan", "review the proposal", "merge pull request"} {
+		if _, ok := app.Flow.Item(want); !ok {
+			t.Errorf("the flow does not register %q — the graph does not vary by role", want)
+		}
 	}
-	res, err := li.Handler(nil)
-	if err == nil || !strings.Contains(err.Error(), "not implemented yet") {
-		t.Errorf("handler err = %v, want an explicit not-yet-implemented refusal", err)
+	// An item at the entry step is the contributor's move, so this binary
+	// declines it rather than crossing into a role it did not declare.
+	err = app.Preflight(context.Background(), &flow.Item{})
+	if err == nil {
+		t.Fatal("Preflight = nil, want the contributor's entry step refused")
 	}
-	if res != (flow.StepResult{}) {
-		t.Errorf("handler elected %+v, want nothing — a refusal completes nothing", res)
+	if !errors.Is(err, flow.ErrBlocked) {
+		t.Errorf("err = %v, want it to wrap flow.ErrBlocked", err)
+	}
+	for _, want := range []string{string(StepPlan), string(RoleContributor), string(RoleMaintainer)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to name %q", err, want)
+		}
 	}
 }
 
@@ -588,11 +599,13 @@ func TestBuildApp_NoAssumableRoleBuildsButRefusesOnDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildApp = %v, want an app that still serves read-only commands", err)
 	}
-	if _, ok := app.Flow.Item("merge pull request"); ok {
-		t.Error("the integrating graph was built for an account that cannot push")
-	}
-	if _, ok := app.Flow.Item("write plan"); !ok {
-		t.Error("want the contributor set built — the least this lifecycle can be")
+	// The graph is the graph: an account that backs nothing does not get a
+	// smaller one, it gets a gate. Building a different graph here would put the
+	// account's standing into the registration, where nothing records why.
+	for _, want := range []string{"write plan", "merge pull request"} {
+		if _, ok := app.Flow.Item(want); !ok {
+			t.Errorf("the flow does not register %q — the graph does not vary by standing", want)
+		}
 	}
 	// And nothing of it can run: every dispatch is refused, blocked rather than
 	// failed, naming what the account needs and where it is reported.
@@ -636,7 +649,7 @@ func TestBuildApp_CarryThroughOnAnAccountBackingNoRoleIsRefused(t *testing.T) {
 	}
 }
 
-func TestBuildApp_ContributorSliceWiresUp(t *testing.T) {
+func TestBuildApp_WiresUp(t *testing.T) {
 	app, err := BuildApp(context.Background(), Config{
 		BinaryName: "issue",
 		VerifyCmd:  []string{"bin/verify", "--wasm"},
@@ -658,6 +671,10 @@ func TestBuildApp_ContributorSliceWiresUp(t *testing.T) {
 	// Ids AND types. The type is what catches `implementation` reverting to a
 	// patch: the deliverable is the commit on the branch, and a copy of it can
 	// be empty, is read back by nothing, and can disagree with what it copies.
+	// One graph, one vocabulary: the maintainer's results are declared on a
+	// contributor build too, because the same item carries both halves of one
+	// resolution and cli.App refuses at startup on anything the flow names and
+	// this list does not.
 	wantArtifacts := []flow.ArtifactDef{
 		{Id: "plan", Type: flow.ArtifactMarkdown},
 		{Id: "branch", Type: flow.ArtifactCommitHash},
@@ -665,6 +682,9 @@ func TestBuildApp_ContributorSliceWiresUp(t *testing.T) {
 		{Id: "review", Type: flow.ArtifactMarkdown},
 		{Id: "coverage", Type: flow.ArtifactMarkdown},
 		{Id: "branch-closed", Type: flow.ArtifactFlag},
+		{Id: "proposal-review", Type: flow.ArtifactMarkdown},
+		{Id: "verify-merge", Type: flow.ArtifactMarkdown},
+		{Id: "merge-commit", Type: flow.ArtifactCommitHash},
 	}
 	if len(app.Artifacts) != len(wantArtifacts) {
 		t.Fatalf("got %d artifacts, want %d", len(app.Artifacts), len(wantArtifacts))
@@ -677,12 +697,13 @@ func TestBuildApp_ContributorSliceWiresUp(t *testing.T) {
 	}
 }
 
-// Preflight is now a chain of two gates, and both halves fail SILENTLY when
-// they are dropped. Dropping the answer gate leaves a non-nil closure that
-// waves every question park through; installing the role gate on a role whose
-// steps exist would block every dispatch that binary ever makes; and the two
-// are ordered, because an item parked for an answer on a step set that does
-// not exist must be told the step set is missing, not asked to answer.
+// Preflight is a chain of three gates, and every one of them fails SILENTLY
+// when it is dropped. Dropping the answer gate leaves a non-nil closure that
+// waves every question park through; dropping the coverage gate turns every
+// maintainer-capable operator into a carry-through runner with no way to
+// decline; and the three are ORDERED, because an item parked for an answer on a
+// step this binary may not perform must be told about the boundary rather than
+// asked to answer for somebody else's move.
 //
 // Nothing else can see any of that: the field is non-nil in every case.
 func TestBuildApp_PreflightChain(t *testing.T) {
@@ -692,6 +713,10 @@ func TestBuildApp_PreflightChain(t *testing.T) {
 	asked := &flow.Item{Park: &flow.ParkRequest{
 		Kind: flow.ParkQuestion, Step: "plan", Reason: "which database?",
 	}}
+	// An empty journal pends the entry step, which is the contributor's — so
+	// both items above are a contributor's move, and a maintainer build refuses
+	// them by naming that step and the role it belongs to.
+	atEntry := string(StepPlan)
 
 	cases := []struct {
 		name    string
@@ -704,13 +729,13 @@ func TestBuildApp_PreflightChain(t *testing.T) {
 			cfg: Config{Role: RoleContributor}, item: clean},
 		{name: "carry-through passes a clean item",
 			cfg: Config{Role: RoleMaintainer, CarryThrough: true}, item: clean},
-		{name: "the maintainer stand-in refuses every dispatch",
-			cfg: Config{Role: RoleMaintainer}, item: clean, want: missingMaintainerSteps},
+		{name: "a maintainer does not perform the contributor's entry step",
+			cfg: Config{Role: RoleMaintainer}, item: clean, want: atEntry},
 		{name: "the answer gate is still in the chain",
 			cfg: Config{Role: RoleContributor}, item: asked, want: "which database?"},
-		{name: "the role gate refuses ahead of the answer gate",
+		{name: "the coverage gate refuses ahead of the answer gate",
 			cfg: Config{Role: RoleMaintainer}, item: asked,
-			want: missingMaintainerSteps, notWant: "which database?"},
+			want: atEntry, notWant: "which database?"},
 		// Role unset, and stubBackend detects nothing: the account backs no
 		// declared role, so this gate stands in the same slot and answers first
 		// for the same reason.
@@ -753,14 +778,14 @@ func TestBuildApp_PreflightChain(t *testing.T) {
 	}
 }
 
-// The registered step set IS the document's step set: seven steps, in order,
-// each producing the result that is its identity.
+// The registered graph IS the document's graph: eleven steps, in the order
+// docs/issue-flow.md § The graph lists them, each producing the result that is
+// its identity.
 //
-// docs/issue-flow.md § "Contributor steps". The two branch steps and the
-// request are mechanical; there is no verification step, because verify is a
-// command a producing step uses while working rather than a place in a
-// sequence.
-func TestContributorStepSetMatchesTheDocument(t *testing.T) {
+// The two branch steps, the request and the merge are mechanical; there is no
+// verification step, because verify is a command a producing step uses while
+// working rather than a place in a sequence.
+func TestStepGraphMatchesTheDocument(t *testing.T) {
 	app, err := BuildApp(context.Background(), Config{
 		BinaryName: "issue", VerifyCmd: []string{"true"},
 		Role: RoleContributor, BaseBranch: "main",
@@ -780,6 +805,10 @@ func TestContributorStepSetMatchesTheDocument(t *testing.T) {
 		{"analyze coverage", "coverage", flow.LifecycleArtifact},
 		{"create pull request", "pr-open", flow.LifecycleSignal},
 		{"close branch", "branch-closed", flow.LifecycleArtifact},
+		{"review the proposal", "proposal-review", flow.LifecycleArtifact},
+		{"verify merge result", "verify-merge", flow.LifecycleArtifact},
+		{"merge pull request", "pr-merged", flow.LifecycleSignal},
+		{"record merge commit", "merge-commit", flow.LifecycleArtifact},
 	}
 	items := app.Flow.Items()
 	if len(items) != len(want) {
@@ -796,11 +825,14 @@ func TestContributorStepSetMatchesTheDocument(t *testing.T) {
 				i, got.Description, result, got.Kind, w.name, w.result, w.kind)
 		}
 	}
-	// Closing the branch has no "did the resolution complete" test of its own:
-	// DeriveNext returns the first PENDING step in registration order, so a run
-	// that stopped never reaches a step registered after the request.
-	if items[len(items)-1].Description != "close branch" {
-		t.Error("close branch is not last, so a parked or failed run would still restore the worktree")
+	// Recording the merge commit is last, and it is what ends the item: "what
+	// landed has exactly one name, and this is where it is written down".
+	last := items[len(items)-1]
+	if last.Description != "record merge commit" {
+		t.Errorf("the last step is %q, want record merge commit", last.Description)
+	}
+	if len(last.Next) != 0 {
+		t.Errorf("record merge commit declares successors %v — it ends the item", last.Next)
 	}
 }
 
@@ -845,25 +877,43 @@ func TestEveryPromptSlotBelongsToARegisteredStep(t *testing.T) {
 	}
 }
 
-// Three ids move across two closed sets in this change — the flow's and the
-// backend's — and today nothing but a live cli.Run notices when they drift.
-// cli.App refuses at startup on a mismatch, which is a failure every operator
-// sees and no test does.
-func TestContributorArtifactsAreInTheGitHubBackendsSchema(t *testing.T) {
+// Every id the flow declares moves across two closed sets — the flow's and the
+// backend's — and nothing but a live cli.Run notices when they drift. cli.App
+// refuses at startup on a mismatch, which is a failure every operator sees and
+// no test does.
+func TestResolveArtifactsAreInTheGitHubBackendsSchema(t *testing.T) {
 	recordable := map[flow.ArtifactId]flow.ArtifactDef{}
 	for _, def := range (*ghbackend.Orchestrator)(nil).SupportedArtifacts() {
 		recordable[def.Id] = def
 	}
-	for _, declared := range contributorArtifacts() {
+	for _, declared := range resolveArtifacts() {
 		def, ok := recordable[declared.Id]
 		if !ok {
-			t.Errorf("artifact %q is declared by the contributor flow but the github "+
+			t.Errorf("artifact %q is declared by the flow but the github "+
 				"backend cannot record it — cli.Run refuses at startup", declared.Id)
 			continue
 		}
 		if def.Type != declared.Type {
 			t.Errorf("artifact %q is declared as %v but the backend records it as %v",
 				declared.Id, declared.Type, def.Type)
+		}
+	}
+}
+
+// The signals cross the same two closed sets, and the merge signal now crosses
+// them on EVERY build: one graph means a contributor binary declares `pr-merged`
+// too, where before only the carry-through composition did. cli.App refuses at
+// startup on an id the backend cannot observe, which is a failure every operator
+// of every build sees and no test did.
+func TestResolveSignalsAreInTheGitHubBackendsSchema(t *testing.T) {
+	observable := map[flow.SignalId]bool{}
+	for _, def := range (*ghbackend.Orchestrator)(nil).SupportedSignals() {
+		observable[def.Id] = true
+	}
+	for _, declared := range resolveSignals() {
+		if !observable[declared.Id] {
+			t.Errorf("signal %q is declared by the flow but the github backend does "+
+				"not observe it — cli.Run refuses at startup", declared.Id)
 		}
 	}
 }
@@ -1068,6 +1118,147 @@ func TestDetectRefusal(t *testing.T) {
 					tc.wantKind, tc.wantSummary, tc.wantEvidence, tc.wantOK)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The maintainer's election: what the review's own decision is read from.
+// ---------------------------------------------------------------------------
+
+func TestDetectProposalDecision(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		in          string
+		wantKind    ProposalDecision
+		wantSummary string
+		wantBlock   string
+		wantErr     bool
+	}{
+		{
+			"rework with its specifics",
+			"I read the diff.\nPROPOSAL-REWORK: the retry loop has no bound\n```\ncli/retry.go:41 loops forever\n```",
+			ProposalRework, "the retry loop has no bound", "cli/retry.go:41 loops forever", false,
+		},
+		{
+			"reject with its reasons",
+			"PROPOSAL-REJECT: forbidden by the normative documents\n```\ndocs/design.md §3: no macros.\n```",
+			ProposalReject, "forbidden by the normative documents", "docs/design.md §3: no macros.", false,
+		},
+		// No sentinel is the ordinary case: the proposal should land, and the
+		// step routes on without anything to read.
+		{"a review that found nothing decides nothing", "the plan is implemented and tested", "", "", "", false},
+		{"empty text", "", "", "", "", false},
+		// Both is an error, and it must be, because the two are opposites:
+		// choosing one here would be the parser making the decision.
+		{
+			"both sentinels is refused",
+			"PROPOSAL-REWORK: bound the loop\n```\ncli/retry.go:41\n```\nPROPOSAL-REJECT: or drop it\n```\ndocs/design.md §3\n```",
+			"", "", "", true,
+		},
+		// The same skips detectRefusal makes, for the same reasons.
+		{"a bare token decides nothing", "PROPOSAL-REWORK:", "", "", "", false},
+		{"a summary with no evidence block is skipped", "PROPOSAL-REWORK: bound the loop", "", "", "", false},
+		{"a whitespace-only summary is skipped", "PROPOSAL-REJECT:    \n```\nevidence\n```", "", "", "", false},
+		{"sentinel not at column zero", "    PROPOSAL-REWORK: bound it\n```\nevidence\n```", "", "", "", false},
+		{"mid-line mention does not trip", "write PROPOSAL-REWORK: at line start\n```\nevidence\n```", "", "", "", false},
+		{"case sensitive", "proposal-rework: bound it\n```\nevidence\n```", "", "", "", false},
+		// The illustration in the prompt is indented precisely so an echo of it
+		// cannot route the item; a real one after it still counts.
+		{
+			"indented example ignored, real one honored",
+			"    PROPOSAL-REWORK: <one-line statement>\n    ```\n    <what must change>\n    ```\nPROPOSAL-REWORK: bound the loop\n```\ncli/retry.go:41\n```",
+			ProposalRework, "bound the loop", "cli/retry.go:41", false,
+		},
+		{
+			"multiple sentinels of one kind — the last one wins",
+			"PROPOSAL-REWORK: first guess\n```\nsomewhere\n```\nPROPOSAL-REWORK: the real finding\n```\ncli/retry.go:41\n```",
+			ProposalRework, "the real finding", "cli/retry.go:41", false,
+		},
+		{
+			"a later sentinel without a block falls through to the earlier one",
+			"PROPOSAL-REJECT: forbidden\n```\ndocs/design.md §3\n```\nPROPOSAL-REJECT: no block here",
+			ProposalReject, "forbidden", "docs/design.md §3", false,
+		},
+		{
+			"blank lines before the fence are tolerated",
+			"PROPOSAL-REWORK: bound the loop\n\n\n```\ncli/retry.go:41\n```",
+			ProposalRework, "bound the loop", "cli/retry.go:41", false,
+		},
+		{
+			// Losing the specifics is the failure that matters — the handback is
+			// unactionable without them.
+			"unterminated fence keeps the remainder",
+			"PROPOSAL-REWORK: bound the loop\n```\ncli/retry.go:41 never closes",
+			ProposalRework, "bound the loop", "cli/retry.go:41 never closes", false,
+		},
+		{
+			"prose before a fence is not a block",
+			"PROPOSAL-REWORK: bound the loop\nand another thing\n```\nnot the block\n```",
+			"", "", "", false,
+		},
+		// Two TOKENS is not two decisions. The refusal is about two elections,
+		// and an unelectable one — a bare token, or a summary nothing follows —
+		// is not one: refusing here would strand an actionable handback on the
+		// strength of a word the agent wrote and then did not stand behind.
+		{
+			"a malformed second sentinel is not a second decision",
+			"PROPOSAL-REJECT: on reflection, no\nPROPOSAL-REWORK: bound the loop\n```\ncli/retry.go:41\n```",
+			ProposalRework, "bound the loop", "cli/retry.go:41", false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, summary, block, err := detectProposalDecision(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("detectProposalDecision(%q) = (%q, %q, %q, nil), want an error naming both",
+						tc.in, kind, summary, block)
+				}
+				for _, want := range []string{ProposalReworkSentinel, ProposalRejectSentinel} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("err = %q, want it to name %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("detectProposalDecision(%q) = %v", tc.in, err)
+			}
+			if kind != tc.wantKind || summary != tc.wantSummary || block != tc.wantBlock {
+				t.Errorf("detectProposalDecision(%q) = (%q, %q, %q), want (%q, %q, %q)",
+					tc.in, kind, summary, block, tc.wantKind, tc.wantSummary, tc.wantBlock)
+			}
+		})
+	}
+}
+
+// The review prompt teaches the sentinels the step enforces, with both
+// illustrations indented so an echo cannot route the item on a placeholder.
+func TestProposalDecisionPartialTeachesWhatTheStepEnforces(t *testing.T) {
+	pc := PromptContext{Prior: map[StepID]flow.ArtifactRecord{}}
+	pc.VerifyCmd = "make check"
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	got, err := renderPrompt(Config{}, PromptReviewProposal, pc)
+	if err != nil {
+		t.Fatalf("renderPrompt: %v", err)
+	}
+	for _, want := range []string{ProposalReworkSentinel, ProposalRejectSentinel} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the review prompt does not teach %q, which detectProposalDecision enforces", want)
+		}
+		for _, line := range strings.Split(got, "\n") {
+			if strings.HasPrefix(line, want) {
+				t.Errorf("the review prompt shows %q at column zero: %q — an echo would self-trigger", want, line)
+			}
+		}
+	}
+	// The line between the two is the decision worth making deliberately, so
+	// the prompt has to draw it: rework continues, rejection ends the item.
+	for _, want := range []string{"ENDS the item", "block is required"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the review prompt is missing %q:\n%s", want, got)
+		}
 	}
 }
 
@@ -1404,8 +1595,8 @@ func TestDefaultPromptsRender(t *testing.T) {
 func TestEveryPromptSlotHasADefault(t *testing.T) {
 	for _, id := range []PromptID{
 		PromptPlan, PromptImplement, PromptImplementFix,
-		PromptReview, PromptCoverage, PromptCommitRepair,
-		PromptStageRepair, PromptPushRepair,
+		PromptReview, PromptCoverage, PromptReviewProposal,
+		PromptCommitRepair, PromptStageRepair, PromptPushRepair,
 	} {
 		if _, ok := defaultPrompts[id]; !ok {
 			t.Errorf("no library default for %q", id)
@@ -1603,6 +1794,109 @@ func TestWorkInProgressReachesEveryResumableDefaultPrompt(t *testing.T) {
 				t.Errorf("override prompt %q does not render the stashed work — a resumed step would re-derive it", id)
 			}
 		})
+	}
+}
+
+// The transfer is what makes a route that RETURNS to a step different from the
+// first time through. Without it a rework handback re-runs implement against
+// the same plan with nothing saying why — the maintainer's "what must change"
+// stranded in a journal entry the prompt never reads.
+func TestTransferBlock(t *testing.T) {
+	t.Run("empty at the entry step", func(t *testing.T) {
+		// An empty journal routed from nowhere, so there is nothing to brief.
+		if got := (PromptContext{}).TransferBlock(); got != "" {
+			t.Errorf("got %q, want empty when nothing routed here", got)
+		}
+	})
+	t.Run("empty when the election carried no message", func(t *testing.T) {
+		pc := PromptContext{Transfer: &flow.JournalEntry{Step: "proposal-review"}}
+		if got := pc.TransferBlock(); got != "" {
+			t.Errorf("got %q, want empty rather than a header over nothing", got)
+		}
+	})
+	t.Run("names the step and carries what it said", func(t *testing.T) {
+		pc := PromptContext{Transfer: &flow.JournalEntry{
+			Step:    "proposal-review",
+			Message: "the retry loop has no bound: cli/retry.go:41",
+		}}
+		got := pc.TransferBlock()
+		for _, want := range []string{"proposal-review", "the retry loop has no bound", "cli/retry.go:41"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("TransferBlock() = %q, want it to contain %q", got, want)
+			}
+		}
+	})
+}
+
+// The handback reaches the implement prompt on the default body and on a
+// project's override alike. A body that dropped it would re-run the step
+// against the plan alone, which is the round the handback exists to avoid.
+func TestTransferReachesTheImplementPrompt(t *testing.T) {
+	pc := PromptContext{
+		Prior: map[StepID]flow.ArtifactRecord{
+			StepPlan: {Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "the plan"},
+		},
+		Transfer: &flow.JournalEntry{
+			Step:    flow.StepId(StepReviewProposal),
+			Message: "the retry loop has no bound: cli/retry.go:41",
+		},
+	}
+	pc.VerifyCmd = "make check"
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for name, cfg := range map[string]Config{
+		"default":  {},
+		"override": {Prompts: map[PromptID]string{PromptImplement: "project body"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := renderPrompt(cfg, PromptImplement, pc)
+			if err != nil {
+				t.Fatalf("renderPrompt: %v", err)
+			}
+			if !strings.Contains(got, "the retry loop has no bound") {
+				t.Errorf("the implement prompt does not carry the handback:\n%s", got)
+			}
+		})
+	}
+}
+
+// The test above hands the entry to the template. This runs the STEP, which is
+// where the entry has to come from the item: newPromptContext reads it off
+// ctx.Transfer, and a build that stopped reading it would render a prompt with
+// an empty block and pass every test that constructs the context by hand — the
+// handback would be a message the contributor's next round never sees, which is
+// the round it exists to save.
+func TestStepImplement_RendersTheHandbackThatRoutedHere(t *testing.T) {
+	wt := resumedWorktree()
+	wt.head = "sha-1"  // the earlier round's work is already on the branch
+	wt.noCommit = true // and this round is asked to change it, not to start it
+	agent := &scriptedAgent{}
+	ctx := ctxWithPlan(wt, agent)
+	// What the maintainer's review elected, as the journal carries it.
+	ctx.journal = []flow.JournalEntry{{
+		Step:      flow.StepId(StepReviewProposal),
+		Execution: 1,
+		Route:     flow.Route{Next: flow.StepId(StepImplement)},
+		Message: "the proposal needs work before it can land: the retry loop has no bound\n\n" +
+			"cli/retry.go:41 loops forever when the backend keeps refusing",
+		By: "tester",
+	}}
+
+	if _, err := testBuilder(t).stepImplement(ctx); err != nil {
+		t.Fatalf("stepImplement: %v", err)
+	}
+	if len(agent.prompts) == 0 {
+		t.Fatal("the step spent no turn, so nothing was briefed")
+	}
+	for _, want := range []string{
+		string(StepReviewProposal),    // who routed here
+		"the retry loop has no bound", // the finding
+		"cli/retry.go:41",             // and the specifics it has to act on
+	} {
+		if !strings.Contains(agent.prompts[0], want) {
+			t.Errorf("the implement prompt does not carry %q from the handback:\n%s", want, agent.prompts[0])
+		}
 	}
 }
 

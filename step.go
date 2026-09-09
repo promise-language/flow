@@ -12,7 +12,7 @@ const (
 )
 
 // step is the internal record for one lifecycle item in a flow's ordered
-// list. Exposed surface is via Flow's Add*/Steps/DeriveNext helpers.
+// list. Exposed surface is via Flow's Add*/Steps/Items/Position helpers.
 type step struct {
 	kind stepKind
 	// description is the human label the registration gave this item. Display

@@ -85,7 +85,11 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		// it still belongs to the flow — so its checklist is what gets rendered
 		// either way.
 		typeFlow = app.Flow
-		f, _ = SelectFlow(app, state)
+		// A Position refusal leaves f nil, which reads as "no eligible step" —
+		// the same thing `status` says about any item this binary will not
+		// advance. It is not swallowed anywhere it decides something: RunOne
+		// returns it, and this command only reports.
+		f, _, _ = SelectFlow(app, state)
 	}
 	if owner == "" {
 		owner = "(unclaimed)"

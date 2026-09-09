@@ -335,7 +335,7 @@ func TestCmdStatus_InspectsById(t *testing.T) {
 	f := flow.NewFlow("implement", []flow.ItemType{"task"})
 	f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-	}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	app.Flow = f
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations: 3, MaxPromptsPerInvocation: 1, MaxCostUSD: 10,
@@ -355,7 +355,7 @@ func TestCmdStatus_InspectsById(t *testing.T) {
 		t.Fatalf("Claim: %v", err)
 	}
 	sib.claim = &claim
-	appendMarkdown(t, be, claim.ItemRef, "plan", "the plan")
+	appendMarkdown(t, be, claim.ItemRef, "plan", "next", "the plan")
 
 	out := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}
@@ -664,7 +664,7 @@ func TestStatusRunningDoesNotOverrideResolved(t *testing.T) {
 	}
 	// Resolve the "plan" artifact so its state is "resolved".
 	ctx := context.Background()
-	appendResult(t, env.be, env.claim.ItemRef, "plan", 1, flow.ArtifactBody{
+	appendResult(t, env.be, env.claim.ItemRef, "plan", "next", 1, flow.ArtifactBody{
 		Type:     flow.ArtifactMarkdown,
 		Markdown: "the plan",
 	})
@@ -1132,5 +1132,48 @@ func TestStatusJSON_BudgetIsThePolicyPlusTheGrants(t *testing.T) {
 	}
 	if got := axis("timeout_seconds"); got["granted"] != 2400.0 {
 		t.Errorf("timeout_seconds = %v, want 1800+600", got)
+	}
+}
+
+// A route naming a step this build does not register — an item left by a binary
+// whose graph had one — is exactly the item an operator runs `status` on. The
+// command REPORTS: it reads the position and never decides on it, so a Position
+// refusal leaves no eligible step and everything else still renders. Failing
+// here would take the diagnosis down with the thing being diagnosed, and
+// RunOne is what surfaces the refusal (TestRunOne_ARouteToAnUnregisteredStepSurfacesTheRefusal).
+func TestCmdStatus_ReportsAnItemWhoseRouteNamesNoRegisteredStep(t *testing.T) {
+	app, _, _ := testAppItem(t, flow.Item{
+		Ref: itemRefFor("1"), Type: "task", Title: "test#1",
+		Journal: []flow.JournalEntry{{
+			Step: "plan", Execution: 1, Route: flow.Route{Next: "no-such-step"}, By: "tester",
+		}},
+	}, []flow.ItemType{"task"}, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			t.Fatal("status dispatches nothing")
+			return flow.StepResult{}, nil
+		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, &stubAgent{name: "stub"})
+	out := &bytes.Buffer{}
+	errBuf := &bytes.Buffer{}
+	app.Out, app.Err = out, errBuf
+
+	if code := app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus --json = %d; stderr=%q", code, errBuf.String())
+	}
+	var payload statusPayload
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if payload.FlowState != flowStateNoEligibleStep {
+		t.Errorf("flow_state = %q, want %q — the flow cannot place this item",
+			payload.FlowState, flowStateNoEligibleStep)
+	}
+	// And the report is still a report: the item, and the checklist someone
+	// reads to see what the run left behind.
+	if payload.Item == "" || payload.Title == "" {
+		t.Errorf("payload = %+v, want the item still identified", payload)
+	}
+	if len(payload.Steps) == 0 {
+		t.Error("steps = none, want the flow's checklist — this is what diagnosis reads")
 	}
 }

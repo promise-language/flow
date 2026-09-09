@@ -58,6 +58,17 @@ type PromptContext struct {
 	// Non-empty ONLY when rendering PromptPushRepair.
 	PushRefusal string
 
+	// Transfer is the journal entry that routed here: the step that elected this
+	// one, and the message it sent. Nil on an empty journal, where nothing
+	// routed anywhere.
+	//
+	// It is what makes a route that returns to a step different from the first
+	// time through. The rework handback is the case that needs it — the
+	// maintainer's review says what must change, and without this the implement
+	// step would re-run against the same plan with no idea why. Read it through
+	// TransferBlock.
+	Transfer *flow.JournalEntry
+
 	// Prior carries upstream artifacts as records rather than strings, so a
 	// body cannot silently interpolate a patch into a markdown slot. Read them
 	// through PriorMarkdown / PriorPatch / PriorJSON.
@@ -113,6 +124,10 @@ func newPromptContext(ctx flow.StepCtx, cfg Config, role Role, prior []StepID) (
 			pc.Prior[id] = rec
 		}
 	}
+	// The entry that routed here, so a body can tell the step why it is running
+	// THIS time. Nil on an empty journal, which TransferBlock renders as
+	// nothing.
+	pc.Transfer = ctx.Transfer()
 	// Pre-set the partials whose shared versions are written for a tracker
 	// backend. Render leaves a non-empty field alone, so this is the prompt
 	// package's own override mechanism, not a workaround.
@@ -210,6 +225,49 @@ is ignored, so a note may wrap onto as many lines as it needs — and a block
 whose lines all lack the prefix declares no wait at all, so the flow reads no
 declaration and carries on.`
 
+// proposalDecisionPartial is the review-the-proposal step's decision contract,
+// stated in the terms detectProposalDecision actually enforces.
+//
+// It is a package constant used by the default body and appended to a project's
+// override, exactly as repoRelativePaths is: the step reads the sentinels, so a
+// prompt that did not teach them would leave the two routes that need a
+// declaration unreachable, and the review would always read as "this should
+// land".
+//
+// The illustrations are INDENTED on purpose. Detection requires column zero
+// precisely so an agent echoing them back cannot route the item on a
+// placeholder — see ProposalReworkSentinel.
+const proposalDecisionPartial = `Your judgement is the decision, and there are exactly three outcomes.
+
+The default is that the proposal should land: say what you checked and what you
+concluded, and emit no sentinel. The flow then measures the merge result and
+integrates.
+
+Emit ONE of these when the answer is not that. Each goes flush against the left
+margin, with a one-line summary after the colon and a fenced block after it. The
+block is required — it is what the reader acts on. The shapes (shown indented
+here; write yours flush left):
+
+    PROPOSAL-REWORK: <one-line statement of what is wrong>
+    ` + "```" + `
+    <specifically what must change, and why — enough to act on without
+    rediscovering the finding>
+    ` + "```" + `
+
+    PROPOSAL-REJECT: <one-line statement of why this must not land>
+    ` + "```" + `
+    <the reasons the item is not resolved by this proposal or any successor>
+    ` + "```" + `
+
+The line between them is what happens next. Rework hands the change back to the
+contributor and the resolution continues on the same branch, as further commits;
+rejection ENDS the item, and no later round revisits it. Choose rework whenever
+the work is worth continuing.
+
+Never emit both — two decisions is not a decision, and the step refuses it. A
+sentinel with no summary, or with no fenced block after it, is ignored: the
+proposal would then read as one that should land.`
+
 // repoRelativePaths is carried by every default prompt whose product is
 // published on the item.
 //
@@ -282,6 +340,8 @@ type promptFragments struct {
 	workInProgress    bool
 	answers           bool
 	narrowGateHint    bool
+	transfer          bool
+	proposalDecision  bool
 }
 
 // requiredFragments maps each slot that carries policy fragments to the set it
@@ -289,10 +349,21 @@ type promptFragments struct {
 // appended — they run inside a session whose opening prompt already carried
 // them.
 var requiredFragments = map[PromptID]promptFragments{
-	PromptPlan:      {repoRelativePaths: true, workInProgress: true, answers: true},
-	PromptImplement: {deferCommit: true, workInProgress: true, answers: true, narrowGateHint: true},
+	PromptPlan: {repoRelativePaths: true, workInProgress: true, answers: true},
+	// The transfer belongs to implement because implement is the step a route
+	// returns to: a rework handback re-runs it with the same plan, and the
+	// message the maintainer's review sent is the only thing distinguishing this
+	// round from the first.
+	PromptImplement: {deferCommit: true, workInProgress: true, answers: true, narrowGateHint: true, transfer: true},
 	PromptReview:    {repoRelativePaths: true, deferCommit: true, workInProgress: true, answers: true, narrowGateHint: true},
 	PromptCoverage:  {repoRelativePaths: true, deferCommit: true, workInProgress: true, answers: true, narrowGateHint: true},
+	PromptReviewProposal: {
+		repoRelativePaths: true, workInProgress: true, answers: true,
+		// Without the decision contract the two routes that need a declaration
+		// cannot be elected at all, so a project override that dropped it would
+		// silently turn every review into "this should land".
+		proposalDecision: true,
+	},
 }
 
 // appendFragments appends the required policy fragments to a project's override
@@ -308,6 +379,12 @@ func appendFragments(body string, frags promptFragments) string {
 	}
 	if frags.narrowGateHint {
 		parts = append(parts, narrowGateHint)
+	}
+	if frags.proposalDecision {
+		parts = append(parts, proposalDecisionPartial)
+	}
+	if frags.transfer {
+		parts = append(parts, "{{.TransferBlock}}")
 	}
 	if frags.workInProgress {
 		parts = append(parts, "{{.WorkInProgressBlock}}")
@@ -347,6 +424,31 @@ Implement this plan:
 Make {{.VerifyCmd}} pass. {{.DeferCommit}}
 
 ` + narrowGateHint + `
+
+{{.TransferBlock}}
+
+{{.WorkInProgressBlock}}
+
+{{.AnswersBlock}}
+
+{{.AskGuidance}}`,
+
+	PromptReviewProposal: `{{.ItemHeader}}
+
+Judge the proposed change as WHAT WILL LAND: the diff on the branch, the plan it
+claims to implement, the briefings the producing steps wrote, and the gate result
+it arrived with — all against the item above.
+
+This is the plan it claims to implement:
+
+{{.PlanBody}}
+
+You are not carrying the change further; the producing steps have had their
+turns. You are deciding whether it should land, and saying why.
+
+` + proposalDecisionPartial + `
+
+` + repoRelativePaths + `
 
 {{.WorkInProgressBlock}}
 
@@ -550,6 +652,29 @@ func (c PromptContext) WorkInProgressBlock() string {
 		"result: nothing was recorded and the step still has to produce its " +
 		"answer. Continue from them rather than starting over, and discard " +
 		"whatever they got wrong.\n\n" + notes
+}
+
+// TransferBlock renders why this step is being run, from the step that elected
+// it, or "" when nothing routed here.
+//
+// A method rather than `{{.Transfer.Message}}`, for the reason AnswersBlock is
+// one: the field is a pointer that is legitimately nil on the entry step, and a
+// body dereferencing it would fail to render there. It also frames the message
+// as an instruction from a named step rather than as free-floating prose — a
+// rework handback read as background is a handback ignored.
+func (c PromptContext) TransferBlock() string {
+	if c.Transfer == nil {
+		return ""
+	}
+	msg := strings.TrimSpace(c.Transfer.Message)
+	if msg == "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"The %q step routed the item here, and this is what it said to you. "+
+			"It is why this step is running now — read it as the brief for this "+
+			"round, above anything the plan or an earlier round assumed:\n\n%s",
+		c.Transfer.Step, msg)
 }
 
 // PlanBody is referenced by the default implement prompt. It is a method rather

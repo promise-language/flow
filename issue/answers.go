@@ -158,6 +158,98 @@ func detectRefusal(lastText string) (kind RefusalKind, summary string, evidence 
 	return "", "", "", false
 }
 
+// ProposalDecision names what the maintainer's review elected, when it elected
+// anything other than letting the proposal continue to integration.
+//
+// Continuing is the unmarked case deliberately: a review that finds nothing
+// wrong says so in prose and the step routes onward, so the sentinels are
+// reserved for the two decisions that change where the item goes.
+type ProposalDecision string
+
+const (
+	// ProposalRework hands the proposal back to the contributor. The
+	// resolution continues (docs/issue-flow.md § Review the proposal).
+	ProposalRework ProposalDecision = "rework"
+	// ProposalReject ends it: this proposal, and any successor to it, will not
+	// resolve the item.
+	ProposalReject ProposalDecision = "reject"
+)
+
+// ProposalReworkSentinel and ProposalRejectSentinel are how a review agent
+// elects one of the two.
+//
+// Structurally identical to RefusalSentinel, and enforced identically: a
+// column-zero token, a one-line summary after the colon, and a fenced block
+// after that. The block is REQUIRED, because it is what the contributor acts on
+// — "a handback with a vague message spends a full contributor round to
+// rediscover what this step already knew" — and, on the rejection, it is the
+// reasons a terminal decision is recorded with.
+//
+// The column-zero rule is what lets the prompt show the agent an indented
+// illustration of the shape without the agent's echo of it routing the item.
+const (
+	ProposalReworkSentinel = "PROPOSAL-REWORK:"
+	ProposalRejectSentinel = "PROPOSAL-REJECT:"
+)
+
+// detectProposalDecision reads the maintainer review's election out of its final
+// message: the decision, its one-line summary, and the block carrying what must
+// change or why the item is declined.
+//
+// ok is implied by a non-empty decision. No sentinel means the review said
+// nothing about routing, which is the ordinary "this should land" case.
+//
+// BOTH sentinels present is an ERROR naming both. Rework expects the resolution
+// to continue and rejection ends it (docs/resolution.md § Finalizing), so a turn
+// emitting both has not decided — and picking one of them here would be this
+// function making the decision the step exists to record.
+func detectProposalDecision(lastText string) (ProposalDecision, string, string, error) {
+	lines := strings.Split(lastText, "\n")
+	reworkSummary, reworkBlock, gotRework := decisionSentinel(lines, ProposalReworkSentinel)
+	rejectSummary, rejectBlock, gotReject := decisionSentinel(lines, ProposalRejectSentinel)
+	switch {
+	case gotRework && gotReject:
+		return "", "", "", fmt.Errorf(
+			"the review emitted both %s and %s — two decisions is not a decision: "+
+				"a handback expects the resolution to continue and a rejection ends it, "+
+				"so exactly one may be elected",
+			ProposalReworkSentinel, ProposalRejectSentinel)
+	case gotRework:
+		return ProposalRework, reworkSummary, reworkBlock, nil
+	case gotReject:
+		return ProposalReject, rejectSummary, rejectBlock, nil
+	}
+	return "", "", "", nil
+}
+
+// decisionSentinel is the scan both proposal sentinels are read by — one
+// implementation, so the two decisions cannot be recognised on different terms.
+//
+// It scans from the END, same rationale as detectRefusal and detectQuestion: an
+// agent reasoning about the mechanism before using it may mention a token in
+// passing, and the operative line is its last word on the matter. A sentinel
+// with no summary, or with no fenced block after it, is skipped and scanning
+// continues — both are what makes the election actionable, and neither is
+// something to guess at.
+func decisionSentinel(lines []string, sentinel string) (summary, block string, ok bool) {
+	for i := len(lines) - 1; i >= 0; i-- {
+		// Column zero, deliberately not trimmed first — see the sentinels.
+		if !strings.HasPrefix(lines[i], sentinel) {
+			continue
+		}
+		summary = strings.TrimSpace(strings.TrimPrefix(lines[i], sentinel))
+		if summary == "" {
+			continue // a bare token decides nothing anyone can act on
+		}
+		block = fencedBlockAfter(lines[i+1:])
+		if block == "" {
+			continue // no specifics — not an election
+		}
+		return summary, block, true
+	}
+	return "", "", false
+}
+
 // WaitsOnSentinel is how a plan agent signals that the work is real and waits
 // on other items — ones that exist, or ones it filed — rather than that the
 // item should not be done.

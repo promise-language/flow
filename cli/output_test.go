@@ -77,7 +77,7 @@ func decode(t *testing.T, b *bytes.Buffer) map[string]any {
 
 func TestStatusJSON_Schema(t *testing.T) {
 	env := newParkGrantEnv(t)
-	appendMarkdown(t, env.be, env.claim.ItemRef, "plan", "done")
+	appendMarkdown(t, env.be, env.claim.ItemRef, "plan", "next", "done")
 	env.dispatches(t, "commit", 1)
 	env.park(t, treasurerRefused("commit", flow.AxisInvocations))
 
@@ -241,7 +241,7 @@ func TestListJSON_EmptyIsArray(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("x"), nil
-		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	out := &bytes.Buffer{}
 	app.Out, app.Err = out, &bytes.Buffer{}

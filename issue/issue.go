@@ -58,13 +58,14 @@ const (
 	StepOpenPR      StepID = "pr-open" // signal step
 	StepCloseBranch StepID = "branch-closed"
 
-	// Maintainer step set. Declared here so both roles share one vocabulary;
-	// the handlers land with the maintainer slice.
-	StepReviewMaint StepID = "review-maint"
-	StepInspect     StepID = "inspection"
-	StepVerifyMerge StepID = "verify-merge"
-	StepMerge       StepID = "pr-merged" // signal step
-	StepRecordMerge StepID = "merge-commit"
+	// Maintainer step set, in the order docs/issue-flow.md § The graph defines.
+	// One vocabulary with the contributor's above, because there is one graph:
+	// the roles differ in which steps they perform, never in which steps exist.
+	StepReviewProposal StepID = "proposal-review"
+	StepInspect        StepID = "inspection"
+	StepVerifyMerge    StepID = "verify-merge"
+	StepMerge          StepID = "pr-merged" // signal step
+	StepRecordMerge    StepID = "merge-commit"
 )
 
 // PromptID keys Config.Prompts. It is deliberately NOT StepID: a step can have
@@ -81,6 +82,13 @@ const (
 	PromptImplement PromptID = "implementation"
 	PromptReview    PromptID = "review"
 	PromptCoverage  PromptID = "coverage"
+
+	// PromptReviewProposal is the maintainer's judgement of the proposal as
+	// what will land. Its own slot rather than a variant of PromptReview: the
+	// two answer to different things — review answers to the code it is
+	// carrying further, this one to whether the proposal should land at all —
+	// and only this one elects between integration, rework and rejection.
+	PromptReviewProposal PromptID = "proposal-review"
 
 	// PromptImplementFix is the re-prompt issued when the verify gate fails
 	// inside the implement step. PromptContext.VerifyOutput carries the

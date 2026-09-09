@@ -793,7 +793,7 @@ usage and exits 0 without running it.
 ```
 .
 ├── doc.go                  package doc
-├── flow.go                 Flow, NewFlow, AddStep/AddSignalStep/AwaitSignal/RequireSignal, DeriveNext/IsDone/IsReady
+├── flow.go                 Flow, NewFlow, AddStep/AddSignalStep/AwaitSignal/RequireSignal, Position/AwaitsAfter/IsReady
 ├── step.go                 StepHandler + StepOption (Required/Optional, StaleAfter/StaleOnCommit, Max*/Timeout)
 ├── stepctx.go              StepCtx interface — typed read surface, Next/Finalize, Agent(), Worktree(), AskQuestions
 ├── artifact.go             ArtifactDef/ArtifactType (the six types), ArtifactRecord, PatchBody/FileBody

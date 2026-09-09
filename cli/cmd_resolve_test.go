@@ -51,7 +51,7 @@ func resolveTestAppStep(t *testing.T, be flow.Orchestrator, step func(flow.StepC
 		Err:          errBuf,
 	}
 	f := flow.NewFlow("implement", []flow.ItemType{"task"})
-	f.AddStep("write plan", "plan", step, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	f.AddStep("write plan", "plan", step, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	app.Flow = f
 	if err := app.validate(); err != nil {
@@ -1203,7 +1203,7 @@ func TestCmdResolve_BudgetParkNarratesAxes(t *testing.T) {
 		return flow.StepResult{}, errors.New("boom")
 	}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", handler, flow.StepConfig{})
+		f.AddStep("write plan", "plan", handler, flow.StepConfig{Entry: true})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations:          1,
@@ -1993,5 +1993,38 @@ func TestCmdResolve_HeldClaimSurvivesTheItemBecomingBlocked(t *testing.T) {
 	}
 	if state.Parked() {
 		t.Error("the stop parked the item — a park is a condition a person clears, and this one clears itself")
+	}
+}
+
+// A route naming a step this build does not register stops the run with the
+// refusal, non-zero, rather than reading as "nothing left to do". The
+// difference matters at exactly one item: the finalize path is what an empty
+// answer takes, and finalizing here would record an item as complete on the
+// strength of a graph that could not say where it stood — terminally, and
+// against a run that never dispatched anything.
+//
+// The backend accepts Finalize, so a swallowed refusal would exit 0 with the
+// item recorded complete: that is the regression this pins.
+func TestCmdResolve_ARouteToAnUnregisteredStepStopsInsteadOfFinalizing(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem("1", flow.Item{
+		Type: "task", Title: "1",
+		Journal: []flow.JournalEntry{{
+			Step: "plan", Execution: 1, Route: flow.Route{Next: "no-such-step"}, By: "tester",
+		}},
+	})
+	be := &finalizingBackend{Orchestrator: inner}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code == 0 {
+		t.Fatalf("exit code = 0 on an item the flow cannot place; err=%q", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "no-such-step") {
+		t.Errorf("stderr = %q, want it to name the successor that resolves to nothing", errBuf.String())
+	}
+	if be.finalizeCalls != 0 {
+		t.Errorf("Finalize called %d time(s) — an item the flow cannot place is not a finished item",
+			be.finalizeCalls)
 	}
 }

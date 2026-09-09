@@ -15,25 +15,48 @@ import (
 	"github.com/promise-language/flow/pkg/clistate"
 )
 
-// SelectFlow returns the binary's one flow when it is eligible for the given
-// item — every RequireSignal is set, and at least one lifecycle item is
-// pending — and (nil, "") when it is not (terminal state).
+// SelectFlow returns the binary's one flow and the pending step's description
+// when it is eligible for the given item — every RequireSignal is set, and the
+// journal's route has not finalized — and (nil, "") when it is not.
+//
+// The pending step comes from Flow.Position: the route the journal's last entry
+// elected, or the declared entry step on an empty journal, and nothing else
+// (docs/resolution.md § Deriving the next step). A step whose result is already
+// recorded is dispatched again when the route names it — "reaching a step a
+// second time is not an anomaly but a route" — which is what makes the rework
+// handback an ordinary election rather than an edge nothing could take.
+//
+// Position's two refusals are RETURNED, never swallowed. An empty answer reads
+// as "nothing left to do", and RunOne finalizes on it: reporting a flow that
+// declares no entry, or a route naming no registered step, as a completed item
+// would finish an item the flow never ran.
 //
 // It does NOT consult the remit. The remit gates listing and selection and is
 // consulted before the journal's first entry, never after
 // (docs/flow-registration.md § Item types), so it is read once, ahead of this,
 // by inRemit — never per dispatch, where an item retyped mid-resolution would
 // be re-routed by the edit.
-func SelectFlow(app *App, item *flow.Item) (*flow.Flow, string) {
+//
+// MIGRATION: position derives from the journal and nothing else, so an item
+// left mid-resolution by a binary from before the journal was the record reads
+// as an item with no journal — and restarts at the entry step. `reset` is the
+// remedy. There is deliberately no fallback that reads the artifact records
+// when the journal is empty: a second derivation of position is exactly what
+// this retires, and one kept "for migration" is one that decides differently
+// from the first on some item nobody has thought about yet.
+func SelectFlow(app *App, item *flow.Item) (*flow.Flow, string, error) {
 	f := app.Flow
 	if !f.IsReady(item) {
-		return nil, ""
+		return nil, "", nil
 	}
-	next, ok := f.DeriveNext(item)
-	if !ok {
-		return nil, ""
+	pos, err := f.Position(item)
+	if err != nil {
+		return nil, "", err
 	}
-	return f, next
+	if pos.Finalized {
+		return nil, "", nil
+	}
+	return f, pos.Step.Description, nil
 }
 
 // inRemit reports whether the item is this binary's work: its type is in the
@@ -96,7 +119,15 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		nextName string
 	)
 	if acts {
-		f, nextName = SelectFlow(app, state)
+		// A Position refusal is the flow's own defect — no entry declared, or a
+		// route naming nothing registered — so it comes back as the
+		// catastrophic error it is rather than as an item state. Reporting it
+		// as `done` would finalize an item on the strength of a graph that
+		// could not say where it stood.
+		var perr error
+		if f, nextName, perr = SelectFlow(app, state); perr != nil {
+			return flow.InvocationResult{}, perr
+		}
 	}
 	if f == nil {
 		// No step remains — the flow is complete (or the item is terminal).
@@ -198,9 +229,11 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		Step:         string(li.Result()),
 	}
 
-	// AwaitSignal items have no handler; signal is checked by DeriveNext.
-	// Reaching here means the signal isn't set yet — skip without
-	// consuming budget.
+	// AwaitSignal items have no handler: the item sits here, nobody's move,
+	// until the orchestrator observes the signal. Skip without consuming
+	// budget. Appending the wait's own entry once the signal IS observed —
+	// which is what would let the route move past it — is #238's; no shipped
+	// flow registers a wait, so nothing reaches this today.
 	if li.Kind == flow.LifecycleAwait {
 		result.Status = string(flow.StatusSkipped)
 		result.Reason = fmt.Sprintf("awaiting signal %q", li.SignalId)

@@ -66,14 +66,17 @@ func main() {
 			// The other steps take the package defaults.
 			issue.StepImplement: {Timeout: 60 * time.Minute},
 		},
-		// Pinned to the contributor set rather than detected. Detection would
-		// route anyone with admin — which is anyone running this on their own
-		// repository — to the maintainer set, and that set is not implemented
-		// yet, so every run would refuse. Pinning also means no probe at
-		// startup, so `doctor` works with a broken token, which is the whole
-		// point of `doctor`.
+		// Pinned to the contributor role rather than detected. The graph is the
+		// same either way; what Role decides is this binary's COVERAGE — which
+		// of that graph's steps it may perform. Detection would give anyone with
+		// admin, which is anyone running this on their own repository, the
+		// maintainer's coverage, and the entry step is the contributor's, so
+		// every run would stop at the boundary before writing a plan. Pinning
+		// also means no probe at startup, so `doctor` works with a broken token,
+		// which is the whole point of `doctor`.
 		//
-		// Drop this line to detect the role once the maintainer set lands.
+		// Set CarryThrough alongside a maintainer role to cover both sides and
+		// run an item through to a merge.
 		Role: issue.RoleContributor,
 		// BaseBranch is left unset: it is detected from the repository, which
 		// is right for any repo whose default branch is the merge target. Set

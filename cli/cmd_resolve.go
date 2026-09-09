@@ -244,7 +244,11 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			acts := inRemit(app, st)
 			var next string
 			if acts {
-				if f, n := SelectFlow(app, st); f != nil {
+				// Best-effort, so a Position refusal just leaves the line
+				// unlabelled: RunOne re-derives and reports it properly a
+				// moment later, and narrating it twice would say it first as a
+				// missing step name.
+				if f, n, err := SelectFlow(app, st); err == nil && f != nil {
 					next = n
 				}
 			}
