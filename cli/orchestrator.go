@@ -336,18 +336,16 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		// leaves `git diff HEAD` empty, so the capture uploaded a zero-byte
 		// patch carrying no diagnostic value at all. Park only; the work
 		// stays in the worktree where the rerun picks it up.
-		if li.Kind == flow.LifecycleArtifact {
-			if err := bumpInvocations(ctx, app, ref, state, li.ArtifactId); err != nil {
-				return flow.InvocationResult{}, fmt.Errorf("bump invocations: %w", err)
-			}
+		if err := chargeDispatch(ctx, app, ref, state, li); err != nil {
+			return flow.InvocationResult{}, err
 		}
 		return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
 			Kind: flow.ParkBudgetExhausted,
 			Step: li.Result(),
 			Axis: flow.AxisTimeout,
-			// The invocations bump above is already counted here: a timeout
-			// park that under-reported invocations is exactly what sent the
-			// operator back for a second grant.
+			// The charge above is already counted here: a timeout park that
+			// under-reported invocations is exactly what sent the operator back
+			// for a second grant.
 			Axes:   sctx.axisReports(timeout),
 			Reason: fmt.Sprintf("step %q exceeded %s", li.Result(), timeout),
 		}))
@@ -427,7 +425,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// unfit machine is reported as blocked, not charged. This catches
 	// environment failures (ENOSPC, etc.) from ANY handler in ANY flow,
 	// without each handler having to classify them. Runs after the sentinel
-	// branches (already classified) and before write-contract / bumpInvocations.
+	// branches (already classified) and before write-contract / the charge.
 	if handlerErr != nil && sctx.worktree != nil {
 		if fitErr := flow.CheckFit(ctx, sctx.worktree); fitErr != nil {
 			result.Status = string(flow.StatusBlocked)
@@ -442,16 +440,14 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	}
 
 	// Write-contract check. Runs after the transient/refused early returns
-	// (which skip budget) but BEFORE the normal bumpInvocations. Only when
-	// the handler acquired a worktree (writeSnap != nil). On violation:
-	// charge the invocation (the handler ran), park with ParkWriteContract,
-	// do NOT revert changes.
+	// (which skip budget) but BEFORE the normal charge. Only when the handler
+	// acquired a worktree (writeSnap != nil). On violation: charge the
+	// invocation (the handler ran), park with ParkWriteContract, do NOT revert
+	// changes.
 	if sctx.writeSnap != nil {
 		if reason := checkWriteContract(ctx, sctx.worktree, sctx.writeSnap, li.Writes); reason != "" {
-			if li.Kind == flow.LifecycleArtifact {
-				if err := bumpInvocations(ctx, app, ref, state, li.ArtifactId); err != nil {
-					return flow.InvocationResult{}, fmt.Errorf("bump invocations: %w", err)
-				}
+			if err := chargeDispatch(ctx, app, ref, state, li); err != nil {
+				return flow.InvocationResult{}, err
 			}
 			return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
 				Kind:   flow.ParkWriteContract,
@@ -461,20 +457,25 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		}
 	}
 
-	// Non-transient: the invocation produced a result (success, skip,
-	// park, or a real failure). Count it.
-	if li.Kind == flow.LifecycleArtifact {
-		if err := bumpInvocations(ctx, app, ref, state, li.ArtifactId); err != nil {
-			return flow.InvocationResult{}, fmt.Errorf("bump invocations: %w", err)
-		}
+	// The completion path counts its own dispatch, at each of its outcomes,
+	// because one of them must not be counted at all — see chargeDispatch.
+	if handlerErr == nil {
+		return sctx.stampResult(completeStep(ctx, app, ref, result, li, sctx, res, state))
 	}
 
-	return sctx.stampResult(translateHandlerError(ctx, app, ref, result, li, sctx, res, handlerErr))
+	// Non-transient: the invocation produced a result (a park, or a real
+	// failure). Count it.
+	if err := chargeDispatch(ctx, app, ref, state, li); err != nil {
+		return flow.InvocationResult{}, err
+	}
+
+	return sctx.stampResult(translateHandlerError(ctx, app, ref, result, li, sctx, handlerErr))
 }
 
-// translateHandlerError converts the handler's return into an
+// translateHandlerError converts a handler's non-nil error into an
 // InvocationResult, applying the appropriate Orchestrator.Park
-// as a side effect.
+// as a side effect. A handler that returned no error completed, and that path
+// is completeStep's.
 func translateHandlerError(
 	ctx context.Context,
 	app *App,
@@ -482,13 +483,8 @@ func translateHandlerError(
 	result flow.InvocationResult,
 	li flow.LifecycleItem,
 	sctx *stepCtx,
-	res flow.StepResult,
 	handlerErr error,
 ) (flow.InvocationResult, error) {
-	if handlerErr == nil {
-		return completeStep(ctx, app, ref, result, li, sctx, res)
-	}
-
 	// Sentinel translations.
 	var park flow.ErrPark
 	if errors.As(handlerErr, &park) {
@@ -574,6 +570,9 @@ func translateHandlerError(
 // can still do the job; a step that decided something it may not decide FAILS,
 // because only a change to the handler or the registration will help. Nothing
 // is journaled and nothing is published in either case.
+//
+// It counts the dispatch itself, at each outcome, because one outcome does not
+// count it: see chargeDispatch.
 func completeStep(
 	ctx context.Context,
 	app *App,
@@ -582,9 +581,13 @@ func completeStep(
 	li flow.LifecycleItem,
 	sctx *stepCtx,
 	res flow.StepResult,
+	state *flow.Item,
 ) (flow.InvocationResult, error) {
 	body, err := res.Elect(li, app.artifactById[li.ArtifactId].Type)
 	if err != nil {
+		if cerr := chargeDispatch(ctx, app, ref, state, li); cerr != nil {
+			return flow.InvocationResult{}, cerr
+		}
 		var incomplete flow.ErrStepDidNotComplete
 		if errors.As(err, &incomplete) {
 			return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
@@ -601,7 +604,12 @@ func completeStep(
 		if err := app.Orchestrator.ResolveArtifact(ctx, ref, li.ArtifactId, body); err != nil {
 			var refused flow.ErrDisclosureRefused
 			if errors.As(err, &refused) {
+				// The ONE outcome that is not charged — the correction round
+				// chargeDispatch names.
 				return refusedCapture(ctx, app, ref, result, li, sctx, refused, body)
+			}
+			if cerr := chargeDispatch(ctx, app, ref, state, li); cerr != nil {
+				return flow.InvocationResult{}, cerr
 			}
 			result.Status = string(flow.StatusFailed)
 			result.Reason = err.Error()
@@ -622,8 +630,45 @@ func completeStep(
 			sctx.Notify("", "could not clear work in progress: "+err.Error())
 		}
 	}
+	if cerr := chargeDispatch(ctx, app, ref, state, li); cerr != nil {
+		return flow.InvocationResult{}, cerr
+	}
 	result.Status = string(flow.StatusDone)
 	return result, nil
+}
+
+// chargeDispatch counts this dispatch against the step's record — the same
+// count RunOne makes for every other way a dispatch ends, made here so the
+// completion path can skip it for the one outcome that must not be charged.
+//
+// That outcome is a capture the disclosure guard refused. "A correction round
+// is priced as a round, not as a dispatch. A dispatch is an attempt at the
+// step; a refused expression of finished work is not a failed attempt, and a
+// treasurer that charged it as one would report exhaustion after three refused
+// sentences — naming the wrong problem" (docs/resolution.md § The treasurer),
+// and three is the default invocation budget. The round is not free: the turn
+// that produced the refused text was metered on the cost axis when it ran, and
+// the next dispatch pays for its own.
+//
+// A signal step owns no record, so there is nothing to count against it.
+//
+// The count is mirrored into the in-memory record as well as written to the
+// orchestrator, because the park paths downstream snapshot their axes from it:
+// a timeout park reporting the pre-charge count would under-report the
+// invocations axis, which is precisely the axis that re-parks the step once the
+// operator grants the time.
+func chargeDispatch(ctx context.Context, app *App, ref flow.ItemRef, state *flow.Item, li flow.LifecycleItem) error {
+	if li.Kind != flow.LifecycleArtifact {
+		return nil
+	}
+	if err := app.Orchestrator.BumpInvocations(ctx, ref, li.ArtifactId); err != nil {
+		return fmt.Errorf("bump invocations: %w", err)
+	}
+	rec := state.Artifact(li.ArtifactId)
+	rec.Invocations++
+	rec.PromptsThisInvocation = 0 // mirror the backend exactly — it resets here too
+	state.Artifacts[li.ArtifactId] = rec
+	return nil
 }
 
 // refusedCapture is what a disclosure refusal at capture leaves behind.
@@ -632,7 +677,9 @@ func completeStep(
 // handler returns there is no in-invocation revision loop to catch it any more.
 // So the capture path does what that loop did on its last round: stash the
 // refusal and the text it refused in the step's work-in-progress record, which
-// is local and never published, and park.
+// is local and never published, and park. The next dispatch renders both into
+// its prompt, so the author is answering something this one did not know — and
+// that dispatch, not this refusal, is what the treasurer counts (chargeDispatch).
 //
 // The park reason carries NOTHING the guard said. A park IS published — the
 // orchestrator posts the request through the same guard — and a refusal names
@@ -723,7 +770,7 @@ func axisReports(rec flow.ArtifactRecord, timeout time.Duration, prompts int, el
 // axisReports is the post-dispatch snapshot: same four axes, read from the
 // live view of the invocation rather than the record alone. Cost and
 // invocations come off the in-memory mirror (kept current by meteredAgent and
-// bumpInvocations), prompts off the metered agent's own counter, and elapsed
+// chargeDispatch), prompts off the metered agent's own counter, and elapsed
 // off the step's start.
 func (sc *stepCtx) axisReports(timeout time.Duration) []flow.AxisReport {
 	if sc.li.Kind != flow.LifecycleArtifact {
@@ -734,22 +781,6 @@ func (sc *stepCtx) axisReports(timeout time.Duration) []flow.AxisReport {
 		prompts = sc.agent.promptsThisInvocation
 	}
 	return axisReports(sc.state.Artifact(sc.li.ArtifactId), timeout, prompts, time.Since(sc.startedAt))
-}
-
-// bumpInvocations counts the invocation on the backend and mirrors it into the
-// in-memory record. The mirror matters because the park paths downstream
-// snapshot their axes from it: a timeout park reporting the pre-bump count
-// would under-report the invocations axis, which is precisely the axis that
-// re-parks the step once the operator grants the time.
-func bumpInvocations(ctx context.Context, app *App, ref flow.ItemRef, state *flow.Item, id flow.ArtifactId) error {
-	if err := app.Orchestrator.BumpInvocations(ctx, ref, id); err != nil {
-		return err
-	}
-	rec := state.Artifact(id)
-	rec.Invocations++
-	rec.PromptsThisInvocation = 0 // mirror the backend exactly — it resets here too
-	state.Artifacts[id] = rec
-	return nil
 }
 
 // checkWriteContract compares the current worktree state against the
@@ -1032,6 +1063,12 @@ func (s *stepCtx) Notes() []flow.JournalEntry {
 // Read from the record's invocation counter, which the bump at the end of every
 // dispatch maintains: this dispatch is the one after those. A signal step owns
 // no record, so it reads 1 — accurate for the only counter it has.
+//
+// The counter is the treasurer's, so it does not move for the one dispatch that
+// is not charged as one — a result the disclosure guard refused (chargeDispatch)
+// — and a dispatch resuming from that refusal reads the same number as the one
+// that was refused. That is the ledger this reads having one carve-out, not two
+// counters: the step's own count lands with the ledger itself (#240).
 func (s *stepCtx) RunNumber() int {
 	if s.li.Kind != flow.LifecycleArtifact {
 		return 1

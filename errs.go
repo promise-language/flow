@@ -175,8 +175,9 @@ func (e ErrWaitsOnItems) Error() string {
 	return "waits on items: " + strings.Join(names, ", ")
 }
 
-// ErrTypeMismatch — handler called the wrong Resolve* for its declared
-// artifact type (e.g. ResolveMarkdown on an ArtifactPatch step).
+// ErrTypeMismatch — the payload a handler returned is not of the step's
+// declared artifact type (e.g. .Markdown(…) on a step declared ArtifactPatch).
+// Refused at capture: nothing is journaled and nothing is published.
 type ErrTypeMismatch struct {
 	Step     string
 	Expected ArtifactType
@@ -187,8 +188,9 @@ func (e ErrTypeMismatch) Error() string {
 	return fmt.Sprintf("step %q: expected %s artifact, got %s", e.Step, e.Expected, e.Got)
 }
 
-// ErrSignalNotWritable — handler called a Resolve* on an AddSignalStep
-// lifecycle item. Signals are never handler-writable.
+// ErrSignalNotWritable — the StepResult of an AddSignalStep or AwaitSignal
+// lifecycle item carried a payload. Signals are never handler-writable: the
+// orchestrator observes them, so a signal step's election carries no result.
 type ErrSignalNotWritable struct {
 	Step   string
 	Signal SignalId

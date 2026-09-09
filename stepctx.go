@@ -52,6 +52,14 @@ type StepCtx interface {
 
 	// Artifact read surface — full record + typed accessors. ok=false if
 	// missing, unresolved, or wrong type.
+	//
+	// These read the ArtifactRecord, not the artifact's latest JOURNAL ENTRY as
+	// docs/step-handler.md § Typed accessors has them. They cannot read the
+	// journal until something appends to it: completion appends (#239) and the
+	// entries persist (#240), and until then every accessor would answer
+	// "absent" for an artifact that is recorded. The record is the same value
+	// by a different route in the meantime, so this is one derivation early,
+	// not two derivations at once.
 	Artifact(id ArtifactId) (ArtifactRecord, bool)
 	Flag(id ArtifactId) (set bool, ok bool)
 	CommitHash(id ArtifactId) (sha string, ok bool)

@@ -235,6 +235,62 @@ func TestCompletion_DisclosureRefusalParksAndKeepsTheWork(t *testing.T) {
 	if rec := state.Artifact("plan"); rec.Resolved {
 		t.Errorf("plan artifact = %+v, want unresolved after a refused capture", rec)
 	}
+	// "A correction round is priced as a round, not as a dispatch"
+	// (docs/resolution.md § The treasurer). Charged as one, three refused
+	// sentences would exhaust the default three invocations and park on the
+	// budget — reporting a budget cap for a problem no grant can fix.
+	if rec := state.Artifact("plan"); rec.Invocations != 0 {
+		t.Errorf("invocations = %d after a refused capture, want 0 — a refused expression of "+
+			"finished work is not a failed attempt at the step", rec.Invocations)
+	}
+}
+
+// Every other completion outcome IS a dispatch, and counts: the refusal is the
+// single exception, not a hole under the completion path.
+func TestCompletion_EveryOtherOutcomeCountsTheDispatch(t *testing.T) {
+	cases := map[string]struct {
+		configure func(*flow.Flow)
+		refuse    error
+		status    string
+	}{
+		"done": {func(f *flow.Flow) {
+			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+				return ctx.Finalize(flow.DispositionResolved, "the plan is written").Markdown("the plan"), nil
+			}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, nil, "done"},
+		"decided nothing": {func(f *flow.Flow) {
+			f.AddStep("forgetful", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+				return flow.StepResult{}, nil
+			}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, nil, "parked"},
+		"undeclared election": {func(f *flow.Flow) {
+			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+				return ctx.Next("nowhere", "carry on").Markdown("the plan"), nil
+			}, flow.StepConfig{Next: []flow.StepId{"review"}})
+		}, nil, "failed"},
+		"capture failed for any other reason": {func(f *flow.Flow) {
+			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+				return ctx.Finalize(flow.DispositionResolved, "the plan is written").Markdown("the plan"), nil
+			}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, errors.New("the orchestrator is broken"), "failed"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			app, be, claim := capturingApp(t, tc.configure)
+			be.refuse = tc.refuse
+			res, err := RunOne(context.Background(), app, claim)
+			if err != nil {
+				t.Fatalf("RunOne: %v", err)
+			}
+			if res.Status != tc.status {
+				t.Fatalf("res = %+v, want %s", res, tc.status)
+			}
+			state, _ := be.Load(context.Background(), claim.ItemRef)
+			if rec := state.Artifact("plan"); rec.Invocations != 1 {
+				t.Errorf("invocations = %d, want the dispatch counted once", rec.Invocations)
+			}
+		})
+	}
 }
 
 // accessorCtx builds a stepCtx directly over a hand-written item, which is the

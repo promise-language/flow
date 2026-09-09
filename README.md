@@ -256,16 +256,18 @@ Every `run-step` runs the same orchestrator (`cli/cmd_run.go` → `RunOne`):
 // types declares which Item.Type values this flow handles; nil/empty = universal.
 func NewFlow(name string, types []flow.ItemType) *flow.Flow
 
-// Artifact step: handler MUST call the matching ctx.Resolve* before returning nil.
-func (f *Flow) AddStep(name string, result flow.ArtifactId, do StepHandler, opts ...StepOption)
+// Artifact step: the handler completes by returning a StepResult carrying the
+// payload for `result`. The first argument is a DESCRIPTION — display text,
+// never an identity; the step's identity is `result`.
+func (f *Flow) AddStep(description string, result flow.ArtifactId, do StepHandler, opts ...StepOption)
 
-// Signal step: handler does a side effect; the orchestrator sets `signal`. Handler
-// MUST NOT call Resolve*. Step completes when the signal is observed set.
-func (f *Flow) AddSignalStep(name string, signal flow.SignalId, do StepHandler, opts ...StepOption)
+// Signal step: handler does a side effect; the orchestrator sets `signal`. Its
+// StepResult carries NO payload. Step completes when the signal is observed set.
+func (f *Flow) AddSignalStep(description string, signal flow.SignalId, do StepHandler, opts ...StepOption)
 
 // Pure wait: no handler. Completes when `signal` is set by any means
 // (another flow's signal step, or an external event the orchestrator observes).
-func (f *Flow) AwaitSignal(name string, signal flow.SignalId, opts ...StepOption)
+func (f *Flow) AwaitSignal(description string, signal flow.SignalId, opts ...StepOption)
 
 // Eligibility precondition (NOT a lifecycle item): an item is only begun once
 // `signal` is already set on it. Gate the flow on something else's completion.
@@ -488,10 +490,13 @@ Two principles make this sequence robust:
 
 Origin advances while you work. The push step's precondition is "validation
 passed on *this* head." On a **push rejection** (someone landed commits
-between your commit and your push), mark the `commit` artifact **stale** —
-`StaleOnCommit` / `ctx.MarkStale("commit")` — and let the flow re-run it: a
-fresh fetch + rebase + re-validate, then push again. This loop is the entire
-reconciliation strategy; no special-casing in the push handler.
+between your commit and your push), the push step elects the commit step as
+its successor — `ctx.Next("commit", "origin moved under the push; …")`, with
+`"commit"` among its declared `Next` — and that step runs again: a fresh fetch
++ rebase + re-validate, then push again. Rework is an ordinary election, not a
+marker: reaching a step a second time is a route, and the message says why.
+This loop is the entire reconciliation strategy; no special-casing in the push
+handler.
 
 ### Multi-repo (submodules)
 
