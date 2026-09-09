@@ -216,6 +216,31 @@ func TestCmdRun_DoesNotMarkTheItemManual(t *testing.T) {
 	}
 }
 
+// The park is the other half of what the takeover took: setting manual
+// resolves any unresolved park, so a `run-step` that asserted it cleared the
+// stop a person put on the item — silently, once per call, for a caller that
+// only meant to advance a step. The park here names a step this run does not
+// resolve (resolving a step legitimately clears its own park), so run-step is
+// the only thing that could have cleared it.
+func TestCmdRun_LeavesAnUnresolvedParkStanding(t *testing.T) {
+	app, be, claim := testApp(t, runStepStubFlow, &stubAgent{name: "stub"})
+	park := flow.ParkRequest{Kind: flow.ParkQuestion, Step: "commit", Reason: "waiting for an answer"}
+	if err := be.Park(context.Background(), claim.ItemRef, park); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+
+	if code := app.cmdRun(context.Background(), nil); code != 0 {
+		t.Fatalf("cmdRun = %d, want 0", code)
+	}
+	got := be.ParkRequest(claim.ItemRef.Display)
+	if got == nil {
+		t.Fatal("the park is gone after a run-step — a command that only advances the item cleared the stop on it")
+	}
+	if got.Step != park.Step || got.Reason != park.Reason {
+		t.Errorf("park = %+v, want %+v untouched", *got, park)
+	}
+}
+
 // The regression guard against reintroducing the switch: the retired name is
 // spelled as a string literal, because the code must no longer know it. Set or
 // unset, the two runs behave identically and mark nothing — an environment

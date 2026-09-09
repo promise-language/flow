@@ -1837,8 +1837,12 @@ func TestCmdResolve_QuotaPrintedWhateverTheEnvironmentHolds(t *testing.T) {
 				t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
 			}
 			output := errBuf.String()
-			if !strings.Contains(output, "quota:") {
-				t.Errorf("the quota block must print whatever the environment holds; got:\n%s", output)
+			// Both sites this run reaches — the start and the finalize — as
+			// TestCmdResolve_QuotaPrintedAtStartAndFinalize counts them. One
+			// occurrence would pass a re-gating that left the terminal site
+			// behind the environment.
+			if n := strings.Count(output, "quota:"); n < 2 {
+				t.Errorf("the quota block must print at start and at finalize whatever the environment holds; got %d in:\n%s", n, output)
 			}
 			if !strings.Contains(output, "quota unreadable") {
 				t.Errorf("pacing must still be attempted (and show the unreadable warning); got:\n%s", output)
