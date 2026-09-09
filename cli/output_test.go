@@ -241,7 +241,7 @@ func TestListJSON_EmptyIsArray(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("x"), nil
-		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	out := &bytes.Buffer{}
 	app.Out, app.Err = out, &bytes.Buffer{}

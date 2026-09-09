@@ -55,7 +55,8 @@ func (b *recordingRoleBackend) DetectCapabilities(ctx context.Context, account f
 func roleApp(t *testing.T) (*App, *recordingRoleBackend) {
 	t.Helper()
 	app, be, _ := testApp(t, func(f *flow.Flow) {
-		f.Role("contributor", flow.CapPush)
+		// `contributor` comes from testApp; `maintainer` is the second role this
+		// test needs, and the one no account here can assume.
 		f.Role("maintainer", flow.CapMerge)
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil

@@ -2,10 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"slices"
 	"strings"
 	"testing"
 
@@ -27,7 +29,9 @@ import (
 // flow, one artifact, nothing that would fail validation for another reason.
 func declaringApp(be flow.Orchestrator, gates ...flow.GateName) App {
 	f := flow.NewFlow("x", []flow.ItemType{"task"})
-	f.AddStep("plan", "plan", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{Entry: true})
+	f.Role("contributor", flow.CapPush)
+	f.AddStep("plan", "plan", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil },
+		flow.StepConfig{Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	return App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
@@ -60,6 +64,278 @@ func TestApp_Validate_AcceptsTheDefaultDeclaration(t *testing.T) {
 	app := declaringApp(fake.New())
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
+	}
+}
+
+// --- The graph, whole ---
+//
+// docs/cli.md § Startup: "a route naming an undeclared step, a step from which
+// finalization is unreachable, a step tagged with an undeclared role" all refuse
+// the binary with a named error and exit 2. The six checks themselves are
+// Flow.ValidateGraph's, and graph_test.go owns them; what is asserted here is
+// that startup RUNS them — the wiring, the wrapping the error survives, and the
+// exit code. Without these the check exists and nothing calls it, which is the
+// state #244 was filed about.
+
+// inertStep is a handler that decides nothing. Every fixture below is refused
+// before an item is ever claimed, so no handler here is called.
+func inertStep(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }
+
+// graphApp is declaringApp over a caller-built flow: everything validate()
+// checks BEFORE the graph is well formed, so what these Apps are refused for is
+// the graph and nothing else. `commit` is declared alongside `plan` so a fixture
+// can route through a second step.
+func graphApp(be flow.Orchestrator, configure func(*flow.Flow)) App {
+	app := declaringApp(be)
+	f := flow.NewFlow("x", []flow.ItemType{"task"})
+	f.Role("contributor", flow.CapPush)
+	configure(f)
+	app.Flow = f
+	app.Artifacts = []flow.ArtifactDef{
+		flow.Artifact("plan", flow.ArtifactMarkdown),
+		flow.Artifact("commit", flow.ArtifactCommitHash),
+	}
+	return app
+}
+
+// wantStartupRefusal asserts validate() refused, and that the message says
+// enough to act on. An App refused for a different reason than the fixture set
+// up would otherwise pass.
+func wantStartupRefusal(t *testing.T, app App, fragments ...string) error {
+	t.Helper()
+	err := app.validate()
+	if err == nil {
+		t.Fatalf("validate() = nil, want a refusal mentioning %v", fragments)
+	}
+	for _, want := range fragments {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not mention %q", err, want)
+		}
+	}
+	return err
+}
+
+// A successor no registration ever produced. Nothing catches this at
+// registration — the step naming it may be declared before the one it names —
+// so startup is the first moment it is knowable at all.
+func TestApp_Validate_RefusesARouteNamingNoStep(t *testing.T) {
+	app := graphApp(fake.New(), func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+			Entry:       true,
+			Role:        "contributor",
+			Next:        []flow.StepId{"commit"},
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+		})
+	})
+	wantStartupRefusal(t, app, "write plan", "commit", "no registered lifecycle item")
+}
+
+// A step from which no sequence of declared routes ends the flow. `write plan`
+// may finalize; the step it routes to may not and routes nowhere, so an item
+// that arrives there can never finish.
+func TestApp_Validate_RefusesAStepThatCannotReachFinalization(t *testing.T) {
+	app := graphApp(fake.New(), func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+			Entry:       true,
+			Role:        "contributor",
+			Next:        []flow.StepId{"commit"},
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+		})
+		f.AddStep("record the commit", "commit", inertStep, flow.StepConfig{Role: "contributor"})
+	})
+	wantStartupRefusal(t, app, "record the commit", "commit", "cannot reach finalization")
+}
+
+// A tag naming no declaration. The refusal is a typed error carrying the
+// declared set, and it has to survive startup's wrapping: a caller that can only
+// read the message cannot tell a typo from a role whose runner has not arrived.
+func TestApp_Validate_RefusesATagNamingNoDeclaredRole(t *testing.T) {
+	app := graphApp(fake.New(), func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+			Entry:       true,
+			Role:        "reviewer",
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+		})
+	})
+	err := wantStartupRefusal(t, app, "write plan", "reviewer")
+
+	var unknown flow.ErrUnknownRole
+	if !errors.As(err, &unknown) {
+		t.Fatalf("validate() = %v, want an ErrUnknownRole recoverable through the wrapping", err)
+	}
+	if unknown.Role != "reviewer" {
+		t.Errorf("Role = %q, want the tag that named nothing", unknown.Role)
+	}
+	if !slices.Equal(unknown.Declared, []flow.RoleName{"contributor"}) {
+		t.Errorf("Declared = %v, want the declared set intact", unknown.Declared)
+	}
+}
+
+// Graph validity is NOT command-scoped. § Startup scopes validation to what the
+// invoked command needs, and the carve-out it names is gate declarations —
+// because gate availability is read off the machine. This is the opposite: pure
+// configuration, wrong wherever the binary is deployed, so it refuses every
+// command including the read-only ones, at exit 2.
+func TestRunWithArgs_ABrokenGraphExitsTwo(t *testing.T) {
+	for _, args := range [][]string{{"list"}, {"status", "1"}, {"resolve"}} {
+		t.Run(args[0], func(t *testing.T) {
+			app := graphApp(fake.New(), func(f *flow.Flow) {
+				f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+					Entry:       true,
+					Role:        "contributor",
+					Next:        []flow.StepId{"commit"},
+					MayFinalize: []flow.Disposition{flow.DispositionResolved},
+				})
+			})
+			out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+			app.Out, app.Err = out, errBuf
+			app.Name = "issue"
+
+			code := RunWithArgs(app, args)
+			if code != 2 {
+				t.Errorf("exit code = %d, want 2 (out=%q err=%q)", code, out.String(), errBuf.String())
+			}
+			got := errBuf.String()
+			if !strings.HasPrefix(got, "startup error:") {
+				t.Errorf("stderr = %q, want the startup refusal", got)
+			}
+			if !strings.Contains(got, "commit") {
+				t.Errorf("stderr = %q, want it to name the successor that names no step", got)
+			}
+		})
+	}
+}
+
+// `doctor` is the exception, and it has to stay one: a binary whose graph does
+// not hang together will not start, and refusing the one command whose job is
+// saying why would leave an operator with nothing.
+func TestRunWithArgs_DoctorReportsABrokenGraph(t *testing.T) {
+	be := fake.New()
+	arena(t, be)
+	app := graphApp(be, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+			Entry:       true,
+			Role:        "contributor",
+			Next:        []flow.StepId{"commit"},
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+		})
+	})
+	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+	app.Out, app.Err = out, errBuf
+	app.Name = "issue"
+
+	// 1, not 2: doctor ran and reported. Exit 2 would mean the report was
+	// withheld, which is the failure this guards.
+	if code := RunWithArgs(app, []string{"doctor"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1 (out=%q err=%q)", code, out.String(), errBuf.String())
+	}
+	line := doctorLine(t, out.String(), "startup")
+	if !strings.HasPrefix(line, glyphFail) || !strings.Contains(line, "commit") {
+		t.Errorf("startup line should fail carrying the graph refusal; got %q", line)
+	}
+}
+
+// The graph check runs LAST, after the per-step artifact and signal references.
+// Those checks are each about ONE declaration's own references; this one is
+// about how the declarations fit together, and docs/cli.md § Startup lists them
+// in that order. An App wrong both ways reports the reference — which is what
+// the four TestApp_Validate_Rejects… fixtures in orchestrator_test.go depend
+// on, none of which declares a routable graph.
+func TestApp_Validate_RunsTheGraphCheckAfterReferenceChecks(t *testing.T) {
+	app := graphApp(fake.New(), func(f *flow.Flow) {
+		f.AddStep("write plan", "missing-artifact", inertStep, flow.StepConfig{
+			Entry: true,
+			Role:  "contributor",
+			Next:  []flow.StepId{"nowhere"},
+		})
+	})
+	err := wantStartupRefusal(t, app, "unknown artifact", "missing-artifact")
+	if strings.Contains(err.Error(), "nowhere") {
+		t.Errorf("refusal %q reports the graph before the reference it also gets wrong", err)
+	}
+}
+
+// A flow with no steps is its own named refusal in docs/cli.md § Startup, and
+// the graph check now shadows it: an empty flow has no entry either, so
+// ValidateGraph would refuse it too — with the wrong sentence. "declares no
+// entry step" tells the reader to add `Entry: true` to a step that does not
+// exist. Dropping the earlier check as redundant is the regression this guards.
+func TestApp_Validate_AFlowWithNoStepsIsRefusedAsEmptyNotAsEntryless(t *testing.T) {
+	app := graphApp(fake.New(), func(*flow.Flow) {}) // registers nothing
+	err := wantStartupRefusal(t, app, "zero lifecycle items")
+	if strings.Contains(err.Error(), "no entry step") {
+		t.Errorf("refusal %q sends a reader with an empty flow looking for the step to tag", err)
+	}
+}
+
+// Help is exempt from the environment check and NOT from this one, and the two
+// have to stay apart. `--help` on a clone whose tools are unbuilt prints usage
+// (TestRunWithArgs_HelpNeverNeedsAGate) because gate availability is a fact
+// about the machine; a graph that does not hang together is a fact about the
+// binary, so the same invocation is refused. `doctor` is the only exemption.
+func TestRunWithArgs_ABrokenGraphRefusesHelpToo(t *testing.T) {
+	for _, args := range [][]string{{"--help"}, {"help"}, {"resolve", "--help"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			app := graphApp(fake.New(), func(f *flow.Flow) {
+				f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+					Entry:       true,
+					Role:        "contributor",
+					Next:        []flow.StepId{"commit"},
+					MayFinalize: []flow.Disposition{flow.DispositionResolved},
+				})
+			})
+			out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+			app.Out, app.Err = out, errBuf
+			app.Name = "issue"
+
+			if code := RunWithArgs(app, args); code != 2 {
+				t.Errorf("exit code = %d, want 2 (out=%q err=%q)", code, out.String(), errBuf.String())
+			}
+			if !strings.HasPrefix(errBuf.String(), "startup error:") {
+				t.Errorf("stderr = %q, want the startup refusal", errBuf.String())
+			}
+			if strings.Contains(out.String(), "usage:") {
+				t.Errorf("stdout = %q, want no usage — the binary did not start", out.String())
+			}
+		})
+	}
+}
+
+// Both refusals at once: a binary whose graph is broken, on a clone whose tools
+// have not been built, running the command that would meet the gate boundary.
+// Startup wins — exit 2, not the boundary's 1 — because it is the earlier
+// question and the one that holds wherever the binary is deployed. The exit
+// code is what an external scheduler reads, and 1 would tell it to wait for a
+// machine that will never become fit enough.
+//
+// And it is decided without asking the machine anything: § Startup covers what
+// is checkable from configuration alone.
+func TestRunWithArgs_ABrokenGraphOutranksTheGateBoundary(t *testing.T) {
+	be := &declaringOrchestrator{Orchestrator: fake.New()} // declares no gate, no command
+	app := graphApp(be, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+			Entry:       true,
+			Role:        "contributor",
+			Next:        []flow.StepId{"commit"},
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+		})
+	})
+	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+	app.Out, app.Err = out, errBuf
+	app.Name = "issue"
+
+	if code := RunWithArgs(app, []string{"resolve"}); code != 2 {
+		t.Errorf("exit code = %d, want 2 (out=%q err=%q)", code, out.String(), errBuf.String())
+	}
+	got := errBuf.String()
+	if !strings.HasPrefix(got, "startup error:") || !strings.Contains(got, "commit") {
+		t.Errorf("stderr = %q, want the graph refusal naming the successor that names no step", got)
+	}
+	if strings.Contains(got, "cannot run gates") {
+		t.Errorf("stderr = %q, want the configuration refusal rather than the environment one", got)
+	}
+	if be.gateCalls != 0 {
+		t.Errorf("a graph refusal asked the orchestrator what it can run %d time(s), want 0", be.gateCalls)
 	}
 }
 

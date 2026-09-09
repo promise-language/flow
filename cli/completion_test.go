@@ -62,7 +62,7 @@ func TestCompletion_CapturesTheReturnedBodyExactlyOnce(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "the plan is written").Markdown("the plan"), nil
-		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -93,7 +93,7 @@ func TestCompletion_ZeroResultParks(t *testing.T) {
 	app, be, claim := capturingApp(t, func(f *flow.Flow) {
 		f.AddStep("forgetful", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, nil
-		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -115,20 +115,27 @@ func TestCompletion_IllegalElectionsFailWithNothingCaptured(t *testing.T) {
 		configure func(*flow.Flow)
 		reason    string
 	}{
+		// The route the entry declares is `commit`, and the handler elects
+		// `nowhere`. The successor has to be a REGISTERED step: startup refuses a
+		// route naming nothing (Flow.ValidateGraph), so a graph whose declared
+		// successor did not exist would never reach the dispatch this is about.
 		"undeclared successor": {func(f *flow.Flow) {
 			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 				return ctx.Next("nowhere", "carry on").Markdown("the plan"), nil
-			}, flow.StepConfig{Entry: true, Next: []flow.StepId{"review"}})
+			}, flow.StepConfig{Role: "contributor", Entry: true, Next: []flow.StepId{"commit"}})
+			f.AddStep("record the commit", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+				return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("abc"), nil
+			}, flow.StepConfig{Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 		}, "does not declare"},
 		"wrong payload type": {func(f *flow.Flow) {
 			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 				return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("deadbeef"), nil
-			}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+			}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 		}, "expected markdown"},
 		"payload on a signal step": {func(f *flow.Flow) {
 			f.AddSignalStep("create pr", "pr-open", func(ctx flow.StepCtx) (flow.StepResult, error) {
 				return ctx.Finalize(flow.DispositionResolved, "done").Markdown("nope"), nil
-			}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+			}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 		}, "not handler-writable"},
 	}
 	for name, tc := range cases {
@@ -165,7 +172,7 @@ func TestCompletion_WriteContractViolationCapturesNothing(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -187,7 +194,7 @@ func TestCompletion_DeadlineCapturesNothing(t *testing.T) {
 		f.AddStep("slow", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			<-ctx.Context().Done()
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("too late"), ctx.Context().Err()
-		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {Timeout: 10 * time.Millisecond}}
 
@@ -213,7 +220,7 @@ func TestCompletion_DisclosureRefusalParksAndKeepsTheWork(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "the plan is written").
 				Markdown("the plan mentioning /home/someone/"), nil
-		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	})
 	be.refuse = flow.ErrDisclosureRefused{
 		Act:    flow.ActArtifactComment,
@@ -274,7 +281,7 @@ func TestCompletion_DisclosureRefusalParksEvenWhenTheStashFails(t *testing.T) {
 	app, be, claim := capturingApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "the plan is written").Markdown("the plan"), nil
-		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	})
 	app.Telemetry = tel
 	be.refuse = flow.ErrDisclosureRefused{Act: flow.ActArtifactComment, Reason: errors.New("a home path")}
@@ -343,22 +350,27 @@ func TestCompletion_EveryOtherOutcomeCountsTheDispatch(t *testing.T) {
 		"done": {func(f *flow.Flow) {
 			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 				return ctx.Finalize(flow.DispositionResolved, "the plan is written").Markdown("the plan"), nil
-			}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+			}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 		}, nil, "done"},
 		"decided nothing": {func(f *flow.Flow) {
 			f.AddStep("forgetful", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 				return flow.StepResult{}, nil
-			}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+			}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 		}, nil, "parked"},
+		// As above: the declared successor exists, and the handler elects one
+		// that does not.
 		"undeclared election": {func(f *flow.Flow) {
 			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 				return ctx.Next("nowhere", "carry on").Markdown("the plan"), nil
-			}, flow.StepConfig{Entry: true, Next: []flow.StepId{"review"}})
+			}, flow.StepConfig{Role: "contributor", Entry: true, Next: []flow.StepId{"commit"}})
+			f.AddStep("record the commit", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+				return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("abc"), nil
+			}, flow.StepConfig{Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 		}, nil, "failed"},
 		"capture failed for any other reason": {func(f *flow.Flow) {
 			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 				return ctx.Finalize(flow.DispositionResolved, "the plan is written").Markdown("the plan"), nil
-			}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+			}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 		}, errors.New("the orchestrator is broken"), "failed"},
 	}
 	for name, tc := range cases {
@@ -389,7 +401,7 @@ func accessorCtx(t *testing.T, state *flow.Item) *stepCtx {
 	f.Role("contributor", flow.CapPush)
 	f.AddStep("write plan", "plan", func(flow.StepCtx) (flow.StepResult, error) {
 		return flow.StepResult{}, nil
-	}, flow.StepConfig{Entry: true, Role: "contributor"})
+	}, flow.StepConfig{Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	li, _ := f.Item("write plan")
 	app := &App{Orchestrator: fake.New(), Agent: &stubAgent{name: "stub"}}
 	claim := flow.Claim{ItemRef: flow.ItemRef{Display: "1"}, Account: "runner-account"}
@@ -514,7 +526,9 @@ func TestStepCtx_RoleAccount(t *testing.T) {
 // is a field no orchestrator can persist, because this is the only write.
 func TestCompletion_TheEntryCarriesTheWholeCompletion(t *testing.T) {
 	app, be, claim := capturingApp(t, func(f *flow.Flow) {
-		f.Role("contributor", flow.CapPush)
+		// `contributor` comes from testApp; the successor's role is the second
+		// one, and the point of the fixture: what the entry awaits is the role
+		// the NEXT step declares.
 		f.Role("reviewer", flow.CapApprove)
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p"}); err != nil {
@@ -583,7 +597,6 @@ func TestCompletion_TheEntryCarriesTheWholeCompletion(t *testing.T) {
 // Finalize.
 func TestCompletion_FinalizingEntryAwaitsNobody(t *testing.T) {
 	app, be, claim := capturingApp(t, func(f *flow.Flow) {
-		f.Role("contributor", flow.CapPush)
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionRejected, "not worth doing").Markdown("why not"), nil
 		}, flow.StepConfig{Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionRejected}})
@@ -637,7 +650,7 @@ func TestCompletion_ZeroResultAppendsNothing(t *testing.T) {
 	app, be, claim := capturingApp(t, func(f *flow.Flow) {
 		f.AddStep("forgetful", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, nil
-		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -672,7 +685,7 @@ func TestRunOne_ResumingAParkRecordsOneResumption(t *testing.T) {
 				return flow.StepResult{}, nil // elects nothing → parks
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "parked" {
@@ -701,7 +714,7 @@ func TestRunOne_AnOrdinaryDispatchRecordsNoResumption(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	if _, err := RunOne(context.Background(), app, claim); err != nil {
