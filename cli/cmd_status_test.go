@@ -1073,3 +1073,64 @@ func TestBlockLine(t *testing.T) {
 		})
 	}
 }
+
+// `status` reports a step's caps through flow.EffectiveBudget — the binary's
+// policy plus every extension recorded on the step's ledger row — which is the
+// same arithmetic the pre-dispatch gate refuses on and `grant` tops up.
+//
+// The three have to agree exactly. A `status` that reported the policy alone
+// would show an operator who has just granted the cap they granted past, and
+// send them back to grant into a number nothing reads.
+func TestStatusJSON_BudgetIsThePolicyPlusTheGrants(t *testing.T) {
+	env := newParkGrantEnv(t) // policy for "plan": 3 inv, 1 prompt, $10, 30m
+	ctx := context.Background()
+
+	env.dispatches(t, "plan", 2)
+	env.spend(t, "plan", 4)
+	if err := env.be.Grant(ctx, env.claim.ItemRef, "plan", flow.Grant{
+		Invocations: 2, PromptsPerInvocation: 3, CostUSD: 5, TimeoutAdd: 600,
+	}); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+
+	if code := env.app.cmdStatus(ctx, []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	m := decode(t, env.out)
+	steps, _ := m["steps"].([]any)
+	if len(steps) == 0 {
+		t.Fatalf("steps = %v, want the flow's steps", m["steps"])
+	}
+	plan, _ := steps[0].(map[string]any)
+	if plan["id"] != "plan" {
+		t.Fatalf("first step = %v, want plan", plan)
+	}
+	budget, ok := plan["budget"].(map[string]any)
+	if !ok {
+		t.Fatalf("budget = %v, want an object", plan["budget"])
+	}
+	axis := func(name string) map[string]any {
+		t.Helper()
+		a, ok := budget[name].(map[string]any)
+		if !ok {
+			t.Fatalf("budget[%q] = %v, want an object", name, budget[name])
+		}
+		return a
+	}
+	// Consumption is the row's; the cap is the policy plus what was granted.
+	if got := axis("invocations"); got["used"] != 2.0 || got["granted"] != 5.0 {
+		t.Errorf("invocations = %v, want 2 used against 3+2", got)
+	}
+	if got := axis("cost_usd"); got["used"] != 4.0 || got["granted"] != 15.0 {
+		t.Errorf("cost_usd = %v, want 4 used against 10+5", got)
+	}
+	// Prompts report no consumption at all: the cap is per-invocation and the
+	// counter lives only inside a running dispatch, so a stored figure would be
+	// a number from some earlier run.
+	if got := axis("prompts_per_invocation"); got["used"] != 0.0 || got["granted"] != 4.0 {
+		t.Errorf("prompts_per_invocation = %v, want 0 used against 1+3", got)
+	}
+	if got := axis("timeout_seconds"); got["granted"] != 2400.0 {
+		t.Errorf("timeout_seconds = %v, want 1800+600", got)
+	}
+}

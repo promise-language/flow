@@ -446,3 +446,27 @@ func TestAwaitsStringRoundTrip(t *testing.T) {
 		t.Errorf("awaitsString carried the account: %q", got)
 	}
 }
+
+// Durations cross the wire as a float count of SECONDS — a number a reader with
+// no Go can interpret — and the scaling back is a float multiply for a reason:
+// converting through an integer second count truncates, and a step that ran for
+// a quarter of a second would read back as never having run at all. The row
+// above uses whole seconds, which cannot tell the two conversions apart.
+func TestLedgerFromDoc_KeepsSubSecondDurations(t *testing.T) {
+	l := ledgerFromDoc(stateLedgerDoc{
+		Steps: map[string]stateLedgerRowDoc{
+			"plan": {DurationSeconds: 0.25, WaitingSeconds: 1.5},
+		},
+		TotalDurationSeconds: 0.25, TotalWaitingSeconds: 1.5,
+	})
+	row := l.Row("plan")
+	if row.Active != 250*time.Millisecond {
+		t.Errorf("Active = %v, want 250ms — 0.25s must not truncate to zero", row.Active)
+	}
+	if row.Waiting != 1500*time.Millisecond {
+		t.Errorf("Waiting = %v, want 1.5s — the fraction must not be dropped", row.Waiting)
+	}
+	if l.TotalActive != 250*time.Millisecond || l.TotalWaiting != 1500*time.Millisecond {
+		t.Errorf("totals = %v/%v, want 250ms/1.5s", l.TotalActive, l.TotalWaiting)
+	}
+}

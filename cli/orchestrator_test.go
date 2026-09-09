@@ -1393,10 +1393,15 @@ func TestSelectFlow_RequireSignalGate(t *testing.T) {
 type finalizingBackend struct {
 	*fake.Orchestrator
 	finalizeCalls int
+	// disposition is the last one Finalize was handed. Recorded because the
+	// disposition is half the record — an item finalized under the wrong one
+	// tells the tracker the opposite of what the run decided.
+	disposition flow.Disposition
 }
 
 func (b *finalizingBackend) Finalize(ctx context.Context, ref flow.ItemRef, d flow.Disposition) error {
 	b.finalizeCalls++
+	b.disposition = d
 	return nil
 }
 
@@ -1624,6 +1629,49 @@ func TestRunOne_FinalizesWhenAllRequiredArtifactsResolved(t *testing.T) {
 	}
 	if wrapped.finalizeCalls != 1 {
 		t.Errorf("finalizeCalls = %d, want 1 (Finalize must run when nothing is pending)", wrapped.finalizeCalls)
+	}
+	// Nothing elected anything here — the journal is empty and the flow simply
+	// reached its end — so the disposition is `resolved`, which is the whole
+	// record this branch has.
+	if wrapped.disposition != flow.DispositionResolved {
+		t.Errorf("Finalize disposition = %q, want %q on the branch where nothing elected",
+			wrapped.disposition, flow.DispositionResolved)
+	}
+}
+
+// The disposition a FINALIZING ELECTION carried is what Finalize records. It is
+// read back off the journal on the advance that finds no step left, and a run
+// that always reported `resolved` would close a rejected item as done — the
+// tracker saying the opposite of what the flow decided, terminally.
+func TestRunOne_FinalizeCarriesTheElectedDisposition(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionRejected, "not worth doing").Markdown("why not"), nil
+		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionRejected}})
+	}, &stubAgent{name: "stub"})
+	wrapped := &finalizingBackend{Orchestrator: be}
+	app.Orchestrator = wrapped
+
+	ctx := context.Background()
+	// The first advance runs the step, which records the finalizing entry. The
+	// step completing is not a Finalize: nothing on the orchestrator is marked
+	// until an advance finds no step left.
+	if res, err := RunOne(ctx, app, claim); err != nil || res.Status != "done" {
+		t.Fatalf("first run = %+v, %v; want done", res, err)
+	}
+	if wrapped.finalizeCalls != 0 {
+		t.Fatalf("finalizeCalls = %d after the step itself ran, want 0", wrapped.finalizeCalls)
+	}
+
+	if res, err := RunOne(ctx, app, claim); err != nil || res.Status != "done" {
+		t.Fatalf("second run = %+v, %v; want done", res, err)
+	}
+	if wrapped.finalizeCalls != 1 {
+		t.Fatalf("finalizeCalls = %d, want 1", wrapped.finalizeCalls)
+	}
+	if wrapped.disposition != flow.DispositionRejected {
+		t.Errorf("Finalize disposition = %q, want %q — the election's own",
+			wrapped.disposition, flow.DispositionRejected)
 	}
 }
 

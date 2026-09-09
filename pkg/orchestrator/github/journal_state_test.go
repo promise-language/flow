@@ -480,6 +480,43 @@ func TestBackend_Reset_OnAnItemWithNoRecord(t *testing.T) {
 	}
 }
 
+// A reset takes the item's DRAFTS with the record they belonged to. Scratch
+// prose kept past the journal it was working towards has nothing left to
+// resume, and a route that returns to a step would hand the next dispatch's
+// agent the earlier execution's thinking as its own.
+//
+// Every step's, and this issue's only — and whether or not there is a state
+// comment, because the drafts are worktree-local and the record they belonged
+// to may never have reached the issue.
+func TestBackend_Reset_ClearsTheItemsDrafts(t *testing.T) {
+	_, b, claim := newJournalEnv(t)
+	ctx := t.Context()
+
+	for _, step := range []flow.StepId{"plan", "implementation"} {
+		if err := b.SaveWorkInProgress(ctx, claim.ItemRef, step, "half a "+string(step)); err != nil {
+			t.Fatalf("SaveWorkInProgress(%s): %v", step, err)
+		}
+	}
+	// Another issue's draft is not part of this item's record.
+	other := b.refFromIssue(43)
+	if err := b.SaveWorkInProgress(ctx, other, "plan", "issue 43's reasoning"); err != nil {
+		t.Fatalf("SaveWorkInProgress(#43): %v", err)
+	}
+
+	if err := b.Reset(ctx, claim.ItemRef); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+
+	for _, step := range []flow.StepId{"plan", "implementation"} {
+		if got, err := b.LoadWorkInProgress(ctx, claim.ItemRef, step); got != "" || err != nil {
+			t.Errorf("draft for %s after Reset = (%q, %v), want (\"\", nil)", step, got, err)
+		}
+	}
+	if got, err := b.LoadWorkInProgress(ctx, other, "plan"); got != "issue 43's reasoning" || err != nil {
+		t.Errorf("another issue's draft = (%q, %v), want it untouched", got, err)
+	}
+}
+
 // --- The role predicate on the listing ---
 
 // awaitingRoleEnv claims the item and leaves it awaiting `role`.
