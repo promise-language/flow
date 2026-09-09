@@ -335,7 +335,7 @@ func TestCmdStatus_InspectsById(t *testing.T) {
 	f := flow.NewFlow("implement", []flow.ItemType{"task"})
 	f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-	}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	app.Flow = f
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations: 3, MaxPromptsPerInvocation: 1, MaxCostUSD: 10,
@@ -355,7 +355,7 @@ func TestCmdStatus_InspectsById(t *testing.T) {
 		t.Fatalf("Claim: %v", err)
 	}
 	sib.claim = &claim
-	appendMarkdown(t, be, claim.ItemRef, "plan", "the plan")
+	appendMarkdown(t, be, claim.ItemRef, "plan", "next", "the plan")
 
 	out := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}
@@ -664,7 +664,7 @@ func TestStatusRunningDoesNotOverrideResolved(t *testing.T) {
 	}
 	// Resolve the "plan" artifact so its state is "resolved".
 	ctx := context.Background()
-	appendResult(t, env.be, env.claim.ItemRef, "plan", 1, flow.ArtifactBody{
+	appendResult(t, env.be, env.claim.ItemRef, "plan", "next", 1, flow.ArtifactBody{
 		Type:     flow.ArtifactMarkdown,
 		Markdown: "the plan",
 	})

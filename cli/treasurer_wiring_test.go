@@ -24,7 +24,7 @@ func TestRunOne_ParksBeforeDispatchWhenTheCostCapIsSpent(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Error("the handler ran for a step whose cost cap is already spent")
 			return flow.StepResult{}, nil
-		}, flow.StepConfig{})
+		}, flow.StepConfig{Entry: true})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxCostUSD: 2}}
 
@@ -65,22 +65,30 @@ func TestRunOne_ParksBeforeDispatchWhenTheCostCapIsSpent(t *testing.T) {
 // never arrives is exactly what a treasurer has to be able to see, and the
 // artifact-only carve-out this replaces made it invisible.
 func TestRunOne_ASignalStepsDispatchesAndTimeReachTheLedger(t *testing.T) {
+	rounds := 0
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddSignalStep("create pull request", "pr-open", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			rounds++
+			if rounds == 1 {
+				// The request could not be opened, so nothing completed and the
+				// route did not move: the next advance dispatches this same step
+				// again, which is the case the counter exists for.
+				return flow.StepResult{}, ctx.Park(flow.ParkRequest{
+					Kind: flow.ParkBlocked, Reason: "the request could not be opened",
+				})
+			}
 			return ctx.Finalize(flow.DispositionResolved, "the change is proposed"), nil
 		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	ctx := context.Background()
-	// The signal never arrives, so the step is dispatched again on the next
-	// advance — the case the counter exists for.
-	for range 2 {
+	for _, want := range []string{"parked", "done"} {
 		res, err := RunOne(ctx, app, claim)
 		if err != nil {
 			t.Fatalf("RunOne: %v", err)
 		}
-		if res.Status != "done" {
-			t.Fatalf("res = %+v, want done", res)
+		if res.Status != want {
+			t.Fatalf("res = %+v, want %s", res, want)
 		}
 	}
 

@@ -53,7 +53,7 @@ func TestWorkInProgress_BackendWithoutAStore(t *testing.T) {
 			gotBody, gotErr = ctx.WorkInProgress()
 			saveErr = ctx.RecordWorkInProgress("half a plan")
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Orchestrator = noWorkBackend{app.Orchestrator}
 
@@ -97,7 +97,7 @@ func TestWorkInProgress_SurvivesToTheNextDispatch(t *testing.T) {
 			}
 			nextInvocation = seen
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "parked" {
@@ -123,7 +123,7 @@ func TestWorkInProgress_ClearedWhenTheStepCompletes(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
@@ -155,7 +155,7 @@ func TestWorkInProgress_RefusedAppendKeepsTheDraft(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Orchestrator = appendFailsBackend{Orchestrator: be, err: errors.New("disk went away")}
 
@@ -193,7 +193,7 @@ func TestWorkInProgress_IsNotVisibleToAnotherStep(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return flow.StepResult{}, ctx.Park(flow.ParkRequest{Kind: flow.ParkBlocked, Reason: "stopping here so the record outlives the step"})
-		}, flow.StepConfig{})
+		}, flow.StepConfig{Entry: true})
 	}, &stubAgent{name: "stub"})
 	// A second step, added after the helper's own validate so the artifact it
 	// produces can be declared alongside it.
@@ -212,7 +212,7 @@ func TestWorkInProgress_IsNotVisibleToAnotherStep(t *testing.T) {
 	// Complete the plan through the backend, then put a record back under its
 	// step id: a record that outlived the step that wrote it, which is the
 	// state the keying has to hold under.
-	appendMarkdown(t, be, claim.ItemRef, "plan", "the plan")
+	appendMarkdown(t, be, claim.ItemRef, "plan", "review", "the plan")
 	if err := be.SaveWorkInProgress(context.Background(), claim.ItemRef, "plan", "the plan step's reasoning"); err != nil {
 		t.Fatalf("SaveWorkInProgress: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestWorkInProgress_ReadFailureReachesTheStep(t *testing.T) {
 			body, first = ctx.WorkInProgress()
 			_, second = ctx.WorkInProgress()
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	store := &loadFailsBackend{Orchestrator: be, err: wantErr}
 	app.Orchestrator = store
@@ -305,7 +305,7 @@ func TestWorkInProgress_SaveFailureReachesTheStepAndStashesNothing(t *testing.T)
 			saveErr = ctx.RecordWorkInProgress("half a plan")
 			readBack, _ = ctx.WorkInProgress()
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Orchestrator = saveFailsBackend{Orchestrator: be, err: wantErr}
 

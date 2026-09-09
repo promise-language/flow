@@ -389,7 +389,7 @@ func TestGrantPark_RefusesRefusedPark(t *testing.T) {
 
 func TestGrantPark_StaleParkOnCompletedStep(t *testing.T) {
 	env := newParkGrantEnv(t)
-	appendMarkdown(t, env.be, env.claim.ItemRef, "plan", "done")
+	appendMarkdown(t, env.be, env.claim.ItemRef, "plan", "commit", "done")
 	// Park recorded AFTER the step completed — a record that outlived its
 	// reason. The CLI must notice, since the backend only clears a park when
 	// the step completes or a grant satisfies it.
@@ -497,7 +497,7 @@ func TestGrant_TooSmallLeavesParkAndReportsIt(t *testing.T) {
 func TestGrantAll_ToppsUpPendingOnly(t *testing.T) {
 	env := newParkGrantEnv(t)
 	env.dispatches(t, "plan", 3)
-	appendResult(t, env.be, env.claim.ItemRef, "commit", 1,
+	appendResult(t, env.be, env.claim.ItemRef, "commit", "next", 1,
 		flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: "abc"})
 	before := env.budget(t, "commit").MaxInvocations
 

@@ -138,8 +138,7 @@ func (b ArtifactBody) Empty() bool {
 // record is derived inside it from the entry being appended, so the projection
 // cannot drift from the journal it projects. It exists because the typed
 // accessors (StepCtx.Artifact, Markdown, Patch, …) still read it — they move to
-// reading entries once entries persist (#240) — and because the outgoing
-// checklist derivation reads it until #245 retires that too.
+// reading entries once entries persist (#240).
 //
 // It carries NO budget and NO checklist bits. Counters are the ledger's
 // (LedgerRow); `required` and `stale` went with seeding and MarkStale, and a

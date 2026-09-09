@@ -34,7 +34,7 @@ func TestParkReportsEveryAxis(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, errors.New("boom")
-		}, flow.StepConfig{})
+		}, flow.StepConfig{Entry: true})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations:          1,
@@ -92,7 +92,7 @@ func TestTimeoutParkReportsInvocationsAsFlat(t *testing.T) {
 		f.AddStep("slow", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			<-ctx.Context().Done()
 			return flow.StepResult{}, ctx.Context().Err()
-		}, flow.StepConfig{})
+		}, flow.StepConfig{Entry: true})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations: 1,
@@ -131,7 +131,7 @@ func TestParkReportsPromptsSpentByTheRun(t *testing.T) {
 				}
 			}
 			return flow.StepResult{}, nil
-		}, flow.StepConfig{})
+		}, flow.StepConfig{Entry: true})
 	}, agent)
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations:          3,
@@ -159,7 +159,7 @@ func TestNonBudgetParkReportsNoAxes(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("silent", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, nil // returns without resolving
-		}, flow.StepConfig{})
+		}, flow.StepConfig{Entry: true})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -316,7 +316,7 @@ func TestRunOne_ExhaustionParkCarriesEveryAxis(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, errors.New("boom")
-		}, flow.StepConfig{})
+		}, flow.StepConfig{Entry: true})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations:          1,
@@ -372,7 +372,7 @@ func TestGrant_ClearsTheRunnersOwnExhaustionParkOnTheTrippingAxisOnly(t *testing
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, errors.New("boom")
-		}, flow.StepConfig{})
+		}, flow.StepConfig{Entry: true})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxInvocations: 1}}
 	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}

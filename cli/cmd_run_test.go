@@ -78,7 +78,7 @@ var _ flow.Orchestrator = (*failingLoadBackend)(nil)
 func runStepStubFlow(f *flow.Flow) {
 	f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-	}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 }
 
 // A run-step that never reached a step still reports on the machine channel:
@@ -287,7 +287,7 @@ func TestCmdRun_JSONModeCompactOutput(t *testing.T) {
 			app, _, _ := testApp(t, func(f *flow.Flow) {
 				f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 					return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-				}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+				}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 			}, &stubAgent{name: "stub"})
 			out := &bytes.Buffer{}
 			app.Out = out
@@ -317,7 +317,7 @@ func TestCmdRun_HumanModeOneLine(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	out := &bytes.Buffer{}
 	app.Out = out
@@ -345,7 +345,7 @@ func TestCmdRun_HumanModeWithReason(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	// Use a preflight that returns ErrBlocked to produce a reason.
@@ -376,7 +376,7 @@ func TestCmdRun_AutoDetectsHuman(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	out := &bytes.Buffer{}
 	app.Out = out
@@ -401,7 +401,7 @@ func TestCmdRun_PipedStdoutSelectsJSON(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	r, w, err := os.Pipe()
@@ -435,7 +435,7 @@ func TestCmdRun_EnvHumanProducesHumanOutput(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	// Use an os.Pipe so auto-detect would pick JSON — the env var must override.
@@ -471,7 +471,7 @@ func TestCmdRun_MutuallyExclusiveFlags(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	code := app.cmdRun(context.Background(), []string{"--json", "--human"})
@@ -489,7 +489,7 @@ func TestCmdRun_BudgetParkNarratesAxes(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, errors.New("boom")
-		}, flow.StepConfig{})
+		}, flow.StepConfig{Entry: true})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations:          1,
@@ -533,7 +533,7 @@ func TestCmdRun_BlockedOnItemsNarratesTheBlockers(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("the step must not dispatch on a blocked item")
 			return flow.StepResult{}, nil
-		}, flow.StepConfig{})
+		}, flow.StepConfig{Entry: true})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "landed"})
 	be.AddItem("3", flow.Item{Type: "task", Title: "still open"})
@@ -565,7 +565,7 @@ func TestCmdRun_BlockedOnItemsJSONCarriesTheKindAndBlockers(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("the step must not dispatch on a blocked item")
 			return flow.StepResult{}, nil
-		}, flow.StepConfig{})
+		}, flow.StepConfig{Entry: true})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "still open"})
 	blockOn(t, be, claim.ItemRef, be.Ref("2"))
@@ -592,7 +592,7 @@ func TestCmdRun_NonBudgetParkOmitsAxes(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("silent", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, nil // returns without resolving
-		}, flow.StepConfig{})
+		}, flow.StepConfig{Entry: true})
 	}, &stubAgent{name: "stub"})
 	out := &bytes.Buffer{}
 	app.Out = out

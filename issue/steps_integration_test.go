@@ -3,6 +3,7 @@ package issue
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/promise-language/flow"
@@ -387,6 +388,30 @@ func TestStepMerge_HappyPath(t *testing.T) {
 	}
 	if !wt.merged {
 		t.Error("pull request was not merged")
+	}
+}
+
+// A request a person merged by hand reaches this step like any other: a step
+// runs when the route names it, and for no other reason. Merging it again is
+// how the documented hand-integrated path used to die at its last act, so the
+// step performs no merge and routes on to record what landed.
+func TestStepMerge_AlreadyMergedRoutesOnWithoutMerging(t *testing.T) {
+	wt := newIntegrationWorktree()
+	ctx := newIntegrationCtx(wt)
+	ctx.fakeCtx.signals = map[flow.SignalId]bool{flow.SignalId(StepMerge): true}
+
+	res, err := testBuilder(t).stepMerge(ctx)
+	if err != nil {
+		t.Fatalf("stepMerge: %v", err)
+	}
+	wantNext(t, res, flow.StepId(StepRecordMerge))
+	for _, c := range wt.fakeWorktree.calls {
+		if c == "merge" {
+			t.Fatalf("the step merged an already-merged request; calls = %v", wt.fakeWorktree.calls)
+		}
+	}
+	if !strings.Contains(res.Message, "already merged") {
+		t.Errorf("message = %q, want it to say the merge was not this step's", res.Message)
 	}
 }
 

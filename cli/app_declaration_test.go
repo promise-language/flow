@@ -27,7 +27,7 @@ import (
 // flow, one artifact, nothing that would fail validation for another reason.
 func declaringApp(be flow.Orchestrator, gates ...flow.GateName) App {
 	f := flow.NewFlow("x", []flow.ItemType{"task"})
-	f.AddStep("plan", "plan", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{})
+	f.AddStep("plan", "plan", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{Entry: true})
 	return App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},

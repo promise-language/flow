@@ -95,79 +95,6 @@ func resolvedArtifact(id ArtifactId, t ArtifactType) ArtifactRecord {
 	return ArtifactRecord{Id: id, Type: t, Resolved: true}
 }
 
-func TestDeriveNext_FirstUnresolved(t *testing.T) {
-	f := NewFlow("x", nil)
-	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
-	f.AddStep("implement", "impl", noopHandler, StepConfig{})
-	f.AddStep("review", "review", noopHandler, StepConfig{})
-
-	state := &Item{
-		Artifacts: map[ArtifactId]ArtifactRecord{
-			"plan": resolvedArtifact("plan", ArtifactMarkdown),
-			// "impl" unresolved
-		},
-	}
-	next, ok := f.DeriveNext(state)
-	if !ok || next != "implement" {
-		t.Errorf("DeriveNext = (%q, %v), want (\"implement\", true)", next, ok)
-	}
-}
-
-func TestDeriveNext_AllResolvedReturnsFalse(t *testing.T) {
-	f := NewFlow("x", nil)
-	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
-	f.AddStep("implement", "impl", noopHandler, StepConfig{})
-
-	state := &Item{
-		Artifacts: map[ArtifactId]ArtifactRecord{
-			"plan": resolvedArtifact("plan", ArtifactMarkdown),
-			"impl": resolvedArtifact("impl", ArtifactPatch),
-		},
-	}
-	if _, ok := f.DeriveNext(state); ok {
-		t.Errorf("DeriveNext should return ok=false when all resolved")
-	}
-}
-
-func TestDeriveNext_SignalStepPendingUntilSet(t *testing.T) {
-	f := NewFlow("x", nil)
-	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
-	f.AddSignalStep("create pr", "pr-open", noopHandler, StepConfig{})
-
-	state := &Item{
-		Artifacts: map[ArtifactId]ArtifactRecord{
-			"plan": resolvedArtifact("plan", ArtifactMarkdown),
-		},
-		Signals: map[SignalId]SignalState{},
-	}
-	next, ok := f.DeriveNext(state)
-	if !ok || next != "create pr" {
-		t.Errorf("DeriveNext = (%q, %v), want (\"create pr\", true)", next, ok)
-	}
-
-	// flip signal — step should complete
-	state.Signals["pr-open"] = SignalState{Set: true}
-	if _, ok := f.DeriveNext(state); ok {
-		t.Errorf("DeriveNext should be done once signal set")
-	}
-}
-
-func TestAwaitSignal_PendingUntilSet(t *testing.T) {
-	f := NewFlow("observe", nil)
-	f.AwaitSignal("await merge", "pr-merged", StepConfig{})
-
-	state := &Item{Signals: map[SignalId]SignalState{}}
-	next, ok := f.DeriveNext(state)
-	if !ok || next != "await merge" {
-		t.Errorf("await should be pending; got (%q, %v)", next, ok)
-	}
-
-	state.Signals["pr-merged"] = SignalState{Set: true}
-	if _, ok := f.DeriveNext(state); ok {
-		t.Errorf("await should complete once signal set")
-	}
-}
-
 func TestIsReady_RequireSignal(t *testing.T) {
 	f := NewFlow("merge", nil)
 	f.RequireSignal("pr-open")
@@ -180,48 +107,6 @@ func TestIsReady_RequireSignal(t *testing.T) {
 	state.Signals["pr-open"] = SignalState{Set: true}
 	if !f.IsReady(state) {
 		t.Errorf("IsReady should be true once precondition signal set")
-	}
-}
-
-func TestIsDone_EveryStepResolved(t *testing.T) {
-	f := NewFlow("x", nil)
-	f.AddStep("first", "one", noopHandler, StepConfig{})
-	f.AddStep("second", "two", noopHandler, StepConfig{})
-
-	state := &Item{Artifacts: map[ArtifactId]ArtifactRecord{}}
-	if f.IsDone(state) {
-		t.Errorf("IsDone should be false with both steps unresolved")
-	}
-	state.Artifacts["one"] = resolvedArtifact("one", ArtifactMarkdown)
-	if f.IsDone(state) {
-		t.Errorf("IsDone should still be false with the second step unresolved — there is no optional step")
-	}
-	state.Artifacts["two"] = resolvedArtifact("two", ArtifactMarkdown)
-	if !f.IsDone(state) {
-		t.Errorf("IsDone should be true once every step is resolved")
-	}
-}
-
-func TestTerminalReason(t *testing.T) {
-	f := NewFlow("merge", nil)
-	f.RequireSignal("pr-open")
-	f.AddStep("merge-step", "merge-commit", noopHandler, StepConfig{})
-
-	state := &Item{Signals: map[SignalId]SignalState{}}
-	if r := f.TerminalReason(state); r != "awaiting-preconditions" {
-		t.Errorf("TerminalReason = %q, want awaiting-preconditions", r)
-	}
-
-	state.Signals["pr-open"] = SignalState{Set: true}
-	if r := f.TerminalReason(state); r != "" {
-		t.Errorf("TerminalReason = %q, want empty (still has pending step)", r)
-	}
-
-	state.Artifacts = map[ArtifactId]ArtifactRecord{
-		"merge-commit": resolvedArtifact("merge-commit", ArtifactCommitHash),
-	}
-	if r := f.TerminalReason(state); r != "done" {
-		t.Errorf("TerminalReason = %q, want done", r)
 	}
 }
 

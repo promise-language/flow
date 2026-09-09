@@ -645,12 +645,10 @@ func (b *builder) stepCoverage(ctx flow.StepCtx) (flow.StepResult, error) {
 // the pull request. The pr-open signal is set by the backend as a side effect of
 // Open succeeding, not by this handler.
 //
-// afterRequest is the successor the flow declares for this step — close branch
-// when the binary proposes, verify merge result when it carries through. It is
-// passed in rather than decided here because the declaration and the election
-// must be the same edge, and the registration is where that edge is written
-// (issue/build.go addContributorSteps).
-func (b *builder) stepOpenPR(ctx flow.StepCtx, afterRequest flow.StepId) (flow.StepResult, error) {
+// Its successor is close branch, always: the contributor's part ends at the
+// proposal whoever is running it, and what happens to the proposal next is the
+// maintainer's step rather than a different edge out of this one.
+func (b *builder) stepOpenPR(ctx flow.StepCtx) (flow.StepResult, error) {
 	wt, err := ctx.Worktree()
 	if err != nil {
 		return flow.StepResult{}, err
@@ -713,7 +711,7 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx, afterRequest flow.StepId) (flow.S
 	ctx.Notify("", "pushing and opening pull request")
 	_, err = flow.Open(ctx.Context(), wt, flow.BranchName(base), title, body)
 	if err == nil {
-		return b.requestOpened(ctx, afterRequest), nil
+		return b.requestOpened(ctx), nil
 	}
 
 	// Only recover ActPush refusals. An ActPullRequest refusal (PR body/title)
@@ -747,7 +745,7 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx, afterRequest flow.StepId) (flow.S
 	ctx.Notify("", "retrying push after history rewrite")
 	_, err = flow.Open(ctx.Context(), wt, flow.BranchName(base), title, body)
 	if err == nil {
-		return b.requestOpened(ctx, afterRequest), nil
+		return b.requestOpened(ctx), nil
 	}
 
 	// Second failure: park, don't fail.
@@ -771,9 +769,10 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx, afterRequest flow.StepId) (flow.S
 // requestOpened is the election the pull request step makes once the request is
 // open, whichever way it got there: one wording for the two call sites, so the
 // successor cannot be told two different things about the same fact.
-func (b *builder) requestOpened(ctx flow.StepCtx, afterRequest flow.StepId) flow.StepResult {
-	return ctx.Next(afterRequest, fmt.Sprintf(
-		"the pull request for branch %q is open and the integration gate passed on the branch as proposed",
+func (b *builder) requestOpened(ctx flow.StepCtx) flow.StepResult {
+	return ctx.Next(flow.StepId(StepCloseBranch), fmt.Sprintf(
+		"the pull request for branch %q is open and the integration gate passed on the branch as proposed; "+
+			"return the worktree to the base branch",
 		b.branchName(ctx)))
 }
 
@@ -886,16 +885,21 @@ func (b *builder) followUpCommitMessage(ctx flow.StepCtx) string {
 	return fmt.Sprintf("Review and coverage on #%s", itemNumber(ctx.Item()))
 }
 
-// stepCloseBranch returns the worktree to the base branch.
+// stepCloseBranch returns the worktree to the base branch and hands the
+// proposal to the maintainer's review.
 //
-// It runs only when the resolution completed: DeriveNext dispatches the first
-// PENDING step in registration order, and this one is registered after the
-// request, so a run that parked, was blocked or failed never reaches it. That is
-// the point — the state a stopped run left is what someone resumes from or
-// diagnoses.
+// It runs only when the contributor's part COMPLETED: the route reaches it only
+// from the open request step's election, so a run that parked, was blocked or
+// failed never arrives here. That is the point — the state a stopped run left is
+// what someone resumes from or diagnoses.
 //
 // It does NOT delete the item's branch. The branch carries the request, and the
 // request outlives the resolution that opened it.
+//
+// And it does not finalize. The contributor's part is over; the item's is not,
+// so this election is the role boundary — a handoff where the maintainer is
+// another principal, and an ordinary step where one principal covers both
+// (docs/issue-flow.md § Close branch).
 func (b *builder) stepCloseBranch(ctx flow.StepCtx) (flow.StepResult, error) {
 	wt, err := ctx.Worktree()
 	if err != nil {
@@ -918,11 +922,9 @@ func (b *builder) stepCloseBranch(ctx flow.StepCtx) (flow.StepResult, error) {
 			"returned to it — a branch of that name now points at this item's work and has "+
 			"to be resolved by hand: %w", base, flow.ErrRefused)
 	}
-	// The one election that ends the item. Finalizing is what completes a flow
-	// — there is no checklist that decides it (docs/resolution.md § Finalizing)
-	// — and this is the step both compositions end at.
-	return ctx.Finalize(flow.DispositionResolved, fmt.Sprintf(
-		"the resolution is complete and the worktree is back on %s", base)).Flag(), nil
+	return ctx.Next(flow.StepId(StepReviewProposal), fmt.Sprintf(
+		"the change is proposed and the worktree is back on %s; "+
+			"judge the proposal as what will land", base)).Flag(), nil
 }
 
 // ---------------------------------------------------------------------------

@@ -444,53 +444,6 @@ func (f *Flow) AwaitsAfter(r Route) Awaits {
 	return Awaits{Role: succ.role}
 }
 
-// Pending, stepPending, DeriveNext, IsDone and TerminalReason below are the
-// OUTGOING derivation: position as a checklist walked in registration order,
-// which Flow.Position replaces. They are not a second copy of one rule kept in
-// sync with it — nothing reads both, and Position becomes the only derivation
-// once the route is elected (#233), appended (#239), persisted (#240) and
-// declared by the shipped flow (#245). The checklist cannot go before then:
-// until something appends an entry, Position would report "no entry declared"
-// for every item, which the advance reads as "nothing left to do".
-
-// Pending returns true iff the lifecycle item with this description is
-// unresolved on the given Item.
-func (f *Flow) Pending(it *Item, description string) bool {
-	st := f.stepByDescription[description]
-	if st == nil {
-		return false
-	}
-	return f.stepPending(it, st)
-}
-
-// stepPending — internal predicate that knows how to derive "is this step
-// complete?" from the Item, per step kind.
-func (f *Flow) stepPending(state *Item, st *step) bool {
-	switch st.kind {
-	case stepArtifact:
-		// Unresolved means pending, and that is the whole test. The
-		// Required=false opt-out and the stale bit both went with seeding and
-		// MarkStale — nothing writes either any more, so a branch reading them
-		// would skip every step on an item with no seeded records at all.
-		return !state.Artifact(st.artifact).Resolved
-	case stepSignal, stepAwait:
-		return !state.SignalSet(st.signal)
-	}
-	return false
-}
-
-// DeriveNext returns the first unresolved lifecycle item in registration
-// order, with ok==true. ok==false means the flow has nothing more to do on
-// this item.
-func (f *Flow) DeriveNext(it *Item) (string, bool) {
-	for _, st := range f.steps {
-		if f.stepPending(it, st) {
-			return st.description, true
-		}
-	}
-	return "", false
-}
-
 // LifecycleKind discriminates the three lifecycle item shapes the cli
 // orchestrator needs to dispatch by.
 type LifecycleKind int
@@ -609,6 +562,11 @@ func toLifecycleItem(st *step) LifecycleItem {
 
 // IsReady returns true iff all RequireSignal preconditions are set on the
 // given Item.
+//
+// ELIGIBILITY, not lifecycle. A required signal is a gate on whether the item
+// may be begun at all; it does not appear in the graph and is never routed to
+// (docs/flow-registration.md § Signal preconditions). Where the item stands
+// once it is eligible is Position's, and Position's only.
 func (f *Flow) IsReady(it *Item) bool {
 	for _, sig := range f.requireSignals {
 		if !it.SignalSet(sig) {
@@ -616,31 +574,4 @@ func (f *Flow) IsReady(it *Item) bool {
 		}
 	}
 	return true
-}
-
-// IsDone returns true iff every lifecycle item is resolved. There is no
-// per-step opt-out to skip: routing subsumed step optionality, and nothing
-// writes a not-required record any more.
-func (f *Flow) IsDone(it *Item) bool {
-	for _, st := range f.steps {
-		if f.stepPending(it, st) {
-			return false
-		}
-	}
-	return true
-}
-
-// TerminalReason returns a short reason string when the flow has stopped
-// making progress. Empty string means "still pending / ready to dispatch."
-func (f *Flow) TerminalReason(it *Item) string {
-	if f.IsDone(it) {
-		return "done"
-	}
-	if !f.IsReady(it) {
-		return "awaiting-preconditions"
-	}
-	if _, ok := f.DeriveNext(it); !ok {
-		return "no-pending-steps"
-	}
-	return ""
 }

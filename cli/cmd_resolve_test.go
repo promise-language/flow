@@ -51,7 +51,7 @@ func resolveTestAppStep(t *testing.T, be flow.Orchestrator, step func(flow.StepC
 		Err:          errBuf,
 	}
 	f := flow.NewFlow("implement", []flow.ItemType{"task"})
-	f.AddStep("write plan", "plan", step, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	f.AddStep("write plan", "plan", step, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	app.Flow = f
 	if err := app.validate(); err != nil {
@@ -1203,7 +1203,7 @@ func TestCmdResolve_BudgetParkNarratesAxes(t *testing.T) {
 		return flow.StepResult{}, errors.New("boom")
 	}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", handler, flow.StepConfig{})
+		f.AddStep("write plan", "plan", handler, flow.StepConfig{Entry: true})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations:          1,

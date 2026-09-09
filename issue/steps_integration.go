@@ -7,12 +7,16 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Integration step set.
+// Integration steps.
 //
-// Three steps that carry a proposed change to a merged one: verify the merge
-// result, merge, record the merge commit. They exist as a phase that can be
-// composed after the contributor steps (carry-through) or — eventually — run
-// by a separate maintainer principal.
+// The three that carry a proposal the maintainer's review accepted to a merged
+// change: verify the merge result, merge, record the merge commit. They sit
+// behind that review in the one graph, so which principal runs them is a
+// question about coverage rather than about which steps exist — the same
+// account continuing across the boundary, or a maintainer picking the item up
+// where the contributor left it.
+//
+// The judgement that routes here is steps_maintainer.go's.
 // ---------------------------------------------------------------------------
 
 // stepVerifyMerge measures the MERGE RESULT, not the branch. A branch that
@@ -70,6 +74,21 @@ func (b *builder) stepVerifyMerge(ctx flow.StepCtx) (flow.StepResult, error) {
 
 // stepMerge merges the pull request. The pr-merged signal is set by the
 // backend as a side effect of Merge succeeding.
+//
+// A request ALREADY merged is not merged again. The hand-integrated path is
+// documented rather than exceptional — "a merged request found already in place
+// — a human integrated by hand — is not an anomaly" (docs/issue-flow.md
+// § Review the proposal) — and the route reaches this step regardless, because
+// a step runs when the route names it and for no other reason. Calling
+// flow.Merge on a merged request is how that path dies at the last step it had
+// nothing left to do.
+//
+// The already-merged fact is read off the signal, which is this step's own
+// result: the backend observes it from the request's state on every load, so a
+// merge performed by a person is visible here exactly as one performed by this
+// step. flow.PRInfo carries no merged flag to read instead, and its
+// MergeCommitSHA is not one — an open request has a test-merge sha, so a guard
+// on that would skip every merge this flow was asked to make.
 func (b *builder) stepMerge(ctx flow.StepCtx) (flow.StepResult, error) {
 	wt, err := ctx.Worktree()
 	if err != nil {
@@ -79,6 +98,11 @@ func (b *builder) stepMerge(ctx flow.StepCtx) (flow.StepResult, error) {
 	if err != nil {
 		return flow.StepResult{}, fmt.Errorf("could not find the pull request for the claim branch: %w", err)
 	}
+	if ctx.Signal(flow.SignalId(StepMerge)) {
+		return ctx.Next(flow.StepId(StepRecordMerge), fmt.Sprintf(
+			"the pull request at %s was already merged, so this step performed no merge; "+
+				"record the merge commit", info.URL)), nil
+	}
 	if err := flow.Merge(ctx.Context(), wt, info.URL); err != nil {
 		return flow.StepResult{}, err
 	}
@@ -86,7 +110,9 @@ func (b *builder) stepMerge(ctx flow.StepCtx) (flow.StepResult, error) {
 		"the pull request at %s is merged; record the merge commit", info.URL)), nil
 }
 
-// stepRecordMerge records the merge commit SHA as the final artifact.
+// stepRecordMerge records the merge commit SHA and finalizes the item as
+// resolved. What landed has exactly one name, and this is where it is written
+// down — the last thing the resolution owes.
 func (b *builder) stepRecordMerge(ctx flow.StepCtx) (flow.StepResult, error) {
 	wt, err := ctx.Worktree()
 	if err != nil {
@@ -107,7 +133,12 @@ func (b *builder) stepRecordMerge(ctx flow.StepCtx) (flow.StepResult, error) {
 				"the backend has not published it; a later pass records it",
 			info.URL)
 	}
-	return ctx.Next(flow.StepId(StepCloseBranch), fmt.Sprintf(
-		"the change is merged as %s; return the worktree to the base branch",
+	// The one election that ends the item resolved. Finalizing is what completes
+	// a flow — there is no checklist that decides it (docs/resolution.md
+	// § Finalizing) — and the worktree is not returned here: the contributor
+	// already did that at close branch, and this step's declared contract leaves
+	// the tree as it found it.
+	return ctx.Finalize(flow.DispositionResolved, fmt.Sprintf(
+		"the change is merged as %s, which resolves the item",
 		info.MergeCommitSHA)).CommitHash(string(info.MergeCommitSHA)), nil
 }
