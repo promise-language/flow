@@ -1,6 +1,7 @@
 package issue
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -96,6 +97,65 @@ func TestElection_TheRequestRoutesWhereItsCompositionSays(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The request opens on the RETRY after a push repair, and that path elects the
+// same route as the first. Returning the zero result here instead would park
+// the step as "did not complete" with the pull request already open — a park
+// the next dispatch cannot clear, because opening it again is not what the
+// step would do.
+func TestElection_TheRequestElectsAfterAPushRepair(t *testing.T) {
+	wt := resumedWorktree()
+	refusal := flow.ErrDisclosureRefused{
+		Act:    flow.ActPush,
+		Reason: errors.New("an absolute home path names the machine's user"),
+	}
+	wt.openErrs = []error{refusal, nil}
+
+	res, err := testBuilder(t).stepOpenPR(ctxWithPlan(wt, &scriptedAgent{}), flow.StepId(StepCloseBranch))
+	if err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	wantNext(t, res, flow.StepId(StepCloseBranch))
+}
+
+// The integration phase's three edges. They are declared by the carry-through
+// composition alone (issue/build_test.go TestCarryThroughFlow_DeclaresItsRoutes),
+// and these are the handlers electing them: a handler and a declaration that
+// disagree fail the step at capture, and the step that fails is the one that
+// already merged.
+func TestElection_VerifyMergeRoutesToTheMerge(t *testing.T) {
+	wt := newIntegrationWorktree()
+	wt.envelope = []byte(`{"coverage": 95}`)
+	wt.thresholds = []byte(`{"coverage": 80}`)
+
+	res, err := testBuilder(t).stepVerifyMerge(newIntegrationCtx(wt))
+	if err != nil {
+		t.Fatalf("stepVerifyMerge: %v", err)
+	}
+	wantNext(t, res, flow.StepId(StepMerge))
+}
+
+func TestElection_MergeRoutesToRecordingTheCommit(t *testing.T) {
+	res, err := testBuilder(t).stepMerge(newIntegrationCtx(newIntegrationWorktree()))
+	if err != nil {
+		t.Fatalf("stepMerge: %v", err)
+	}
+	wantNext(t, res, flow.StepId(StepRecordMerge))
+	if res.Payload != nil {
+		t.Errorf("payload = %+v — merging is a signal step, and signals are not handler-writable", res.Payload)
+	}
+}
+
+func TestElection_RecordMergeRoutesToClosingTheBranch(t *testing.T) {
+	wt := newIntegrationWorktree()
+	wt.prMergeCommitSHA = "abc123"
+
+	res, err := testBuilder(t).stepRecordMerge(newIntegrationCtx(wt))
+	if err != nil {
+		t.Fatalf("stepRecordMerge: %v", err)
+	}
+	wantNext(t, res, flow.StepId(StepCloseBranch))
 }
 
 // Closing the branch is where both compositions end, and finalizing is the one

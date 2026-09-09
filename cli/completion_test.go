@@ -18,6 +18,9 @@ type capturingBackend struct {
 	*fake.Orchestrator
 	captures []flow.ArtifactBody
 	refuse   error
+	// saveErr models a backend that cannot write a work-in-progress record,
+	// which is the store the refused-capture path stashes into.
+	saveErr error
 }
 
 func (b *capturingBackend) ResolveArtifact(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId, body flow.ArtifactBody) error {
@@ -26,6 +29,13 @@ func (b *capturingBackend) ResolveArtifact(ctx context.Context, ref flow.ItemRef
 		return b.refuse
 	}
 	return b.Orchestrator.ResolveArtifact(ctx, ref, id, body)
+}
+
+func (b *capturingBackend) SaveWorkInProgress(ctx context.Context, ref flow.ItemRef, step flow.StepId, body string) error {
+	if b.saveErr != nil {
+		return b.saveErr
+	}
+	return b.Orchestrator.SaveWorkInProgress(ctx, ref, step, body)
 }
 
 // capturingApp is testApp with the capture-recording backend in front of the
@@ -242,6 +252,73 @@ func TestCompletion_DisclosureRefusalParksAndKeepsTheWork(t *testing.T) {
 	if rec := state.Artifact("plan"); rec.Invocations != 0 {
 		t.Errorf("invocations = %d after a refused capture, want 0 — a refused expression of "+
 			"finished work is not a failed attempt at the step", rec.Invocations)
+	}
+}
+
+// The stash is best-effort, and it has to be: a backend that cannot write the
+// record must not cost the item its park as well as its work. Losing the park
+// would end the run with nobody told anything, which is the outcome the whole
+// refusal path exists to avoid.
+func TestCompletion_DisclosureRefusalParksEvenWhenTheStashFails(t *testing.T) {
+	tel := &recordingTelemetry{}
+	app, be, claim := capturingApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "the plan is written").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	})
+	app.Telemetry = tel
+	be.refuse = flow.ErrDisclosureRefused{Act: flow.ActArtifactComment, Reason: errors.New("a home path")}
+	be.saveErr = errors.New("disk went away")
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkBlocked {
+		t.Fatalf("res = %+v, want parked blocked despite the failed stash", res)
+	}
+	var reported bool
+	for _, e := range tel.events {
+		if e.Detail == "could not record refused text: disk went away" {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Errorf("the failed stash was never reported; events = %+v", tel.events)
+	}
+}
+
+// What the stash carries for each kind of payload. The next dispatch is asked
+// to revise text it can only read here, so a payload rendered as nothing is a
+// author asked to fix a sentence they were never shown.
+func TestRefusedPayload_CarriesWhatMustBeRevised(t *testing.T) {
+	cases := map[string]struct {
+		body flow.ArtifactBody
+		want []string
+	}{
+		"commit hash": {flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: "deadbeef"}, []string{"deadbeef"}},
+		"markdown":    {flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"}, []string{"the plan"}},
+		"json":        {flow.ArtifactBody{Type: flow.ArtifactJSON, JSON: []byte(`{"a":1}`)}, []string{`{"a":1}`}},
+		"file": {flow.ArtifactBody{Type: flow.ArtifactFile, File: flow.FileBody{
+			Name: "report.txt", Content: []byte("what it said"),
+		}}, []string{"report.txt", "what it said"}},
+		"patch": {flow.ArtifactBody{Type: flow.ArtifactPatch, Patch: flow.PatchBody{
+			Diff: []byte("diff --git a/x b/x"),
+		}}, []string{"diff --git a/x b/x"}},
+		// A flag carries no payload, so what was refused is the fact of the
+		// write — said in words rather than left blank, which reads as a
+		// rendering that failed.
+		"flag": {flow.ArtifactBody{Type: flow.ArtifactFlag}, []string{"no payload"}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := refusedPayload(tc.body)
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("refusedPayload = %q, want it to carry %q", got, want)
+				}
+			}
+		})
 	}
 }
 
