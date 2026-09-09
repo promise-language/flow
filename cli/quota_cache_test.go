@@ -876,13 +876,11 @@ func TestCachedQuota_PassesTheFailureThrough(t *testing.T) {
 
 func TestRunWithArgs_InstallsTheCacheBackedReader(t *testing.T) {
 	// The wiring, from the binary's entry point: with App.Quota nil, the reader
-	// Run installs is the one that goes through the cache. Asserted through the
-	// seam it must reach — the run is runner-dispatched, so the display sites
-	// are suppressed and the only thing that can call quotaFetch is the pacing
-	// read in resolve's loop. A reader that went to the network instead would
-	// make no call at all and print "quota unreadable" for a machine with a
-	// perfectly good reading available.
-	t.Setenv(dispatchedByRunnerEnv, "1")
+	// Run installs is the one that goes through the cache. Every read in the
+	// run — the display sites and the pacing read in resolve's loop — goes
+	// through it, so one fetch serves them all. A reader that went to the
+	// network instead would make more calls, or none at all and print "quota
+	// unreadable" for a machine with a perfectly good reading available.
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestApp(t, be)
@@ -905,7 +903,6 @@ func TestRunWithArgs_OneResolveMakesOneRequest(t *testing.T) {
 	// print at startup, one per step, another on the terminal outcome. It makes
 	// one now, and the display sites still print the figures they printed
 	// before.
-	t.Setenv(dispatchedByRunnerEnv, "")
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestApp(t, be)

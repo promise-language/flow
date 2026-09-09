@@ -1753,7 +1753,6 @@ func TestCmdResolve_PreflightBlockPrintsNoBlockedByLine(t *testing.T) {
 
 func TestCmdResolve_QuotaPrintedAtStartAndFinalize(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	t.Setenv(dispatchedByRunnerEnv, "")
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestApp(t, be)
@@ -1772,7 +1771,6 @@ func TestCmdResolve_QuotaPrintedAtStartAndFinalize(t *testing.T) {
 
 func TestCmdResolve_QuotaPrintedOnFailedStep(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	t.Setenv(dispatchedByRunnerEnv, "")
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
@@ -1796,7 +1794,6 @@ func TestCmdResolve_QuotaPrintedOnFailedStep(t *testing.T) {
 
 func TestCmdResolve_QuotaPrintedOnParked(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	t.Setenv(dispatchedByRunnerEnv, "")
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
@@ -1815,39 +1812,43 @@ func TestCmdResolve_QuotaPrintedOnParked(t *testing.T) {
 	}
 }
 
-func TestCmdResolve_RunnerSuppressesDisplayButNotPacing(t *testing.T) {
-	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	t.Setenv(dispatchedByRunnerEnv, "1")
-	be := fake.New()
-	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
-	app, _, errBuf := resolveTestApp(t, be)
-	// Injected and failing: this asserts pacing is attempted even under a
-	// runner, and the warning is the evidence it was. Reaching the real reader
-	// would make the assertion depend on whether this machine happens to hold
-	// credentials, and would sleep when it does.
-	app.Quota = func() ([]windowUsage, error) {
-		return nil, fmt.Errorf("no credentials (injected)")
-	}
+// No environment variable decides whether the quota block prints. The report
+// goes to stderr, where narration goes, and the retired name — spelled as a
+// literal here, because the code must no longer know it — selects nothing.
+// Pacing runs either way, as it always did.
+func TestCmdResolve_QuotaPrintedWhateverTheEnvironmentHolds(t *testing.T) {
+	for _, value := range []string{"1", ""} {
+		t.Run("env="+value, func(t *testing.T) {
+			t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+			t.Setenv("FLOW_DISPATCHED_BY_RUNNER", value)
+			be := fake.New()
+			be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+			app, _, errBuf := resolveTestApp(t, be)
+			// Injected and failing: this asserts pacing is attempted, and the
+			// warning is the evidence it was. Reaching the real reader would
+			// make the assertion depend on whether this machine happens to
+			// hold credentials, and would sleep when it does.
+			app.Quota = func() ([]windowUsage, error) {
+				return nil, fmt.Errorf("no credentials (injected)")
+			}
 
-	code := app.cmdResolve(context.Background(), nil)
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
-	}
-	output := errBuf.String()
-	// Runner-driven: no display quota lines.
-	if strings.Contains(output, "quota:") {
-		t.Errorf("runner-driven run should not display quota lines; got:\n%s", output)
-	}
-	// Pacing diagnostic may appear (quota unreadable warning) because
-	// pacing is NOT gated on isRunner — that's the point.
-	if !strings.Contains(output, "quota unreadable") {
-		t.Errorf("runner-driven run should still attempt pacing (and show unreadable warning); got:\n%s", output)
+			code := app.cmdResolve(context.Background(), nil)
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+			}
+			output := errBuf.String()
+			if !strings.Contains(output, "quota:") {
+				t.Errorf("the quota block must print whatever the environment holds; got:\n%s", output)
+			}
+			if !strings.Contains(output, "quota unreadable") {
+				t.Errorf("pacing must still be attempted (and show the unreadable warning); got:\n%s", output)
+			}
+		})
 	}
 }
 
 func TestCmdResolve_QuotaPrintedOnBlocked(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	t.Setenv(dispatchedByRunnerEnv, "")
 	inner := fake.New()
 	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	be := &fitGateBackend{Orchestrator: inner}
@@ -1876,7 +1877,6 @@ func TestCmdResolve_QuotaPrintedOnBlocked(t *testing.T) {
 
 func TestCmdResolve_QuotaUnreadableWarnedOnce(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	t.Setenv(dispatchedByRunnerEnv, "")
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	// The warning is what this test is about, so the reader is injected and
@@ -1906,7 +1906,6 @@ func TestCmdResolve_QuotaUnreadableWarnedOnce(t *testing.T) {
 
 func TestCmdResolve_PaceZeroSkipsPacing(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	t.Setenv(dispatchedByRunnerEnv, "")
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestApp(t, be)

@@ -31,20 +31,6 @@ func TestReportQuota_PrintsOnFailure(t *testing.T) {
 	}
 }
 
-func TestReportQuota_NotGatedByRunner(t *testing.T) {
-	// reportQuota no longer checks FLOW_DISPATCHED_BY_RUNNER; call sites gate
-	// display. Verify it prints even when runner env is set.
-	useTempQuotaCache(t)
-	t.Setenv(dispatchedByRunnerEnv, "1")
-	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	t.Setenv("PATH", t.TempDir())
-	var buf bytes.Buffer
-	reportQuota(&buf)
-	if buf.Len() == 0 {
-		t.Error("reportQuota must not be gated by runner env — call sites handle that")
-	}
-}
-
 func TestReadQuota_ReturnsErrorOnFailure(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Setenv("PATH", t.TempDir())
