@@ -72,10 +72,14 @@ their tags is its own compliance gaps.
 - [proposals/anchoring.md](proposals/anchoring.md) — Aspects whose modification requires a
   person to approve it. Superseded in direction by org's anchoring proposal, which widened it
   to the fleet.
+- [proposals/drive-by-requests.md](proposals/drive-by-requests.md) — A pull request with no
+  item behind it, and why the answer is an item rather than a merge.
 - [proposals/grant-and-step-identity.md](proposals/grant-and-step-identity.md) — Grants and how
   a step proves it is the step it claims.
 - [proposals/multi-project.md](proposals/multi-project.md) — One binary resolving items across
   projects.
+- [proposals/outside-contribution.md](proposals/outside-contribution.md) — Resolving an item
+  when the contributor is a principal the project does not trust.
 - [proposals/reusable-flows-and-leases.md](proposals/reusable-flows-and-leases.md) — Flows as
   reusable definitions, and leases.
 - [proposals/untrusted-sources.md](proposals/untrusted-sources.md) — Item text is executable
