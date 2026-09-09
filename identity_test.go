@@ -321,6 +321,21 @@ func TestCheckoutRootRefusesWhatIsNotACheckout(t *testing.T) {
 		}
 	})
 
+	// The walk STOPS at home rather than stepping over it. A checkout that
+	// happens to sit ABOVE the home directory is not this binary's arena
+	// either, and adopting it would hand every ~/go/bin install on the machine
+	// one shared ArenaId — the "two checkouts, one arena" half of the identity
+	// error, at the width of a whole account.
+	t.Run("the walk does not continue above the home directory", func(t *testing.T) {
+		above := gitDir(t, mkTree(t, t.TempDir(), "above"))
+		home := mkTree(t, above, "home")
+		start := mkTree(t, home, "go", "bin")
+		if got, err := checkoutRoot(start, home); err == nil {
+			t.Fatalf("checkoutRoot(%s, home=%s) = %s, want a refusal — the checkout above home is not this binary's",
+				start, home, got)
+		}
+	})
+
 	// The walk terminates rather than looping at the filesystem root.
 	t.Run("the walk reaches the filesystem root", func(t *testing.T) {
 		root := t.TempDir()

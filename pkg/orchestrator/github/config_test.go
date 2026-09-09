@@ -174,3 +174,22 @@ func mustResolveWorktree(t *testing.T, dir string) string {
 	}
 	return got
 }
+
+// FAIL CLOSED when there is nothing to derive from. An empty WorktreeDir that
+// survived New would BE the ArenaId, since arena() uses the field as it stands
+// — one empty identity shared by every arena on every host, which is the "two
+// checkouts are one arena" half of #286 at its widest. The old default made
+// this unreachable by answering "." to every question; there is no default now,
+// so the refusal is the whole of the answer.
+func TestNewRefusesAWorktreeItCannotDerive(t *testing.T) {
+	if _, err := flow.DeriveArenaRoot(); err == nil {
+		t.Skip("this test binary lives inside a checkout, so the underivable case cannot be exercised here")
+	}
+	_, err := New(Config{Owner: "acme", Repo: "widget", BinaryName: "issue", Token: "fake-token"})
+	if err == nil {
+		t.Fatal("New accepted a worktree it could not derive — every arena would share one empty ArenaId")
+	}
+	if !strings.Contains(err.Error(), "worktree") {
+		t.Errorf("err = %v, want it to name the worktree it could not locate", err)
+	}
+}

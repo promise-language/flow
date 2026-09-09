@@ -514,3 +514,37 @@ func TestStageAll_RefusesUnignoredStateDir(t *testing.T) {
 		t.Errorf("claim state should NOT be staged, got: %q", staged)
 	}
 }
+
+// The guard is the only thing standing between claim state and a commit, so a
+// state dir that cannot be located at all stops the add rather than letting
+// `git add -A` run with the check skipped. Nothing is staged: an index built
+// while "is the state dir inside this worktree?" went unanswered is exactly the
+// commit the guard exists to prevent.
+func TestStageAll_RefusesWhenTheStateDirCannotBeLocated(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+	g := initTestRepoIn(t, dir)
+	ctx := t.Context()
+
+	if err := os.WriteFile(filepath.Join(dir, "README"), []byte("changed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// A relative FLOW_DIR is refused by clistate.Dir, which is how the lookup
+	// is made to fail from outside that package.
+	t.Setenv("FLOW_DIR", "relative/state")
+
+	err := g.StageAll(ctx)
+	if err == nil {
+		t.Fatal("StageAll staged the tree without knowing where the state dir is")
+	}
+	if !strings.Contains(err.Error(), "state dir") {
+		t.Errorf("err = %v, want it to name what could not be located", err)
+	}
+	stdout, _, runErr := g.run(ctx, "diff", "--cached", "--name-only")
+	if runErr != nil {
+		t.Fatalf("git diff --cached: %v", runErr)
+	}
+	if staged := strings.TrimSpace(string(stdout)); staged != "" {
+		t.Errorf("the index was modified despite the refusal: %q", staged)
+	}
+}
