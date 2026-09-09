@@ -152,6 +152,23 @@ func TestStepReviewProposal_AlreadyMergedElectsWithoutAnAgentTurn(t *testing.T) 
 	}
 }
 
+// The turn is a JUDGEMENT, so it runs in plan mode. A reviewer that could edit
+// would be doing the contributor's work under the maintainer's tag — and the
+// step declares Writes{}, so whatever it changed would fail the contract check
+// on the way out, reporting a review that decided nothing as a write violation.
+func TestStepReviewProposal_JudgesWithoutBeingAbleToEdit(t *testing.T) {
+	agent := &scriptedAgent{replies: []string{"the plan is implemented and the tests cover it"}}
+	if _, err := testBuilder(t).stepReviewProposal(reviewCtx(agent)); err != nil {
+		t.Fatalf("stepReviewProposal: %v", err)
+	}
+	if len(agent.reqs) != 1 {
+		t.Fatalf("the step made %d agent request(s), want 1", len(agent.reqs))
+	}
+	if got := agent.reqs[0].PermissionMode; got != "plan" {
+		t.Errorf("PermissionMode = %q, want plan — a reviewer must not edit what it judges", got)
+	}
+}
+
 // The step declares Writes{}, and acquiring the worktree is what takes the
 // write-contract snapshot: a review that reached for the tree would be checked
 // against a contract permitting nothing.

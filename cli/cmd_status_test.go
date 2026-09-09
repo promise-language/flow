@@ -1134,3 +1134,46 @@ func TestStatusJSON_BudgetIsThePolicyPlusTheGrants(t *testing.T) {
 		t.Errorf("timeout_seconds = %v, want 1800+600", got)
 	}
 }
+
+// A route naming a step this build does not register — an item left by a binary
+// whose graph had one — is exactly the item an operator runs `status` on. The
+// command REPORTS: it reads the position and never decides on it, so a Position
+// refusal leaves no eligible step and everything else still renders. Failing
+// here would take the diagnosis down with the thing being diagnosed, and
+// RunOne is what surfaces the refusal (TestRunOne_ARouteToAnUnregisteredStepSurfacesTheRefusal).
+func TestCmdStatus_ReportsAnItemWhoseRouteNamesNoRegisteredStep(t *testing.T) {
+	app, _, _ := testAppItem(t, flow.Item{
+		Ref: itemRefFor("1"), Type: "task", Title: "test#1",
+		Journal: []flow.JournalEntry{{
+			Step: "plan", Execution: 1, Route: flow.Route{Next: "no-such-step"}, By: "tester",
+		}},
+	}, []flow.ItemType{"task"}, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			t.Fatal("status dispatches nothing")
+			return flow.StepResult{}, nil
+		}, flow.StepConfig{Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, &stubAgent{name: "stub"})
+	out := &bytes.Buffer{}
+	errBuf := &bytes.Buffer{}
+	app.Out, app.Err = out, errBuf
+
+	if code := app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus --json = %d; stderr=%q", code, errBuf.String())
+	}
+	var payload statusPayload
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if payload.FlowState != flowStateNoEligibleStep {
+		t.Errorf("flow_state = %q, want %q — the flow cannot place this item",
+			payload.FlowState, flowStateNoEligibleStep)
+	}
+	// And the report is still a report: the item, and the checklist someone
+	// reads to see what the run left behind.
+	if payload.Item == "" || payload.Title == "" {
+		t.Errorf("payload = %+v, want the item still identified", payload)
+	}
+	if len(payload.Steps) == 0 {
+		t.Error("steps = none, want the flow's checklist — this is what diagnosis reads")
+	}
+}

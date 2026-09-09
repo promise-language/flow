@@ -900,6 +900,24 @@ func TestResolveArtifactsAreInTheGitHubBackendsSchema(t *testing.T) {
 	}
 }
 
+// The signals cross the same two closed sets, and the merge signal now crosses
+// them on EVERY build: one graph means a contributor binary declares `pr-merged`
+// too, where before only the carry-through composition did. cli.App refuses at
+// startup on an id the backend cannot observe, which is a failure every operator
+// of every build sees and no test did.
+func TestResolveSignalsAreInTheGitHubBackendsSchema(t *testing.T) {
+	observable := map[flow.SignalId]bool{}
+	for _, def := range (*ghbackend.Orchestrator)(nil).SupportedSignals() {
+		observable[def.Id] = true
+	}
+	for _, declared := range resolveSignals() {
+		if !observable[declared.Id] {
+			t.Errorf("signal %q is declared by the flow but the github backend does "+
+				"not observe it — cli.Run refuses at startup", declared.Id)
+		}
+	}
+}
+
 type stubAgent struct{}
 
 func (stubAgent) Name() string { return "stub" }
@@ -1177,6 +1195,15 @@ func TestDetectProposalDecision(t *testing.T) {
 			"prose before a fence is not a block",
 			"PROPOSAL-REWORK: bound the loop\nand another thing\n```\nnot the block\n```",
 			"", "", "", false,
+		},
+		// Two TOKENS is not two decisions. The refusal is about two elections,
+		// and an unelectable one — a bare token, or a summary nothing follows —
+		// is not one: refusing here would strand an actionable handback on the
+		// strength of a word the agent wrote and then did not stand behind.
+		{
+			"a malformed second sentinel is not a second decision",
+			"PROPOSAL-REJECT: on reflection, no\nPROPOSAL-REWORK: bound the loop\n```\ncli/retry.go:41\n```",
+			ProposalRework, "bound the loop", "cli/retry.go:41", false,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1831,6 +1858,45 @@ func TestTransferReachesTheImplementPrompt(t *testing.T) {
 				t.Errorf("the implement prompt does not carry the handback:\n%s", got)
 			}
 		})
+	}
+}
+
+// The test above hands the entry to the template. This runs the STEP, which is
+// where the entry has to come from the item: newPromptContext reads it off
+// ctx.Transfer, and a build that stopped reading it would render a prompt with
+// an empty block and pass every test that constructs the context by hand — the
+// handback would be a message the contributor's next round never sees, which is
+// the round it exists to save.
+func TestStepImplement_RendersTheHandbackThatRoutedHere(t *testing.T) {
+	wt := resumedWorktree()
+	wt.head = "sha-1"  // the earlier round's work is already on the branch
+	wt.noCommit = true // and this round is asked to change it, not to start it
+	agent := &scriptedAgent{}
+	ctx := ctxWithPlan(wt, agent)
+	// What the maintainer's review elected, as the journal carries it.
+	ctx.journal = []flow.JournalEntry{{
+		Step:      flow.StepId(StepReviewProposal),
+		Execution: 1,
+		Route:     flow.Route{Next: flow.StepId(StepImplement)},
+		Message: "the proposal needs work before it can land: the retry loop has no bound\n\n" +
+			"cli/retry.go:41 loops forever when the backend keeps refusing",
+		By: "tester",
+	}}
+
+	if _, err := testBuilder(t).stepImplement(ctx); err != nil {
+		t.Fatalf("stepImplement: %v", err)
+	}
+	if len(agent.prompts) == 0 {
+		t.Fatal("the step spent no turn, so nothing was briefed")
+	}
+	for _, want := range []string{
+		string(StepReviewProposal),    // who routed here
+		"the retry loop has no bound", // the finding
+		"cli/retry.go:41",             // and the specifics it has to act on
+	} {
+		if !strings.Contains(agent.prompts[0], want) {
+			t.Errorf("the implement prompt does not carry %q from the handback:\n%s", want, agent.prompts[0])
+		}
 	}
 }
 
