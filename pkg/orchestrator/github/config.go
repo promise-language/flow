@@ -111,7 +111,7 @@ func (c Config) withDefaults() Config {
 
 // resolveWorktreeDir turns the configured worktree into the absolute path every
 // consumer of the field inherits: empty derives it from the binary's own
-// location, absolute is cleaned and kept, relative is refused.
+// location, absolute is canonicalized and kept, relative is refused.
 //
 // filepath.Abs is deliberately NOT applied to an explicit relative value.
 // Resolving one would re-import the process working directory through the back
@@ -119,12 +119,22 @@ func (c Config) withDefaults() Config {
 // stood — which is the ambient dependency this whole field exists to be free
 // of. A caller that means a directory says which one.
 //
-// CLEANED, because this value IS the ArenaId: "/w/repo/" and "/w/repo" are one
-// worktree, and an identity compared by string equality would make them two
-// arenas with two flow:arena:<fingerprint> labels — the same "one checkout, two
-// arenas" error #286 reports, arriving through a spelling instead of a cwd.
-// filepath.Abs used to normalize incidentally, down in arena(); the one place a
-// location is decided is where that has to happen now.
+// CANONICALIZED, because this value IS the ArenaId: "/w/repo/" and "/w/repo"
+// are one worktree, and so are "/var/w/repo" and the "/private/var/w/repo" it
+// is a symlink to. An identity compared by string equality would make each pair
+// two arenas with two flow:arena:<fingerprint> labels — the same "one checkout,
+// two arenas" error #286 reports, arriving through a spelling instead of a cwd.
+// flow.CanonicalPath is the one canonicalization, shared with the derived route
+// above, so a checkout reached by either answers one string; a worktree that
+// does not exist yet cannot be symlink-resolved and is cleaned instead, since
+// New resolves `origin` in it moments later and fails there with a better
+// message than a path refusal would give. filepath.Abs used to normalize
+// incidentally, down in arena(); the one place a location is decided is where
+// that has to happen now.
+//
+// The relative refusal stays AHEAD of it: EvalSymlinks resolves a relative path
+// against the process working directory, which is the exact dependency the
+// refusal exists to remove.
 func resolveWorktreeDir(dir string) (string, error) {
 	if dir == "" {
 		root, err := flow.DeriveArenaRoot()
@@ -138,7 +148,7 @@ func resolveWorktreeDir(dir string) (string, error) {
 			"github orchestrator: Config.WorktreeDir %q is relative — it must be an absolute "+
 				"path, or empty to derive the checkout this binary lives in", dir)
 	}
-	return filepath.Clean(dir), nil
+	return flow.CanonicalPath(dir), nil
 }
 
 // validate returns an error if Config is missing fields NewBackend couldn't

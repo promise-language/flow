@@ -1,7 +1,9 @@
 package github
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +99,20 @@ func TestNewRefusesARelativeWorktreeDir(t *testing.T) {
 	if strings.Contains(err.Error(), "git ") || strings.Contains(err.Error(), "resolve repo") {
 		t.Errorf("err = %v, want the refusal to precede any git invocation", err)
 	}
+
+	// And refused even when the relative path EXISTS where the process happens
+	// to be standing, which is what the ordering guards. The canonicalization
+	// resolves symlinks, and resolving a relative path resolves it against the
+	// process working directory — so a refusal that came second would answer
+	// "wherever the operator stood/bin" for a caller who configured "bin", the
+	// exact ambient dependency the refusal exists to remove.
+	t.Chdir(t.TempDir())
+	if err := os.Mkdir("bin", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := resolveWorktreeDir("bin"); err == nil {
+		t.Errorf("resolveWorktreeDir(\"bin\") = %q, want a refusal — an existing relative path is still the operator's cwd", got)
+	}
 }
 
 // An absolute WorktreeDir is the caller's answer and is kept exactly: New
@@ -106,7 +122,12 @@ func TestNewKeepsAnAbsoluteWorktreeDir(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not on PATH")
 	}
+	// The configured spelling goes in raw; the canonical one is what every
+	// reader gets back. On macOS a t.TempDir sits under /var, a symlink to
+	// /private/var, so these are two different strings for one directory —
+	// and the ArenaId must be the same one either way.
 	dir := t.TempDir()
+	want := flow.CanonicalPath(dir)
 	for _, args := range [][]string{
 		{"init"},
 		{"remote", "add", "origin", "https://github.com/acme/widget.git"},
@@ -121,15 +142,15 @@ func TestNewKeepsAnAbsoluteWorktreeDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if b.cfg.WorktreeDir != dir {
-		t.Errorf("WorktreeDir = %q, want the configured %q", b.cfg.WorktreeDir, dir)
+	if b.cfg.WorktreeDir != want {
+		t.Errorf("WorktreeDir = %q, want the configured %q canonicalized to %q", b.cfg.WorktreeDir, dir, want)
 	}
 	if b.cfg.Owner != "acme" || b.cfg.Repo != "widget" {
 		t.Errorf("resolved %s/%s, want acme/widget from the worktree's own origin", b.cfg.Owner, b.cfg.Repo)
 	}
 	// The arena identity is that same path, not a second derivation of it.
-	if got := string(b.arena().Id); got != dir {
-		t.Errorf("ArenaId = %q, want the worktree %q", got, dir)
+	if got := string(b.arena().Id); got != want {
+		t.Errorf("ArenaId = %q, want the worktree %q", got, want)
 	}
 }
 
@@ -146,6 +167,9 @@ func TestNewKeepsAnAbsoluteWorktreeDir(t *testing.T) {
 // normalization with it, so it belongs here, where the location is decided.
 func TestResolveWorktreeDirCanonicalizesOneWorktreeToOneArena(t *testing.T) {
 	const want = "/w/repo"
+	// None of these exists, so this half also pins the fallback: a worktree
+	// that cannot be symlink-resolved is CLEANED, not refused — New resolves
+	// `origin` in it moments later and fails there with a better message.
 	for _, spelling := range []string{"/w/repo", "/w/repo/", "/w/./repo", "/w/sibling/../repo", "/w//repo"} {
 		got, err := resolveWorktreeDir(spelling)
 		if err != nil {
@@ -163,6 +187,51 @@ func TestResolveWorktreeDirCanonicalizesOneWorktreeToOneArena(t *testing.T) {
 	bare := (&Orchestrator{cfg: Config{WorktreeDir: mustResolveWorktree(t, "/w/repo")}}).arenaFingerprint()
 	if trailing != bare {
 		t.Errorf("flow:arena fingerprints differ (%s vs %s) for one worktree spelled two ways", trailing, bare)
+	}
+
+	// The spelling a lexical table cannot reach: a SYMLINK. One worktree
+	// reached through a symlinked parent and reached directly must be one
+	// arena — the derived route resolves symlinks, so a configured route that
+	// only cleaned would hand the same checkout two ArenaIds depending on which
+	// way in the caller took.
+	t.Run("through a symlinked parent", func(t *testing.T) {
+		tmp := t.TempDir()
+		direct := filepath.Join(tmp, "real", "repo")
+		if err := os.MkdirAll(direct, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(tmp, "real"), filepath.Join(tmp, "link")); err != nil {
+			t.Skipf("symlinks are unavailable here: %v", err)
+		}
+		viaLink := filepath.Join(tmp, "link", "repo")
+
+		if got, want := mustResolveWorktree(t, viaLink), mustResolveWorktree(t, direct); got != want {
+			t.Errorf("resolveWorktreeDir(%q) = %q, want %q — one worktree reached two ways is two arenas",
+				viaLink, got, want)
+		}
+		linked := (&Orchestrator{cfg: Config{WorktreeDir: mustResolveWorktree(t, viaLink)}}).arenaFingerprint()
+		plain := (&Orchestrator{cfg: Config{WorktreeDir: mustResolveWorktree(t, direct)}}).arenaFingerprint()
+		if linked != plain {
+			t.Errorf("flow:arena fingerprints differ (%s vs %s) for one worktree reached through a symlink",
+				linked, plain)
+		}
+	})
+}
+
+// An absolute worktree that DOES NOT EXIST YET is accepted and cleaned, not
+// refused. Refusing it is defensible — nothing can be resolved through a
+// directory that is not there, so the canonicalization falls back to a lexical
+// clean — but it would change New's failure surface for a caller pointing at a
+// worktree it is about to create, and New resolves `origin` in that directory
+// moments later and fails with a message naming the actual problem.
+func TestResolveWorktreeDirAcceptsAnAbsoluteWorktreeThatDoesNotExistYet(t *testing.T) {
+	absent := filepath.Join(t.TempDir(), "not", "created", "yet")
+	got, err := resolveWorktreeDir(absent + string(filepath.Separator))
+	if err != nil {
+		t.Fatalf("resolveWorktreeDir(%q): %v — a worktree the caller is about to create is not a bad path", absent, err)
+	}
+	if got != filepath.Clean(absent) {
+		t.Errorf("resolveWorktreeDir(%q) = %q, want the cleaned %q", absent, got, filepath.Clean(absent))
 	}
 }
 

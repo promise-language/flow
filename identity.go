@@ -366,8 +366,45 @@ func DeriveArenaRoot() (string, error) {
 	}
 	// An unknowable home is no home to refuse: the guard below is skipped
 	// rather than the derivation failing over a value it only ever excludes.
+	//
+	// CanonicalPath, because the guard is a string comparison and the walk it
+	// guards descends from EvalSymlinks(exe). os.UserHomeDir answers $HOME
+	// verbatim, so a home reached through a symlinked component — /home →
+	// /mnt/home, or any macOS home under /var → /private/var — is spelled one
+	// way on the walk's side and another on this one, `dir == home` never
+	// matches, and the guard silently does not fire.
 	home, _ := os.UserHomeDir()
-	return checkoutRoot(filepath.Dir(resolved), home)
+	return checkoutRoot(filepath.Dir(resolved), CanonicalPath(home))
+}
+
+// CanonicalPath returns the one spelling of p that identities are compared and
+// digested by: symlinks resolved, and lexically cleaned.
+//
+// ONE PATH IS ONE SPELLING. An ArenaId is a worktree path compared by string
+// equality and digested into flow:arena:<fingerprint>, so a checkout reached
+// through a symlink and the same checkout reached directly must not be two
+// arenas — the exclusion that keeps one item to one arena would not fire. This
+// is the counterpart of NormalizeHostId for the other half of the pair, and the
+// reason it exists is the same: docs/orchestrator.md requires the pair be
+// stable across restarts, and two spellings of one thing are two things.
+//
+// A path that does not exist yet is cleaned rather than refused: EvalSymlinks
+// can only resolve what is there, and a caller may name a worktree it is about
+// to create. EvalSymlinks already returns a cleaned result, so the two branches
+// agree lexically. Any other resolution failure falls back the same way — a
+// spelling this can improve on is better than none.
+//
+// Empty stays empty, and that is load-bearing: callers read "" as "no path",
+// and filepath.Clean("") is ".", which is a path — the process working
+// directory, the very thing an identity must not depend on.
+func CanonicalPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
 }
 
 // checkoutRoot walks start and its ancestors and returns the first that holds a
@@ -383,6 +420,9 @@ func DeriveArenaRoot() (string, error) {
 // ~/go/bin would silently take $HOME as its arena — an ArenaId shared by every
 // binary installed that way. home is a parameter so the walk is testable
 // without touching the real one; empty means no home to refuse.
+//
+// The walk is a pure string comparison, so both arguments must arrive in one
+// spelling — CanonicalPath is applied at the call boundary, not here.
 func checkoutRoot(start, home string) (string, error) {
 	dir := start
 	for {

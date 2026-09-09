@@ -350,3 +350,56 @@ func TestCheckoutRootRefusesWhatIsNotACheckout(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// CanonicalPath: one directory, one spelling.
+//
+// The ArenaId IS a path, compared by string equality and digested into
+// flow:arena:<fingerprint>. Two spellings of one worktree are two arenas, the
+// exclusion that keeps one item to one arena does not fire, and two runs
+// proceed on the same item — so the canonicalization both routes to a location
+// pass through is worth pinning on its own.
+// ---------------------------------------------------------------------------
+
+func TestCanonicalPathIsOneSpellingPerDirectory(t *testing.T) {
+	// A real directory reached through a symlinked parent answers the real
+	// path. This is the case the lexical table cannot reach and the one the
+	// defect lived in: on macOS every /var path is a /private/var path.
+	t.Run("a directory reached through a symlinked parent", func(t *testing.T) {
+		tmp := t.TempDir()
+		realDir := mkTree(t, tmp, "real", "w", "repo")
+		link := filepath.Join(tmp, "link")
+		if err := os.Symlink(filepath.Join(tmp, "real"), link); err != nil {
+			t.Skipf("symlinks are unavailable here: %v", err)
+		}
+		viaLink := filepath.Join(link, "w", "repo")
+
+		want := CanonicalPath(realDir)
+		if got := CanonicalPath(viaLink); got != want {
+			t.Errorf("CanonicalPath(%s) = %s, want %s — one directory reached two ways is one arena",
+				viaLink, got, want)
+		}
+	})
+
+	// A path that does not exist yet cannot be symlink-resolved, and is cleaned
+	// rather than refused — the EvalSymlinks error path. A caller may name a
+	// worktree it is about to create, and New fails on `origin` moments later
+	// with a better message than a path refusal would give.
+	t.Run("a path that does not exist is cleaned", func(t *testing.T) {
+		const want = "/w/repo"
+		for _, spelling := range []string{"/w/repo", "/w/repo/", "/w/./repo", "/w//repo", "/w/sibling/../repo"} {
+			if got := CanonicalPath(spelling); got != want {
+				t.Errorf("CanonicalPath(%q) = %q, want %q", spelling, got, want)
+			}
+		}
+	})
+
+	// Empty stays empty. checkoutRoot reads an empty home as "no home to
+	// refuse", and filepath.Clean("") is "." — a path, and the one path an
+	// identity must never be: wherever the operator happened to be standing.
+	t.Run("empty is not a path", func(t *testing.T) {
+		if got := CanonicalPath(""); got != "" {
+			t.Errorf("CanonicalPath(\"\") = %q, want \"\" — %q would be the process working directory", got, got)
+		}
+	})
+}
