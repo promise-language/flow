@@ -91,9 +91,14 @@ func (b *builder) stepRecordMerge(ctx flow.StepCtx) error {
 		return fmt.Errorf("could not find the pull request for the claim branch: %w", err)
 	}
 	if info.MergeCommitSHA == "" {
+		// The merge step is synchronous, so reaching here means the merge this
+		// step is recording was not the one the flow performed: the request was
+		// integrated by hand and the signal was already set, or GitHub has not
+		// yet published the merge commit for it. Either way there is nothing to
+		// record, and a later pass reads it once GitHub reports it.
 		return fmt.Errorf(
-			"the pull request at %s has not merged yet — the --auto flag may have queued it "+
-				"but CI has not finished; the next LoadState cycle will refresh the pr-merged signal",
+			"the pull request at %s reports no merge commit yet — it was not merged, "+
+				"or GitHub has not published the commit for a merge performed outside the flow",
 			info.URL)
 	}
 	return ctx.ResolveCommitHash(string(info.MergeCommitSHA))

@@ -75,6 +75,33 @@ func TestGhInvocationsCarryNoDashC(t *testing.T) {
 	}
 }
 
+// The merge must complete before the call returns, because the step after it
+// reads the merge commit the merge produced. `--auto` only queues the merge
+// behind GitHub's checks — the question stepVerifyMerge just answered against
+// the merge result — so the recording step finds nothing and the merge step is
+// re-dispatched until the runaway guard stops it (#148). Asserting the argv is
+// what keeps the flag from drifting back: a test mocking the merge's result
+// would pass against either command line.
+func TestGhMergeIsSynchronousSquash(t *testing.T) {
+	const prURL = "https://github.com/acme/widget/pull/1"
+	args := ghArgsFor(t, func(w *worktree) error {
+		return w.Merge(context.Background(), prURL)
+	})
+
+	if slices.Contains(args, "--auto") {
+		t.Errorf("gh pr merge carries --auto, which only queues the merge: %v", args)
+	}
+	if !slices.Contains(args, "--squash") {
+		t.Errorf("gh pr merge does not name a strategy; --squash is the one this repo allows: %v", args)
+	}
+	// The URL is positional, and it has to follow the subcommand — gh reads the
+	// first non-flag word after `pr merge` as the pull request to act on.
+	i := slices.Index(args, "merge")
+	if i < 0 || i+1 >= len(args) || args[i+1] != prURL {
+		t.Errorf("gh pr merge does not name the pull request straight after the subcommand: %v", args)
+	}
+}
+
 func TestGhOpenTargetsTheBranchAndBase(t *testing.T) {
 	// --repo removes the dependency on the process working directory, which the
 	// runner never sets — so the branch and base must be named explicitly or gh
