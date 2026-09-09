@@ -3341,3 +3341,29 @@ func TestAgentTurn_NoArenaRootLeavesTheFieldEmpty(t *testing.T) {
 		t.Errorf("Worktree = %q, want empty — the SDK stamps what the orchestrator holds, never a path of its own", agent.reqs[0].Worktree)
 	}
 }
+
+// The step is not the fallback for an orchestrator that named no directory.
+// "Never by the step" holds on this path too: an orchestrator with nothing to
+// say leaves the field empty rather than deferring to whatever the handler
+// wrote, which would be the step choosing the tree by the back door.
+func TestAgentTurn_NoArenaRootClearsAHandlersDirectory(t *testing.T) {
+	agent := &stubAgent{name: "stub"}
+	elsewhere := t.TempDir()
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("spend", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work", Worktree: elsewhere})
+			return flow.StepResult{}, err
+		}, flow.StepConfig{})
+	}, agent)
+	be.SetArenaRoot("")
+
+	if _, err := RunOne(context.Background(), app, claim); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if len(agent.reqs) != 1 {
+		t.Fatalf("agent saw %d requests, want 1", len(agent.reqs))
+	}
+	if agent.reqs[0].Worktree != "" {
+		t.Errorf("Worktree = %q, want empty — a handler's directory does not stand in for an arena the orchestrator does not have", agent.reqs[0].Worktree)
+	}
+}
