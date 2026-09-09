@@ -60,83 +60,129 @@ func (e *takeoverEditor) Commit(ctx context.Context) error {
 // Compile-time assert: takeoverBackend is a whole orchestrator.
 var _ flow.Orchestrator = (*takeoverBackend)(nil)
 
-// TestCmdRun_ManualSetsManualAndClearsPark (T0481): when the binary is run
-// by hand (FLOW_DISPATCHED_BY_RUNNER unset), cli.cmdRun MUST call the
-// backend's MarkManualTakeover so the operator's "I'm driving now" signal
-// flows through (set Manual, resolve any FlowPark).
-func TestCmdRun_ManualSetsManualAndClearsPark(t *testing.T) {
-	a := &stubAgent{name: "stub"}
-	app, be, _ := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+// run-step NEVER asserts manual control, whoever invoked it.
+//
+// It used to: the absence of FLOW_DISPATCHED_BY_RUNNER was read as "an operator
+// typed this", and the item was flagged hand-driven with any unresolved park
+// resolved. Both halves were wrong for the caller that most needs this command
+// — an external scheduler is unattended like the runner and external like the
+// operator, so it took the operator branch and marked every item it touched for
+// a person who was not there, clearing the parks that existed to stop the item.
+//
+// Running one step is not an act of takeover. `resolve` is what a person types
+// to drive an item, so manual control is asserted there or deliberately through
+// the editor, never inferred from which command was reached for
+// (docs/orchestrator.md § ItemEditor: "set by a deliberate act and never as a
+// side effect of advancing the item").
+//
+// The env var is a table row rather than a separate test, because the point is
+// that it no longer selects anything: both values must produce no edit. A test
+// covering only the unset case would pass against code that still branched.
+func TestCmdRun_NeverAssertsManualControl(t *testing.T) {
+	for _, tc := range []struct{ name, env string }{
+		{"env unset — would have been read as an operator takeover", ""},
+		{"env set — the runner's old signal, now meaning nothing here", "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &stubAgent{name: "stub"}
+			app, be, _ := testApp(t, func(f *flow.Flow) {
+				f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+					return ctx.ResolveMarkdown("the plan")
+				}, flow.StepConfig{})
+			}, a)
+			wrapped := &takeoverBackend{Orchestrator: be}
+			app.Orchestrator = wrapped
 
-	}, a)
-	wrapped := &takeoverBackend{Orchestrator: be}
-	app.Orchestrator = wrapped
+			t.Setenv(dispatchedByRunnerEnv, tc.env)
 
-	// Belt-and-braces: ensure the env var is NOT set for this case (the runner
-	// would set it; an operator-typed run-step has no such pre-export).
-	t.Setenv(dispatchedByRunnerEnv, "")
-
-	code := app.cmdRun(context.Background(), nil)
-	if code != 0 {
-		t.Fatalf("cmdRun = %d, want 0", code)
-	}
-	if wrapped.calls != 1 {
-		t.Errorf("manual-takeover edits = %d, want 1 (operator-driven run-step)", wrapped.calls)
-	}
-}
-
-// TestCmdRun_OrchestratedSkipsTakeover (T0481): when the runner spawned this
-// process (FLOW_DISPATCHED_BY_RUNNER=1), the takeover side effects MUST NOT
-// fire — the orchestrator owns the lease/manual decisions, and applying the
-// operator-takeover signal here would flip Manual=true on an auto-dispatched
-// item.
-func TestCmdRun_OrchestratedSkipsTakeover(t *testing.T) {
-	a := &stubAgent{name: "stub"}
-	app, be, _ := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
-
-	}, a)
-	wrapped := &takeoverBackend{Orchestrator: be}
-	app.Orchestrator = wrapped
-
-	t.Setenv(dispatchedByRunnerEnv, "1")
-
-	code := app.cmdRun(context.Background(), nil)
-	if code != 0 {
-		t.Fatalf("cmdRun = %d, want 0", code)
-	}
-	if wrapped.calls != 0 {
-		t.Errorf("manual-takeover edits = %d, want 0 (orchestrator-spawned run-step)", wrapped.calls)
+			if code := app.cmdRun(context.Background(), nil); code != 0 {
+				t.Fatalf("cmdRun = %d, want 0", code)
+			}
+			if wrapped.calls != 0 {
+				t.Errorf("manual edits = %d, want 0 — run-step must never assert manual control", wrapped.calls)
+			}
+		})
 	}
 }
 
-// TestCmdRun_TakeoverFailureDoesNotBlockStep (T0481): a manual-takeover
-// failure surfaces as a warning on Err but does NOT abort the step — the
-// user's intent is the step, the takeover is bookkeeping.
-func TestCmdRun_TakeoverFailureDoesNotBlockStep(t *testing.T) {
-	a := &stubAgent{name: "stub"}
-	app, be, _ := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+// noClaimBackend answers "this arena holds nothing".
+type noClaimBackend struct{ *fake.Orchestrator }
 
-	}, a)
-	wrapped := &takeoverBackend{Orchestrator: be, failWith: errors.New("tracker unreachable")}
-	app.Orchestrator = wrapped
+func (b *noClaimBackend) LookupActiveClaim(context.Context) (*flow.Claim, error) {
+	return nil, nil
+}
 
-	t.Setenv(dispatchedByRunnerEnv, "")
+// unreadableLeaseBackend answers with the failure a truncated lease file
+// produces — the store exists and cannot say what it holds.
+type unreadableLeaseBackend struct{ *fake.Orchestrator }
 
-	code := app.cmdRun(context.Background(), nil)
-	if code != 0 {
-		t.Fatalf("cmdRun = %d, want 0 (takeover failure must not abort the step)", code)
-	}
-	if wrapped.calls != 1 {
-		t.Errorf("manual-takeover edits = %d, want 1 (failure path still calls)", wrapped.calls)
+func (b *unreadableLeaseBackend) LookupActiveClaim(context.Context) (*flow.Claim, error) {
+	return nil, errors.New("active.json: unexpected end of JSON input")
+}
+
+// A refusal is REPORTED, on stdout, in the same shape as any other outcome —
+// and it names its scope.
+//
+// Before this, every failure path printed prose to stderr and exited 1, so a
+// caller sequencing steps itself had the branch `resolve` makes internally
+// (ErrClaimRefused.ItemScoped: try the next item, or stop) and nothing to make
+// it on but the text. Both cases here are arena-scoped: neither names an item,
+// so "try a different one" is not a move that exists.
+//
+// Asserted on the decoded JSON rather than on the string, because a caller
+// decodes — a substring check would pass on prose that merely mentioned the
+// word.
+func TestCmdRun_RefusalIsReportedWithItsScope(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		backend  func(*fake.Orchestrator) flow.Orchestrator
+		wantCode string
+	}{
+		{
+			name:     "no claim — nothing to advance, and no item to name",
+			backend:  func(f *fake.Orchestrator) flow.Orchestrator { return &noClaimBackend{f} },
+			wantCode: string(refusalNoClaim),
+		},
+		{
+			name:     "lease unreadable — the store cannot answer at all",
+			backend:  func(f *fake.Orchestrator) flow.Orchestrator { return &unreadableLeaseBackend{f} },
+			wantCode: string(refusalLeaseUnreadable),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &stubAgent{name: "stub"}
+			app, be, _ := testApp(t, func(f *flow.Flow) {
+				f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+					return ctx.ResolveMarkdown("the plan")
+				}, flow.StepConfig{})
+			}, a)
+			app.Orchestrator = tc.backend(be)
+			var out bytes.Buffer
+			app.Out = &out
+
+			code := app.cmdRun(context.Background(), []string{"--json"})
+			if code != 1 {
+				t.Fatalf("cmdRun = %d, want 1 (a refusal is not success)", code)
+			}
+
+			var res flow.InvocationResult
+			if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+				t.Fatalf("stdout is not an InvocationResult: %v\n%s", err, out.String())
+			}
+			if res.Refusal == nil {
+				t.Fatalf("result carries no refusal:\n%s", out.String())
+			}
+			if res.Refusal.Code != tc.wantCode {
+				t.Errorf("refusal code = %q, want %q", res.Refusal.Code, tc.wantCode)
+			}
+			if res.Refusal.ItemScoped {
+				t.Error("refusal is item-scoped; neither of these conditions names an item, " +
+					"so trying the next item is not a move a caller could make")
+			}
+			if res.Refusal.Reason == "" {
+				t.Error("refusal carries no human reason")
+			}
+		})
 	}
 }
 

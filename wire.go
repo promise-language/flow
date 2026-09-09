@@ -1,6 +1,7 @@
 package flow
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -418,4 +419,61 @@ type InvocationResult struct {
 	// pointer-to-zero means the step ran but spent nothing. With omitempty a
 	// nil pointer is omitted while &0.0 serialises as "cost_usd":0.
 	CostUSD *float64 `json:"cost_usd,omitempty"`
+
+	// Refusal is set when the invocation stopped because something refused it
+	// rather than because a step ran and reported — the arena holds no claim,
+	// the lease cannot be read, a precondition said no. It is the whole reason
+	// a caller sequencing steps itself can branch: Refusal.ItemScoped separates
+	// "this item slipped away, try another" from "this arena is broken, stop",
+	// which is the distinction docs/cli.md § Claiming requires and which,
+	// before this field, existed only inside the process that made it.
+	//
+	// omitempty, and nil on every result a step produced: a run that was not
+	// refused serialises byte-for-byte as it did before this field existed.
+	Refusal *Refusal `json:"refusal,omitempty"`
+}
+
+// Refusal is a typed refusal on the wire — ErrClaimRefused as a caller outside
+// the process sees it.
+//
+// It carries the fields a caller can act on and not the Go error: a refusal
+// crossing a process boundary is data, and a consumer branching on it must not
+// have to match prose to do so. The field names are the error's, so the two
+// cannot drift into two vocabularies for one condition.
+type Refusal struct {
+	// Code is the machine-readable reason, opaque to the caller beyond
+	// equality — display, logs, and branching on a specific known cause.
+	Code string `json:"code"`
+	// ItemScoped is true when a different item might succeed, and false when
+	// nothing would until someone fixes this arena. A caller driving a queue
+	// tries the next item on true and stops on false.
+	ItemScoped bool `json:"item_scoped"`
+	// Reason is the one-line human explanation. It is for a person reading a
+	// log, never for a program to parse.
+	Reason string `json:"reason"`
+	// Detail is the failing check's own output, verbatim and unmodified.
+	Detail string `json:"detail,omitempty"`
+	// Check names the check that failed, when the orchestrator has one.
+	Check string `json:"check,omitempty"`
+	// Override names the flag that would bypass this refusal, empty when it is
+	// not overridable.
+	Override string `json:"override,omitempty"`
+}
+
+// RefusalOf converts a typed claim refusal into its wire form. It returns nil
+// for an error that is not one, so a caller can hand it any error and emit the
+// result either way.
+func RefusalOf(err error) *Refusal {
+	var refused ErrClaimRefused
+	if !errors.As(err, &refused) {
+		return nil
+	}
+	return &Refusal{
+		Code:       string(refused.Code),
+		ItemScoped: refused.ItemScoped,
+		Reason:     refused.Reason,
+		Detail:     refused.Detail,
+		Check:      refused.Check,
+		Override:   refused.Override,
+	}
 }

@@ -55,6 +55,10 @@ Commands fall into two shapes, and the shape determines the streams.
 
 The report *is* the output. It goes to **stdout**, rendered in the selected mode.
 
+**`run-step` reports an `InvocationResult`** — the same object `resolve` streams, one of them rather than a stream — and reports it for **every** outcome, a refusal included. A caller sequencing steps itself then reads exactly what a caller reading `resolve`'s stdout reads, with no second shape to parse for the failure case. A refusal that left stdout for prose on stderr would have one kind of event reported two ways by two commands, which is the same report told twice.
+
+**A refusal names its scope in the report.** § Claiming already requires that a refusal another item might survive be distinguished from one no item would survive. That distinction is a **field a caller reads**, never something inferred from a message, and it survives the process boundary at every command that can refuse. `resolve` branches on it in-process to decide whether the next item is worth trying; an external caller driving `claim` and `run-step` itself has the identical branch to make, and matching prose to make it is not an interface.
+
 ### Streaming — `resolve`
 
 `resolve` runs for minutes to hours and produces a result per step. The streams split by role:

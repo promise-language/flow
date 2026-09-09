@@ -13,6 +13,24 @@ import (
 	"github.com/promise-language/flow"
 )
 
+// dispatchedByRunnerEnv is the env-var the runner's spawnFlow sets to "1" when
+// it spawns this binary on behalf of the orchestrator.
+//
+// It survives here for ONE reader, and that reader chooses only whether to
+// PRINT the quota block — a display choice, not a behaviour one. That is the
+// only reason it is still read at all: org/cli-guide.md forbids an environment
+// variable deciding what a tool does, absolutely, and the reader that did
+// decide something is gone. `run-step` used its absence to infer that an
+// operator had typed the command and to assert manual control on that
+// inference, which flagged every unattended caller's item as hand-driven and
+// cleared the parks that were stopping it.
+//
+// It should not stay. Retiring it means giving `resolve` an explicit way to say
+// "do not print quota", which is #196's business rather than this one's — so
+// the variable is left named and documented here, next to its one use, instead
+// of being deleted out from under a caller that still sets it.
+const dispatchedByRunnerEnv = "FLOW_DISPATCHED_BY_RUNNER"
+
 // maxResolveSteps backstops cmdResolve's loop. A healthy flow advances through
 // its steps and finalizes well under this; the cap only trips on a step that
 // neither progresses (resolves/parks/fails) nor finalizes — i.e. a bug, not a
