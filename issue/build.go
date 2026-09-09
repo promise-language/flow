@@ -144,9 +144,24 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 	return app, nil
 }
 
+// declareRoles declares the named roles on f, from the one roleDecls table.
+//
+// A composition declares only the roles its own steps perform. Declaring the
+// whole vocabulary everywhere would put a role on a graph no step of which can
+// be tagged with it — a boundary written down that nothing crosses, and a name
+// ErrUnknownRole would then accept from a handler asking who holds a role this
+// binary never runs.
+func declareRoles(f *flow.Flow, roles ...Role) {
+	for _, r := range roles {
+		d := roleDeclFor(r)
+		f.Role(d.Name, d.Capabilities...)
+	}
+}
+
 // contributorFlow is the canonical contributor step set, in order.
 func (b *builder) contributorFlow(cfg Config) *flow.Flow {
 	f := flow.NewFlow("resolve", itemTypes(cfg))
+	declareRoles(f, RoleContributor)
 	b.addContributorSteps(f, flow.StepId(StepCloseBranch))
 	b.addCloseBranch(f)
 	return f
@@ -165,32 +180,38 @@ func (b *builder) contributorFlow(cfg Config) *flow.Flow {
 func (b *builder) addContributorSteps(f *flow.Flow, afterRequest flow.StepId) {
 	f.AddStep("write plan", flow.ArtifactId(StepPlan), b.stepPlan,
 		flow.StepConfig{
+			Role:  contributorRole,
 			Entry: true,
 			Next:  []flow.StepId{flow.StepId(StepBranch)},
 		})
 	f.AddStep("open branch", flow.ArtifactId(StepBranch), b.stepOpenBranch,
 		flow.StepConfig{
+			Role:   contributorRole,
 			Next:   []flow.StepId{flow.StepId(StepImplement)},
 			Writes: flow.WriteContract{MayBranch: true, MayCommit: true},
 		})
 	f.AddStep("implement the change", flow.ArtifactId(StepImplement), b.stepImplement,
 		flow.StepConfig{
+			Role:   contributorRole,
 			Next:   []flow.StepId{flow.StepId(StepReview)},
 			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true},
 		})
 	f.AddStep("review the work", flow.ArtifactId(StepReview), b.stepReview,
 		flow.StepConfig{
+			Role:   contributorRole,
 			Next:   []flow.StepId{flow.StepId(StepCoverage)},
 			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true},
 		})
 	f.AddStep("analyze coverage", flow.ArtifactId(StepCoverage), b.stepCoverage,
 		flow.StepConfig{
+			Role:   contributorRole,
 			Next:   []flow.StepId{flow.StepId(StepOpenPR)},
 			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true},
 		})
 	f.AddSignalStep("create pull request", flow.SignalId(StepOpenPR),
 		func(ctx flow.StepCtx) (flow.StepResult, error) { return b.stepOpenPR(ctx, afterRequest) },
 		flow.StepConfig{
+			Role:   contributorRole,
 			Next:   []flow.StepId{afterRequest},
 			Writes: flow.WriteContract{MayBranch: true, MayCommit: true},
 		})
@@ -201,13 +222,14 @@ func (b *builder) addContributorSteps(f *flow.Flow, afterRequest flow.StepId) {
 func (b *builder) addIntegrationSteps(f *flow.Flow) {
 	f.AddStep("verify merge result", flow.ArtifactId(StepVerifyMerge), b.stepVerifyMerge,
 		flow.StepConfig{
+			Role:   maintainerRole,
 			Next:   []flow.StepId{flow.StepId(StepMerge)},
 			Writes: flow.WriteContract{MayBranch: true, MayCommit: true},
 		})
 	f.AddSignalStep("merge pull request", flow.SignalId(StepMerge), b.stepMerge,
-		flow.StepConfig{Next: []flow.StepId{flow.StepId(StepRecordMerge)}})
+		flow.StepConfig{Role: maintainerRole, Next: []flow.StepId{flow.StepId(StepRecordMerge)}})
 	f.AddStep("record merge commit", flow.ArtifactId(StepRecordMerge), b.stepRecordMerge,
-		flow.StepConfig{Next: []flow.StepId{flow.StepId(StepCloseBranch)}})
+		flow.StepConfig{Role: maintainerRole, Next: []flow.StepId{flow.StepId(StepCloseBranch)}})
 }
 
 // addCloseBranch registers the step both compositions end at. It is the one
@@ -217,6 +239,12 @@ func (b *builder) addIntegrationSteps(f *flow.Flow) {
 func (b *builder) addCloseBranch(f *flow.Flow) {
 	f.AddStep("close branch", flow.ArtifactId(StepCloseBranch), b.stepCloseBranch,
 		flow.StepConfig{
+			// The contributor's, in both compositions. Returning the worktree
+			// to its base is housekeeping on the branch the contributor cut —
+			// it needs nothing the merge needed, so tagging it maintainer in
+			// the carry-through graph would put a capability requirement on the
+			// one step that has none.
+			Role:        contributorRole,
 			MayFinalize: []flow.Disposition{flow.DispositionResolved},
 			Writes:      flow.WriteContract{MayBranch: true},
 		})
@@ -226,6 +254,11 @@ func (b *builder) addCloseBranch(f *flow.Flow) {
 // into one flow that ends at a merged change rather than a proposed one.
 func (b *builder) carryThroughFlow(cfg Config) *flow.Flow {
 	f := flow.NewFlow("resolve", itemTypes(cfg))
+	// Both roles, because this graph performs both: carrying through is one
+	// principal covering both roles and crossing the boundary without a handoff
+	// (docs/resolution.md § One principal, several roles), and the boundary is
+	// still a role boundary in the declaration.
+	declareRoles(f, RoleContributor, RoleMaintainer)
 	b.addContributorSteps(f, flow.StepId(StepVerifyMerge))
 	b.addIntegrationSteps(f)
 	b.addCloseBranch(f)
@@ -269,6 +302,7 @@ func missingMaintainerStepsGate(context.Context, *flow.Item) error {
 // rather than resolve.
 func (b *builder) unimplementedMaintainerFlow(cfg Config) *flow.Flow {
 	f := flow.NewFlow("review", itemTypes(cfg))
+	declareRoles(f, RoleMaintainer)
 	f.AddStep("review the implementation", flow.ArtifactId(StepReviewMaint),
 		func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, fmt.Errorf("issue: %s", missingMaintainerSteps)
@@ -279,6 +313,7 @@ func (b *builder) unimplementedMaintainerFlow(cfg Config) *flow.Flow {
 		// first — because a graph that could not end is not a stub, it is a
 		// graph that never terminates.
 		flow.StepConfig{
+			Role:        maintainerRole,
 			Entry:       true,
 			MayFinalize: []flow.Disposition{flow.DispositionResolved},
 		})

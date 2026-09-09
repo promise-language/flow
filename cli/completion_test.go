@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -376,6 +377,7 @@ func TestCompletion_EveryOtherOutcomeCountsTheDispatch(t *testing.T) {
 func accessorCtx(t *testing.T, state *flow.Item) *stepCtx {
 	t.Helper()
 	f := flow.NewFlow("resolve", nil)
+	f.Role("contributor", flow.CapPush)
 	f.AddStep("write plan", "plan", func(flow.StepCtx) (flow.StepResult, error) {
 		return flow.StepResult{}, nil
 	}, flow.StepConfig{Role: "contributor"})
@@ -463,6 +465,13 @@ func TestStepCtx_RoleAccount(t *testing.T) {
 		t.Fatalf("RoleAccount(reviewer) err = %v, want ErrUnknownRole", err)
 	} else if unknown.Role != "reviewer" {
 		t.Errorf("err names %q, want the role that was asked for", unknown.Role)
+	}
+	// The alternatives travel with the refusal. The raiser can enumerate them —
+	// it holds the flow — and a handler told only that its name is unknown has
+	// to go and read the registration to find out what it should have asked
+	// for.
+	if !slices.Equal(unknown.Declared, []flow.RoleName{"contributor"}) {
+		t.Errorf("ErrUnknownRole.Declared = %v, want the flow's declared set", unknown.Declared)
 	}
 
 	got, err := sc.RoleAccount("contributor")

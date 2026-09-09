@@ -22,6 +22,13 @@ type Flow struct {
 	// declared, and it is what ValidateGraph walks from.
 	entry          *step
 	requireSignals []SignalId
+	// roles is the declared role vocabulary, in declaration order, and
+	// roleIndex is the membership test over it. The declarations are the SINGLE
+	// SOURCE OF TRUTH for what this flow declares: every reference — a step's
+	// tag, a lookup by name, the awaited role an item records — is matched
+	// against them and nothing else (docs/resolution.md § Whose move it is).
+	roles     []RoleDecl
+	roleIndex map[RoleName]bool
 }
 
 // NewFlow constructs an empty flow. `types` declares which Item.Type values
@@ -35,6 +42,7 @@ func NewFlow(name string, types []ItemType) *Flow {
 		types:             types,
 		stepByDescription: map[string]*step{},
 		stepByResult:      map[StepId]*step{},
+		roleIndex:         map[RoleName]bool{},
 	}
 }
 
@@ -243,27 +251,85 @@ func (f *Flow) appendStep(s *step, resultKey StepId) {
 	}
 }
 
-// DeclaresRole reports whether this flow declares the given role — true when
-// some registered step carries the tag.
+// Role declares one role: the name this flow's steps are tagged with, and the
+// capabilities an account must hold to assume it — exactly the shape
+// docs/flow-registration.md § Roles writes down.
 //
-// That is the whole of "the roles a flow declares" today, and it is one
-// predicate rather than a set every caller re-derives: a role reference that
-// names no declaration must be refused loudly wherever it is read
-// (docs/resolution.md § Whose move it is), and a second answer to what is
-// declared is a second place that judgement can differ.
+//	f.Role("contributor", flow.CapPush)
+//	f.Role("maintainer", flow.CapPush, flow.CapMerge)
 //
-// The empty name is never declared: a step with no role tag declares nothing,
-// so a lookup on "" is a lookup on nothing.
+// Order against the step registrations is NOT enforced. Nothing here needs the
+// roles first: whether a step's tag names a declaration is checked once
+// registration has ended (ValidateGraph), which is the only point at which the
+// declared set is knowable whole.
+//
+// Everything below panics rather than returning an error, like the step
+// registrars: these are programming errors caught while the program is being
+// assembled (docs/flow-registration.md § Uniqueness invariants). What is NOT
+// refused here is an empty capability set — docs/flow-registration.md
+// § Startup validation puts that check at startup, alongside the tags it makes
+// meaningless, rather than at the declaration.
+func (f *Flow) Role(name RoleName, caps ...Capability) {
+	if name == "" {
+		panic("flow.Role: empty role name")
+	}
+	if f.roleIndex[name] {
+		panic(fmt.Sprintf("flow.Role: duplicate role %q in flow %q", name, f.name))
+	}
+	for _, c := range caps {
+		if !c.Valid() {
+			panic(fmt.Sprintf("flow.Role: role %q in flow %q requires capability %q, which is not one of %v",
+				name, f.name, c, AllCapabilities()))
+		}
+	}
+	f.roleIndex[name] = true
+	// Cloned in, for the reason prepareStep clones its slices: a declaration
+	// the caller still holds the backing array to could be rewritten after
+	// startup validation certified it.
+	f.roles = append(f.roles, RoleDecl{Name: name, Capabilities: slices.Clone(caps)})
+}
+
+// Roles returns the declared roles in declaration order, deeply cloned —
+// symmetrically with the copy Role makes on the way in, and for the same
+// reason: a caller ranging the declarations must not be able to rewrite them
+// through the view it was handed.
+func (f *Flow) Roles() []RoleDecl {
+	out := make([]RoleDecl, len(f.roles))
+	for i, r := range f.roles {
+		out[i] = RoleDecl{Name: r.Name, Capabilities: slices.Clone(r.Capabilities)}
+	}
+	return out
+}
+
+// RoleNames returns the declared role names in declaration order. What fills
+// ErrUnknownRole.Declared — an unknown-role refusal that could not name the
+// alternatives leaves the reader to go and find them.
+func (f *Flow) RoleNames() []RoleName {
+	out := make([]RoleName, len(f.roles))
+	for i, r := range f.roles {
+		out[i] = r.Name
+	}
+	return out
+}
+
+// DeclaresRole reports whether this flow declares the given role.
+//
+// It answers from the DECLARATIONS, not from what the steps happen to be tagged
+// with. The difference is the whole point: a tag scan makes every typo its own
+// declaration, so the one check that would catch it — "this reference names
+// nothing" — could never fail. Matching happens only against the declared set
+// (docs/resolution.md § Whose move it is), and this is that set.
+//
+// One predicate rather than a set every caller re-derives: a second answer to
+// what is declared is a second place that judgement can differ.
+//
+// The empty name is never declared: a signal wait carries no role, so a lookup
+// on "" is a lookup on nothing.
 func (f *Flow) DeclaresRole(role RoleName) bool {
 	if role == "" {
 		return false
 	}
-	for _, s := range f.steps {
-		if s.role == role {
-			return true
-		}
-	}
-	return false
+	return f.roleIndex[role]
 }
 
 // RequireSignal adds an eligibility precondition. An item is only begun once

@@ -36,6 +36,12 @@ type Orchestrator struct {
 	// one, which is why LookupActiveClaim needs no key.
 	active *flow.Claim
 
+	// capabilities is what DetectCapabilities answers, keyed by account, with
+	// the empty key holding the ambient one's. An account with no entry has no
+	// capabilities — the honest reading of "not a collaborator" — so a test
+	// wanting one says so with SetCapabilities.
+	capabilities map[flow.AccountId][]flow.Capability
+
 	verifyOK        bool         // controls the exit code of the verify command
 	commandOutcome  flow.Outcome // controls what Worktree.Run observes
 	gateOutcome     flow.Outcome // controls what Worktree.RunGate observes
@@ -142,6 +148,12 @@ func New(signals ...flow.SignalDef) *Orchestrator {
 		supportsRequest: true,
 		arena:           flow.Arena{Host: "fakehost", Id: "/fake/arena"},
 		account:         "fake-account",
+		// The ambient account holds everything by default. A fake exists to let
+		// a flow's own logic be exercised, and an ambient account that could
+		// assume no role would refuse before any of it ran — so the default is
+		// the one that gets out of the way, and a test constraining
+		// capabilities says so.
+		capabilities: map[flow.AccountId][]flow.Capability{"": flow.AllCapabilities()},
 	}
 }
 
@@ -712,6 +724,27 @@ func (b *Orchestrator) LookupActiveClaim(ctx context.Context) (*flow.Claim, erro
 	}
 	cp := *b.active
 	return &cp, nil
+}
+
+// SetCapabilities overrides what DetectCapabilities answers for one account.
+// The EMPTY account is the ambient one — the account this arena acts as — which
+// is the same convention the contract uses.
+func (b *Orchestrator) SetCapabilities(account flow.AccountId, caps ...flow.Capability) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.capabilities[account] = slices.Clone(caps)
+}
+
+// DetectCapabilities reports what the named account can do, with the empty
+// account naming the ambient one.
+//
+// An account nothing was set for answers with no capabilities rather than an
+// error: "this account may do nothing here" is what the real backend says about
+// a non-collaborator, and it is an answer role derivation can act on.
+func (b *Orchestrator) DetectCapabilities(ctx context.Context, account flow.AccountId) ([]flow.Capability, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(b.capabilities[account]), nil
 }
 
 func (b *Orchestrator) LookupClaim(ctx context.Context, ref flow.ItemRef) (*flow.ClaimInfo, error) {

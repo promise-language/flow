@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,45 +18,26 @@ import (
 // Role selection.
 // ---------------------------------------------------------------------------
 
-func TestRoleFromPermissions(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		in   flow.RepoPermissions
-		want Role
-	}{
-		// GitHub reports these cumulatively, so an admin also carries push.
-		// Testing push first would call every admin a contributor.
-		{"admin carries push too", flow.RepoPermissions{Admin: true, Maintain: true, Push: true, Triage: true, Pull: true}, RoleMaintainer},
-		{"maintain", flow.RepoPermissions{Maintain: true, Push: true, Pull: true}, RoleMaintainer},
-		{"push only", flow.RepoPermissions{Push: true, Pull: true}, RoleContributor},
-		{"triage without push", flow.RepoPermissions{Triage: true, Pull: true}, RoleContributor},
-		{"read only", flow.RepoPermissions{Pull: true}, RoleContributor},
-		{"nothing", flow.RepoPermissions{}, RoleContributor},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := roleFromPermissions(tc.in); got != tc.want {
-				t.Errorf("roleFromPermissions(%+v) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
-
 // stubBackend implements just enough of flow.Orchestrator to be passed around; the
 // capability interfaces are what the tests actually exercise.
 type stubBackend struct {
 	flow.Orchestrator // nil — these tests never call the base methods
-	perms             flow.RepoPermissions
-	permsErr          error
+	caps              []flow.Capability
+	capsErr           error
+	capsCalls         int
 	branch            string
 	branchErr         error
 	answers           []flow.Answer
 	answersErr        error
 	sawSince          time.Time
 	sawSelf           string
+	sawAccount        flow.AccountId
 }
 
-func (s *stubBackend) RepoPermissions(context.Context) (flow.RepoPermissions, error) {
-	return s.perms, s.permsErr
+func (s *stubBackend) DetectCapabilities(_ context.Context, account flow.AccountId) ([]flow.Capability, error) {
+	s.capsCalls++
+	s.sawAccount = account
+	return s.caps, s.capsErr
 }
 func (s *stubBackend) DefaultBranch(context.Context) (flow.BranchName, error) {
 	return flow.BranchName(s.branch), s.branchErr
@@ -70,39 +52,135 @@ type bareBackend struct{ flow.Orchestrator }
 
 func TestResolveRole_ExplicitConfigWins(t *testing.T) {
 	// A maintainer deliberately running their own change through the
-	// contributor set is the case this exists for: the probe would say
+	// contributor set is the case this exists for: detection would say
 	// maintainer, and the operator's choice has to beat it.
-	be := &stubBackend{perms: flow.RepoPermissions{Admin: true}}
+	be := &stubBackend{caps: []flow.Capability{flow.CapPush, flow.CapMerge, flow.CapApprove}}
 	got, err := resolveRole(context.Background(), Config{Role: RoleContributor}, be)
 	if err != nil {
 		t.Fatalf("resolveRole: %v", err)
 	}
 	if got != RoleContributor {
-		t.Errorf("role = %q, want %q — explicit config must beat the probe", got, RoleContributor)
+		t.Errorf("role = %q, want %q — explicit config must beat detection", got, RoleContributor)
+	}
+	// And it beats it by not asking. BuildApp runs before every command, so a
+	// configured role is also what makes `doctor` start with no network.
+	if be.capsCalls != 0 {
+		t.Errorf("DetectCapabilities called %d time(s) with Config.Role set; want none", be.capsCalls)
 	}
 }
 
-func TestResolveRole_DetectsFromBackend(t *testing.T) {
-	be := &stubBackend{perms: flow.RepoPermissions{Maintain: true, Push: true}}
-	got, err := resolveRole(context.Background(), Config{}, be)
-	if err != nil {
-		t.Fatalf("resolveRole: %v", err)
-	}
-	if got != RoleMaintainer {
-		t.Errorf("role = %q, want %q", got, RoleMaintainer)
+// The two capability sets that cover a declared role, each landing on the most
+// privileged one it covers.
+func TestResolveRole_DetectsFromCapabilities(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		caps []flow.Capability
+		want Role
+	}{
+		{"push alone covers the contributor", []flow.Capability{flow.CapPush}, RoleContributor},
+		{"push and merge covers both, and the more privileged wins",
+			[]flow.Capability{flow.CapPush, flow.CapMerge}, RoleMaintainer},
+		// A capability no declared role asks for neither adds nor removes one.
+		{"approve alongside changes nothing",
+			[]flow.Capability{flow.CapPush, flow.CapApprove}, RoleContributor},
+		// merge without push covers neither role: both require push.
+		{"merge without push covers no role", []flow.Capability{flow.CapMerge}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			be := &stubBackend{caps: tc.caps}
+			got, err := resolveRole(context.Background(), Config{}, be)
+			if tc.want == "" {
+				if err == nil {
+					t.Fatalf("resolveRole = %q, want a refusal — %v covers no declared role", got, tc.caps)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveRole: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("role = %q, want %q", got, tc.want)
+			}
+			// The ambient account is named by the empty AccountId: the
+			// derivation runs before any claim exists.
+			if be.sawAccount != "" {
+				t.Errorf("DetectCapabilities asked about %q, want the ambient account (empty)", be.sawAccount)
+			}
+		})
 	}
 }
 
-func TestResolveRole_RefusesWhenUndetectable(t *testing.T) {
-	// Guessing here would route a contributor into merge steps they cannot
-	// perform, and the failure would not surface until the merge call.
-	_, err := resolveRole(context.Background(), Config{}, &bareBackend{})
+// An account that can assume no declared role is a startup error naming what
+// was detected. Calling it a contributor — which the old permissions collapse
+// did for a read-only account — starts a resolution that dies at its first
+// push, several steps from the misconfiguration.
+func TestResolveRole_RefusesAnAccountCoveringNoRole(t *testing.T) {
+	be := &stubBackend{caps: nil}
+	_, err := resolveRole(context.Background(), Config{}, be)
 	if err == nil {
-		t.Fatal("want an error when the backend cannot report permissions")
+		t.Fatal("want an error when the account can assume no declared role")
 	}
-	if !strings.Contains(err.Error(), "Config.Role") {
-		t.Errorf("error = %q, want it to name the field that fixes it", err)
+	for _, want := range []string{"Config.Role", string(RoleContributor), string(flow.CapPush)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to mention %q", err, want)
+		}
 	}
+}
+
+func TestResolveRole_WrapsDetectionFailure(t *testing.T) {
+	boom := errors.New("boom")
+	_, err := resolveRole(context.Background(), Config{}, &stubBackend{capsErr: boom})
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want it to wrap the backend's error", err)
+	}
+	if !strings.Contains(err.Error(), "detect repository capabilities") {
+		t.Errorf("error = %q, want it to say what failed", err)
+	}
+}
+
+// roleDecls is the one table, so both readers of it agree by construction:
+// what a role requires is the same fact whether the flow is being declared or
+// the step set is being chosen.
+func TestRoleDecls_CoverEveryRoleTheFlowsDeclare(t *testing.T) {
+	for _, r := range []Role{RoleContributor, RoleMaintainer} {
+		d := roleDeclFor(r)
+		if d.Name != flow.RoleName(r) {
+			t.Errorf("roleDeclFor(%q) named %q", r, d.Name)
+		}
+		if len(d.Capabilities) == 0 {
+			t.Errorf("role %q requires no capability — every account would cover it", r)
+		}
+		for _, c := range d.Capabilities {
+			if !c.Valid() {
+				t.Errorf("role %q requires %q, which is not a capability", r, c)
+			}
+		}
+	}
+	// Least privileged first: resolveRole reads that order to pick the most
+	// privileged role an account covers, so a reordering here would silently
+	// hand a maintainer the contributor step set.
+	if !slices.Equal(roleDeclFor(RoleMaintainer).Capabilities, []flow.Capability{flow.CapPush, flow.CapMerge}) {
+		t.Errorf("the maintainer requires %v, want push and merge", roleDeclFor(RoleMaintainer).Capabilities)
+	}
+	if len(roleDeclFor(RoleContributor).Capabilities) >= len(roleDeclFor(RoleMaintainer).Capabilities) {
+		t.Error("roleDecls is not ordered least privileged first, which is the order resolveRole reads")
+	}
+}
+
+// A role with no declaration is a programming error in a table three lines
+// long, and the flow builders name their own constants — so it panics rather
+// than declaring a role nothing can back.
+func TestRoleDeclFor_PanicsOnAnUndeclaredRole(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("roleDeclFor on an undeclared role returned instead of panicking")
+		}
+		if msg, _ := r.(string); !strings.Contains(msg, "reviewer") {
+			t.Errorf("panic = %v, want it to name the role", r)
+		}
+	}()
+	roleDeclFor("reviewer")
 }
 
 func TestResolveRole_RejectsUnknownRole(t *testing.T) {

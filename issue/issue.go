@@ -130,21 +130,14 @@ type Answer = flow.Answer
 // ---------------------------------------------------------------------------
 // Optional backend capabilities.
 //
-// This package takes a flow.Orchestrator, not a concrete one. The three interfaces
+// This package takes a flow.Orchestrator, not a concrete one. The interfaces
 // below are how it reaches capabilities that only some backends have. Each is
 // probed with a type assertion and degrades explicitly — never silently.
-// ---------------------------------------------------------------------------
-
-// RoleProber reports what the authenticated principal may do on the repo, so
-// the step set can be chosen from it.
 //
-// Backends with no permission model do not implement this — on a tracker whose
-// runner holds full rights by construction there is no role question to ask.
-// A backend that does not implement it requires Config.Role to be set, and
-// BuildApp refuses at startup otherwise rather than guessing a step set.
-type RoleProber interface {
-	RepoPermissions(ctx context.Context) (flow.RepoPermissions, error)
-}
+// The step set is NOT one of them any more: capabilities are detected through
+// flow.Orchestrator.DetectCapabilities, which every orchestrator implements, so
+// there is nothing to probe for and nothing to degrade to.
+// ---------------------------------------------------------------------------
 
 // BranchDetector reports the repository's default branch, used as the base for
 // the working branch. There is no safe literal to fall back on: "main" is
@@ -216,9 +209,10 @@ type Config struct {
 	// flow's package defaults.
 	Budgets map[StepID]flow.StepBudget
 
-	// Role forces the step set. Zero value means detect it from the backend
-	// (see RoleProber). Set it when a maintainer is deliberately working their
-	// own change through the contributor flow.
+	// Role forces the step set. Zero value means derive it from the account's
+	// detected capabilities (flow.Orchestrator.DetectCapabilities). Set it when
+	// a maintainer is deliberately working their own change through the
+	// contributor flow.
 	Role Role
 
 	// CarryThrough declares that this binary runs both the contributor and

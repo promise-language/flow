@@ -546,6 +546,33 @@ func (o *outward) ListBlockedBy(ctx context.Context, issue int) ([]*github.Issue
 	return out, nil
 }
 
+// CollaboratorPermission returns one account's permission level on the
+// repository — "admin", "maintain", "write", "triage", "read" or "none" — via
+// GET /repos/{owner}/{repo}/collaborators/{login}/permission.
+//
+// Built through the client's own NewRequest/Do pair, like ListBlockedBy, so
+// this file stays the only thing in the package that talks to GitHub.
+//
+// A refusal is a refusal. A 403 (the token may not read collaborators) and a
+// 404 (no such account, or none this token can see) are returned as errors
+// rather than as an empty permission, because the two readings are not the
+// same: "detected nothing" is a fact about the account that role derivation
+// acts on, and "could not ask" is a fact about the caller that it must not.
+func (o *outward) CollaboratorPermission(ctx context.Context, login string) (string, error) {
+	u := fmt.Sprintf("repos/%v/%v/collaborators/%v/permission", o.owner, o.repo, url.PathEscape(login))
+	req, err := o.client.NewRequest("GET", u, nil)
+	if err != nil {
+		return "", err
+	}
+	var out struct {
+		Permission string `json:"permission"`
+	}
+	if _, err := o.client.Do(ctx, req, &out); err != nil {
+		return "", err
+	}
+	return out.Permission, nil
+}
+
 func (o *outward) GetRepo(ctx context.Context) (*github.Repository, error) {
 	repo, _, err := o.client.Repositories.Get(ctx, o.owner, o.repo)
 	return repo, err

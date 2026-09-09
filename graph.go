@@ -22,6 +22,8 @@ import "fmt"
 //  5. Finalization is reachable from every item — a step from which no
 //     sequence of declared routes could ever end the flow is a dead end, and
 //     an item that reaches one can never finish.
+//  6. The roles line up: every declared role names at least one capability,
+//     every step carries a role, and every tag names a declared role.
 //
 // Every error names the flow, the step's description and its result id: a
 // description alone is display text, and an id alone is not what the reader
@@ -50,7 +52,61 @@ func (f *Flow) ValidateGraph() error {
 	if err := f.validateReachableFromEntry(); err != nil {
 		return err
 	}
-	return f.validateFinalizationReachable()
+	if err := f.validateFinalizationReachable(); err != nil {
+		return err
+	}
+	return f.validateRoles()
+}
+
+// validateRoles checks the role declarations and the step tags against each
+// other, which is the level at which either is checkable: a declaration cannot
+// know whether anything is tagged with it, and a tag cannot know whether the
+// declaration it names arrived.
+//
+// Three refusals, in the order a reader wants them — first the declarations
+// themselves, then the steps against them:
+//
+//   - A declared role naming NO capability is refused. Every account covers it
+//     (AssumableRoles: a role requiring nothing is required of nothing), so the
+//     steps it tags are performable by a read-only account — a role boundary
+//     written down and enforcing nothing, which is worse than no boundary
+//     because the declaration says otherwise. docs/flow-registration.md § Startup
+//     validation puts the check here rather than at Flow.Role: only now is it
+//     knowable that no later call added the capabilities.
+//   - A step carrying NO role is refused. StepConfig.Role is "required on
+//     steps", and an untagged step is nobody's move: no runner's assumable set
+//     matches it, so the item awaits a role that does not exist.
+//   - A tag naming NO declaration is refused as ErrUnknownRole, carrying the
+//     declared set. This is the check the declaration surface exists for: the
+//     vocabulary is open, so a typo is indistinguishable from a role whose
+//     runner has not arrived, and the item sits unofferable forever with
+//     nothing naming why (docs/resolution.md § Whose move it is).
+//
+// Signal waits are exempt from the tag checks. A wait belongs to no role — it
+// has no handler and performs nothing — and AwaitSignal already panics on a
+// role given to one, so the exemption here is the same rule read from the other
+// side.
+func (f *Flow) validateRoles() error {
+	for _, r := range f.roles {
+		if len(r.Capabilities) == 0 {
+			return fmt.Errorf("flow %q: declared role %q names no capability — every account would cover it, so the steps it tags would be performable by an account that can do nothing; declare what the role requires, from %v",
+				f.name, r.Name, AllCapabilities())
+		}
+	}
+	for _, s := range f.steps {
+		if s.kind == stepAwait {
+			continue
+		}
+		if s.role == "" {
+			return fmt.Errorf("flow %q: step %s declares no Role — every step is tagged with exactly one declared role, and an untagged step is nobody's move; declared roles are %v",
+				f.name, s.describe(), f.RoleNames())
+		}
+		if !f.DeclaresRole(s.role) {
+			return fmt.Errorf("flow %q: step %s: %w", f.name, s.describe(),
+				ErrUnknownRole{Role: s.role, Declared: f.RoleNames()})
+		}
+	}
+	return nil
 }
 
 // validateReachableFromEntry walks Next forward from the entry and refuses the

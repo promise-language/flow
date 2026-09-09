@@ -58,6 +58,55 @@ func TestErrClaimRefused_ErrorsAs(t *testing.T) {
 	}
 }
 
+// Both message forms. The raiser can enumerate the alternatives or it cannot,
+// and the message has to say which: a refusal that named neither would leave
+// the reader unable to tell "you typed a name nothing declares" from "this flow
+// declares nothing at all".
+func TestErrUnknownRole_Error(t *testing.T) {
+	cases := []struct {
+		name string
+		err  flow.ErrUnknownRole
+		want string
+	}{
+		{
+			name: "no alternatives to name",
+			err:  flow.ErrUnknownRole{Role: "reviewer"},
+			want: `role "reviewer" is not declared by this flow`,
+		},
+		{
+			name: "the declared set travels with it",
+			err:  flow.ErrUnknownRole{Role: "reviewer", Declared: []flow.RoleName{"contributor", "maintainer"}},
+			want: `role "reviewer" is not declared by this flow; declared roles are [contributor maintainer]`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.err.Error(); got != c.want {
+				t.Errorf("Error() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// It survives wrapping with both fields intact. ValidateGraph wraps it into a
+// message naming the step, and a caller reading the graph's refusal has to be
+// able to recover which role named nothing.
+func TestErrUnknownRole_ErrorsAs(t *testing.T) {
+	original := flow.ErrUnknownRole{Role: "reviewer", Declared: []flow.RoleName{"contributor"}}
+	wrapped := fmt.Errorf(`flow "resolve": step "review the work" (review): %w`, original)
+
+	var target flow.ErrUnknownRole
+	if !errors.As(wrapped, &target) {
+		t.Fatal("errors.As failed on wrapped ErrUnknownRole")
+	}
+	if target.Role != "reviewer" {
+		t.Errorf("Role = %q, want reviewer", target.Role)
+	}
+	if len(target.Declared) != 1 || target.Declared[0] != "contributor" {
+		t.Errorf("Declared = %v, want the declared set carried through", target.Declared)
+	}
+}
+
 func TestErrWaitsOnItems_Error(t *testing.T) {
 	refs := []flow.ItemRef{{Display: "o/r#7"}, {Display: "o/r#8"}}
 	if got, want := (flow.ErrWaitsOnItems{Refs: refs}).Error(), "waits on items: o/r#7, o/r#8"; got != want {

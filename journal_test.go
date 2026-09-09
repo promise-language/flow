@@ -12,6 +12,7 @@ import (
 func journalFlow(t *testing.T) *Flow {
 	t.Helper()
 	f := NewFlow("implement", []ItemType{"task"})
+	f.Role("contributor", CapPush)
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
 		Role:        "contributor",
 		Entry:       true,

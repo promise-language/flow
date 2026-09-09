@@ -1008,3 +1008,60 @@ func TestBackend_ReleaseDropsWorkInProgress(t *testing.T) {
 		t.Errorf("Load after Release = (%q, %v), want nothing left", got, err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// DetectCapabilities.
+// ---------------------------------------------------------------------------
+
+// The ambient account holds everything by default. A fake exists to let a
+// flow's own logic be exercised, and an ambient account that could assume no
+// role would refuse before any of it ran.
+func TestBackend_DetectCapabilities_AmbientDefaultsToEverything(t *testing.T) {
+	got, err := fake.New().DetectCapabilities(context.Background(), "")
+	if err != nil {
+		t.Fatalf("DetectCapabilities: %v", err)
+	}
+	if !slices.Equal(got, flow.AllCapabilities()) {
+		t.Errorf("DetectCapabilities(ambient) = %v, want every capability", got)
+	}
+}
+
+func TestBackend_SetCapabilities(t *testing.T) {
+	b := fake.New()
+	b.SetCapabilities("", flow.CapPush)
+	b.SetCapabilities("bob", flow.CapPush, flow.CapMerge)
+
+	if got, _ := b.DetectCapabilities(context.Background(), ""); !slices.Equal(got, []flow.Capability{flow.CapPush}) {
+		t.Errorf("DetectCapabilities(ambient) = %v, want the narrowed set", got)
+	}
+	if got, _ := b.DetectCapabilities(context.Background(), "bob"); !slices.Equal(got, []flow.Capability{flow.CapPush, flow.CapMerge}) {
+		t.Errorf("DetectCapabilities(bob) = %v, want what was set for bob", got)
+	}
+}
+
+// An account nothing was set for has no capabilities, and that is an ANSWER
+// rather than a failure: it is what the real backend says about somebody who is
+// not a collaborator, and role derivation acts on it.
+func TestBackend_DetectCapabilities_UnsetAccountHasNone(t *testing.T) {
+	got, err := fake.New().DetectCapabilities(context.Background(), "stranger")
+	if err != nil {
+		t.Fatalf("DetectCapabilities: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("DetectCapabilities(stranger) = %v, want nothing", got)
+	}
+}
+
+// The answer is a copy: a caller sorting or truncating what it was handed must
+// not rewrite what the next call reports.
+func TestBackend_DetectCapabilities_AnswerIsACopy(t *testing.T) {
+	b := fake.New()
+	got, err := b.DetectCapabilities(context.Background(), "")
+	if err != nil {
+		t.Fatalf("DetectCapabilities: %v", err)
+	}
+	got[0] = "rewritten"
+	if again, _ := b.DetectCapabilities(context.Background(), ""); !slices.Equal(again, flow.AllCapabilities()) {
+		t.Errorf("the stored set followed the caller's slice: %v", again)
+	}
+}
