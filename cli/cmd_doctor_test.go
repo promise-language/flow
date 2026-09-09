@@ -14,8 +14,8 @@ import (
 )
 
 func TestCmdDoctor_OKGlyph(t *testing.T) {
-	arena(t)
 	be := fake.New()
+	arena(t, be)
 	app := App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
@@ -39,8 +39,8 @@ func TestCmdDoctor_OKGlyph(t *testing.T) {
 }
 
 func TestCmdDoctor_FailGlyph(t *testing.T) {
-	arena(t)
 	be := &failingBackend{Orchestrator: fake.New(), err: errors.New("simulated")}
+	arena(t, be)
 	app := App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
@@ -101,22 +101,22 @@ func TestCmdDoctor_AgentCheckSpendsNothing(t *testing.T) {
 func TestCmdDoctor_NoPathSpendsATurn(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		orch  func() flow.Orchestrator
+		orch  func() rootedOrchestrator
 		agent func(t *testing.T) flow.Agent
 	}{
 		{"everything fine",
-			func() flow.Orchestrator { return fake.New() },
+			func() rootedOrchestrator { return fake.New() },
 			func(t *testing.T) flow.Agent { return &spendTrapAgent{t: t} }},
 		{"agent broken",
-			func() flow.Orchestrator { return fake.New() },
+			func() rootedOrchestrator { return fake.New() },
 			func(t *testing.T) flow.Agent { return &spendTrapAgent{t: t, err: errors.New("claude: not found")} }},
 		{"orchestrator unreachable",
-			func() flow.Orchestrator {
+			func() rootedOrchestrator {
 				return &failingBackend{Orchestrator: fake.New(), err: errors.New("simulated")}
 			},
 			func(t *testing.T) flow.Agent { return &spendTrapAgent{t: t} }},
 		{"agent cannot be checked for free",
-			func() flow.Orchestrator { return fake.New() },
+			func() rootedOrchestrator { return fake.New() },
 			func(t *testing.T) flow.Agent { return &runTrapAgent{t: t} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -177,28 +177,44 @@ func TestCmdDoctor_AgentWithoutDoctorCapabilitySkips(t *testing.T) {
 	}
 }
 
-// arena moves the test into a directory shaped like an arena someone has set
-// up: a docs/ holding one document. doctor reads the arena it RUNS in — that is
-// what an arena is — so a test that does not set one up is testing this
-// package's source directory.
-func arena(t *testing.T) string {
+// rootedOrchestrator is an orchestrator whose arena root a test can point at a
+// real directory. doctor reads the docs/ of the checkout the ORCHESTRATOR
+// reports, so this — not the process's directory — is how a test says which
+// tree it is asking about. Taking it as a parameter type rather than asserting
+// on flow.Orchestrator makes that wiring compile-checked.
+type rootedOrchestrator interface {
+	flow.Orchestrator
+	SetArenaRoot(string)
+}
+
+// arena builds a directory shaped like an arena someone has set up — a docs/
+// holding one document — and points orch's checkout at it. The fake's default
+// root does not exist, so a test whose subject is not the docs row still has to
+// set one up for that row to pass.
+func arena(t *testing.T, orch rootedOrchestrator) string {
 	t.Helper()
 	dir := t.TempDir()
+	withDocs(t, dir)
+	orch.SetArenaRoot(dir)
+	return dir
+}
+
+// withDocs gives a directory the normative documentation doctor looks for.
+func withDocs(t *testing.T, dir string) {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Join(dir, "docs"), 0o755); err != nil {
 		t.Fatalf("mkdir docs: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "docs", "cli.md"), []byte("# cli\n"), 0o644); err != nil {
 		t.Fatalf("write doc: %v", err)
 	}
-	t.Chdir(dir)
-	return dir
 }
 
 // doctorApp builds a validated App around an orchestrator and agent, with both
 // streams captured.
-func doctorApp(t *testing.T, orch flow.Orchestrator, agent flow.Agent) (*App, *bytes.Buffer) {
+func doctorApp(t *testing.T, orch rootedOrchestrator, agent flow.Agent) (*App, *bytes.Buffer) {
 	t.Helper()
-	arena(t)
+	arena(t, orch)
 	app := &App{
 		Orchestrator: orch,
 		Agent:        agent,
@@ -276,9 +292,10 @@ func newDummyFlow(name string) *flow.Flow {
 // what startup validation checked, and an operator asking why a run refused
 // needs to see the same list the check saw.
 func TestCmdDoctor_ReportsDeclaredGatesAndCommands(t *testing.T) {
-	arena(t)
+	be := fake.New()
+	arena(t, be)
 	app := App{
-		Orchestrator: fake.New(),
+		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         newDummyFlow("x"),
@@ -303,8 +320,8 @@ func TestCmdDoctor_ReportsDeclaredGatesAndCommands(t *testing.T) {
 
 // When CarryThrough is set, doctor should print the carry-through caveat.
 func TestCmdDoctor_ReportsCarryThrough(t *testing.T) {
-	arena(t)
 	be := fake.New()
+	arena(t, be)
 	app := App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
@@ -333,8 +350,8 @@ func TestCmdDoctor_ReportsCarryThrough(t *testing.T) {
 
 // When CarryThrough is not set, doctor should not mention it.
 func TestCmdDoctor_OmitsCarryThroughWhenDisabled(t *testing.T) {
-	arena(t)
 	be := fake.New()
+	arena(t, be)
 	app := App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
@@ -394,9 +411,10 @@ func TestCmdDoctor_NormativeDocsMissing(t *testing.T) {
 					t.Fatalf("mkdir: %v", err)
 				}
 			}
-			t.Chdir(dir)
+			be := fake.New()
+			be.SetArenaRoot(dir)
 			app := &App{
-				Orchestrator: fake.New(),
+				Orchestrator: be,
 				Agent:        &stubAgent{name: "stub"},
 				Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 				Flow:         newDummyFlow("x"),
@@ -414,6 +432,144 @@ func TestCmdDoctor_NormativeDocsMissing(t *testing.T) {
 				t.Errorf("docs line should fail; got %q", line)
 			}
 		})
+	}
+}
+
+// The row reports on the ARENA'S checkout, never on the directory the operator
+// happened to be standing in. Both directions are asserted, because each pins a
+// different half of the defect: a wrong cwd must not be able to fail a sound
+// arena, and a convenient cwd must not be able to pass an unsound one. The
+// process is chdir'd to a directory whose docs/ is the opposite of the arena's,
+// so a check reading the cwd reaches the opposite verdict from the one asserted
+// here — and the assertion is on the PATH the line names, not only the glyph,
+// which is what makes the right verdict proof rather than coincidence.
+func TestCmdDoctor_NormativeDocsReadTheArenaNotTheCwd(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		arenaHasDocs bool
+		wantGlyph    string
+		wantCode     int
+	}{
+		{"a wrong cwd cannot fail a sound arena", true, glyphOK, 0},
+		{"a convenient cwd cannot pass an arena without documents", false, glyphFail, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			be := fake.New()
+			app, out := doctorApp(t, be, &stubAgent{name: "stub"}) // an arena holding docs/
+			arenaDir := be.ArenaRoot()
+			if !tc.arenaHasDocs {
+				arenaDir = t.TempDir()
+				be.SetArenaRoot(arenaDir)
+			}
+			// The process stands somewhere else, holding the opposite.
+			cwd := t.TempDir()
+			if !tc.arenaHasDocs {
+				withDocs(t, cwd)
+			}
+			t.Chdir(cwd)
+
+			if code := app.cmdDoctor(context.Background(), nil, nil); code != tc.wantCode {
+				t.Fatalf("exit code = %d, want %d; output:\n%s", code, tc.wantCode, out.String())
+			}
+			line := doctorLine(t, out.String(), "normative docs")
+			if !strings.HasPrefix(line, tc.wantGlyph) {
+				t.Errorf("docs line should carry %q; got %q", tc.wantGlyph, line)
+			}
+			if docs := filepath.Join(arenaDir, "docs"); !strings.Contains(line, docs) {
+				t.Errorf("docs line should name the arena's %s; got %q", docs, line)
+			}
+			if strings.Contains(line, cwd) {
+				t.Errorf("docs line names the process's directory %s — the check read the cwd; got %q", cwd, line)
+			}
+		})
+	}
+}
+
+// An orchestrator with no local checkout has no docs/ that could be missing, so
+// the row SKIPS and the exit code stays 0. A check the SDK could not make is a
+// fact about what it was given, not a verdict on this machine — and there is no
+// second place to look: falling back to the process's directory is the defect,
+// not the fallback.
+func TestCmdDoctor_NormativeDocsSkipWithoutACheckout(t *testing.T) {
+	be := fake.New()
+	app, out := doctorApp(t, be, &stubAgent{name: "stub"})
+	be.SetArenaRoot("")
+
+	if code := app.cmdDoctor(context.Background(), nil, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0 — an unavailable check is not an unfit machine; output:\n%s",
+			code, out.String())
+	}
+	line := doctorLine(t, out.String(), "normative docs")
+	if !strings.HasPrefix(line, glyphSkip) {
+		t.Errorf("docs line should skip when the orchestrator declares no checkout; got %q", line)
+	}
+	// And it says why. A skip an operator cannot account for reads as a check
+	// that quietly stopped working, which is how a row nobody trusts turns into
+	// a row nobody looks at.
+	if !strings.Contains(line, "checkout") {
+		t.Errorf("the skip should say what was missing; got %q", line)
+	}
+}
+
+// A checkout doctor WAS given and cannot find is a failure, not a skip. The two
+// are one glyph apart in the report and worlds apart to an operator: the skip
+// says the SDK had nowhere to look and leaves the machine fit, while this is an
+// orchestrator naming a directory that is not on this machine — a moved
+// worktree, a configuration pointing at a clone that was deleted — and every
+// step that followed would work on a project whose definition of correct
+// nothing can read.
+//
+// The distinction is exactly what a later "be forgiving about roots that are
+// not there" would erase, and erasing it costs nothing visible: the row turns
+// from a failure into a skip, doctor exits 0, and the failure comes back at
+// review time as work that is plausible rather than right. The line names the
+// path, because which checkout it looked in is the whole diagnosis.
+func TestCmdDoctor_NormativeDocsCheckoutThatIsNotThere(t *testing.T) {
+	be := fake.New()
+	app, out := doctorApp(t, be, &stubAgent{name: "stub"})
+	gone := filepath.Join(t.TempDir(), "moved-away")
+	be.SetArenaRoot(gone)
+
+	if code := app.cmdDoctor(context.Background(), nil, nil); code != 1 {
+		t.Fatalf("exit code = %d, want 1 — a checkout that is not on this machine is an unfit "+
+			"machine, not an unavailable check; output:\n%s", code, out.String())
+	}
+	line := doctorLine(t, out.String(), "normative docs")
+	if !strings.HasPrefix(line, glyphFail) {
+		t.Errorf("docs line should fail for a checkout that is not there; got %q", line)
+	}
+	if !strings.Contains(line, gone) {
+		t.Errorf("docs line should name the checkout it could not read (%s); got %q", gone, line)
+	}
+}
+
+// The docs row is answered because there IS an orchestrator, not because its
+// probe passed. ArenaRoot is a path the orchestrator already holds — asking for
+// it reaches nothing — so an orchestrator that cannot be reached still says
+// which checkout this is, and the row reports on it.
+//
+// This is the coupling the root parameter introduced: the docs row now takes an
+// input from the subject of another row. Resolving it inside the reachable
+// branch would be the natural-looking refactor, and it would silently turn the
+// docs row into a skip on every machine whose orchestrator is down — the
+// operator who most needs the whole list in one pass losing a row of it,
+// reported as "could not look" when doctor could look perfectly well.
+func TestCmdDoctor_NormativeDocsSurviveAnUnreachableOrchestrator(t *testing.T) {
+	be := &failingBackend{Orchestrator: fake.New(), err: errors.New("simulated")}
+	app, out := doctorApp(t, be, &stubAgent{name: "stub"})
+
+	if code := app.cmdDoctor(context.Background(), nil, nil); code != 1 {
+		t.Fatalf("exit code = %d, want 1 — the orchestrator row fails; output:\n%s", code, out.String())
+	}
+	if line := doctorLine(t, out.String(), "orchestrator"); !strings.HasPrefix(line, glyphFail) {
+		t.Fatalf("this test needs an orchestrator that cannot be reached; got %q", line)
+	}
+	line := doctorLine(t, out.String(), "normative docs")
+	if !strings.HasPrefix(line, glyphOK) {
+		t.Errorf("the docs row should still be answered when the orchestrator is unreachable; got %q", line)
+	}
+	if docs := filepath.Join(be.ArenaRoot(), "docs"); !strings.Contains(line, docs) {
+		t.Errorf("docs line should report on the unreachable orchestrator's checkout %s; got %q", docs, line)
 	}
 }
 
@@ -609,9 +765,9 @@ func TestCmdDoctor_SaysNothingAboutAStartupThatPassed(t *testing.T) {
 }
 
 // An App so broken that validation never reached its fields still gets a
-// report, not a panic.
+// report, not a panic — including the docs row, whose root comes from the
+// orchestrator this App does not have.
 func TestCmdDoctor_ReportsAnAppMissingItsParts(t *testing.T) {
-	arena(t)
 	app := &App{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}}
 	out := app.Out.(*bytes.Buffer)
 
@@ -623,5 +779,14 @@ func TestCmdDoctor_ReportsAnAppMissingItsParts(t *testing.T) {
 		if line := doctorLine(t, out.String(), name); !strings.HasPrefix(line, glyphFail) {
 			t.Errorf("%s line should fail; got %q", name, line)
 		}
+	}
+	// With no orchestrator there is nothing to ask for the arena's checkout,
+	// so the docs row says it could not look. Failing here would report an
+	// unfit tree over a directory doctor never had — and inventing one, which
+	// is what reading the process's directory did, would report on whichever
+	// project the operator happened to be standing in.
+	line := doctorLine(t, out.String(), "normative docs")
+	if !strings.HasPrefix(line, glyphSkip) {
+		t.Errorf("docs line should skip when there is no orchestrator to name the checkout; got %q", line)
 	}
 }
