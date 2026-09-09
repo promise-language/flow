@@ -89,7 +89,7 @@ func TestBackend_AnUnfinishedDependencyBlocksTheItem(t *testing.T) {
 	_, b := dependingOrchestrator(t, []string{"flow:implement"}, http.StatusOK,
 		[]map[string]any{finishedBlocker(7), openBlocker(8)})
 
-	info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", func(flow.ItemType) bool { return true })
+	info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", func(flow.ItemType) bool { return true }, nil)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestBackend_FinishedDependenciesStopBlockingButStayListed(t *testing.T) {
 	_, b := dependingOrchestrator(t, []string{"flow:implement"}, http.StatusOK,
 		[]map[string]any{finishedBlocker(7), finishedBlocker(8)})
 
-	info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", func(flow.ItemType) bool { return true })
+	info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", func(flow.ItemType) bool { return true }, nil)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestBackend_AFailedDependencyReadFailsLoad(t *testing.T) {
 func TestBackend_ListAutoSelectable_OmitsAnItemWaitingOnAnItem(t *testing.T) {
 	_, blocked := dependingOrchestrator(t, []string{"flow:implement"}, http.StatusOK,
 		[]map[string]any{openBlocker(8)})
-	refs, err := blocked.ListAutoSelectable(t.Context(), nil)
+	refs, err := blocked.ListAutoSelectable(t.Context(), nil, nil)
 	if err != nil {
 		t.Fatalf("ListAutoSelectable: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestBackend_ListAutoSelectable_OmitsAnItemWaitingOnAnItem(t *testing.T) {
 	// the exclusion is the blocker's doing and not the helper's.
 	_, free := dependingOrchestrator(t, []string{"flow:implement"}, http.StatusOK,
 		[]map[string]any{finishedBlocker(8)})
-	refs, err = free.ListAutoSelectable(t.Context(), nil)
+	refs, err = free.ListAutoSelectable(t.Context(), nil, nil)
 	if err != nil {
 		t.Fatalf("ListAutoSelectable: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestBackend_AnUnavailableDependencyEndpointReadsAsNoBlockers(t *testing.T) 
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			_, b := dependingOrchestrator(t, []string{"flow:implement"}, status, nil)
 
-			info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", func(flow.ItemType) bool { return true })
+			info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", func(flow.ItemType) bool { return true }, nil)
 			if err != nil {
 				t.Fatalf("Get: %v — an absent feature must not fail the read", err)
 			}
@@ -259,10 +259,10 @@ func TestBackend_AnUnavailableDependencyEndpointReadsAsNoBlockers(t *testing.T) 
 func TestBackend_AFailedDependencyReadIsNotNoBlockers(t *testing.T) {
 	_, b := dependingOrchestrator(t, []string{"flow:implement"}, http.StatusForbidden, nil)
 
-	if _, err := b.Get(t.Context(), b.refFromIssue(42), "implement", func(flow.ItemType) bool { return true }); err == nil {
+	if _, err := b.Get(t.Context(), b.refFromIssue(42), "implement", func(flow.ItemType) bool { return true }, nil); err == nil {
 		t.Fatal("Get succeeded although the blockers could not be read")
 	}
-	if _, err := b.ListAutoSelectable(t.Context(), nil); err == nil {
+	if _, err := b.ListAutoSelectable(t.Context(), nil, nil); err == nil {
 		t.Fatal("ListAutoSelectable returned a set although the blockers could not be read")
 	}
 }
@@ -284,14 +284,14 @@ func TestBackend_GetAnswersIdenticallyToList(t *testing.T) {
 		_, b := dependingOrchestrator(t, []string{"flow:implement"}, http.StatusOK, deps)
 		acceptsAll := func(flow.ItemType) bool { return true }
 
-		listed, err := b.List(t.Context(), flow.ScopeAll, "implement", acceptsAll)
+		listed, err := b.List(t.Context(), flow.ScopeAll, "implement", acceptsAll, nil)
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
 		if len(listed) != 1 {
 			t.Fatalf("List returned %d items, want 1", len(listed))
 		}
-		got, err := b.Get(t.Context(), b.refFromIssue(42), "implement", acceptsAll)
+		got, err := b.Get(t.Context(), b.refFromIssue(42), "implement", acceptsAll, nil)
 		if err != nil {
 			t.Fatalf("Get: %v", err)
 		}
@@ -309,7 +309,7 @@ func TestBackend_LoadAgreesWithGetWhereTheyOverlap(t *testing.T) {
 	_, b := dependingOrchestrator(t, []string{"flow:implement", "area:api"}, http.StatusOK,
 		[]map[string]any{openBlocker(8)})
 
-	info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", func(flow.ItemType) bool { return true })
+	info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", func(flow.ItemType) bool { return true }, nil)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

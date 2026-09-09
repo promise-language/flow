@@ -106,7 +106,7 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		blockPayload: blockPayloadOf(state.Blocked, state.BlockKind, state.BlockReason, state.BlockedBy),
 		Finalized:    state.Finalized,
 		Park:         parkPayloadOf(state.Park),
-		Steps:        stepPayloads(typeFlow, state),
+		Steps:        app.stepPayloads(typeFlow, state),
 		Questions:    questionPayloads(state),
 	}
 
@@ -211,9 +211,6 @@ func statusFlowState(state *flow.Item, eligible, typeFlow *flow.Flow) string {
 		return flowStateEligible
 	}
 	if typeFlow != nil {
-		if !state.HasRequiredArtifacts() {
-			return flowStateNotSeeded
-		}
 		return flowStateNoEligibleStep
 	}
 	return flowStateNoMatchingFlow
@@ -222,11 +219,13 @@ func statusFlowState(state *flow.Item, eligible, typeFlow *flow.Flow) string {
 // statusFlowLine renders the "flow:" value. A finalized item is reported as
 // finalized (its run is complete — NOT "no flow eligible", which misleadingly
 // implies unstarted/blocked). "(finalized)" is shown ONLY when the persistent
-// finalized flag is set — never for a not-yet-seeded item (whose derived
-// Finalized() is vacuously true). Otherwise: the currently-eligible flow's
-// name; or, when no step is eligible, the type-matching flow tagged with why —
-// "(not seeded)" if its finalization checklist has not been seeded yet, else
-// "(no eligible step)"; or a no-match note.
+// Item.Finalized flag is set, which only Finalize writes. Otherwise: the
+// currently-eligible flow's name; or, when no step is eligible, the
+// type-matching flow tagged "(no eligible step)"; or a no-match note.
+//
+// There is no "(not seeded)" rung any more. Nothing seeds an item, so an item
+// with nothing recorded is one whose entry step is pending — which reads as the
+// eligible flow, not as a state of its own.
 func statusFlowLine(state *flow.Item, eligible, typeFlow *flow.Flow) string {
 	if state.Finalized {
 		if typeFlow != nil {
@@ -241,9 +240,6 @@ func statusFlowLine(state *flow.Item, eligible, typeFlow *flow.Flow) string {
 		return eligible.Name()
 	}
 	if typeFlow != nil {
-		if !state.HasRequiredArtifacts() {
-			return typeFlow.Name() + " (not seeded)"
-		}
 		return typeFlow.Name() + " (no eligible step)"
 	}
 	return "(no matching flow)"
@@ -268,7 +264,7 @@ func blockLine(b blockPayload) string {
 // stepPayloads projects a flow's lifecycle items onto the state. Returns an
 // empty (non-nil) slice when no flow handles the item's type, so the JSON
 // carries [] rather than null.
-func stepPayloads(f *flow.Flow, state *flow.Item) []stepPayload {
+func (app *App) stepPayloads(f *flow.Flow, state *flow.Item) []stepPayload {
 	if f == nil {
 		return []stepPayload{}
 	}
@@ -297,14 +293,20 @@ func stepPayloads(f *flow.Flow, state *flow.Item) []stepPayload {
 		}
 		switch li.Kind {
 		case flow.LifecycleArtifact:
-			rec := state.Artifact(li.ArtifactId)
+			// Consumption from the step's ledger row, caps from
+			// flow.EffectiveBudget — the same arithmetic the pre-dispatch gate
+			// and `grant` use, so the three cannot report different caps for one
+			// step. Prompts show no consumption: the counter is per-invocation
+			// and lives only inside a running dispatch.
+			row := state.Ledger.Row(li.Result())
+			eff := app.effectiveBudget(state, li.Result())
 			sp.Kind = kindArtifact
 			sp.State = artifactState(state, li.ArtifactId)
 			sp.Budget = &budgetPayload{
-				Invocations:          intAxis{Used: rec.Invocations, Granted: rec.GrantedInvocations},
-				CostUSD:              costAxis{Used: rec.CostUSDSpent, Granted: rec.GrantedCostUSD},
-				PromptsPerInvocation: intAxis{Used: rec.PromptsThisInvocation, Granted: rec.GrantedPromptsPerInvocation},
-				TimeoutSeconds:       grantedOnly{Granted: int(rec.GrantedTimeout.Seconds())},
+				Invocations:          intAxis{Used: row.Dispatches, Granted: eff.MaxInvocations},
+				CostUSD:              costAxis{Used: row.CostUSD, Granted: eff.MaxCostUSD},
+				PromptsPerInvocation: intAxis{Granted: eff.MaxPromptsPerInvocation},
+				TimeoutSeconds:       grantedOnly{Granted: int(eff.Timeout.Seconds())},
 			}
 		case flow.LifecycleSignal, flow.LifecycleAwait:
 			if li.Kind == flow.LifecycleSignal {
@@ -320,9 +322,8 @@ func stepPayloads(f *flow.Flow, state *flow.Item) []stepPayload {
 			// exactly what makes them invalid grant targets.
 		}
 		// A pending step that matches the verified running record is
-		// promoted to running. Running only overrides pending — a
-		// resolved/stale/skipped step keeps its state even if a stale
-		// record names it.
+		// promoted to running. Running only overrides pending — a resolved
+		// step keeps its state even if a stale record names it.
 		if sp.State == statePending && sp.ID == runningStep {
 			sp.State = stateRunning
 			sp.RunningPID = runningPID
@@ -334,17 +335,10 @@ func stepPayloads(f *flow.Flow, state *flow.Item) []stepPayload {
 }
 
 // artifactState mirrors Flow.stepPending's view of one artifact record.
+// Resolved or pending, and nothing else: the operator opt-out and the stale bit
+// both went with seeding and MarkStale, and nothing writes either any more.
 func artifactState(state *flow.Item, id flow.ArtifactId) string {
-	rec, seeded := state.Artifacts[id]
-	// Operator opt-out: a seeded record marked not-required and not resolved
-	// has been struck off the checklist.
-	if seeded && !rec.Required && !rec.Resolved {
-		return stateSkipped
-	}
-	switch {
-	case rec.Stale:
-		return stateStale
-	case rec.Resolved:
+	if state.Artifact(id).Resolved {
 		return stateResolved
 	}
 	return statePending
@@ -498,10 +492,6 @@ func stepMarker(state string) string {
 	switch state {
 	case stateResolved:
 		return "[x]"
-	case stateStale:
-		return "[~]"
-	case stateSkipped:
-		return "[-]"
 	case stateRunning:
 		return "[>]"
 	}

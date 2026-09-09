@@ -77,14 +77,9 @@ func decode(t *testing.T, b *bytes.Buffer) map[string]any {
 
 func TestStatusJSON_Schema(t *testing.T) {
 	env := newParkGrantEnv(t)
-	if err := env.be.ResolveArtifact(context.Background(), env.claim.ItemRef, "plan",
-		flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "done"}); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
-	}
-	if err := env.be.BumpInvocations(context.Background(), env.claim.ItemRef, "commit"); err != nil {
-		t.Fatalf("BumpInvocations: %v", err)
-	}
-	env.park(t, budgetExhausted("commit", flow.AxisInvocations))
+	appendMarkdown(t, env.be, env.claim.ItemRef, "plan", "done")
+	env.dispatches(t, "commit", 1)
+	env.park(t, treasurerRefused("commit", flow.AxisInvocations))
 
 	if code := env.app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
 		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
@@ -111,7 +106,7 @@ func TestStatusJSON_Schema(t *testing.T) {
 	if !ok {
 		t.Fatalf("park = %v, want an object", m["park"])
 	}
-	if park["kind"] != string(flow.ParkBudgetExhausted) || park["step"] != "commit" || park["axis"] != string(flow.AxisInvocations) {
+	if park["kind"] != string(flow.ParkTreasurerRefused) || park["step"] != "commit" || park["axis"] != string(flow.AxisInvocations) {
 		t.Errorf("park = %v, want budget-exhausted on commit/invocations", park)
 	}
 
@@ -177,12 +172,8 @@ func TestStatusHuman_IDFirstChecklist(t *testing.T) {
 
 func TestGrantJSON_Schema(t *testing.T) {
 	env := newParkGrantEnv(t)
-	for range 3 {
-		if err := env.be.BumpInvocations(context.Background(), env.claim.ItemRef, "plan"); err != nil {
-			t.Fatalf("BumpInvocations: %v", err)
-		}
-	}
-	env.park(t, budgetExhausted("plan", flow.AxisInvocations))
+	env.dispatches(t, "plan", 3)
+	env.park(t, treasurerRefused("plan", flow.AxisInvocations))
 
 	if code := env.grant("--json"); code != 0 {
 		t.Fatalf("exit = %d; stderr=%q", code, env.err.String())
@@ -270,11 +261,11 @@ func TestListJSON_EmptyIsArray(t *testing.T) {
 // emptyListBackend is the wrapped backend with nothing eligible.
 type emptyListBackend struct{ flow.Orchestrator }
 
-func (emptyListBackend) List(context.Context, flow.ItemScope, flow.BinaryName, func(flow.ItemType) bool) ([]flow.ItemInfo, error) {
+func (emptyListBackend) List(context.Context, flow.ItemScope, flow.BinaryName, func(flow.ItemType) bool, func(flow.RoleName) bool) ([]flow.ItemInfo, error) {
 	return nil, nil
 }
 
-func (emptyListBackend) ListAutoSelectable(context.Context, []flow.TagId) ([]flow.ItemRef, error) {
+func (emptyListBackend) ListAutoSelectable(context.Context, []flow.TagId, func(flow.RoleName) bool) ([]flow.ItemRef, error) {
 	return nil, nil
 }
 

@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/promise-language/flow"
@@ -145,6 +146,26 @@ func (app *App) stepBudget(id flow.StepId) flow.StepBudget {
 	return flow.ResolveStepBudget(app.StepBudgets[id])
 }
 
+// assumesRole is the role predicate the orchestrator borrows: whether this
+// arena's account can take an item's next move.
+//
+// CAPABILITY IS THE CEILING, and only that. The account's detected capabilities
+// decide which of the flow's declared roles it could assume at all; narrowing
+// further by what this binary actually covers is #250's.
+//
+// An orchestrator that cannot answer the capability question returns NIL, which
+// filters nothing — the same convention acceptsType uses. Filtering on a ceiling
+// nobody could measure would hide every item behind a backend that cannot ask,
+// which is a worse answer than not filtering.
+func (app *App) assumesRole(ctx context.Context) func(flow.RoleName) bool {
+	caps, err := app.Orchestrator.DetectCapabilities(ctx, "")
+	if err != nil {
+		return nil
+	}
+	assumable := flow.AssumableRoles(app.Flow.Roles(), caps)
+	return func(role flow.RoleName) bool { return slices.Contains(assumable, role) }
+}
+
 // Run is the binary's entry point. Parses argv, dispatches the matching
 // command, returns an exit code. Idiomatic call site is
 // `os.Exit(cli.Run(cli.App{...}))`.
@@ -239,8 +260,6 @@ func RunWithArgs(app App, args []string) int {
 		return app.cmdAnswer(ctx, rest)
 	case "resolve":
 		return app.cmdResolve(ctx, rest)
-	case "stale":
-		return app.cmdStale(ctx, rest)
 	default:
 		return app.usageError("%s: unknown command %q", app.Name, cmd)
 	}
@@ -577,9 +596,8 @@ usage:
                                      "status" — never the label (e.g. "write plan")
   %[1]s release                      drop the claim
   %[1]s reseed [--force]              clear seed state (artifacts, budgets, park) on the active claim
-  %[1]s stale <step-id>               mark one resolved artifact stale for re-derivation
 
-answer, status, list, grant, stale, run-step, and resolve print human-readable text on a terminal and
+answer, status, list, grant, run-step, and resolve print human-readable text on a terminal and
 JSON when piped or redirected; --json / --human (or FLOW_OUTPUT=json|human)
 force one. resolve's human text is its progress narration on stderr, which it
 prints in both modes — in human mode it writes nothing to stdout at all.`, bin)

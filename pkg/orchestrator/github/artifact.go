@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/go-github/v68/github"
 	"github.com/promise-language/flow"
+	"github.com/promise-language/flow/pkg/clistate"
 )
 
 // artifactCommentMarker is the leading HTML comment on an artifact comment.
@@ -20,146 +21,31 @@ import (
 const artifactCommentMarkerPrefix = "<!-- flow:artifact "
 
 // errNoStateComment — the issue carries no state-v1 comment, so there is no
-// document to mutate. A sentinel rather than a string so callers that tolerate
-// it (Park, which can fire before an item is seeded) match on identity instead
-// of on message text.
+// document to mutate. A sentinel rather than a string so a caller that
+// distinguishes "nothing recorded yet" from a transport failure matches on
+// identity instead of on message text.
 var errNoStateComment = errors.New("no state comment")
 
-// SeedState writes the initial state comment with the artifact checklist +
-// budget caps. Refuses if the issue already has a state comment.
-func (b *Orchestrator) SeedState(ctx context.Context, ref flow.ItemRef, specs []flow.ArtifactSpec) error {
-	issueNum, err := b.issueNumber(ref)
-	if err != nil {
-		return err
-	}
-	owner, err := b.resolveAccount(ctx)
-	if err != nil {
-		return err
-	}
-	// Seeding requires the lease. The item is the subject, so the item is the
-	// address; holding the lease is a precondition checked here, not a value
-	// the caller supplies. The orchestrator minted the claim and the arena is
-	// ambient, so it has the lease in hand without re-proving anything.
-	if err := b.requireOwnClaim(ctx, ref, "SeedState"); err != nil {
-		return err
-	}
-
-	// If we already have a state-comment id and the document has artifacts,
-	// refuse a re-seed.
-	body, stateID, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
-	if err != nil {
-		return err
-	}
-	if body != "" {
-		doc, _, _, perr := extractStateDoc(body)
-		if perr == nil && doc != nil && len(doc.Artifacts) > 0 {
-			return errors.New("github: item already seeded; SeedState refused")
-		}
-	}
-
-	doc := stateDoc{
-		Flow:     b.cfg.BinaryName,
-		Schema:   stateSchemaVersion,
-		SeededAt: nowUTC(),
-	}
-	for _, sp := range specs {
-		doc.Artifacts = append(doc.Artifacts, stateArtifactDoc{
-			Id:                          string(sp.Id),
-			Type:                        artifactTypeString(sp.Type),
-			Required:                    sp.Required,
-			GrantedInvocations:          sp.Budget.MaxInvocations,
-			GrantedPromptsPerInvocation: sp.Budget.MaxPromptsPerInvocation,
-			GrantedCostUSD:              sp.Budget.MaxCostUSD,
-			GrantedTimeout:              sp.Budget.Timeout,
-		})
-	}
-
-	if stateID != 0 {
-		if _, err := b.updateStateComment(ctx, issueNum, stateID, doc, owner); err != nil {
-			return err
-		}
-	} else {
-		id, _, err := b.postStateComment(ctx, issueNum, doc, owner)
-		if err != nil {
-			return err
-		}
-		stateID = id
-	}
-
-	// Idempotent label adds.
-	if err := b.out.AddLabels(ctx, issueNum, []string{
-		b.labels.Seeded(),
-		b.labels.Binary(b.cfg.BinaryName),
-	}); err != nil {
-		return fmt.Errorf("add seeded labels: %w", err)
-	}
-
-	// Update the claim token cache (caller persists Claim across calls but
-	// the Token JSON is what's serialized — we can't mutate it here).
-	b.mu.Lock()
-	b.stateCommentCache[issueNum] = stateID
-	b.mu.Unlock()
-	return nil
-}
-
-// ResetSeed clears the state comment's artifact set so the next SeedState
-// pass writes a fresh artifact checklist. Operator-initiated (e.g. a UI
-// "re-seed with current flow" action); the SDK never calls this
-// automatically. The state comment's metadata is preserved; only the
-// artifact list is cleared, since artifact comments live in their own
-// per-version comments and re-deriving from those would be lossy on
-// schema change.
-func (b *Orchestrator) ResetSeed(ctx context.Context, ref flow.ItemRef) error {
-	issueNum, err := b.issueNumber(ref)
-	if err != nil {
-		return err
-	}
-	owner, err := b.resolveAccount(ctx)
-	if err != nil {
-		return err
-	}
-	body, stateID, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
-	if err != nil {
-		return err
-	}
-	if body == "" || stateID == 0 {
-		// Nothing to reset — never seeded. The next SeedState will write
-		// a fresh state comment.
-		return nil
-	}
-	doc, _, found, perr := extractStateDoc(body)
-	if perr != nil {
-		return fmt.Errorf("github: malformed state comment for issue %d: %w", issueNum, perr)
-	}
-	if !found || doc == nil {
-		// State-v1 marker absent — comment exists but isn't ours to reset.
-		// Same outcome as 'never seeded': next SeedState writes fresh.
-		return nil
-	}
-	doc.Artifacts = nil
-	doc.SeededAt = nowUTC()
-	// The park belongs to the cleared checklist — a park naming a step that no
-	// longer has a budget record would survive the reset and misreport the item
-	// as blocked forever. (fake.ResetSeed clears its park for the same reason.)
-	//
-	// The questions do NOT go with it. They are never removed: one leaves the
-	// pending set by being answered, not by being deleted, and a question
-	// dropped while still unanswered is one `answer --question <id>` can never
-	// reach again.
-	clearedLabel := parkLabel(b.labels, parkRequestFromDoc(doc.Park))
-	doc.Park = nil
-	if _, err := b.updateStateComment(ctx, issueNum, stateID, *doc, owner); err != nil {
-		return fmt.Errorf("reset state comment: %w", err)
-	}
-	b.removeParkLabel(ctx, ref, clearedLabel)
-	return nil
-}
-
-// ResolveArtifact persists a handler-produced value to the issue. The
-// canonical storage is a new "artifact comment" (per-version, append-only);
-// the state comment's resolved_by / produced_at / version pointers move to
-// the new comment.
-func (b *Orchestrator) ResolveArtifact(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId, body flow.ArtifactBody) error {
+// AppendEntry appends ONE completed step execution to the item's journal and,
+// in the same state-comment round, moves everything derived from it: the
+// artifact projection, and — on the first entry — the flow binding and the
+// labels that say this binary has begun.
+//
+// RESULT AND ROUTE LAND TOGETHER OR NOT AT ALL. The captured value is published
+// first (an artifact comment, and the orphan branch for the large types), and
+// then one document update records the entry and the projection: a reader can
+// never see a captured artifact whose route was not recorded.
+//
+// It PUBLISHES, so the disclosure guard can refuse it — the caller stashes what
+// was refused and parks, and nothing is journaled.
+//
+// The state comment is CREATED when the item has none. Nothing seeds an item any
+// more, so the first entry is what brings its record into being.
+//
+// EVERY REFUSAL COMES BEFORE THE PUBLISH. An append that is going to be refused
+// must not first post a comment for a step whose route is never recorded — the
+// one thing the single write exists to prevent.
+func (b *Orchestrator) AppendEntry(ctx context.Context, ref flow.ItemRef, entry flow.JournalEntry) error {
 	issueNum, err := b.issueNumber(ref)
 	if err != nil {
 		return err
@@ -168,46 +54,158 @@ func (b *Orchestrator) ResolveArtifact(ctx context.Context, ref flow.ItemRef, id
 	if err != nil {
 		return err
 	}
+	if entry.Step == "" {
+		return errors.New("github: journal entry names no step")
+	}
+	// Holding the lease is a PRECONDITION THE ORCHESTRATOR CHECKS, not a value
+	// the caller supplies (docs/orchestrator.md § What an orchestrator may
+	// refuse). It is the whole of what a claim protects on the write path: an
+	// arena that lost the item to an `already-held` takeover would otherwise
+	// keep journaling under revoked authority, and its entry would route the
+	// item out from under the arena that now holds it.
+	if err := b.requireOwnClaim(ctx, ref, "AppendEntry"); err != nil {
+		return err
+	}
+	// This orchestrator STORES THE BYTES — a comment, or a file on the orphan
+	// branch — so it has no somewhere-else in which to verify that the content
+	// an empty body stands for exists. An empty body is therefore refused, named
+	// (docs/orchestrator.md § What an orchestrator may refuse). Accepting one
+	// would post an empty artifact comment and journal the step as completed,
+	// which reads as a result nobody produced.
+	//
+	// A zero Result.Type is a signal step or a wait: its result IS the
+	// observation, and there is no body to be empty.
+	if entry.Result.Type != 0 && entry.Result.Empty() {
+		return fmt.Errorf(
+			"github: step %q completed with an empty %s body and this orchestrator stores the bytes itself — "+
+				"there is no out-of-band content for it to stand for",
+			entry.Step, entry.Result.Type)
+	}
+	// The body's shape against the schema this orchestrator declares. Startup
+	// validation covers the flow's DECLARATION; this covers the value actually
+	// recorded, which is the half a declaration cannot answer for.
+	if err := checkDeclaredArtifactType(entry); err != nil {
+		return err
+	}
 
-	// Pull the current state doc so we know the next version.
-	stateBody, stateID, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
+	// Publish the payload, if the entry carries one. Version is the entry's own
+	// execution number: a step the route reaches again appends again, and the
+	// later entry's result stands as the step's current one.
+	artifactURL, spillURL, err := b.publishResult(ctx, issueNum, entry, account)
 	if err != nil {
 		return err
 	}
-	if stateBody == "" {
-		return errors.New("github: ResolveArtifact called before SeedState")
-	}
-	doc, owner, _, err := extractStateDoc(stateBody)
-	if err != nil {
-		return err
+	bodyAt := artifactURL
+	if bodyAt == "" {
+		bodyAt = spillURL
 	}
 
-	// Find the artifact's spec entry; record the type for validation.
-	idx := -1
-	for i := range doc.Artifacts {
-		if doc.Artifacts[i].Id == string(id) {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return fmt.Errorf("github: artifact %q not seeded on issue #%d", id, issueNum)
-	}
-	declaredType := artifactTypeFromString(doc.Artifacts[idx].Type)
-	if body.Type != declaredType {
-		return flow.ErrTypeMismatch{Step: string(id), Expected: declaredType, Got: body.Type}
-	}
-
-	version := doc.Artifacts[idx].Version + 1
-	now := nowUTC()
-
-	// Post the artifact comment (or skip for Flag — no payload).
-	// File/Patch always spill to the orphan branch. Markdown spills only
-	// when the rendered comment would exceed cfg.MaxCommentBytes.
 	var (
-		artifactURL string
-		spillURL    string
+		clearedLabel string
+		firstEntry   bool
 	)
+	if err := b.mutateOrCreateStateDoc(ctx, ref, "AppendEntry", func(doc *stateDoc) error {
+		// The first entry binds the flow. An item with an empty journal is bound
+		// to nothing: the binding is a consequence of work having been recorded,
+		// not of a binary having looked at the item.
+		if len(doc.Journal) == 0 {
+			doc.Flow = b.cfg.BinaryName
+			firstEntry = true
+		}
+		// APPEND. An existing entry is never rewritten, so the pending step
+		// derived from the last one cannot change under a reader.
+		doc.Journal = append(doc.Journal, journalEntryDocOf(entry, bodyAt))
+		if entry.Result.Type != 0 {
+			projectArtifactDoc(doc, entry, artifactURL, account)
+		}
+		// A park recorded against this step is obsolete once the step completes
+		// — drop it rather than let Load keep reporting a reason that no longer
+		// holds. The questions stay: they are never removed, and one asked and
+		// never answered is part of the record whether or not the step went on
+		// to complete.
+		if doc.Park != nil && doc.Park.Step == string(entry.Step) {
+			clearedLabel = parkLabel(b.labels, parkRequestFromDoc(doc.Park))
+			doc.Park = nil
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	// The step has a result now, so its scaffolding is done: THE DRAFT ENDS
+	// WHERE THE RESULT BEGINS, which is why it is cleared inside this write and
+	// nowhere else (docs/step-handler.md § Drafts). It matters beyond hygiene
+	// under the journal: a route can return to a step it has already completed,
+	// and a draft left from the earlier execution would reach that dispatch's
+	// agent as its own prior thinking.
+	//
+	// AFTER the entry has landed, and best-effort. Clearing first would discard
+	// what a refused append has to stash; failing here would report a failure
+	// for work that is recorded, and send the caller back to append it twice.
+	_ = b.ClearWorkInProgress(ctx, ref, entry.Step)
+	b.removeParkLabel(ctx, ref, clearedLabel)
+	if firstEntry {
+		// The markers that say this binary has begun on the item. They used to
+		// go on at seed time; the first entry is where "begun" is now recorded,
+		// and the binary label is what separates `auto` from `available`.
+		//
+		// Best-effort: the entry has already landed, and failing the append over
+		// a label would report a failure for work that is recorded.
+		_ = b.out.AddLabels(ctx, issueNum, []string{
+			b.labels.Seeded(),
+			b.labels.Binary(b.cfg.BinaryName),
+		})
+	}
+	return nil
+}
+
+// checkDeclaredArtifactType refuses a recorded body whose type is not the one
+// this orchestrator's schema declares for that step's artifact id.
+//
+// A step id outside the schema is not checked: SupportedArtifacts is the set a
+// FLOW's declaration is validated against at startup, and an id nothing
+// declared has no declared type to disagree with.
+func checkDeclaredArtifactType(entry flow.JournalEntry) error {
+	if entry.Result.Type == 0 {
+		return nil
+	}
+	for _, def := range githubSupportedArtifacts {
+		if def.Id != flow.ArtifactId(entry.Step) {
+			continue
+		}
+		if def.Type != entry.Result.Type {
+			return flow.ErrTypeMismatch{
+				Step:     string(entry.Step),
+				Expected: def.Type,
+				Got:      entry.Result.Type,
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
+// publishResult writes the entry's captured value where it belongs and returns
+// the URLs. A signal step's entry carries no body, and nothing is published for
+// it; a flag carries no payload, so it gets no comment either.
+func (b *Orchestrator) publishResult(
+	ctx context.Context,
+	issueNum int,
+	entry flow.JournalEntry,
+	account flow.AccountId,
+) (artifactURL, spillURL string, err error) {
+	body := entry.Result
+	if body.Type == 0 {
+		return "", "", nil
+	}
+	id := flow.ArtifactId(entry.Step)
+	version := entry.Execution
+	now := entry.At
+	if now.IsZero() {
+		now = nowUTC()
+	}
+
+	// File/Patch always spill to the orphan branch. Markdown spills only when
+	// the rendered comment would exceed cfg.MaxCommentBytes.
 	switch body.Type {
 	case flow.ArtifactFlag:
 		// no payload, no spill
@@ -220,7 +218,7 @@ func (b *Orchestrator) ResolveArtifact(ctx context.Context, ref flow.ItemRef, id
 		url, err := b.putArtifactFile(ctx, path, body.File.Content,
 			commitMessageForArtifact(issueNum, string(id), filename, spillFileType))
 		if err != nil {
-			return fmt.Errorf("spill file artifact %q: %w", id, err)
+			return "", "", fmt.Errorf("spill file artifact %q: %w", id, err)
 		}
 		spillURL = url
 	case flow.ArtifactPatch:
@@ -228,138 +226,211 @@ func (b *Orchestrator) ResolveArtifact(ctx context.Context, ref flow.ItemRef, id
 		url, err := b.putArtifactFile(ctx, path, body.Patch.Diff,
 			commitMessageForArtifact(issueNum, string(id), "patch.diff", spillPatchType))
 		if err != nil {
-			return fmt.Errorf("spill patch artifact %q: %w", id, err)
+			return "", "", fmt.Errorf("spill patch artifact %q: %w", id, err)
 		}
 		spillURL = url
 	case flow.ArtifactMarkdown:
 		commentBody, err := renderArtifactComment(id, body, version, string(account), now, "")
 		if err != nil {
-			return err
+			return "", "", err
 		}
 		if len(commentBody) > b.cfg.MaxCommentBytes {
 			path := artifactFilePath(issueNum, string(id), "body.md")
 			url, err := b.putArtifactFile(ctx, path, []byte(body.Markdown),
 				commitMessageForArtifact(issueNum, string(id), "body.md", spillMarkdownTooLarge))
 			if err != nil {
-				return fmt.Errorf("spill markdown artifact %q: %w", id, err)
+				return "", "", fmt.Errorf("spill markdown artifact %q: %w", id, err)
 			}
 			spillURL = url
 		}
 	}
 
-	if body.Type != flow.ArtifactFlag {
-		commentBody, err := renderArtifactComment(id, body, version, string(account), now, spillURL)
-		if err != nil {
-			return err
-		}
-		// Truncate markdown body for the inline preview when spilled.
-		if spillURL != "" && body.Type == flow.ArtifactMarkdown {
-			preview := body.Markdown
-			if len(preview) > 4096 {
-				preview = preview[:4096]
-			}
-			previewBody := flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: preview}
-			commentBody, err = renderArtifactComment(id, previewBody, version, string(account), now, spillURL)
-			if err != nil {
-				return err
-			}
-		}
-		// The assembled comment, not the artifact: the SDK's marker line and
-		// spill notice around prose an agent wrote, which nobody vouches for
-		// as a whole.
-		c, err := b.out.CreateComment(ctx, flow.ActArtifactComment, issueNum,
-			flow.Text{Origin: flow.OriginAgent, Body: commentBody})
-		if err != nil {
-			return fmt.Errorf("post artifact comment: %w", err)
-		}
-		artifactURL = c.GetHTMLURL()
+	if body.Type == flow.ArtifactFlag {
+		return "", spillURL, nil
 	}
 
-	// Update state doc in place.
-	a := &doc.Artifacts[idx]
+	commentBody, err := renderArtifactComment(id, body, version, string(account), now, spillURL)
+	if err != nil {
+		return "", "", err
+	}
+	// Truncate the markdown body for the inline preview when spilled.
+	if spillURL != "" && body.Type == flow.ArtifactMarkdown {
+		preview := body.Markdown
+		if len(preview) > 4096 {
+			preview = preview[:4096]
+		}
+		previewBody := flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: preview}
+		commentBody, err = renderArtifactComment(id, previewBody, version, string(account), now, spillURL)
+		if err != nil {
+			return "", "", err
+		}
+	}
+	// The assembled comment, not the artifact: the SDK's marker line and spill
+	// notice around prose an agent wrote, which nobody vouches for as a whole.
+	c, err := b.out.CreateComment(ctx, flow.ActArtifactComment, issueNum,
+		flow.Text{Origin: flow.OriginAgent, Body: commentBody})
+	if err != nil {
+		return "", "", fmt.Errorf("post artifact comment: %w", err)
+	}
+	return c.GetHTMLURL(), spillURL, nil
+}
+
+// projectArtifactDoc derives the artifact projection from the entry being
+// appended. The ONE place the record is written, which is what keeps it from
+// drifting from the journal it projects.
+func projectArtifactDoc(doc *stateDoc, entry flow.JournalEntry, artifactURL string, account flow.AccountId) {
+	id := string(entry.Step)
+	a := findArtifactDoc(doc, id)
+	if a == nil {
+		doc.Artifacts = append(doc.Artifacts, stateArtifactDoc{Id: id})
+		a = &doc.Artifacts[len(doc.Artifacts)-1]
+	}
+	body := entry.Result
+	a.Type = artifactTypeString(body.Type)
 	a.Resolved = true
-	a.Stale = false
-	a.Version = version
-	a.ProducedAt = now
+	a.Version = entry.Execution
+	a.ProducedAt = entry.At
+	if a.ProducedAt.IsZero() {
+		a.ProducedAt = nowUTC()
+	}
 	a.ResolvedBy = artifactURL
 	a.ResolvedByPrincipal = string(account)
+	a.CommitHash = ""
+	a.JSONInline = ""
 	if body.Type == flow.ArtifactCommitHash {
 		a.CommitHash = body.CommitHash
 	}
 	if body.Type == flow.ArtifactJSON {
 		a.JSONInline = string(body.JSON)
 	}
+}
 
-	// A park recorded against this step is obsolete once the step resolves —
-	// drop it (and its label) rather than let Load keep reporting a reason that
-	// no longer holds. The questions stay: they are never removed, and one that
-	// was asked and never answered is part of the record of what happened here
-	// whether or not the step it belonged to went on to resolve.
-	clearedLabel := ""
-	if doc.Park != nil && doc.Park.Step == string(id) {
-		clearedLabel = parkLabel(b.labels, parkRequestFromDoc(doc.Park))
-		doc.Park = nil
-	}
-
-	_ = owner // we patch as the current user (state comment author); owner stays as-is
-
-	if _, err := b.updateStateComment(ctx, issueNum, stateID, *doc, account); err != nil {
+// Reset clears the flow's whole record on the item so the next resolution starts
+// from an empty journal: journal, ledger, park, the artifact projection, the
+// finalization, and this issue's drafts.
+//
+// Operator-initiated only; the SDK never calls it automatically.
+//
+// The QUESTIONS THEMSELVES do not go. They are never removed: one leaves the
+// pending set by being answered, not by being deleted, and a question dropped
+// while still unanswered is one `answer --question <id>` can never reach again.
+// What goes is the park that was waiting on it, which is the outstanding marker.
+func (b *Orchestrator) Reset(ctx context.Context, ref flow.ItemRef) error {
+	issueNum, err := b.issueNumber(ref)
+	if err != nil {
 		return err
+	}
+	owner, err := b.resolveAccount(ctx)
+	if err != nil {
+		return err
+	}
+	body, stateID, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
+	if err != nil {
+		return err
+	}
+	// Drafts are worktree-local and go whether or not a state comment exists:
+	// scratch prose kept past the record it belonged to has nothing to resume.
+	//
+	// Keyed through workItemKey, the same function the writes use: a second
+	// spelling of the key would clear a directory nothing stores records in, and
+	// nothing would report that it had.
+	workItem, err := b.workItemKey(ref)
+	if err != nil {
+		return err
+	}
+	if derr := clistate.ClearItemWork(workItem); derr != nil {
+		return fmt.Errorf("github.Reset: clear drafts for #%d: %w", issueNum, derr)
+	}
+	if body == "" || stateID == 0 {
+		// Nothing recorded — the next AppendEntry writes a fresh state comment.
+		return nil
+	}
+	doc, _, found, perr := extractStateDoc(body)
+	if perr != nil {
+		return fmt.Errorf("github: malformed state comment for issue %d: %w", issueNum, perr)
+	}
+	if !found || doc == nil {
+		// The marker is absent — the comment exists but is not ours to reset.
+		return nil
+	}
+	doc.Journal = nil
+	doc.Ledger = stateLedgerDoc{}
+	doc.Artifacts = nil
+	doc.Finalized = false
+	doc.Disposition = ""
+	doc.SeededAt = nowUTC()
+	clearedLabel := parkLabel(b.labels, parkRequestFromDoc(doc.Park))
+	doc.Park = nil
+	if _, err := b.updateStateComment(ctx, issueNum, stateID, *doc, owner); err != nil {
+		return fmt.Errorf("reset state comment: %w", err)
 	}
 	b.removeParkLabel(ctx, ref, clearedLabel)
 	return nil
 }
 
-// MarkStale flips the stale bit on the artifact's state entry.
-func (b *Orchestrator) MarkStale(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId) error {
-	return b.mutateArtifact(ctx, ref, id, func(a *stateArtifactDoc) {
-		a.Stale = true
+// ---------------------------------------------------------------------------
+// Ledger
+// ---------------------------------------------------------------------------
+//
+// Every row is keyed by StepId — the result a step produces is that step's
+// identity — which is what gives a signal step a row as well as an artifact one.
+
+// RecordDispatch counts one dispatch of the pending step.
+func (b *Orchestrator) RecordDispatch(ctx context.Context, ref flow.ItemRef, step flow.StepId) error {
+	return b.mutateLedgerRow(ctx, ref, step, "RecordDispatch", func(row *stateLedgerRowDoc, l *stateLedgerDoc) {
+		row.Dispatches++
+		row.LastRunAt = nowUTC()
 	})
 }
 
-// BumpInvocations increments Invocations + resets PromptsThisInvocation.
-func (b *Orchestrator) BumpInvocations(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId) error {
-	return b.mutateArtifact(ctx, ref, id, func(a *stateArtifactDoc) {
-		a.Invocations++
-		a.PromptsThisInvocation = 0
-		a.LastRunAt = nowUTC()
+// RecordResumption counts one resume of a parked step.
+func (b *Orchestrator) RecordResumption(ctx context.Context, ref flow.ItemRef, step flow.StepId) error {
+	return b.mutateLedgerRow(ctx, ref, step, "RecordResumption", func(row *stateLedgerRowDoc, l *stateLedgerDoc) {
+		row.Resumptions++
 	})
 }
 
-func (b *Orchestrator) BumpPrompts(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId) error {
-	return b.mutateArtifact(ctx, ref, id, func(a *stateArtifactDoc) {
-		a.PromptsThisInvocation++
+func (b *Orchestrator) AddCost(ctx context.Context, ref flow.ItemRef, step flow.StepId, usd float64) error {
+	return b.mutateLedgerRow(ctx, ref, step, "AddCost", func(row *stateLedgerRowDoc, l *stateLedgerDoc) {
+		row.CostUSDSpent += usd
+		l.TotalCostUSD += usd
 	})
 }
 
-func (b *Orchestrator) AddCost(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId, usd float64) error {
-	return b.mutateArtifact(ctx, ref, id, func(a *stateArtifactDoc) {
-		a.CostUSDSpent += usd
+// AddDuration adds ACTIVE time — time spent doing work. Time blocked on a
+// declared exclusion goes to AddWaiting, never here: it is evidence about
+// contention rather than about the work.
+func (b *Orchestrator) AddDuration(ctx context.Context, ref flow.ItemRef, step flow.StepId, d time.Duration) error {
+	return b.mutateLedgerRow(ctx, ref, step, "AddDuration", func(row *stateLedgerRowDoc, l *stateLedgerDoc) {
+		row.DurationSeconds += d.Seconds()
+		l.TotalDurationSeconds += d.Seconds()
 	})
 }
 
-func (b *Orchestrator) AddDuration(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId, d time.Duration) error {
-	return b.mutateArtifact(ctx, ref, id, func(a *stateArtifactDoc) {
-		a.DurationWorked += d
+// AddWaiting adds time spent blocked on a declared exclusion, reported by the
+// party that held the wait.
+func (b *Orchestrator) AddWaiting(ctx context.Context, ref flow.ItemRef, step flow.StepId, d time.Duration) error {
+	return b.mutateLedgerRow(ctx, ref, step, "AddWaiting", func(row *stateLedgerRowDoc, l *stateLedgerDoc) {
+		row.WaitingSeconds += d.Seconds()
+		l.TotalWaitingSeconds += d.Seconds()
 	})
 }
 
-// Grant adds budget to the artifact's caps and clears a ParkBudgetExhausted
-// park the grant actually satisfies — the state-doc field AND the
-// flow:budget-exhausted:<step-id> label, so neither outlives the condition
-// (see the Orchestrator.Grant contract).
-func (b *Orchestrator) Grant(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId, g flow.Grant) error {
+// Grant records an operator's extension against the step's ledger row and
+// clears a treasurer-refused park the extension actually satisfies — the
+// state-doc field AND the label, so neither outlives the condition (see the
+// Orchestrator.Grant contract). The decision is flow.GrantClearsPark's, so both
+// orchestrators apply one rule.
+func (b *Orchestrator) Grant(ctx context.Context, ref flow.ItemRef, step flow.StepId, g flow.Grant) error {
 	var clearedLabel string
 	err := b.mutateStateDoc(ctx, ref, "Grant", func(doc *stateDoc) error {
-		a := findArtifactDoc(doc, string(id))
-		if a == nil {
-			return fmt.Errorf("github: artifact %q not found in state doc", id)
+		row := ledgerRowDoc(&doc.Ledger, string(step))
+		now := nowUTC()
+		for _, gr := range grantRecordDocs(g, now) {
+			row.Granted = append(row.Granted, gr)
 		}
-		a.GrantedInvocations += g.Invocations
-		a.GrantedPromptsPerInvocation += g.PromptsPerInvocation
-		a.GrantedCostUSD += g.CostUSD
-		a.GrantedTimeout += time.Duration(g.TimeoutAdd) * time.Second
-		if flow.GrantClearsPark(parkRequestFromDoc(doc.Park), id, recordFromArtifactDoc(*a), g) {
+		doc.Ledger.Steps[string(step)] = *row
+		if flow.GrantClearsPark(parkRequestFromDoc(doc.Park), step, rowFromDoc(step, *row), g) {
 			clearedLabel = parkLabel(b.labels, parkRequestFromDoc(doc.Park))
 			doc.Park = nil
 		}
@@ -370,6 +441,64 @@ func (b *Orchestrator) Grant(ctx context.Context, ref flow.ItemRef, id flow.Arti
 	}
 	b.removeParkLabel(ctx, ref, clearedLabel)
 	return nil
+}
+
+// grantRecordDocs splits one Grant into the per-axis records the ledger keeps.
+// Zero on an axis means "no change", so nothing is recorded there: a row of
+// zero-amount entries would be a history of grants that granted nothing.
+func grantRecordDocs(g flow.Grant, at time.Time) []stateLedgerGrantDoc {
+	var out []stateLedgerGrantDoc
+	if g.Invocations != 0 {
+		out = append(out, stateLedgerGrantDoc{Axis: string(flow.AxisInvocations), Amount: float64(g.Invocations), At: at})
+	}
+	if g.PromptsPerInvocation != 0 {
+		out = append(out, stateLedgerGrantDoc{Axis: string(flow.AxisPrompts), Amount: float64(g.PromptsPerInvocation), At: at})
+	}
+	if g.CostUSD != 0 {
+		out = append(out, stateLedgerGrantDoc{Axis: string(flow.AxisCost), Amount: g.CostUSD, At: at})
+	}
+	if g.TimeoutAdd != 0 {
+		out = append(out, stateLedgerGrantDoc{Axis: string(flow.AxisTimeout), Amount: float64(g.TimeoutAdd), At: at})
+	}
+	return out
+}
+
+// rowFromDoc inflates one ledger row, for the rule that has to read it back
+// inside the write that produced it.
+func rowFromDoc(step flow.StepId, d stateLedgerRowDoc) flow.LedgerRow {
+	l := ledgerFromDoc(stateLedgerDoc{Steps: map[string]stateLedgerRowDoc{string(step): d}})
+	return l.Steps[step]
+}
+
+// mutateLedgerRow applies a mutation to one row and to the item-level totals in
+// ONE document update, so a total can never disagree with the rows under it.
+func (b *Orchestrator) mutateLedgerRow(
+	ctx context.Context,
+	ref flow.ItemRef,
+	step flow.StepId,
+	op string,
+	mutate func(*stateLedgerRowDoc, *stateLedgerDoc),
+) error {
+	if step == "" {
+		return fmt.Errorf("github.%s: ledger write names no step", op)
+	}
+	return b.mutateOrCreateStateDoc(ctx, ref, op, func(doc *stateDoc) error {
+		row := ledgerRowDoc(&doc.Ledger, string(step))
+		mutate(row, &doc.Ledger)
+		doc.Ledger.Steps[string(step)] = *row
+		return nil
+	})
+}
+
+// ledgerRowDoc returns a mutable copy of the step's row, creating one on first
+// use. A step that has never been dispatched has spent nothing, which is what
+// the zero row says — so a missing row is not an error.
+func ledgerRowDoc(l *stateLedgerDoc, step string) *stateLedgerRowDoc {
+	if l.Steps == nil {
+		l.Steps = map[string]stateLedgerRowDoc{}
+	}
+	row := l.Steps[step]
+	return &row
 }
 
 // removeParkLabel drops a park label once the park it advertises is gone.
@@ -406,7 +535,7 @@ func (b *Orchestrator) removeParkLabel(ctx context.Context, ref flow.ItemRef, la
 // THE PARK IS NOT THE MARKER AND DOES NOT CLEAR HERE. The marker records that a
 // human must act; the park records which step stopped and what it resumes from,
 // and is dropped by the three triggers docs/github-schema.md:113 names — the
-// asking step completing (see ResolveArtifact), a park of another kind
+// asking step completing (see AppendEntry), a park of another kind
 // superseding it, or a reset. Answering is not one of them, and an answer that
 // cleared the park would delete its own delivery: the park carries `asked-at`,
 // the only window a resumed step has for finding replies (see
@@ -518,17 +647,65 @@ func (b *Orchestrator) requireOwnClaim(ctx context.Context, ref flow.ItemRef, op
 	return nil
 }
 
-// mutateArtifact applies a mutation to one artifact entry of the state doc.
-// Centralizes the load-modify-store cycle used by the per-axis bumpers.
-func (b *Orchestrator) mutateArtifact(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId, mutate func(*stateArtifactDoc)) error {
-	return b.mutateStateDoc(ctx, ref, "mutateArtifact", func(doc *stateDoc) error {
-		a := findArtifactDoc(doc, string(id))
-		if a == nil {
-			return fmt.Errorf("github: artifact %q not found in state doc", id)
+// mutateOrCreateStateDoc is mutateStateDoc for the writes that must succeed on
+// an item with no record yet.
+//
+// Nothing seeds an item any more, so whichever of these lands first is what
+// brings its state comment into being: the first journal entry, the first
+// ledger row, the first park, the first question, or the first observed signal.
+// The last three are here because work can be attempted and record no entry — a
+// refusal on the very first step counts no dispatch, and a question and a signal
+// are both written mid-handler, before any dispatch is counted.
+//
+// The writes that can only FOLLOW a record still refuse an absent document
+// (mutateStateDoc): an answer needs the question it answers, a park is cleared
+// only where one was recorded, and a grant against an item nothing has
+// dispatched has no row whose cap it could be raising.
+func (b *Orchestrator) mutateOrCreateStateDoc(ctx context.Context, ref flow.ItemRef, op string, mutate func(*stateDoc) error) error {
+	issueNum, err := b.issueNumber(ref)
+	if err != nil {
+		return err
+	}
+	owner, err := b.resolveAccount(ctx)
+	if err != nil {
+		return err
+	}
+	body, stateID, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
+	if err != nil {
+		return err
+	}
+	var doc *stateDoc
+	if body != "" {
+		parsed, _, found, perr := extractStateDoc(body)
+		if perr != nil {
+			return fmt.Errorf("github.%s: parse state comment: %w", op, perr)
 		}
-		mutate(a)
-		return nil
-	})
+		if found && parsed != nil {
+			doc = parsed
+		}
+	}
+	if doc == nil {
+		doc = &stateDoc{
+			Flow:     b.cfg.BinaryName,
+			Schema:   stateSchemaVersion,
+			SeededAt: nowUTC(),
+		}
+	}
+	if err := mutate(doc); err != nil {
+		return err
+	}
+	if stateID != 0 {
+		_, err = b.updateStateComment(ctx, issueNum, stateID, *doc, owner)
+		return err
+	}
+	id, _, err := b.postStateComment(ctx, issueNum, *doc, owner)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	b.stateCommentCache[issueNum] = id
+	b.mu.Unlock()
+	return nil
 }
 
 // mutateStateDoc loads the state comment, applies mutate to the whole
@@ -583,7 +760,11 @@ func parkLabel(l labels, req *flow.ParkRequest) string {
 	switch req.Kind {
 	case flow.ParkQuestion:
 		return l.NeedsAnswer()
-	case flow.ParkBudgetExhausted:
+	case flow.ParkTreasurerRefused:
+		// The label spelling is still `flow:budget-exhausted:<id>`. Renaming the
+		// LABEL is #240's, with the schema bump that goes with it; renaming the
+		// KIND is this change's, and the two are separable because the label is
+		// storage and the kind is vocabulary.
 		return l.BudgetExhausted(string(req.Step))
 	case flow.ParkInfraTransient:
 		return l.InfraTransient()
@@ -634,11 +815,16 @@ func (b *Orchestrator) Park(ctx context.Context, ref flow.ItemRef, req flow.Park
 			return err
 		}
 	}
-	// Record it in the state doc. An item can be parked before it is seeded
-	// (a preflight refusal, say), and there is no state comment to write to
-	// then — the label and timeline comment above still carry the record, so
-	// that is not an error.
-	if err := b.mutateStateDoc(ctx, ref, "Park", func(doc *stateDoc) error {
+	// Record it in the state doc, CREATING the document when the item has none.
+	//
+	// A park is precisely what happens when work was attempted and nothing was
+	// recorded: a refusal or an infra failure on the very first step records no
+	// dispatch and appends no entry, so an item can reach here with an entirely
+	// empty document. This field is the machine-readable copy Load returns —
+	// the label and timeline comment are for humans — and dropping it would
+	// leave `status` reporting nothing and the next advance re-dispatching a
+	// step a person has to unstick.
+	if err := b.mutateOrCreateStateDoc(ctx, ref, "Park", func(doc *stateDoc) error {
 		doc.Park = parkDocFromRequest(req, nowUTC())
 		// The questions are untouched, whatever kind of park this is. They are
 		// never removed: a park of another kind supersedes the one the item was
@@ -646,7 +832,7 @@ func (b *Orchestrator) Park(ctx context.Context, ref flow.ItemRef, req flow.Park
 		// and deleting the record is what makes an unanswered question
 		// unreachable by the id `answer --question` needs.
 		return nil
-	}); err != nil && !errors.Is(err, errNoStateComment) {
+	}); err != nil {
 		return err
 	}
 	return nil
@@ -702,12 +888,14 @@ func (b *Orchestrator) AskQuestion(ctx context.Context, ref flow.ItemRef, q flow
 	// answer this": that is only true once the record that lets `answer` name a
 	// question exists.
 	//
-	// A failure here is fatal, deliberately unlike Park's errNoStateComment
-	// tolerance. An item can be parked before it is seeded; a question cannot be
-	// asked before it is, because the handler that asks runs after the
-	// mandatory-seed gate. Tolerating it would recreate exactly the state this
-	// record exists to prevent — a question park nothing can clear.
-	if err := b.mutateStateDoc(ctx, ref, "AskQuestion", func(doc *stateDoc) error {
+	// The document is CREATED when the item has none, and a failure here is
+	// fatal. Nothing seeds an item any more and a dispatch is counted only
+	// after the handler returns, so the first question a first step asks
+	// arrives at an item with no record at all. Refusing it — or tolerating the
+	// refusal — would produce exactly the state this record exists to prevent:
+	// a question park nothing can clear, because `answer --question` has no id
+	// to name.
+	if err := b.mutateOrCreateStateDoc(ctx, ref, "AskQuestion", func(doc *stateDoc) error {
 		doc.Questions = append(doc.Questions, questionDocOf(recorded))
 		return nil
 	}); err != nil {

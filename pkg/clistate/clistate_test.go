@@ -452,6 +452,7 @@ func TestOperationsRefuseWhenTheStateDirCannotBeLocated(t *testing.T) {
 		{"SaveWork", func() error { return clistate.SaveWork("42", "plan", "reasoning") }},
 		{"LoadWork", func() error { _, err := clistate.LoadWork("42", "plan"); return err }},
 		{"ClearWork", func() error { return clistate.ClearWork("42", "plan") }},
+		{"ClearItemWork", func() error { return clistate.ClearItemWork("42") }},
 		{"SaveRunning", func() error { return clistate.SaveRunning(clistate.RunningRecord{Item: "1"}) }},
 		{"LoadRunning", func() error { _, err := clistate.LoadRunning(); return err }},
 		{"ClearRunning", clistate.ClearRunning},
@@ -464,5 +465,54 @@ func TestOperationsRefuseWhenTheStateDirCannotBeLocated(t *testing.T) {
 	// And nothing was created where the old relative name would have put it.
 	if _, err := os.Stat(".flow"); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf(".flow was created in the process working directory; stat err = %v", err)
+	}
+}
+
+// ClearItemWork is what a Reset needs: the flow's whole record on ONE item
+// goes, and a draft kept past the journal it belonged to is scratch prose with
+// nothing left to resume. Per-item, because one arena's other items are not
+// part of the record being cleared — the wholesale Clear above is a different
+// operation with a different trigger.
+func TestClearItemWorkTakesOneItemsRecordsAndNoOthers(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+
+	for _, w := range []struct{ item, step string }{{"42", "plan"}, {"42", "review"}, {"43", "plan"}} {
+		if err := clistate.SaveWork(w.item, w.step, w.item+"/"+w.step); err != nil {
+			t.Fatalf("SaveWork(%s, %s): %v", w.item, w.step, err)
+		}
+	}
+
+	if err := clistate.ClearItemWork("42"); err != nil {
+		t.Fatalf("ClearItemWork: %v", err)
+	}
+	for _, step := range []string{"plan", "review"} {
+		if got, err := clistate.LoadWork("42", step); got != "" || err != nil {
+			t.Errorf("LoadWork(42, %s) after ClearItemWork = (%q, %v), want (\"\", nil)", step, got, err)
+		}
+	}
+	if got, err := clistate.LoadWork("43", "plan"); got != "43/plan" || err != nil {
+		t.Errorf("LoadWork(43, plan) = (%q, %v), want another item's draft untouched", got, err)
+	}
+}
+
+// Idempotent: an item with no drafts is already in the state ClearItemWork is
+// trying to reach, and a reset that failed because there was nothing to clear
+// would fail the whole reset.
+func TestClearItemWorkIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+
+	if err := clistate.ClearItemWork("42"); err != nil {
+		t.Errorf("ClearItemWork with nothing stored = %v, want nil", err)
+	}
+	if err := clistate.SaveWork("42", "plan", "half a plan"); err != nil {
+		t.Fatalf("SaveWork: %v", err)
+	}
+	if err := clistate.ClearItemWork("42"); err != nil {
+		t.Fatalf("ClearItemWork: %v", err)
+	}
+	if err := clistate.ClearItemWork("42"); err != nil {
+		t.Errorf("second ClearItemWork = %v, want nil", err)
 	}
 }

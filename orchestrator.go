@@ -44,7 +44,18 @@ type Item struct {
 	Title string
 	Body  string
 	URL   string // where a person reads the request
-	Flow  string // last selected flow name, when known
+
+	// Creator is the account that filed the item. What a step routes on when
+	// the source's standing matters; its detected capabilities are asked for
+	// through DetectCapabilities, never taken from the body's claims about
+	// itself.
+	Creator AccountId
+
+	// Flow is the flow bound to this item AT THE JOURNAL'S FIRST ENTRY, when
+	// known. Not at selection and not at a claim: an item with an empty journal
+	// is bound to nothing, and the binding is a consequence of work having been
+	// recorded rather than of a binary having looked at it.
+	Flow string
 
 	// Status is the orchestrator's own lifecycle position; Disposition is its
 	// own name for it ("done", "won't fix", "duplicate"), carried alongside for
@@ -87,7 +98,20 @@ type Item struct {
 	// Finalized marks the item's flow run as complete — the sole terminal "no
 	// more work" record, set only by Finalize. Load MUST report it truthfully:
 	// a write nothing can observe is not a record.
-	Finalized bool
+	//
+	// FinalizedAs is the Disposition the finalizing election carried, set only
+	// when Finalized. A distinct field from Item.Disposition above, which is
+	// the ORCHESTRATOR's own display name for its own status: one is a decision
+	// the flow made, the other a label the orchestrator already had, and
+	// collapsing them would make "resolved" mean two things.
+	Finalized   bool
+	FinalizedAs Disposition
+
+	// Awaits is what the item awaits: the pending step's declared role with
+	// that role's account of record, or the signal a pending wait is held on.
+	// Empty when unstarted or finalized. Derived from the last journal entry —
+	// the orchestrator maintains its own marker from what AppendEntry recorded.
+	Awaits Awaits
 
 	// Manual reports that an operator has taken hand control. It stops anything
 	// dispatching the item underneath the person now driving it. Load MUST
@@ -100,6 +124,12 @@ type Item struct {
 	// derived from the last entry (Flow.Position), and a journal read short or
 	// out of order re-routes the item.
 	Journal []JournalEntry
+
+	// Ledger is the treasurer's durable record: per-StepId dispatches,
+	// resumptions, cost, active and waiting durations, their totals, and what
+	// grants extended (docs/orchestrator.md § Ledger). The orchestrator stores
+	// it and decides none of it.
+	Ledger Ledger
 
 	Artifacts map[ArtifactId]ArtifactRecord
 	Signals   map[SignalId]SignalState
@@ -144,23 +174,6 @@ func (i *Item) Artifact(id ArtifactId) ArtifactRecord {
 	return i.Artifacts[id]
 }
 
-// HasRequiredArtifacts reports whether the item has a seeded finalization
-// checklist — i.e. at least one artifact record marked Required. It is the
-// "is this item seeded?" predicate used by cli.RunOne's mandatory-seed gate: an
-// item with no required artifact has not been seeded and the flow must not run
-// any step against it.
-func (i *Item) HasRequiredArtifacts() bool {
-	if i == nil {
-		return false
-	}
-	for _, rec := range i.Artifacts {
-		if rec.Required {
-			return true
-		}
-	}
-	return false
-}
-
 // SignalSet returns true iff the named signal is set on the item.
 func (i *Item) SignalSet(id SignalId) bool {
 	if i == nil {
@@ -191,7 +204,15 @@ type ItemInfo struct {
 	Availability Availability
 
 	Holder Holder
-	Tags   []TagId
+
+	// Awaits is what the item awaits — the same stored marker Item carries, and
+	// the other half of the `awaits` rung: a RoleName with that role's account
+	// of record, or the SignalId a pending wait is held on. An awaited SIGNAL
+	// reports the item blocked (waits-on-condition), never `awaits` — nobody's
+	// move is not somebody else's.
+	Awaits Awaits
+
+	Tags []TagId
 
 	// Priority and Urgency are the two selection axes. Both reads return them —
 	// List for a listing, Get for one item — so `list` and `status` report the
@@ -212,7 +233,8 @@ type ItemInfo struct {
 	Manual bool
 }
 
-// ItemScope names how far up the listing ladder to go. The set is closed.
+// ItemScope names how far up the listing ladder to go. The set is closed at
+// SEVEN, named for the levels themselves (docs/cli.md § Availability).
 type ItemScope string
 
 const (
@@ -222,7 +244,10 @@ const (
 	ScopeOpen ItemScope = "open"
 	// ScopeProcessable: open items this binary could process (default).
 	ScopeProcessable ItemScope = "processable"
-	// ScopeWorkable: processable items not blocked — someone could work them.
+	// ScopeActionable: processable items that are this operator's, here — the
+	// awaited role is one this account can assume.
+	ScopeActionable ItemScope = "actionable"
+	// ScopeWorkable: actionable items not blocked — someone could work them.
 	ScopeWorkable ItemScope = "workable"
 	// ScopeFree: workable items this operator could claim now.
 	ScopeFree ItemScope = "free"
@@ -230,30 +255,31 @@ const (
 	ScopeAuto ItemScope = "auto"
 )
 
-// ValidScope reports whether s is one of the six recognized scope values.
+// ValidScope reports whether s is one of the seven recognized scope values.
 func ValidScope(s ItemScope) bool {
-	switch s {
-	case ScopeAll, ScopeOpen, ScopeProcessable, ScopeWorkable, ScopeFree, ScopeAuto:
-		return true
-	}
-	return false
+	return scopeLevel(s) != 0
 }
 
-// Availability is the per-item state, from a closed set. Each state is the
-// boundary between two adjacent scope levels.
+// Availability is the per-item state, from a closed set of SEVEN. Each state is
+// the boundary between two adjacent scope levels.
 type Availability string
 
 const (
-	// AvailAuto: in scope level 6 — opted in for unattended selection.
+	// AvailAuto: in scope level 7 — opted in for unattended selection.
 	AvailAuto Availability = "auto"
-	// AvailAvailable: in 5 (free) but not 6 (auto).
+	// AvailAvailable: in 6 (free) but not 7 (auto).
 	AvailAvailable Availability = "available"
-	// AvailHeld: in 4 (workable) but not 5 (free) — someone else holds it.
+	// AvailHeld: in 5 (workable) but not 6 (free) — someone else holds it.
 	AvailHeld Availability = "held"
-	// AvailBlocked: in 3 (processable) but not 4 (workable).
+	// AvailBlocked: in 4 (actionable) but not 5 (workable).
 	AvailBlocked Availability = "blocked"
-	// AvailUnhandled: in 2 (open) but not 3 — no flow here accepts the type.
-	AvailUnhandled Availability = "unhandled"
+	// AvailAwaits: in 3 (processable) but not 4 — somebody else's move, or
+	// somebody else's machine. The pending step's role is one this account
+	// cannot assume, or the item's placement restrictions exclude this arena.
+	AvailAwaits Availability = "awaits"
+	// AvailOutsideRemit: in 2 (open) but not 3 — the item's type is outside
+	// this binary's remit. Another binary's work, not an error.
+	AvailOutsideRemit Availability = "outside-remit"
 	// AvailClosed: in 1 (all) but not 2.
 	AvailClosed Availability = "closed"
 )
@@ -264,6 +290,10 @@ func (a Availability) InScope(s ItemScope) bool {
 	return availLevel(a) >= scopeLevel(s)
 }
 
+// scopeLevel and availLevel are ONE ladder read from its two ends, which is why
+// they are written together: each Availability is exactly the boundary between
+// two adjacent scopes, and a rung added to one list without the other would
+// silently sort every item above or below it wrong.
 func scopeLevel(s ItemScope) int {
 	switch s {
 	case ScopeAll:
@@ -272,12 +302,14 @@ func scopeLevel(s ItemScope) int {
 		return 2
 	case ScopeProcessable:
 		return 3
-	case ScopeWorkable:
+	case ScopeActionable:
 		return 4
-	case ScopeFree:
+	case ScopeWorkable:
 		return 5
-	case ScopeAuto:
+	case ScopeFree:
 		return 6
+	case ScopeAuto:
+		return 7
 	}
 	return 0
 }
@@ -286,16 +318,18 @@ func availLevel(a Availability) int {
 	switch a {
 	case AvailClosed:
 		return 1
-	case AvailUnhandled:
+	case AvailOutsideRemit:
 		return 2
-	case AvailBlocked:
+	case AvailAwaits:
 		return 3
-	case AvailHeld:
+	case AvailBlocked:
 		return 4
-	case AvailAvailable:
+	case AvailHeld:
 		return 5
-	case AvailAuto:
+	case AvailAvailable:
 		return 6
+	case AvailAuto:
+		return 7
 	}
 	return 0
 }
@@ -605,9 +639,12 @@ type Orchestrator interface {
 	// tags, holder and blockers. The BinaryName names the label that marks an
 	// item opted in, which is what separates auto from available.
 	//
-	// The predicate is NOT A VALUE: it is the SDK lending the orchestrator its
-	// own knowledge of which flows are registered, without which the
-	// orchestrator could not tell unhandled from processable.
+	// THE PREDICATES ARE NOT VALUES: each is the SDK lending the orchestrator
+	// its own knowledge. acceptsType is the flow's remit, without which the
+	// orchestrator could not tell outside-remit from processable; assumesRole
+	// is whether this account may assume the role an item awaits, without which
+	// it could not tell awaits from actionable-and-above. A nil predicate means
+	// no filter on that axis.
 	//
 	// AT SCOPE ScopeAuto IT MUST RETURN ITEMS IN SELECTION ORDER — the order
 	// CompareSelection defines. At that scope the listing IS the selectable
@@ -619,14 +656,14 @@ type Orchestrator interface {
 	// Feeds `list`. THE AUTO-SELECT PATH MUST NEVER CALL IT — List reports
 	// blocked items, and widening auto-select would let a bare `resolve` pick an
 	// arbitrary open item and begin work on it.
-	List(ctx context.Context, scope ItemScope, binary BinaryName, acceptsType func(ItemType) bool) ([]ItemInfo, error)
+	List(ctx context.Context, scope ItemScope, binary BinaryName, acceptsType func(ItemType) bool, assumesRole func(RoleName) bool) ([]ItemInfo, error)
 
 	// Get returns one of exactly what List returns, addressed by ref instead of
 	// enumerated. IT MUST ANSWER IDENTICALLY TO List for the same item at the
 	// same moment — one derivation serving both, never two. An item that reads
 	// blocked in `list` and available in `status` is a contradiction an operator
 	// cannot resolve, and nothing in the item caused it.
-	Get(ctx context.Context, ref ItemRef, binary BinaryName, acceptsType func(ItemType) bool) (*ItemInfo, error)
+	Get(ctx context.Context, ref ItemRef, binary BinaryName, acceptsType func(ItemType) bool, assumesRole func(RoleName) bool) (*ItemInfo, error)
 
 	// ListAutoSelectable returns the items an unattended `resolve` may start
 	// on, carrying every TagId given. An empty list means no filter.
@@ -641,6 +678,11 @@ type Orchestrator interface {
 	// and "do not start this unattended" is precisely what an operator
 	// deferring it said.
 	//
+	// MUST NOT return one whose awaited role fails assumesRole. Somebody else's
+	// move is not this runner's work, and claiming it would hold work its holder
+	// cannot advance. Eligibility, not a sort key, for the same reason. A nil
+	// predicate filters nothing.
+	//
 	// MUST RETURN WHAT IT DOES RETURN IN SELECTION ORDER — the order
 	// CompareSelection defines, with a tiebreak of the orchestrator's own.
 	//
@@ -649,7 +691,7 @@ type Orchestrator interface {
 	// caller has nothing to filter or sort on. An orchestrator with no tag
 	// vocabulary returns nothing when tags are given, which is an honest
 	// answer.
-	ListAutoSelectable(ctx context.Context, tags []TagId) ([]ItemRef, error)
+	ListAutoSelectable(ctx context.Context, tags []TagId, assumesRole func(RoleName) bool) ([]ItemRef, error)
 
 	// ---- Claiming ----
 
@@ -703,26 +745,23 @@ type Orchestrator interface {
 	// ---- State ----
 
 	// Load returns the item and everything the flow has recorded on it —
-	// artifacts, signals, questions and park — in one round. Signals are
-	// refreshed by orchestrator-internal polling.
+	// journal, ledger, artifacts, signals, questions and park — in one round.
+	// Signals are refreshed by orchestrator-internal polling.
 	//
 	// ADDRESSED BY REF, NOT BY CLAIM: reading an item is not a privileged act,
 	// and the item is what is being loaded. An orchestrator wanting the
 	// shortcut a held claim affords looks up its own.
 	Load(ctx context.Context, ref ItemRef) (*Item, error)
 
-	// SeedState pre-loads the artifact set and budget caps. It MUST refuse a
-	// second seed for the same item — mid-flight items are frozen against later
-	// flow-source changes — and MUST refuse an unclaimed item, or one claimed by
-	// another arena.
-	SeedState(ctx context.Context, ref ItemRef, artifacts []ArtifactSpec) error
-
-	// ResetSeed clears the existing seed so the next SeedState succeeds. This is
-	// the ONLY escape hatch from SeedState's "frozen after first write"
-	// contract. Operator-initiated only; the SDK never calls it automatically.
+	// Reset clears the flow's whole record on the item — journal, ledger, park,
+	// the questions' outstanding marker, drafts — so the next resolution starts
+	// from an empty journal.
 	//
-	// An orchestrator with no separable seed concept refuses with ErrUnsupported.
-	ResetSeed(ctx context.Context, ref ItemRef) error
+	// Operator-initiated only; the SDK never calls it automatically. An
+	// orchestrator that cannot clear its record refuses, and the refusal is
+	// TYPED (ErrUnsupported), so a caller can tell "not supported" from a
+	// transient failure.
+	Reset(ctx context.Context, ref ItemRef) error
 
 	// ---- Editing ----
 
@@ -731,44 +770,75 @@ type Orchestrator interface {
 	// discovered.
 	Edit(ctx context.Context, ref ItemRef) (ItemEditor, error)
 
-	// ---- Artifacts ----
+	// ---- Journal ----
 
-	// ResolveArtifact writes a handler-produced artifact value. There is no
-	// orchestrator method for writing signals — signals are written by
-	// orchestrator-internal side effects or the Load poll path.
+	// AppendEntry appends ONE completed step execution: the captured result and
+	// the elected route, in one write. An entry is never half-recorded, and an
+	// EXISTING ENTRY IS NEVER REWRITTEN — the journal is the durable route, and
+	// Load must return exactly what was appended, in order, because the pending
+	// step is derived from the last entry (Flow.Position).
 	//
-	// An EMPTY body is a legal call, not a client-side error: it is the
-	// side-effect-artifact pattern, where the content was already attached
-	// out-of-band and the handler is saying "I'm done — record me as resolved".
-	// An orchestrator that stores such content elsewhere MUST decide emptiness
-	// itself: verify the side effect happened and fail naming what is missing.
-	ResolveArtifact(ctx context.Context, ref ItemRef, id ArtifactId, body ArtifactBody) error
-
-	// MarkStale flips the stale bit on an artifact, causing its step to re-run.
-	MarkStale(ctx context.Context, ref ItemRef, id ArtifactId) error
-
-	// ---- Budget ----
+	// There is no orchestrator method for writing signals — signals are written
+	// by orchestrator-internal side effects or the Load poll path.
 	//
-	// Every counter is keyed by the ArtifactId of the step's artifact: the
-	// artifact a step produces is that step's identity, and the budget record
-	// hangs off it. Signal steps produce no artifact, so they own no budget
-	// record — they are never counted and never grantable. The counters are
-	// transactional with the artifact record.
-
-	BumpInvocations(ctx context.Context, ref ItemRef, id ArtifactId) error
-	BumpPrompts(ctx context.Context, ref ItemRef, id ArtifactId) error
-	AddCost(ctx context.Context, ref ItemRef, id ArtifactId, usd float64) error
-	AddDuration(ctx context.Context, ref ItemRef, id ArtifactId, d time.Duration) error
-
-	// Grant adds budget to the artifact record.
+	// An EMPTY artifact body is a legal entry where the orchestrator can verify
+	// the content it stands for exists — a capture stored elsewhere, a side
+	// effect it can observe. It is the side-effect-artifact pattern, where the
+	// content was already attached out of band and the step is saying "I'm done".
+	// The orchestrator that stores such content is the party that must decide
+	// emptiness: it verifies, and fails naming what is missing.
 	//
-	// It MUST clear a ParkBudgetExhausted park when the grant raises the parked
-	// step's offending axis above its consumption — use GrantClearsPark so every
-	// orchestrator applies the same rule. Parks of any other kind, and grants
-	// too small to clear the cap, MUST be left in place: reporting an item as
-	// unparked when the next dispatch would re-park it immediately is the
-	// failure this contract exists to prevent.
-	Grant(ctx context.Context, ref ItemRef, id ArtifactId, g Grant) error
+	// It is where the artifact projection (Item.Artifacts) is maintained from,
+	// so the record and the journal cannot drift: one write, one derivation.
+	//
+	// It PUBLISHES, so it may refuse — an orchestrator posting the result
+	// outward passes the same disclosure seam every outward write does.
+	AppendEntry(ctx context.Context, ref ItemRef, entry JournalEntry) error
+
+	// ---- Ledger ----
+	//
+	// The treasurer's durable record. Every row is keyed by StepId — the result
+	// a step produces is that step's identity, the ledger rows hang off it, and
+	// it is the only name `grant` accepts. That is what gives a SIGNAL step a
+	// row too: a row is keyed by a step, not by an artifact. The rows are
+	// transactional with the writes they account.
+	//
+	// The orchestrator stores the ledger and decides none of it: admission,
+	// allowances and refusals are the treasurer's, computed over the journal and
+	// ledger the orchestrator returns.
+
+	// RecordDispatch counts one dispatch of the pending step.
+	RecordDispatch(ctx context.Context, ref ItemRef, step StepId) error
+
+	// RecordResumption counts one resume of a parked step — the unpark count the
+	// treasurer reads.
+	RecordResumption(ctx context.Context, ref ItemRef, step StepId) error
+
+	// AddCost adds cost to the step's running total.
+	AddCost(ctx context.Context, ref ItemRef, step StepId, usd float64) error
+
+	// AddDuration adds ACTIVE time — time spent doing work — to the step's
+	// running total. Time blocked on a declared exclusion goes to AddWaiting,
+	// never here.
+	AddDuration(ctx context.Context, ref ItemRef, step StepId, d time.Duration) error
+
+	// AddWaiting adds time spent blocked on a declared exclusion, recorded apart
+	// from active time as evidence about contention rather than about the work
+	// (docs/resolution.md § The treasurer).
+	//
+	// Reported by the party that held the wait, the only party that knows it was
+	// one: an orchestrator whose Push waited its turn reports that wait here.
+	AddWaiting(ctx context.Context, ref ItemRef, step StepId, d time.Duration) error
+
+	// Grant records an operator's extension against the step's ledger row.
+	//
+	// It MUST clear a ParkTreasurerRefused park when the extension clears what
+	// the treasurer refused on — use GrantClearsPark so every orchestrator
+	// applies the same rule rather than re-deriving it. Parks of any other kind,
+	// and extensions too small to clear the refusal, MUST be left in place:
+	// reporting an item as unparked when the next dispatch would re-park it
+	// immediately is the failure this contract exists to prevent.
+	Grant(ctx context.Context, ref ItemRef, step StepId, g Grant) error
 
 	// ---- Parking and questions ----
 
@@ -824,7 +894,8 @@ type Orchestrator interface {
 
 	// ---- Completion ----
 
-	// Finalize marks the item's flow run complete and releases its claim.
+	// Finalize marks the item's flow run complete — with the disposition the
+	// finalizing election carried — and releases its claim.
 	//
 	// MUST REFUSE an item whose ItemStatus is not terminal. Finalizing does not
 	// MAKE an item terminal; there is no method here that closes one. So
@@ -834,7 +905,11 @@ type Orchestrator interface {
 	// says it is not.
 	//
 	// THIS IS THE ONLY WAY COMPLETION IS EVER RECORDED — nothing infers it.
-	Finalize(ctx context.Context, ref ItemRef) error
+	//
+	// Its read is required with it: Load MUST report Item.Finalized and
+	// Item.FinalizedAs truthfully, because a write nothing can observe is not a
+	// record.
+	Finalize(ctx context.Context, ref ItemRef, d Disposition) error
 
 	// ---- Worktree ----
 
@@ -972,9 +1047,33 @@ type Worktree interface {
 	// indefinitely — a livelock in which the work is sound, the gate passes
 	// every time, and nothing ever lands.
 	//
-	// So an orchestrator serializes landing across everything sharing the
-	// mainline. Waiting is not failing.
+	// SO AN ORCHESTRATOR SERIALIZES THE WHOLE ROUND, NOT THE PUSH. The
+	// serialized section spans rebase → measure the merge result → push
+	// (docs/gates-and-commands.md § Two scopes): a lock held only across the
+	// push protects nothing, because the measurement it exists to keep valid was
+	// taken outside it. The lock NEVER survives a stop — an arena that parked or
+	// died must not hold the mainline — which is why a resumption comes back
+	// arbitrarily far behind and re-enters through the Drift election.
+	//
+	// Waiting is not failing, and the wait is reported to the ledger through
+	// AddWaiting, never as work.
 	Push(ctx context.Context) error
+
+	// Drift reports how far the world has moved under the branch: commits the
+	// branch carries past its recorded cut point (Ahead), commits the mainline
+	// has taken since that cut point (Behind), and when the reading was taken.
+	//
+	// A MEASUREMENT, ALREADY STALE WHEN RETURNED — evidence for judgment, never
+	// a safety check (docs/orchestrator.md § Drift is evidence for judgment).
+	// Whether a push is safe is the push itself; whether a change still lands is
+	// the gate on the merge result. What Drift legitimately elects between is
+	// routes: at head, landing is mechanical, and behind, the rebase deserves
+	// review. A reading that went stale costs one hop, and the journal says why.
+	//
+	// A base that will not resolve returns an ERROR rather than a zero pair, for
+	// the reason RevParse's contract already gives: a caller handed (0, 0) would
+	// conclude the branch is level with a mainline it never compared against.
+	Drift(ctx context.Context) (Drift, error)
 
 	// RevParse resolves a revision to a commit SHA.
 	//
@@ -1116,6 +1215,23 @@ type RequestManager interface {
 	// a merge brings newer tool source from the base branch.
 	RebuildTools(ctx context.Context) error
 }
+
+// Drift is one reading of how far the world has moved under a branch: what the
+// branch carries past its recorded cut point, what the mainline has taken since
+// that cut point, and when the reading was taken.
+//
+// At carries the reading time because the value is EVIDENCE, and evidence
+// without its timestamp cannot be weighed: a reading is already stale when it
+// is returned, and a reader deciding what to do with it needs to know how stale.
+type Drift struct {
+	Ahead  int
+	Behind int
+	At     time.Time
+}
+
+// Level reports whether the branch is exactly at the mainline's cut point —
+// nothing ahead, nothing behind. The one shape in which landing is mechanical.
+func (d Drift) Level() bool { return d.Ahead == 0 && d.Behind == 0 }
 
 // PRInfo is the read-only snapshot FindPR returns.
 type PRInfo struct {

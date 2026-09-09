@@ -18,17 +18,20 @@ import (
 )
 
 // statusFlowLine is the source of the "flow:" status line. The key invariant
-// (the T-bug this guards): "(finalized)" must appear ONLY when the persistent
-// Item.Finalized flag is set — never for a not-yet-seeded item. An unseeded
-// item with no eligible step must read "(not seeded)", not "(finalized)" and
-// not the misleading "(no eligible step)".
+// (the T-bug this guards): "(finalized)" appears ONLY when the persistent
+// Item.Finalized flag is set — the flag only Finalize writes. An item with
+// nothing recorded on it is not finalized and must not read as such.
+//
+// There is no "(not seeded)" rung any more: nothing seeds an item, so an item
+// with an empty record is one whose entry step is pending, and that reads as
+// the eligible flow.
 func TestStatusFlowLine(t *testing.T) {
 	doFlow := flow.NewFlow("do", []flow.ItemType{"task"})
 
-	seeded := map[flow.ArtifactId]flow.ArtifactRecord{
-		"plan": {Id: "plan", Required: true},
+	recorded := map[flow.ArtifactId]flow.ArtifactRecord{
+		"plan": {Id: "plan", Resolved: true, Type: flow.ArtifactMarkdown},
 	}
-	unseeded := map[flow.ArtifactId]flow.ArtifactRecord{}
+	empty := map[flow.ArtifactId]flow.ArtifactRecord{}
 
 	tests := []struct {
 		name      string
@@ -41,36 +44,37 @@ func TestStatusFlowLine(t *testing.T) {
 		{
 			name:      "finalized flag set",
 			finalized: true,
-			artifacts: seeded,
+			artifacts: recorded,
 			typeFlow:  doFlow,
 			want:      "do (finalized)",
 		},
 		{
 			name:      "finalized flag set, no type flow",
 			finalized: true,
-			artifacts: seeded,
+			artifacts: recorded,
 			typeFlow:  nil,
 			want:      "finalized",
 		},
 		{
-			// The bug: unseeded item is NOT finalized — must not read "(finalized)".
-			name:      "unseeded item is not finalized",
+			// The bug: an item with nothing recorded is NOT finalized, and must
+			// not read "(finalized)".
+			name:      "an item with nothing recorded is not finalized",
 			finalized: false,
-			artifacts: unseeded,
+			artifacts: empty,
 			typeFlow:  doFlow,
-			want:      "do (not seeded)",
+			want:      "do (no eligible step)",
 		},
 		{
-			name:      "seeded but no eligible step",
+			name:      "recorded but no eligible step",
 			finalized: false,
-			artifacts: seeded,
+			artifacts: recorded,
 			typeFlow:  doFlow,
 			want:      "do (no eligible step)",
 		},
 		{
 			name:      "eligible step takes precedence",
 			finalized: false,
-			artifacts: unseeded,
+			artifacts: empty,
 			eligible:  doFlow,
 			typeFlow:  doFlow,
 			want:      "do",
@@ -78,7 +82,7 @@ func TestStatusFlowLine(t *testing.T) {
 		{
 			name:      "no matching flow",
 			finalized: false,
-			artifacts: unseeded,
+			artifacts: empty,
 			typeFlow:  nil,
 			want:      "(no matching flow)",
 		},
@@ -341,7 +345,7 @@ func TestCmdStatus_InspectsById(t *testing.T) {
 		t.Fatalf("validate: %v", err)
 	}
 
-	// Claim and seed via the underlying fake so Load has state to
+	// Claim and record an entry via the underlying fake so Load has state to
 	// return, but the claim is NOT the app's active claim — the point is that
 	// `status <id>` must NOT need an active claim.
 	ctx := context.Background()
@@ -351,11 +355,7 @@ func TestCmdStatus_InspectsById(t *testing.T) {
 		t.Fatalf("Claim: %v", err)
 	}
 	sib.claim = &claim
-	if err := be.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
-	}); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
+	appendMarkdown(t, be, claim.ItemRef, "plan", "the plan")
 
 	out := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}
@@ -664,12 +664,10 @@ func TestStatusRunningDoesNotOverrideResolved(t *testing.T) {
 	}
 	// Resolve the "plan" artifact so its state is "resolved".
 	ctx := context.Background()
-	if err := env.be.ResolveArtifact(ctx, env.claim.ItemRef, "plan", flow.ArtifactBody{
+	appendResult(t, env.be, env.claim.ItemRef, "plan", 1, flow.ArtifactBody{
 		Type:     flow.ArtifactMarkdown,
 		Markdown: "the plan",
-	}); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
-	}
+	})
 	// Write a running record naming the now-resolved step.
 	if err := clistate.SaveRunning(clistate.RunningRecord{
 		Item: "test#1",
@@ -711,8 +709,8 @@ func TestStatusRunningDoesNotOverrideResolved(t *testing.T) {
 // that names what would clear it.
 func TestStatusFlowState_BlockedDisplacesEligibleOnly(t *testing.T) {
 	doFlow := flow.NewFlow("do", []flow.ItemType{"task"})
-	seeded := map[flow.ArtifactId]flow.ArtifactRecord{"plan": {Id: "plan", Required: true}}
-	unseeded := map[flow.ArtifactId]flow.ArtifactRecord{}
+	recorded := map[flow.ArtifactId]flow.ArtifactRecord{"plan": {Id: "plan", Resolved: true, Type: flow.ArtifactMarkdown}}
+	empty := map[flow.ArtifactId]flow.ArtifactRecord{}
 
 	tests := []struct {
 		name      string
@@ -724,7 +722,7 @@ func TestStatusFlowState_BlockedDisplacesEligibleOnly(t *testing.T) {
 	}{
 		{
 			name:      "eligible and waiting on items",
-			state:     flow.Item{Artifacts: seeded, Blocked: true, BlockKind: flow.WaitsOnItems},
+			state:     flow.Item{Artifacts: recorded, Blocked: true, BlockKind: flow.WaitsOnItems},
 			eligible:  doFlow,
 			typeFlow:  doFlow,
 			wantState: flowStateBlocked,
@@ -732,7 +730,7 @@ func TestStatusFlowState_BlockedDisplacesEligibleOnly(t *testing.T) {
 		},
 		{
 			name:      "eligible and unblocked",
-			state:     flow.Item{Artifacts: seeded},
+			state:     flow.Item{Artifacts: recorded},
 			eligible:  doFlow,
 			typeFlow:  doFlow,
 			wantState: flowStateEligible,
@@ -742,7 +740,7 @@ func TestStatusFlowState_BlockedDisplacesEligibleOnly(t *testing.T) {
 			// A park-derived kind: the next advance runs the step, so the
 			// "flow:" line must not say otherwise.
 			name:      "eligible and waiting on a person",
-			state:     flow.Item{Artifacts: seeded, Blocked: true, BlockKind: flow.WaitsOnPerson},
+			state:     flow.Item{Artifacts: recorded, Blocked: true, BlockKind: flow.WaitsOnPerson},
 			eligible:  doFlow,
 			typeFlow:  doFlow,
 			wantState: flowStateEligible,
@@ -750,28 +748,21 @@ func TestStatusFlowState_BlockedDisplacesEligibleOnly(t *testing.T) {
 		},
 		{
 			name:      "finalized still wins",
-			state:     flow.Item{Finalized: true, Artifacts: seeded, Blocked: true, BlockKind: flow.WaitsOnItems},
+			state:     flow.Item{Finalized: true, Artifacts: recorded, Blocked: true, BlockKind: flow.WaitsOnItems},
 			typeFlow:  doFlow,
 			wantState: flowStateFinalized,
 			wantLine:  "do (finalized)",
 		},
 		{
-			name:      "not seeded keeps",
-			state:     flow.Item{Artifacts: unseeded, Blocked: true, BlockKind: flow.WaitsOnItems},
-			typeFlow:  doFlow,
-			wantState: flowStateNotSeeded,
-			wantLine:  "do (not seeded)",
-		},
-		{
 			name:      "no eligible step keeps",
-			state:     flow.Item{Artifacts: seeded, Blocked: true, BlockKind: flow.WaitsOnItems},
+			state:     flow.Item{Artifacts: recorded, Blocked: true, BlockKind: flow.WaitsOnItems},
 			typeFlow:  doFlow,
 			wantState: flowStateNoEligibleStep,
 			wantLine:  "do (no eligible step)",
 		},
 		{
 			name:      "no matching flow keeps",
-			state:     flow.Item{Artifacts: unseeded, Blocked: true, BlockKind: flow.WaitsOnItems},
+			state:     flow.Item{Artifacts: empty, Blocked: true, BlockKind: flow.WaitsOnItems},
 			wantState: flowStateNoMatchingFlow,
 			wantLine:  "(no matching flow)",
 		},
@@ -977,7 +968,7 @@ func TestStatusJSON_LandedBlockersLeaveItEligible(t *testing.T) {
 // references, and it does not displace `eligible`: the next advance runs.
 func TestStatusJSON_ParkDerivedBlockIsReportedWithoutReferences(t *testing.T) {
 	env := newParkGrantEnv(t)
-	env.park(t, budgetExhausted("plan", flow.AxisInvocations))
+	env.park(t, treasurerRefused("plan", flow.AxisInvocations))
 	env.out.Reset()
 
 	if code := env.app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
@@ -1019,11 +1010,6 @@ func TestCmdStatus_ByIdReportsTheBlockOnAnUnclaimedItem(t *testing.T) {
 	ctx := context.Background()
 	env.be.AddItem("3", flow.Item{Type: "task", Title: "still open"})
 	env.be.AddItem("9", flow.Item{Type: "task", Title: "nobody holds this"})
-	if err := env.be.SeedState(ctx, env.be.Ref("9"), []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
-	}); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
 	blockOn(t, env.be, env.be.Ref("9"), env.be.Ref("3"))
 	env.out.Reset()
 
@@ -1085,5 +1071,66 @@ func TestBlockLine(t *testing.T) {
 				t.Errorf("blockLine = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// `status` reports a step's caps through flow.EffectiveBudget — the binary's
+// policy plus every extension recorded on the step's ledger row — which is the
+// same arithmetic the pre-dispatch gate refuses on and `grant` tops up.
+//
+// The three have to agree exactly. A `status` that reported the policy alone
+// would show an operator who has just granted the cap they granted past, and
+// send them back to grant into a number nothing reads.
+func TestStatusJSON_BudgetIsThePolicyPlusTheGrants(t *testing.T) {
+	env := newParkGrantEnv(t) // policy for "plan": 3 inv, 1 prompt, $10, 30m
+	ctx := context.Background()
+
+	env.dispatches(t, "plan", 2)
+	env.spend(t, "plan", 4)
+	if err := env.be.Grant(ctx, env.claim.ItemRef, "plan", flow.Grant{
+		Invocations: 2, PromptsPerInvocation: 3, CostUSD: 5, TimeoutAdd: 600,
+	}); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+
+	if code := env.app.cmdStatus(ctx, []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	m := decode(t, env.out)
+	steps, _ := m["steps"].([]any)
+	if len(steps) == 0 {
+		t.Fatalf("steps = %v, want the flow's steps", m["steps"])
+	}
+	plan, _ := steps[0].(map[string]any)
+	if plan["id"] != "plan" {
+		t.Fatalf("first step = %v, want plan", plan)
+	}
+	budget, ok := plan["budget"].(map[string]any)
+	if !ok {
+		t.Fatalf("budget = %v, want an object", plan["budget"])
+	}
+	axis := func(name string) map[string]any {
+		t.Helper()
+		a, ok := budget[name].(map[string]any)
+		if !ok {
+			t.Fatalf("budget[%q] = %v, want an object", name, budget[name])
+		}
+		return a
+	}
+	// Consumption is the row's; the cap is the policy plus what was granted.
+	if got := axis("invocations"); got["used"] != 2.0 || got["granted"] != 5.0 {
+		t.Errorf("invocations = %v, want 2 used against 3+2", got)
+	}
+	if got := axis("cost_usd"); got["used"] != 4.0 || got["granted"] != 15.0 {
+		t.Errorf("cost_usd = %v, want 4 used against 10+5", got)
+	}
+	// Prompts report no consumption at all: the cap is per-invocation and the
+	// counter lives only inside a running dispatch, so a stored figure would be
+	// a number from some earlier run.
+	if got := axis("prompts_per_invocation"); got["used"] != 0.0 || got["granted"] != 4.0 {
+		t.Errorf("prompts_per_invocation = %v, want 0 used against 1+3", got)
+	}
+	if got := axis("timeout_seconds"); got["granted"] != 2400.0 {
+		t.Errorf("timeout_seconds = %v, want 1800+600", got)
 	}
 }

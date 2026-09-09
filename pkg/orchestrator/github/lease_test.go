@@ -64,7 +64,7 @@ func TestBackend_AnItemThisArenaClaimedDoesNotReadAsHeldElsewhere(t *testing.T) 
 	if _, err := b.Claim(t.Context(), ref, nil); err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	info, err := b.Get(t.Context(), ref, "implement", func(flow.ItemType) bool { return true })
+	info, err := b.Get(t.Context(), ref, "implement", func(flow.ItemType) bool { return true }, nil)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestBackend_Finalize_RefusesAnItemThatIsNotTerminal(t *testing.T) {
 		t.Fatalf("clistate.Save: %v", err)
 	}
 
-	err := b.Finalize(t.Context(), claim.ItemRef)
+	err := b.Finalize(t.Context(), claim.ItemRef, flow.DispositionResolved)
 	if err == nil {
 		t.Fatal("Finalize recorded a flow run complete on an item the orchestrator does not consider finished")
 	}

@@ -402,7 +402,7 @@ func TestNoGuardStillReads(t *testing.T) {
 	b.out.guard = nil
 	ctx := t.Context()
 
-	if _, err := b.ListAutoSelectable(ctx, nil); err != nil {
+	if _, err := b.ListAutoSelectable(ctx, nil, nil); err != nil {
 		t.Errorf("ListAutoSelectable with no guard: %v", err)
 	}
 	if err := b.Doctor(ctx); err != nil {
@@ -718,20 +718,15 @@ func TestGuardSeesTheAssembledCommentAndNotTheArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := b.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{{Id: "plan", Type: flow.ArtifactMarkdown}}); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
 
 	guard := &recordingGuard{}
 	b.out.guard = guard
 
 	prose := strings.Repeat("plan prose. ", 900) // comfortably over 4KiB
-	if err := b.ResolveArtifact(ctx, claim.ItemRef, "plan", flow.ArtifactBody{
+	appendResult(t, b, claim.ItemRef, "plan", 1, flow.ArtifactBody{
 		Type:     flow.ArtifactMarkdown,
 		Markdown: prose,
-	}); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
-	}
+	})
 
 	comments := guard.of(flow.ActArtifactComment)
 	if len(comments) != 1 {
@@ -774,15 +769,12 @@ func TestGuardSeesConstructedLabelNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := b.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{{Id: "implement", Type: flow.ArtifactMarkdown}}); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
 
 	guard := &recordingGuard{}
 	b.out.guard = guard
 
 	if err := b.Park(ctx, claim.ItemRef, flow.ParkRequest{
-		Kind:   flow.ParkBudgetExhausted,
+		Kind:   flow.ParkTreasurerRefused,
 		Step:   "implement",
 		Reason: "spent the budget",
 	}); err != nil {
@@ -908,17 +900,13 @@ func driveAResolution(t *testing.T, b *Orchestrator, tape *spawnTape) (prURL flo
 	// resolution — the test constructs a worktree directly, and Open checks
 	// that CurrentBranch returns the claim branch.
 	tape.setBranch(b.claimBranch(42))
-	if err := b.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactFile, Required: true, Budget: flow.DefaultStepBudget()},
-	}); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
-	if err := b.ResolveArtifact(ctx, claim.ItemRef, "plan", flow.ArtifactBody{
+	// An id OUTSIDE the curated schema, because no declared artifact carries a
+	// file body and AppendEntry refuses a declared id recorded with the wrong
+	// type. What this drive needs is the spill route, not a particular step.
+	appendResult(t, b, claim.ItemRef, "spilled-file", 1, flow.ArtifactBody{
 		Type: flow.ArtifactFile,
 		File: flow.FileBody{Name: "notes.txt", Content: []byte("the spilled bytes")},
-	}); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
-	}
+	})
 	q, err := b.AskQuestion(ctx, claim.ItemRef, flow.AgentQuestion{
 		Header: "Which base branch?", Text: "main, or the release branch?",
 	})
@@ -1264,20 +1252,17 @@ func TestArtifactPathCarriesTheAgentFilename(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := b.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{{Id: "plan", Type: flow.ArtifactFile}}); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
 	b.out.guard = guard
 
 	const filename = "an-agent-chose-this.txt"
 	resolve := func(content string) {
 		t.Helper()
-		if err := b.ResolveArtifact(ctx, claim.ItemRef, "plan", flow.ArtifactBody{
+		// Outside the curated schema: no declared artifact carries a file body,
+		// and a declared id recorded with another type is refused.
+		appendResult(t, b, claim.ItemRef, "spilled-file", 1, flow.ArtifactBody{
 			Type: flow.ArtifactFile,
 			File: flow.FileBody{Name: filename, Content: []byte(content)},
-		}); err != nil {
-			t.Fatalf("ResolveArtifact: %v", err)
-		}
+		})
 	}
 	// Two routes reach the artifacts branch and both template the filename: the
 	// first spill creates the branch through the Git Data API, and every later

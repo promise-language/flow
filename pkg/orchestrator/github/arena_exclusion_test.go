@@ -127,7 +127,7 @@ func TestBackend_ListAutoSelectable_OmitsAnItemAnotherArenaHolds(t *testing.T) {
 	one.claimed(t)
 
 	one.run(func() {
-		refs, err := one.b.ListAutoSelectable(t.Context(), nil)
+		refs, err := one.b.ListAutoSelectable(t.Context(), nil, nil)
 		if err != nil {
 			t.Fatalf("holder's ListAutoSelectable: %v", err)
 		}
@@ -136,7 +136,7 @@ func TestBackend_ListAutoSelectable_OmitsAnItemAnotherArenaHolds(t *testing.T) {
 		}
 	})
 	two.run(func() {
-		refs, err := two.b.ListAutoSelectable(t.Context(), nil)
+		refs, err := two.b.ListAutoSelectable(t.Context(), nil, nil)
 		if err != nil {
 			t.Fatalf("ListAutoSelectable: %v", err)
 		}
@@ -156,7 +156,7 @@ func TestBackend_ListAndGet_ReportAnItemAnotherArenaHoldsAsHeld(t *testing.T) {
 	one.claimed(t)
 
 	two.run(func() {
-		items, err := two.b.List(t.Context(), flow.ScopeAll, "implement", acceptsAllTypes)
+		items, err := two.b.List(t.Context(), flow.ScopeAll, "implement", acceptsAllTypes, nil)
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -167,7 +167,7 @@ func TestBackend_ListAndGet_ReportAnItemAnotherArenaHoldsAsHeld(t *testing.T) {
 			t.Errorf("List availability = %q, want %q", items[0].Availability, flow.AvailHeld)
 		}
 
-		info, err := two.b.Get(t.Context(), two.b.refFromIssue(42), "implement", acceptsAllTypes)
+		info, err := two.b.Get(t.Context(), two.b.refFromIssue(42), "implement", acceptsAllTypes, nil)
 		if err != nil {
 			t.Fatalf("Get: %v", err)
 		}
@@ -188,7 +188,7 @@ func TestBackend_ListAndGet_ReportAnItemAnotherArenaHoldsAsHeld(t *testing.T) {
 	})
 	// And the holder's own reading is unchanged: its arena half IS nameable.
 	one.run(func() {
-		info, err := one.b.Get(t.Context(), one.b.refFromIssue(42), "implement", acceptsAllTypes)
+		info, err := one.b.Get(t.Context(), one.b.refFromIssue(42), "implement", acceptsAllTypes, nil)
 		if err != nil {
 			t.Fatalf("holder's Get: %v", err)
 		}
@@ -534,7 +534,7 @@ func TestBackend_AnItemHeldByAnotherAccountIsRefusedAndUnselectable(t *testing.T
 			t.Errorf("Reason = %q, want the unchanged message naming bob", refused.Reason)
 		}
 
-		refs, err := two.b.ListAutoSelectable(t.Context(), nil)
+		refs, err := two.b.ListAutoSelectable(t.Context(), nil, nil)
 		if err != nil {
 			t.Fatalf("ListAutoSelectable: %v", err)
 		}
@@ -654,7 +654,7 @@ func TestBackend_Release_PartialFailureLeavesTheItemReadingHeld(t *testing.T) {
 	}
 	// What every other arena reads off that half-removed record: still held.
 	two.run(func() {
-		refs, err := two.b.ListAutoSelectable(t.Context(), nil)
+		refs, err := two.b.ListAutoSelectable(t.Context(), nil, nil)
 		if err != nil {
 			t.Fatalf("ListAutoSelectable: %v", err)
 		}
@@ -678,7 +678,7 @@ func TestBackend_AnArenaLabelWithoutAnOwnerLabelIsNotAHolder(t *testing.T) {
 	mock.mu.Unlock()
 
 	one.run(func() {
-		info, err := one.b.Get(t.Context(), one.b.refFromIssue(42), "implement", acceptsAllTypes)
+		info, err := one.b.Get(t.Context(), one.b.refFromIssue(42), "implement", acceptsAllTypes, nil)
 		if err != nil {
 			t.Fatalf("Get: %v", err)
 		}
@@ -761,7 +761,7 @@ func TestBackend_Listing_HolderOfARecordNamingNoArenaStillSeesItsOwnItem(t *test
 		}); err != nil {
 			t.Fatalf("seed lease file: %v", err)
 		}
-		refs, err := one.b.ListAutoSelectable(t.Context(), nil)
+		refs, err := one.b.ListAutoSelectable(t.Context(), nil, nil)
 		if err != nil {
 			t.Fatalf("ListAutoSelectable: %v", err)
 		}
@@ -769,7 +769,7 @@ func TestBackend_Listing_HolderOfARecordNamingNoArenaStillSeesItsOwnItem(t *test
 			t.Errorf("got %v, want #42 — this arena's lease file says it holds it (labels %v)",
 				refs, mock.labelNames())
 		}
-		info, err := one.b.Get(t.Context(), one.b.refFromIssue(42), "implement", acceptsAllTypes)
+		info, err := one.b.Get(t.Context(), one.b.refFromIssue(42), "implement", acceptsAllTypes, nil)
 		if err != nil {
 			t.Fatalf("Get: %v", err)
 		}
@@ -801,14 +801,14 @@ func TestBackend_Listing_AnUnreadableLeaseFileReadsTheItemAsHeld(t *testing.T) {
 		if err := os.WriteFile(activeJSONPath(t), []byte("{truncated"), 0o644); err != nil {
 			t.Fatalf("write lease file: %v", err)
 		}
-		refs, err := one.b.ListAutoSelectable(t.Context(), nil)
+		refs, err := one.b.ListAutoSelectable(t.Context(), nil, nil)
 		if err != nil {
 			t.Fatalf("ListAutoSelectable must answer despite an unreadable lease file: %v", err)
 		}
 		if len(refs) != 0 {
 			t.Errorf("got %v, want none — an unreadable lease file is no evidence that this arena holds #42", refs)
 		}
-		info, err := one.b.Get(t.Context(), one.b.refFromIssue(42), "implement", acceptsAllTypes)
+		info, err := one.b.Get(t.Context(), one.b.refFromIssue(42), "implement", acceptsAllTypes, nil)
 		if err != nil {
 			t.Fatalf("Get: %v", err)
 		}

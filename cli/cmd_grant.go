@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/promise-language/flow"
 )
@@ -35,10 +34,16 @@ const (
 )
 
 // plannedGrant is one step's computed budget delta, before it is applied.
+//
+// It carries the step's ledger ROW (what it has consumed) and the effective
+// CAPS before the grant (flow.EffectiveBudget). The two are separate now that
+// nothing seeds caps onto the item: consumption is the orchestrator's record,
+// the cap is the binary's policy plus what has already been granted.
 type plannedGrant struct {
-	id     flow.ArtifactId
+	id     flow.StepId
 	grant  flow.Grant
-	before flow.ArtifactRecord
+	row    flow.LedgerRow
+	before flow.StepBudget
 }
 
 // empty reports whether this plan would write nothing.
@@ -230,7 +235,12 @@ func (app *App) planManual(f *flow.Flow, state *flow.Item, arg string, a grantAm
 		app.usageError("grant: at least one of --invocations / --prompts / --cost / --timeout must be set")
 		return refuse()
 	}
-	return planned(plannedGrant{id: id, grant: g, before: state.Artifact(id)})
+	return planned(plannedGrant{
+		id:     id,
+		grant:  g,
+		row:    state.Ledger.Row(id),
+		before: app.effectiveBudget(state, id),
+	})
 }
 
 // planPark tops up exactly the axis that parked the step. `grant` is almost
@@ -246,7 +256,7 @@ func (app *App) planPark(f *flow.Flow, state *flow.Item, display string, a grant
 		fmt.Fprintln(app.Err, "       or `grant --all` to sweep every pending step.")
 		return refuse()
 	}
-	if park.Kind != flow.ParkBudgetExhausted {
+	if park.Kind != flow.ParkTreasurerRefused {
 		fmt.Fprintf(app.Err, "grant: item is parked on %s%s, not a budget cap — granting budget would not unpark it.\n",
 			park.Kind, parkDetailSuffix(park, state))
 		fmt.Fprintln(app.Err, "      ", remedyFor(park.Kind))
@@ -257,14 +267,12 @@ func (app *App) planPark(f *flow.Flow, state *flow.Item, display string, a grant
 	if !ok {
 		return refuse()
 	}
-	rec := state.Artifact(flow.ArtifactId(id))
-	if rec.Resolved && !rec.Stale {
-		return nothingToDo(fmt.Sprintf("park on %q is stale — the step has resolved since; nothing to grant", id))
-	}
+	row := state.Ledger.Row(id)
+	eff := app.effectiveBudget(state, id)
 	// The axes a bare `grant` tops up on its own: the one that parked the step,
 	// plus any other already at its cap. See parkIncrement for why the second
 	// group is not optional.
-	auto := parkTopUpAxes(park.Axis, rec)
+	auto := parkTopUpAxes(park.Axis, row, eff)
 	// The axes a FLAG may name: the automatic set, plus any axis the park
 	// itself reported flat. The two differ because the live record cannot
 	// always tell: PromptsThisInvocation resets on the invocation bump, so a
@@ -315,11 +323,11 @@ func (app *App) planPark(f *flow.Flow, state *flow.Item, display string, a grant
 		return refuse()
 	}
 
-	g := parkIncrement(axes, rec, app.stepBudget(flow.StepId(id)), a)
+	g := parkIncrement(axes, row, eff, app.stepBudget(id), a)
 	if g == (flow.Grant{}) {
 		return nothingToDo(fmt.Sprintf("%q already has headroom on the %s axis — park is stale; nothing to grant", id, park.Axis))
 	}
-	return planned(plannedGrant{id: id, grant: g, before: rec})
+	return planned(plannedGrant{id: id, grant: g, row: row, before: eff})
 }
 
 // grantableAxes widens the automatic set with every axis the park reported
@@ -340,9 +348,9 @@ func grantableAxes(auto []flow.BudgetAxis, park *flow.ParkRequest) []flow.Budget
 
 // parkTopUpAxes is the axis set bare `grant` acts on: the parked axis first,
 // then every other axis that is already at its cap.
-func parkTopUpAxes(parked flow.BudgetAxis, rec flow.ArtifactRecord) []flow.BudgetAxis {
+func parkTopUpAxes(parked flow.BudgetAxis, row flow.LedgerRow, eff flow.StepBudget) []flow.BudgetAxis {
 	axes := []flow.BudgetAxis{parked}
-	for _, axis := range blockingAxes(rec) {
+	for _, axis := range blockingAxes(row, eff) {
 		if axis != parked {
 			axes = append(axes, axis)
 		}
@@ -360,12 +368,12 @@ func parkTopUpAxes(parked flow.BudgetAxis, rec flow.ArtifactRecord) []flow.Budge
 // that kills a run already under way rather than blocking one from starting.
 // Neither can re-park a step the instant it restarts, so neither belongs in a
 // collateral top-up — they are granted only when they are the parked axis.
-func blockingAxes(rec flow.ArtifactRecord) []flow.BudgetAxis {
+func blockingAxes(row flow.LedgerRow, eff flow.StepBudget) []flow.BudgetAxis {
 	var out []flow.BudgetAxis
-	if rec.GrantedInvocations > 0 && rec.Invocations >= rec.GrantedInvocations {
+	if eff.MaxInvocations > 0 && row.Dispatches >= eff.MaxInvocations {
 		out = append(out, flow.AxisInvocations)
 	}
-	if rec.GrantedCostUSD > 0 && rec.CostUSDSpent >= rec.GrantedCostUSD {
+	if eff.MaxCostUSD > 0 && row.CostUSD >= eff.MaxCostUSD {
 		out = append(out, flow.AxisCost)
 	}
 	return out
@@ -391,10 +399,10 @@ func containsAxis(axes []flow.BudgetAxis, want flow.BudgetAxis) bool {
 // ran, and granting invocations alone bought one that died at the same
 // deadline — the item ping-ponged between the two axes forever. Each axis is
 // computed at most once, so summing the per-axis grants cannot double up.
-func parkIncrement(axes []flow.BudgetAxis, rec flow.ArtifactRecord, budget flow.StepBudget, a grantAmounts) flow.Grant {
+func parkIncrement(axes []flow.BudgetAxis, row flow.LedgerRow, eff, policy flow.StepBudget, a grantAmounts) flow.Grant {
 	var g flow.Grant
 	for _, axis := range axes {
-		inc := grantIncrement(axis, rec, budget, a)
+		inc := grantIncrement(axis, row, eff, policy, a)
 		g.Invocations += inc.Invocations
 		g.PromptsPerInvocation += inc.PromptsPerInvocation
 		g.CostUSD += inc.CostUSD
@@ -412,21 +420,17 @@ func (app *App) planAll(f *flow.Flow, state *flow.Item, a grantAmounts) planOutc
 		if li.Kind != flow.LifecycleArtifact {
 			continue
 		}
-		rec, seeded := state.Artifacts[li.ArtifactId]
-		if !seeded {
+		// Only steps with work left: a step that has completed needs no budget.
+		if artifactState(state, li.ArtifactId) != statePending {
 			continue
 		}
-		// Only steps with work left: a resolved step needs no budget, and one
-		// the operator struck off the checklist (skipped) is not ours to fund.
-		switch artifactState(state, li.ArtifactId) {
-		case statePending, stateStale:
-		default:
-			continue
-		}
+		row := state.Ledger.Row(li.Result())
+		eff := app.effectiveBudget(state, li.Result())
 		plans = append(plans, plannedGrant{
-			id:     li.ArtifactId,
-			grant:  sweepIncrement(rec, app.stepBudget(li.Result()), a),
-			before: rec,
+			id:     li.Result(),
+			grant:  sweepIncrement(row, eff, app.stepBudget(li.Result()), a),
+			row:    row,
+			before: eff,
 		})
 	}
 	if len(plans) == 0 {
@@ -438,28 +442,28 @@ func (app *App) planAll(f *flow.Flow, state *flow.Item, a grantAmounts) planOutc
 // grantIncrement computes the delta for ONE axis: the amount that raises the
 // cap to consumption + headroom. Returns the zero Grant when the step already
 // has room, which the caller reports as a stale park rather than a write.
-func grantIncrement(axis flow.BudgetAxis, rec flow.ArtifactRecord, budget flow.StepBudget, a grantAmounts) flow.Grant {
+func grantIncrement(axis flow.BudgetAxis, row flow.LedgerRow, eff, policy flow.StepBudget, a grantAmounts) flow.Grant {
 	switch axis {
 	case flow.AxisInvocations:
 		h := defaultInvocationHeadroom
 		if a.set["invocations"] {
 			h = a.invocations
 		}
-		if d := rec.Invocations + h - rec.GrantedInvocations; d > 0 {
+		if d := row.Dispatches + h - eff.MaxInvocations; d > 0 {
 			return flow.Grant{Invocations: d}
 		}
 	case flow.AxisCost:
-		h := costHeadroom(budget)
+		h := costHeadroom(policy)
 		if a.set["cost"] {
 			h = a.cost
 		}
-		if d := rec.CostUSDSpent + h - rec.GrantedCostUSD; d > 0 {
+		if d := row.CostUSD + h - eff.MaxCostUSD; d > 0 {
 			return flow.Grant{CostUSD: d}
 		}
 	case flow.AxisPrompts:
-		// Prompts is a per-invocation cap, not a meter that fills up
-		// (PromptsThisInvocation resets on every invocation), so there is no
-		// consumption to clear — the cap itself has to go up.
+		// Prompts is a per-invocation cap, not a meter that fills up (the
+		// counter resets at every dispatch and the ledger keeps none), so there
+		// is no consumption to clear — the cap itself has to go up.
 		h := defaultPromptHeadroom
 		if a.set["prompts"] {
 			h = a.prompts
@@ -469,7 +473,7 @@ func grantIncrement(axis flow.BudgetAxis, rec flow.ArtifactRecord, budget flow.S
 		}
 	case flow.AxisTimeout:
 		// Likewise a duration, not a meter: add one more run's worth.
-		h := timeoutHeadroom(budget)
+		h := timeoutHeadroom(policy)
 		if a.set["timeout"] {
 			h = int64(a.timeout)
 		}
@@ -482,27 +486,27 @@ func grantIncrement(axis flow.BudgetAxis, rec flow.ArtifactRecord, budget flow.S
 
 // sweepIncrement is the --all counterpart: every axis at once, each one raised
 // only as far as it needs to go.
-func sweepIncrement(rec flow.ArtifactRecord, budget flow.StepBudget, a grantAmounts) flow.Grant {
+func sweepIncrement(row flow.LedgerRow, eff, policy flow.StepBudget, a grantAmounts) flow.Grant {
 	var g flow.Grant
 	invH := defaultInvocationHeadroom
 	if a.set["invocations"] {
 		invH = a.invocations
 	}
-	if d := rec.Invocations + invH - rec.GrantedInvocations; d > 0 {
+	if d := row.Dispatches + invH - eff.MaxInvocations; d > 0 {
 		g.Invocations = d
 	}
-	costH := costHeadroom(budget)
+	costH := costHeadroom(policy)
 	if a.set["cost"] {
 		costH = a.cost
 	}
-	if d := rec.CostUSDSpent + costH - rec.GrantedCostUSD; d > 0 {
+	if d := row.CostUSD + costH - eff.MaxCostUSD; d > 0 {
 		g.CostUSD = d
 	}
-	promptFloor := max(budget.MaxPromptsPerInvocation, 1)
+	promptFloor := max(policy.MaxPromptsPerInvocation, 1)
 	if a.set["prompts"] {
 		promptFloor = a.prompts
 	}
-	if d := promptFloor - rec.GrantedPromptsPerInvocation; d > 0 {
+	if d := promptFloor - eff.MaxPromptsPerInvocation; d > 0 {
 		g.PromptsPerInvocation = d
 	}
 	// Timeout is left alone unless asked for: it is a per-run duration, so
@@ -533,7 +537,7 @@ func timeoutHeadroom(budget flow.StepBudget) int64 {
 // resolveGrantTarget turns an operator-supplied argument into a step id, or
 // refuses with a message that names the legal ids. Every refusal happens
 // before any backend write.
-func (app *App) resolveGrantTarget(f *flow.Flow, state *flow.Item, arg string) (flow.ArtifactId, bool) {
+func (app *App) resolveGrantTarget(f *flow.Flow, state *flow.Item, arg string) (flow.StepId, bool) {
 	// The step id is the identity: exact match, no prefix or case folding.
 	if li, ok := f.ItemByResult(flow.StepId(arg)); ok {
 		switch li.Kind {
@@ -541,23 +545,19 @@ func (app *App) resolveGrantTarget(f *flow.Flow, state *flow.Item, arg string) (
 			fmt.Fprintf(app.Err, "grant: step %q is a signal step and carries no budget (nothing to grant)\n", arg)
 			return "", false
 		}
-		if _, seeded := state.Artifacts[li.ArtifactId]; !seeded {
-			fmt.Fprintf(app.Err, "grant: item not seeded — no budget record for %q (run `run-step` once first)\n", arg)
-			return "", false
-		}
-		return li.ArtifactId, true
+		return li.Result(), true
 	}
 	// The human label is NOT an identity. Say so, and name the id.
 	if li, ok := f.Item(arg); ok {
 		fmt.Fprintf(app.Err, "grant: %q is a step label, not a step id — did you mean %q?\n", arg, li.Result())
 		return "", false
 	}
-	// Seeded but no longer in the flow: the flow source moved on while this
-	// item was mid-flight. The budget record is real and the intent is
+	// Recorded but no longer in the flow: the flow source moved on while this
+	// item was mid-flight. The ledger row is real and the intent is
 	// unambiguous, so honor it — loudly.
-	if _, seeded := state.Artifacts[flow.ArtifactId(arg)]; seeded {
-		fmt.Fprintf(app.Err, "grant: warning — %q is seeded on this item but no longer part of flow %q; granting anyway\n", arg, f.Name())
-		return flow.ArtifactId(arg), true
+	if _, recorded := state.Ledger.Steps[flow.StepId(arg)]; recorded {
+		fmt.Fprintf(app.Err, "grant: warning — %q has a ledger row on this item but is no longer part of flow %q; granting anyway\n", arg, f.Name())
+		return flow.StepId(arg), true
 	}
 	ids := grantableIDs(f)
 	fmt.Fprintf(app.Err, "grant: unknown step id %q\n", arg)
@@ -572,36 +572,25 @@ func (app *App) resolveGrantTarget(f *flow.Flow, state *flow.Item, arg string) (
 // written by this version record the id; one written by an older version
 // recorded the human label, so that is accepted too rather than stranding an
 // item parked before the upgrade.
-func (app *App) resolveParkStep(f *flow.Flow, state *flow.Item, park *flow.ParkRequest) (flow.ArtifactId, bool) {
-	id := flow.ArtifactId("")
+func (app *App) resolveParkStep(f *flow.Flow, state *flow.Item, park *flow.ParkRequest) (flow.StepId, bool) {
 	switch li, ok := f.ItemByResult(park.Step); {
 	case ok && li.Kind != flow.LifecycleArtifact:
 		fmt.Fprintf(app.Err, "grant: park names signal step %q, which carries no budget — nothing to grant\n", park.Step)
 		return "", false
 	case ok:
-		id = li.ArtifactId
-	default:
-		// A park written before ParkRequest.Step carried the id recorded the
-		// human label; map it rather than strand an item parked across the
-		// upgrade.
-		if byLabel, found := f.Item(string(park.Step)); found && byLabel.Kind == flow.LifecycleArtifact {
-			id = byLabel.ArtifactId
-		} else if _, seeded := state.Artifacts[flow.ArtifactId(park.Step)]; seeded {
-			id = flow.ArtifactId(park.Step)
-		} else {
-			fmt.Fprintf(app.Err, "grant: park names step %q, which is not a step of flow %q — grant it explicitly by id\n", park.Step, f.Name())
-			fmt.Fprintf(app.Err, "       valid ids: %s\n", idList(grantableIDs(f)))
-			return "", false
-		}
+		return li.Result(), true
 	}
-	// The budget lives on the seeded record; without one there is nothing for
-	// the backend to add to, and its error would name the artifact rather than
-	// the real problem.
-	if _, seeded := state.Artifacts[id]; !seeded {
-		fmt.Fprintf(app.Err, "grant: park names %q but the item has no budget record for it (not seeded) — nothing to grant\n", id)
-		return "", false
+	// A park written before ParkRequest.Step carried the id recorded the human
+	// label; map it rather than strand an item parked across the upgrade.
+	if byLabel, found := f.Item(string(park.Step)); found && byLabel.Kind == flow.LifecycleArtifact {
+		return byLabel.Result(), true
 	}
-	return id, true
+	if _, recorded := state.Ledger.Steps[park.Step]; recorded {
+		return park.Step, true
+	}
+	fmt.Fprintf(app.Err, "grant: park names step %q, which is not a step of flow %q — grant it explicitly by id\n", park.Step, f.Name())
+	fmt.Fprintf(app.Err, "       valid ids: %s\n", idList(grantableIDs(f)))
+	return "", false
 }
 
 // grantableIDs lists the ids that can take a grant — artifact steps only.
@@ -677,7 +666,10 @@ func (app *App) reportUnparked(ctx context.Context, claim flow.Claim, before *fl
 	}
 	if dryRun {
 		for _, p := range plans {
-			if flow.GrantClearsPark(before.Park, p.id, applyGrant(p.before, p.grant), p.grant) {
+			// The PRE-grant row: a grant changes what the step may spend, never
+			// what it has spent, and GrantClearsPark reads the cap off the
+			// park's own snapshot plus the grant.
+			if flow.GrantClearsPark(before.Park, p.id, p.row, p.grant) {
 				return true
 			}
 		}
@@ -692,32 +684,24 @@ func (app *App) reportUnparked(ctx context.Context, claim flow.Claim, before *fl
 	return after.Park == nil
 }
 
-// applyGrant returns the record as it would look after g — the local mirror
-// used for dry-run prediction.
-func applyGrant(rec flow.ArtifactRecord, g flow.Grant) flow.ArtifactRecord {
-	rec.GrantedInvocations += g.Invocations
-	rec.GrantedPromptsPerInvocation += g.PromptsPerInvocation
-	rec.GrantedCostUSD += g.CostUSD
-	rec.GrantedTimeout += time.Duration(g.TimeoutAdd) * time.Second
-	return rec
-}
-
+// deltaOf reports the cap movement a grant makes: the step's effective caps
+// before it, and those plus the grant.
 func deltaOf(p plannedGrant) grantDelta {
 	d := grantDelta{ID: string(p.id)}
 	if p.grant.Invocations != 0 {
-		d.Invocations = &intDelta{From: p.before.GrantedInvocations, To: p.before.GrantedInvocations + p.grant.Invocations}
+		d.Invocations = &intDelta{From: p.before.MaxInvocations, To: p.before.MaxInvocations + p.grant.Invocations}
 	}
 	if p.grant.PromptsPerInvocation != 0 {
 		d.PromptsPerInvocation = &intDelta{
-			From: p.before.GrantedPromptsPerInvocation,
-			To:   p.before.GrantedPromptsPerInvocation + p.grant.PromptsPerInvocation,
+			From: p.before.MaxPromptsPerInvocation,
+			To:   p.before.MaxPromptsPerInvocation + p.grant.PromptsPerInvocation,
 		}
 	}
 	if p.grant.CostUSD != 0 {
-		d.CostUSD = &costDelta{From: p.before.GrantedCostUSD, To: p.before.GrantedCostUSD + p.grant.CostUSD}
+		d.CostUSD = &costDelta{From: p.before.MaxCostUSD, To: p.before.MaxCostUSD + p.grant.CostUSD}
 	}
 	if p.grant.TimeoutAdd != 0 {
-		from := int(p.before.GrantedTimeout.Seconds())
+		from := int(p.before.Timeout.Seconds())
 		d.TimeoutSeconds = &intDelta{From: from, To: from + int(p.grant.TimeoutAdd)}
 	}
 	return d
@@ -747,7 +731,7 @@ func remedyFor(kind flow.ParkKind) string {
 		return "Answer the question on the item; the step re-runs from the top once it has an answer."
 	case flow.ParkInfraTransient, flow.ParkRemoteUnreachable:
 		return "Nothing to grant — this park consumed no budget. Re-run the step once the infrastructure is back."
-	case flow.ParkStepDidNotResolve:
+	case flow.ParkStepDidNotComplete:
 		return "The handler returned without completing — it elected no route, or elected one and produced no result — a code fix, not a budget one."
 	case flow.ParkRefused:
 		return "Nothing to grant — the failure is deterministic and consumed no budget. Fix the environment or precondition, then re-run."

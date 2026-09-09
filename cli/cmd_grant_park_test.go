@@ -13,7 +13,7 @@ import (
 
 // parkGrantEnv is the scaffolding for the identity/park tests: a flow with two
 // artifact steps (whose labels differ from their ids — the whole point) and one
-// signal step, seeded with explicit budgets.
+// signal step, under an explicit cap policy.
 type parkGrantEnv struct {
 	app   *App
 	be    *fake.Orchestrator
@@ -47,29 +47,40 @@ func newParkGrantEnv(t *testing.T) *parkGrantEnv {
 
 	env := &parkGrantEnv{app: app, be: be, claim: claim, out: &bytes.Buffer{}, err: &bytes.Buffer{}}
 	app.Out, app.Err = env.out, env.err
-	env.seed(t, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.StepBudget{
-			MaxInvocations: 3, MaxPromptsPerInvocation: 1, MaxCostUSD: 10, Timeout: 30 * time.Minute,
-		}},
-		{Id: "commit", Type: flow.ArtifactCommitHash, Required: true, Budget: flow.DefaultStepBudget()},
-	})
 	return env
 }
 
-func (e *parkGrantEnv) seed(t *testing.T, specs []flow.ArtifactSpec) {
-	t.Helper()
-	if err := e.be.SeedState(context.Background(), e.claim.ItemRef, specs); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
-}
-
-func (e *parkGrantEnv) rec(t *testing.T, id flow.ArtifactId) flow.ArtifactRecord {
+// budget is what the step may actually spend: the binary's policy plus every
+// extension recorded on the step's ledger row. Nothing seeds caps onto an item
+// any more, so this is what a `grant` moves and what every assertion below
+// reads — through the same flow.EffectiveBudget the dispatch gate uses, so the
+// test cannot pass against an arithmetic the runner does not share.
+func (e *parkGrantEnv) budget(t *testing.T, id flow.StepId) flow.StepBudget {
 	t.Helper()
 	st, err := e.be.Load(context.Background(), e.claim.ItemRef)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	return st.Artifact(id)
+	return e.app.effectiveBudget(st, id)
+}
+
+// dispatches records n dispatches of a step, which is what "used n invocations"
+// means now that the counter lives on the ledger row.
+func (e *parkGrantEnv) dispatches(t *testing.T, id flow.StepId, n int) {
+	t.Helper()
+	for range n {
+		if err := e.be.RecordDispatch(context.Background(), e.claim.ItemRef, id); err != nil {
+			t.Fatalf("RecordDispatch(%s): %v", id, err)
+		}
+	}
+}
+
+// spend records cost against a step's ledger row.
+func (e *parkGrantEnv) spend(t *testing.T, id flow.StepId, usd float64) {
+	t.Helper()
+	if err := e.be.AddCost(context.Background(), e.claim.ItemRef, id, usd); err != nil {
+		t.Fatalf("AddCost(%s): %v", id, err)
+	}
 }
 
 func (e *parkGrantEnv) park(t *testing.T, req flow.ParkRequest) {
@@ -92,9 +103,36 @@ func (e *parkGrantEnv) grant(args ...string) int {
 	return e.app.cmdGrant(context.Background(), args)
 }
 
-// budgetExhausted is the park RunOne writes when a step burns its invocations.
-func budgetExhausted(step flow.StepId, axis flow.BudgetAxis) flow.ParkRequest {
-	return flow.ParkRequest{Kind: flow.ParkBudgetExhausted, Step: step, Axis: axis, Reason: "test park"}
+// treasurerRefused is the park RunOne writes when a step exhausts an axis.
+//
+// It carries the run's own snapshot of every axis, exactly as RunOne's does:
+// that snapshot is the record of the cap that was refused on, and
+// flow.GrantClearsPark reads it because an orchestrator holds no policy. A park
+// written without one can never be cleared, which is a state no real run
+// produces.
+func treasurerRefused(step flow.StepId, axis flow.BudgetAxis) flow.ParkRequest {
+	// The caps are newParkGrantEnv's policy for "plan". Only the named axis is
+	// flat; the others carry headroom, which is the ordinary shape — a park
+	// where every axis is exhausted is a different case, and the tests about it
+	// build their own snapshot.
+	caps := map[flow.BudgetAxis]float64{
+		flow.AxisInvocations: 3,
+		flow.AxisPrompts:     1,
+		flow.AxisCost:        10,
+		flow.AxisTimeout:     (30 * time.Minute).Seconds(),
+	}
+	var axes []flow.AxisReport
+	for _, a := range []flow.BudgetAxis{flow.AxisInvocations, flow.AxisPrompts, flow.AxisCost, flow.AxisTimeout} {
+		used := float64(0)
+		if a == axis {
+			used = caps[a]
+		}
+		axes = append(axes, flow.NewAxisReport(a, used, caps[a]))
+	}
+	return flow.ParkRequest{
+		Kind: flow.ParkTreasurerRefused, Step: step, Axis: axis, Reason: "test park",
+		Axes: axes,
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -115,8 +153,8 @@ func TestGrantTarget_RejectsStepLabel(t *testing.T) {
 	if !strings.Contains(env.err.String(), `"plan"`) {
 		t.Errorf("stderr = %q, want it to name the id", env.err.String())
 	}
-	if got := env.rec(t, "plan").GrantedInvocations; got != 3 {
-		t.Errorf("GrantedInvocations = %d, want 3 (unchanged — a refusal must not write)", got)
+	if got := env.budget(t, "plan").MaxInvocations; got != 3 {
+		t.Errorf("MaxInvocations = %d, want 3 (unchanged — a refusal must not write)", got)
 	}
 }
 
@@ -161,39 +199,37 @@ func TestGrantTarget_RejectsSignalStep(t *testing.T) {
 	}
 }
 
-func TestGrantTarget_RejectsUnseededId(t *testing.T) {
-	// No SeedState call: the flow declares "plan" but the item has no budget
-	// record for it yet.
-	app, _, _ := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
-			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("x"), nil
-		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
-	}, &stubAgent{name: "stub"})
-	errBuf := &bytes.Buffer{}
-	app.Out, app.Err = &bytes.Buffer{}, errBuf
+// A step the FLOW declares is always a grant target, whether or not the item
+// has spent anything on it: nothing seeds caps onto an item any more, so
+// "recorded" is no longer a precondition for raising one. The cap it lands on
+// is the binary's policy plus the grant.
+func TestGrantTarget_AcceptsADeclaredStepWithNoLedgerRow(t *testing.T) {
+	env := newParkGrantEnv(t)
 
-	code := app.cmdGrant(context.Background(), []string{"plan", "--invocations", "1"})
-	if code != 2 {
-		t.Fatalf("exit = %d, want 2", code)
+	// Nothing has been dispatched: the step has no row at all.
+	st, err := env.be.Load(context.Background(), env.claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
 	}
-	if !strings.Contains(errBuf.String(), "not seeded") {
-		t.Errorf("stderr = %q, want 'not seeded'", errBuf.String())
+	if _, recorded := st.Ledger.Steps["plan"]; recorded {
+		t.Fatal("the step already has a ledger row; this test needs one with none")
+	}
+
+	if code := env.grant("plan", "--invocations", "1"); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	if got := env.budget(t, "plan").MaxInvocations; got != 4 {
+		t.Errorf("MaxInvocations = %d, want 4 (3 policy + 1 granted)", got)
 	}
 }
 
-// A record seeded before the flow dropped the step is still real budget, so the
-// grant lands — with a warning rather than a refusal.
-func TestGrantTarget_SeededButNoLongerInFlow(t *testing.T) {
+// A step the flow no longer declares but the item has a LEDGER ROW for is still
+// real spend, so the grant lands — with a warning rather than a refusal.
+func TestGrantTarget_RecordedButNoLongerInFlow(t *testing.T) {
 	env := newParkGrantEnv(t)
-	// A second seed is refused by the fake, so reset first and seed a set that
-	// includes an id the flow no longer declares.
-	if err := env.be.ResetSeed(context.Background(), env.claim.ItemRef); err != nil {
-		t.Fatalf("ResetSeed: %v", err)
-	}
-	env.seed(t, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true},
-		{Id: "coverage", Type: flow.ArtifactMarkdown, Required: true},
-	})
+	// A row for an id the flow does not declare: the flow source moved on while
+	// this item was mid-flight.
+	env.dispatches(t, "coverage", 1)
 
 	if code := env.grant("coverage", "--invocations", "2"); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
@@ -201,8 +237,10 @@ func TestGrantTarget_SeededButNoLongerInFlow(t *testing.T) {
 	if !strings.Contains(env.err.String(), "no longer part of flow") {
 		t.Errorf("stderr = %q, want the stale-step warning", env.err.String())
 	}
-	if got := env.rec(t, "coverage").GrantedInvocations; got != 2 {
-		t.Errorf("GrantedInvocations = %d, want 2", got)
+	// The default policy plus the grant: an undeclared step has no policy of
+	// its own, so it takes the package defaults.
+	if want := flow.DefaultStepBudget().MaxInvocations + 2; env.budget(t, "coverage").MaxInvocations != want {
+		t.Errorf("MaxInvocations = %d, want %d", env.budget(t, "coverage").MaxInvocations, want)
 	}
 }
 
@@ -212,19 +250,15 @@ func TestGrantTarget_SeededButNoLongerInFlow(t *testing.T) {
 
 func TestGrantPark_InvocationsAxis(t *testing.T) {
 	env := newParkGrantEnv(t)
-	for range 3 {
-		if err := env.be.BumpInvocations(context.Background(), env.claim.ItemRef, "plan"); err != nil {
-			t.Fatalf("BumpInvocations: %v", err)
-		}
-	}
-	env.park(t, budgetExhausted("plan", flow.AxisInvocations))
+	env.dispatches(t, "plan", 3)
+	env.park(t, treasurerRefused("plan", flow.AxisInvocations))
 
 	if code := env.grant(); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
 	}
 	// used(3) + headroom(1) = 4.
-	if got := env.rec(t, "plan").GrantedInvocations; got != 4 {
-		t.Errorf("GrantedInvocations = %d, want 4", got)
+	if got := env.budget(t, "plan").MaxInvocations; got != 4 {
+		t.Errorf("MaxInvocations = %d, want 4", got)
 	}
 	if p := env.parked(t); p != nil {
 		t.Errorf("park = %+v, want cleared", p)
@@ -236,17 +270,15 @@ func TestGrantPark_InvocationsAxis(t *testing.T) {
 
 func TestGrantPark_CostAxisUsesStepBudgetAsHeadroom(t *testing.T) {
 	env := newParkGrantEnv(t)
-	if err := env.be.AddCost(context.Background(), env.claim.ItemRef, "plan", 12.40); err != nil {
-		t.Fatalf("AddCost: %v", err)
-	}
-	env.park(t, budgetExhausted("plan", flow.AxisCost))
+	env.spend(t, "plan", 12.40)
+	env.park(t, treasurerRefused("plan", flow.AxisCost))
 
 	if code := env.grant(); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
 	}
 	// spent(12.40) + the step's own $10 cap = 22.40.
-	if got := env.rec(t, "plan").GrantedCostUSD; got != 22.40 {
-		t.Errorf("GrantedCostUSD = %v, want 22.40", got)
+	if got := env.budget(t, "plan").MaxCostUSD; got != 22.40 {
+		t.Errorf("MaxCostUSD = %v, want 22.40", got)
 	}
 	if p := env.parked(t); p != nil {
 		t.Errorf("park = %+v, want cleared", p)
@@ -255,19 +287,19 @@ func TestGrantPark_CostAxisUsesStepBudgetAsHeadroom(t *testing.T) {
 
 func TestGrantPark_TimeoutAxisAddsOneMoreRun(t *testing.T) {
 	env := newParkGrantEnv(t)
-	env.park(t, budgetExhausted("plan", flow.AxisTimeout))
+	env.park(t, treasurerRefused("plan", flow.AxisTimeout))
 
 	if code := env.grant(); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
 	}
-	if got := env.rec(t, "plan").GrantedTimeout; got != time.Hour {
-		t.Errorf("GrantedTimeout = %v, want 1h (30m seeded + 30m granted)", got)
+	if got := env.budget(t, "plan").Timeout; got != time.Hour {
+		t.Errorf("Timeout = %v, want 1h (30m policy + 30m granted)", got)
 	}
 }
 
 func TestGrantPark_PromptsAxisRaisesTheCap(t *testing.T) {
 	env := newParkGrantEnv(t)
-	env.park(t, budgetExhausted("plan", flow.AxisPrompts))
+	env.park(t, treasurerRefused("plan", flow.AxisPrompts))
 
 	if code := env.grant(); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
@@ -276,8 +308,8 @@ func TestGrantPark_PromptsAxisRaisesTheCap(t *testing.T) {
 	// Asserting against the constant rather than a literal keeps this test
 	// about the behavior — the cap goes UP — and not about the tuning.
 	want := 1 + defaultPromptHeadroom
-	if got := env.rec(t, "plan").GrantedPromptsPerInvocation; got != want {
-		t.Errorf("GrantedPromptsPerInvocation = %d, want %d", got, want)
+	if got := env.budget(t, "plan").MaxPromptsPerInvocation; got != want {
+		t.Errorf("MaxPromptsPerInvocation = %d, want %d", got, want)
 	}
 }
 
@@ -302,8 +334,8 @@ func TestGrantPark_RefusesNonBudgetPark(t *testing.T) {
 			t.Errorf("stderr = %q, want %q", env.err.String(), want)
 		}
 	}
-	if got := env.rec(t, "plan").GrantedInvocations; got != 3 {
-		t.Errorf("GrantedInvocations = %d, want 3 (unchanged)", got)
+	if got := env.budget(t, "plan").MaxInvocations; got != 3 {
+		t.Errorf("MaxInvocations = %d, want 3 (unchanged)", got)
 	}
 }
 
@@ -350,21 +382,18 @@ func TestGrantPark_RefusesRefusedPark(t *testing.T) {
 			t.Errorf("stderr = %q, want %q", env.err.String(), want)
 		}
 	}
-	if got := env.rec(t, "plan").GrantedInvocations; got != 3 {
-		t.Errorf("GrantedInvocations = %d, want 3 (unchanged — no budget written)", got)
+	if got := env.budget(t, "plan").MaxInvocations; got != 3 {
+		t.Errorf("MaxInvocations = %d, want 3 (unchanged — no budget written)", got)
 	}
 }
 
-func TestGrantPark_StaleParkOnResolvedStep(t *testing.T) {
+func TestGrantPark_StaleParkOnCompletedStep(t *testing.T) {
 	env := newParkGrantEnv(t)
-	if err := env.be.ResolveArtifact(context.Background(), env.claim.ItemRef, "plan",
-		flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "done"}); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
-	}
-	// Park recorded AFTER the step resolved — a record that outlived its
+	appendMarkdown(t, env.be, env.claim.ItemRef, "plan", "done")
+	// Park recorded AFTER the step completed — a record that outlived its
 	// reason. The CLI must notice, since the backend only clears a park when
-	// the step resolves or a grant satisfies it.
-	env.park(t, budgetExhausted("plan", flow.AxisInvocations))
+	// the step completes or a grant satisfies it.
+	env.park(t, treasurerRefused("plan", flow.AxisInvocations))
 
 	code := env.grant()
 	if code != 0 {
@@ -378,14 +407,14 @@ func TestGrantPark_StaleParkOnResolvedStep(t *testing.T) {
 	if env.err.String() != "" {
 		t.Errorf("stderr = %q, want empty on a successful no-op", env.err.String())
 	}
-	if got := env.rec(t, "plan").GrantedInvocations; got != 3 {
-		t.Errorf("GrantedInvocations = %d, want 3 (unchanged)", got)
+	if got := env.budget(t, "plan").MaxInvocations; got != 3 {
+		t.Errorf("MaxInvocations = %d, want 3 (unchanged)", got)
 	}
 }
 
 func TestGrantPark_StaleWhenHeadroomAlreadyExists(t *testing.T) {
 	env := newParkGrantEnv(t)
-	env.park(t, budgetExhausted("plan", flow.AxisInvocations))
+	env.park(t, treasurerRefused("plan", flow.AxisInvocations))
 	// Granted 3, used 0 — the park cannot be current.
 	code := env.grant()
 	if code != 0 {
@@ -401,7 +430,7 @@ func TestGrantPark_RejectsFlagForOtherAxis(t *testing.T) {
 	if err := env.be.AddCost(context.Background(), env.claim.ItemRef, "plan", 12); err != nil {
 		t.Fatalf("AddCost: %v", err)
 	}
-	env.park(t, budgetExhausted("plan", flow.AxisCost))
+	env.park(t, treasurerRefused("plan", flow.AxisCost))
 
 	code := env.grant("--invocations", "5")
 	if code != 2 {
@@ -410,25 +439,21 @@ func TestGrantPark_RejectsFlagForOtherAxis(t *testing.T) {
 	if !strings.Contains(env.err.String(), "does not apply") {
 		t.Errorf("stderr = %q, want 'does not apply'", env.err.String())
 	}
-	if got := env.rec(t, "plan").GrantedCostUSD; got != 10 {
-		t.Errorf("GrantedCostUSD = %v, want 10 (unchanged)", got)
+	if got := env.budget(t, "plan").MaxCostUSD; got != 10 {
+		t.Errorf("MaxCostUSD = %v, want 10 (unchanged)", got)
 	}
 }
 
 func TestGrantPark_FlagOverridesHeadroom(t *testing.T) {
 	env := newParkGrantEnv(t)
-	for range 3 {
-		if err := env.be.BumpInvocations(context.Background(), env.claim.ItemRef, "plan"); err != nil {
-			t.Fatalf("BumpInvocations: %v", err)
-		}
-	}
-	env.park(t, budgetExhausted("plan", flow.AxisInvocations))
+	env.dispatches(t, "plan", 3)
+	env.park(t, treasurerRefused("plan", flow.AxisInvocations))
 
 	if code := env.grant("--invocations", "5"); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
 	}
-	if got := env.rec(t, "plan").GrantedInvocations; got != 8 { // used(3) + 5
-		t.Errorf("GrantedInvocations = %d, want 8", got)
+	if got := env.budget(t, "plan").MaxInvocations; got != 8 { // used(3) + 5
+		t.Errorf("MaxInvocations = %d, want 8", got)
 	}
 }
 
@@ -436,18 +461,14 @@ func TestGrantPark_FlagOverridesHeadroom(t *testing.T) {
 // keeps items parked across the upgrade grantable.
 func TestGrantPark_AcceptsLegacyLabelInParkRecord(t *testing.T) {
 	env := newParkGrantEnv(t)
-	for range 3 {
-		if err := env.be.BumpInvocations(context.Background(), env.claim.ItemRef, "plan"); err != nil {
-			t.Fatalf("BumpInvocations: %v", err)
-		}
-	}
-	env.park(t, budgetExhausted("write plan", flow.AxisInvocations))
+	env.dispatches(t, "plan", 3)
+	env.park(t, treasurerRefused("write plan", flow.AxisInvocations))
 
 	if code := env.grant(); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
 	}
-	if got := env.rec(t, "plan").GrantedInvocations; got != 4 {
-		t.Errorf("GrantedInvocations = %d, want 4", got)
+	if got := env.budget(t, "plan").MaxInvocations; got != 4 {
+		t.Errorf("MaxInvocations = %d, want 4", got)
 	}
 }
 
@@ -455,10 +476,8 @@ func TestGrantPark_AcceptsLegacyLabelInParkRecord(t *testing.T) {
 // otherwise a tool grants a token amount and loops forever.
 func TestGrant_TooSmallLeavesParkAndReportsIt(t *testing.T) {
 	env := newParkGrantEnv(t)
-	if err := env.be.AddCost(context.Background(), env.claim.ItemRef, "plan", 12.40); err != nil {
-		t.Fatalf("AddCost: %v", err)
-	}
-	env.park(t, budgetExhausted("plan", flow.AxisCost))
+	env.spend(t, "plan", 12.40)
+	env.park(t, treasurerRefused("plan", flow.AxisCost))
 
 	if code := env.grant("plan", "--cost", "0.01"); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
@@ -477,25 +496,19 @@ func TestGrant_TooSmallLeavesParkAndReportsIt(t *testing.T) {
 
 func TestGrantAll_ToppsUpPendingOnly(t *testing.T) {
 	env := newParkGrantEnv(t)
-	for range 3 {
-		if err := env.be.BumpInvocations(context.Background(), env.claim.ItemRef, "plan"); err != nil {
-			t.Fatalf("BumpInvocations: %v", err)
-		}
-	}
-	if err := env.be.ResolveArtifact(context.Background(), env.claim.ItemRef, "commit",
-		flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: "abc"}); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
-	}
-	before := env.rec(t, "commit").GrantedInvocations
+	env.dispatches(t, "plan", 3)
+	appendResult(t, env.be, env.claim.ItemRef, "commit", 1,
+		flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: "abc"})
+	before := env.budget(t, "commit").MaxInvocations
 
 	if code := env.grant("--all"); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
 	}
-	if got := env.rec(t, "plan").GrantedInvocations; got != 4 {
-		t.Errorf("plan GrantedInvocations = %d, want 4", got)
+	if got := env.budget(t, "plan").MaxInvocations; got != 4 {
+		t.Errorf("plan MaxInvocations = %d, want 4", got)
 	}
-	if got := env.rec(t, "commit").GrantedInvocations; got != before {
-		t.Errorf("commit GrantedInvocations = %d, want %d (resolved steps are skipped)", got, before)
+	if got := env.budget(t, "commit").MaxInvocations; got != before {
+		t.Errorf("commit MaxInvocations = %d, want %d (completed steps are skipped)", got, before)
 	}
 }
 
@@ -505,8 +518,8 @@ func TestGrantAll_NoOpWhenHeadroomExists(t *testing.T) {
 	if code := env.grant("--all"); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
 	}
-	if got := env.rec(t, "plan").GrantedInvocations; got != 3 {
-		t.Errorf("GrantedInvocations = %d, want 3 (untouched)", got)
+	if got := env.budget(t, "plan").MaxInvocations; got != 3 {
+		t.Errorf("MaxInvocations = %d, want 3 (untouched)", got)
 	}
 	if !strings.Contains(env.out.String(), "already have headroom") {
 		t.Errorf("stdout = %q, want the no-op line", env.out.String())
@@ -526,18 +539,14 @@ func TestGrantAll_RejectsStepId(t *testing.T) {
 
 func TestGrant_DryRunWritesNothing(t *testing.T) {
 	env := newParkGrantEnv(t)
-	for range 3 {
-		if err := env.be.BumpInvocations(context.Background(), env.claim.ItemRef, "plan"); err != nil {
-			t.Fatalf("BumpInvocations: %v", err)
-		}
-	}
-	env.park(t, budgetExhausted("plan", flow.AxisInvocations))
+	env.dispatches(t, "plan", 3)
+	env.park(t, treasurerRefused("plan", flow.AxisInvocations))
 
 	if code := env.grant("--dry-run"); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
 	}
-	if got := env.rec(t, "plan").GrantedInvocations; got != 3 {
-		t.Errorf("GrantedInvocations = %d, want 3 (dry run must not write)", got)
+	if got := env.budget(t, "plan").MaxInvocations; got != 3 {
+		t.Errorf("MaxInvocations = %d, want 3 (dry run must not write)", got)
 	}
 	if p := env.parked(t); p == nil {
 		t.Error("dry run cleared the park")
@@ -551,7 +560,7 @@ func TestGrant_DryRunWritesNothing(t *testing.T) {
 // empty stdout they have to special-case.
 func TestGrantPark_StaleParkStillEmitsPayload(t *testing.T) {
 	env := newParkGrantEnv(t)
-	env.park(t, budgetExhausted("plan", flow.AxisInvocations)) // granted 3, used 0
+	env.park(t, treasurerRefused("plan", flow.AxisInvocations)) // granted 3, used 0
 
 	if code := env.grant("--json"); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
@@ -576,7 +585,7 @@ func TestGrantPark_StaleParkStillEmitsPayload(t *testing.T) {
 // "already has headroom" would misdescribe the step.
 func TestGrantPark_RejectsExplicitZeroOnParkedAxis(t *testing.T) {
 	env := newParkGrantEnv(t)
-	env.park(t, budgetExhausted("plan", flow.AxisPrompts))
+	env.park(t, treasurerRefused("plan", flow.AxisPrompts))
 
 	if code := env.grant("--prompts", "0"); code != 2 {
 		t.Fatalf("exit = %d, want 2", code)
@@ -584,8 +593,8 @@ func TestGrantPark_RejectsExplicitZeroOnParkedAxis(t *testing.T) {
 	if !strings.Contains(env.err.String(), "would grant nothing") {
 		t.Errorf("stderr = %q, want 'would grant nothing'", env.err.String())
 	}
-	if got := env.rec(t, "plan").GrantedPromptsPerInvocation; got != 1 {
-		t.Errorf("GrantedPromptsPerInvocation = %d, want 1 (unchanged)", got)
+	if got := env.budget(t, "plan").MaxPromptsPerInvocation; got != 1 {
+		t.Errorf("MaxPromptsPerInvocation = %d, want 1 (unchanged)", got)
 	}
 }
 
@@ -593,7 +602,7 @@ func TestGrantPark_RejectsExplicitZeroOnParkedAxis(t *testing.T) {
 // message must say that rather than surfacing a backend "not seeded" error.
 func TestGrantPark_ParkOnUnseededStep(t *testing.T) {
 	env := newParkGrantEnv(t)
-	env.park(t, budgetExhausted("nonesuch", flow.AxisInvocations))
+	env.park(t, treasurerRefused("nonesuch", flow.AxisInvocations))
 
 	if code := env.grant(); code != 2 {
 		t.Fatalf("exit = %d, want 2", code)
@@ -606,12 +615,8 @@ func TestGrantPark_ParkOnUnseededStep(t *testing.T) {
 // A dry run must not report an unpark as something that happened.
 func TestGrant_DryRunPredictsUnparkWithoutClaimingIt(t *testing.T) {
 	env := newParkGrantEnv(t)
-	for range 3 {
-		if err := env.be.BumpInvocations(context.Background(), env.claim.ItemRef, "plan"); err != nil {
-			t.Fatalf("BumpInvocations: %v", err)
-		}
-	}
-	env.park(t, budgetExhausted("plan", flow.AxisInvocations))
+	env.dispatches(t, "plan", 3)
+	env.park(t, treasurerRefused("plan", flow.AxisInvocations))
 
 	if code := env.grant("--dry-run"); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
@@ -637,21 +642,21 @@ func TestGrantPark_TimeoutParkAlsoTopsUpExhaustedInvocations(t *testing.T) {
 	env := newParkGrantEnv(t)
 	ctx := context.Background()
 	for range 3 { // burn all 3 seeded invocations
-		if err := env.be.BumpInvocations(ctx, env.claim.ItemRef, "plan"); err != nil {
-			t.Fatalf("BumpInvocations: %v", err)
+		if err := env.be.RecordDispatch(ctx, env.claim.ItemRef, "plan"); err != nil {
+			t.Fatalf("RecordDispatch: %v", err)
 		}
 	}
-	env.park(t, budgetExhausted("plan", flow.AxisTimeout))
+	env.park(t, treasurerRefused("plan", flow.AxisTimeout))
 
 	if code := env.grant(); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
 	}
-	rec := env.rec(t, "plan")
-	if rec.GrantedTimeout != time.Hour {
-		t.Errorf("GrantedTimeout = %v, want 1h (30m seeded + 30m granted)", rec.GrantedTimeout)
+	eff := env.budget(t, "plan")
+	if eff.Timeout != time.Hour {
+		t.Errorf("Timeout = %v, want 1h (30m policy + 30m granted)", eff.Timeout)
 	}
-	if rec.GrantedInvocations != 4 {
-		t.Errorf("GrantedInvocations = %d, want 4 (3 used + 1 headroom)", rec.GrantedInvocations)
+	if eff.MaxInvocations != 4 {
+		t.Errorf("MaxInvocations = %d, want 4 (3 used + 1 headroom)", eff.MaxInvocations)
 	}
 	if p := env.parked(t); p != nil {
 		t.Errorf("park = %+v, want cleared", p)
@@ -663,51 +668,51 @@ func TestGrantPark_TimeoutParkAlsoTopsUpExhaustedCost(t *testing.T) {
 	env := newParkGrantEnv(t)
 	ctx := context.Background()
 	for range 3 {
-		if err := env.be.BumpInvocations(ctx, env.claim.ItemRef, "plan"); err != nil {
-			t.Fatalf("BumpInvocations: %v", err)
+		if err := env.be.RecordDispatch(ctx, env.claim.ItemRef, "plan"); err != nil {
+			t.Fatalf("RecordDispatch: %v", err)
 		}
 	}
 	if err := env.be.AddCost(ctx, env.claim.ItemRef, "plan", 12); err != nil {
 		t.Fatalf("AddCost: %v", err)
 	}
-	env.park(t, budgetExhausted("plan", flow.AxisTimeout))
+	env.park(t, treasurerRefused("plan", flow.AxisTimeout))
 
 	if code := env.grant(); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
 	}
-	rec := env.rec(t, "plan")
-	if rec.GrantedTimeout != time.Hour {
-		t.Errorf("GrantedTimeout = %v, want 1h", rec.GrantedTimeout)
+	eff := env.budget(t, "plan")
+	if eff.Timeout != time.Hour {
+		t.Errorf("Timeout = %v, want 1h", eff.Timeout)
 	}
-	if rec.GrantedInvocations != 4 {
-		t.Errorf("GrantedInvocations = %d, want 4", rec.GrantedInvocations)
+	if eff.MaxInvocations != 4 {
+		t.Errorf("MaxInvocations = %d, want 4", eff.MaxInvocations)
 	}
 	// spent(12) + the step's own $10 cap = 22.
-	if rec.GrantedCostUSD != 22 {
-		t.Errorf("GrantedCostUSD = %v, want 22", rec.GrantedCostUSD)
+	if eff.MaxCostUSD != 22 {
+		t.Errorf("MaxCostUSD = %v, want 22", eff.MaxCostUSD)
 	}
 }
 
 // An axis with headroom is left alone: the top-up is targeted, not a sweep.
 func TestGrantPark_LeavesAxesWithHeadroomAlone(t *testing.T) {
 	env := newParkGrantEnv(t)
-	env.park(t, budgetExhausted("plan", flow.AxisTimeout))
+	env.park(t, treasurerRefused("plan", flow.AxisTimeout))
 
 	if code := env.grant(); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
 	}
-	rec := env.rec(t, "plan")
-	if rec.GrantedTimeout != time.Hour {
-		t.Errorf("GrantedTimeout = %v, want 1h", rec.GrantedTimeout)
+	eff := env.budget(t, "plan")
+	if eff.Timeout != time.Hour {
+		t.Errorf("Timeout = %v, want 1h", eff.Timeout)
 	}
-	if rec.GrantedInvocations != 3 {
-		t.Errorf("GrantedInvocations = %d, want 3 (untouched — none used)", rec.GrantedInvocations)
+	if eff.MaxInvocations != 3 {
+		t.Errorf("MaxInvocations = %d, want 3 (untouched — none used)", eff.MaxInvocations)
 	}
-	if rec.GrantedCostUSD != 10 {
-		t.Errorf("GrantedCostUSD = %v, want 10 (untouched)", rec.GrantedCostUSD)
+	if eff.MaxCostUSD != 10 {
+		t.Errorf("MaxCostUSD = %v, want 10 (untouched)", eff.MaxCostUSD)
 	}
-	if rec.GrantedPromptsPerInvocation != 1 {
-		t.Errorf("GrantedPromptsPerInvocation = %d, want 1 (untouched)", rec.GrantedPromptsPerInvocation)
+	if eff.MaxPromptsPerInvocation != 1 {
+		t.Errorf("MaxPromptsPerInvocation = %d, want 1 (untouched)", eff.MaxPromptsPerInvocation)
 	}
 }
 
@@ -717,24 +722,24 @@ func TestGrantPark_FlagSetsCollateralAxisHeadroom(t *testing.T) {
 	env := newParkGrantEnv(t)
 	ctx := context.Background()
 	for range 3 {
-		if err := env.be.BumpInvocations(ctx, env.claim.ItemRef, "plan"); err != nil {
-			t.Fatalf("BumpInvocations: %v", err)
+		if err := env.be.RecordDispatch(ctx, env.claim.ItemRef, "plan"); err != nil {
+			t.Fatalf("RecordDispatch: %v", err)
 		}
 	}
-	env.park(t, budgetExhausted("plan", flow.AxisTimeout))
+	env.park(t, treasurerRefused("plan", flow.AxisTimeout))
 
 	if code := env.grant("--invocations", "5"); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
 	}
-	if got := env.rec(t, "plan").GrantedInvocations; got != 8 {
-		t.Errorf("GrantedInvocations = %d, want 8 (3 used + 5 headroom)", got)
+	if got := env.budget(t, "plan").MaxInvocations; got != 8 {
+		t.Errorf("MaxInvocations = %d, want 8 (3 used + 5 headroom)", got)
 	}
 }
 
 // ...but an axis that is neither parked nor blocked is still refused.
 func TestGrantPark_RejectsFlagForUnblockedAxis(t *testing.T) {
 	env := newParkGrantEnv(t)
-	env.park(t, budgetExhausted("plan", flow.AxisTimeout))
+	env.park(t, treasurerRefused("plan", flow.AxisTimeout))
 
 	if code := env.grant("--cost", "5"); code != 2 {
 		t.Fatalf("exit = %d, want 2", code)
@@ -742,8 +747,8 @@ func TestGrantPark_RejectsFlagForUnblockedAxis(t *testing.T) {
 	if !strings.Contains(env.err.String(), "does not apply") {
 		t.Errorf("stderr = %q, want 'does not apply'", env.err.String())
 	}
-	if got := env.rec(t, "plan").GrantedCostUSD; got != 10 {
-		t.Errorf("GrantedCostUSD = %v, want 10 (unchanged)", got)
+	if got := env.budget(t, "plan").MaxCostUSD; got != 10 {
+		t.Errorf("MaxCostUSD = %v, want 10 (unchanged)", got)
 	}
 }
 
@@ -753,11 +758,11 @@ func TestGrantPark_RejectsExplicitZeroOnCollateralAxis(t *testing.T) {
 	env := newParkGrantEnv(t)
 	ctx := context.Background()
 	for range 3 {
-		if err := env.be.BumpInvocations(ctx, env.claim.ItemRef, "plan"); err != nil {
-			t.Fatalf("BumpInvocations: %v", err)
+		if err := env.be.RecordDispatch(ctx, env.claim.ItemRef, "plan"); err != nil {
+			t.Fatalf("RecordDispatch: %v", err)
 		}
 	}
-	env.park(t, budgetExhausted("plan", flow.AxisTimeout))
+	env.park(t, treasurerRefused("plan", flow.AxisTimeout))
 
 	if code := env.grant("--invocations", "0"); code != 2 {
 		t.Fatalf("exit = %d, want 2", code)
@@ -765,8 +770,8 @@ func TestGrantPark_RejectsExplicitZeroOnCollateralAxis(t *testing.T) {
 	if !strings.Contains(env.err.String(), "would grant nothing") {
 		t.Errorf("stderr = %q, want 'would grant nothing'", env.err.String())
 	}
-	if got := env.rec(t, "plan").GrantedTimeout; got != 30*time.Minute {
-		t.Errorf("GrantedTimeout = %v, want 30m (unchanged — the refusal writes nothing)", got)
+	if got := env.budget(t, "plan").Timeout; got != 30*time.Minute {
+		t.Errorf("Timeout = %v, want 30m (unchanged — the refusal writes nothing)", got)
 	}
 }
 

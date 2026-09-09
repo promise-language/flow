@@ -345,7 +345,7 @@ func TestQuestionAskedAt_MissingMarkerIsZero(t *testing.T) {
 func TestAnswerGate_IgnoresNonQuestionParks(t *testing.T) {
 	gate := answerGate(&stubBackend{}, self("flowbot"))
 	// A budget park is the budget system's business; this gate must not touch it.
-	state := &flow.Item{Park: &flow.ParkRequest{Kind: flow.ParkBudgetExhausted, Step: "plan"}}
+	state := &flow.Item{Park: &flow.ParkRequest{Kind: flow.ParkTreasurerRefused, Step: "plan"}}
 	if err := gate(context.Background(), state); err != nil {
 		t.Errorf("gate returned %v on a budget park, want nil", err)
 	}
@@ -443,7 +443,7 @@ func TestAnswerGate_BlocksWhenParkClearedButQuestionsRemain(t *testing.T) {
 func TestAnswerGate_BlocksWhenNonQuestionParkButQuestionsRemain(t *testing.T) {
 	gate := answerGate(&stubBackend{}, self("flowbot"))
 	state := &flow.Item{
-		Park: &flow.ParkRequest{Kind: flow.ParkBudgetExhausted, Step: "plan"},
+		Park: &flow.ParkRequest{Kind: flow.ParkTreasurerRefused, Step: "plan"},
 		Questions: []flow.Question{
 			{ID: "q1", AgentQuestion: flow.AgentQuestion{Text: "cache or store?"}},
 		},

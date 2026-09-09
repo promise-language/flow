@@ -92,7 +92,9 @@ type refusingFinalizer struct {
 	err error
 }
 
-func (b *refusingFinalizer) Finalize(context.Context, flow.ItemRef) error { return b.err }
+func (b *refusingFinalizer) Finalize(context.Context, flow.ItemRef, flow.Disposition) error {
+	return b.err
+}
 
 // A Finalize failure that is not the not-yet-terminal refusal stays a FAILURE.
 // Collapsing the two would send an operator hunting for a defect that is not

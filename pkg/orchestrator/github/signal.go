@@ -96,8 +96,14 @@ func (b *Orchestrator) prHasApprovedReview(ctx context.Context, prNum int) (bool
 // It never depends on a cached state-comment id: fetchStateComment resolves the
 // comment by scanning the issue when the cache is empty, which is how every
 // other mutator already behaves.
+//
+// It CREATES the document when the item has none. The side effect happens
+// inside the handler, before the entry that records the step is appended, so
+// the very first one on an item arrives at an empty record — and a signal
+// dropped there is a wait that never resolves, because the observation is the
+// only evidence it ever happened.
 func (b *Orchestrator) markSignalSetOnState(ctx context.Context, ref flow.ItemRef, sig flow.SignalId) error {
-	return b.mutateStateDoc(ctx, ref, "markSignalSetOnState", func(doc *stateDoc) error {
+	return b.mutateOrCreateStateDoc(ctx, ref, "markSignalSetOnState", func(doc *stateDoc) error {
 		entry := stateSignalDoc{
 			Id:          string(sig),
 			Set:         true,

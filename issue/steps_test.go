@@ -59,9 +59,12 @@ type fakeWorktree struct {
 	revsAsked  []flow.Revision
 	strictRevs map[flow.Revision]bool // when set, any other revision errors
 	pushed     bool
-	opened     bool
-	openBody   string
-	captured   []byte
+	// drift is what Drift reports. Zero is level, which is what a fresh
+	// worktree measures.
+	drift    flow.Drift
+	opened   bool
+	openBody string
+	captured []byte
 	// commitErrs scripts what Commit returns on successive calls. A nil entry
 	// means success for that call. When exhausted, Commit falls back to the
 	// noCommit flag as before.
@@ -176,6 +179,10 @@ func (w *fakeWorktree) Stage(context.Context) error {
 	return nil
 }
 func (w *fakeWorktree) Push(context.Context) error { w.pushed = true; return nil }
+
+// Drift reports the pair a test recorded — evidence for a route election, never
+// a safety check.
+func (w *fakeWorktree) Drift(context.Context) (flow.Drift, error) { return w.drift, nil }
 
 // Run is the command seam. It returns a RUN, not a bare error: the outcome
 // separates "ran and reported" from "could not start", "timed out" and "died",
@@ -992,7 +999,7 @@ func TestAnswersSkippedWhenNotParkedOnAQuestion(t *testing.T) {
 	if got := b.answersFor(ctx); got != nil {
 		t.Errorf("got %v on an unparked item, want none", got)
 	}
-	ctx.park = &flow.ParkRequest{Kind: flow.ParkBudgetExhausted}
+	ctx.park = &flow.ParkRequest{Kind: flow.ParkTreasurerRefused}
 	if got := b.answersFor(ctx); got != nil {
 		t.Errorf("got %v on a budget park, want none", got)
 	}

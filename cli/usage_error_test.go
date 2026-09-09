@@ -116,6 +116,18 @@ func TestUsageError_UnknownCommand(t *testing.T) {
 		`issue: unknown command "frobnicate"`)
 }
 
+// `stale` existed only to call MarkStale, and staleness went with the checklist
+// model: nothing can mark a step stale, so the command is not a command. It has
+// to read as UNKNOWN rather than as a command that does nothing — an operator
+// typing it must be told it is gone, not left believing it worked.
+func TestUsageError_StaleIsNoLongerACommand(t *testing.T) {
+	app, out, errBuf := newArgparseApp(t)
+	app.Name = "issue"
+	code := RunWithArgs(*app, []string{"stale", "plan"})
+	checkUsageError(t, "stale", out.String(), errBuf.String(), code,
+		`issue: unknown command "stale"`)
+}
+
 func TestUsageError_NoCommand(t *testing.T) {
 	app, out, errBuf := newArgparseApp(t)
 	app.Name = "issue"

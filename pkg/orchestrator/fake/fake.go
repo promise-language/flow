@@ -63,11 +63,16 @@ type Orchestrator struct {
 	supportedGates    []flow.GateDef
 	supportedCommands []flow.CommandDef
 
+	// boundFlow is what AppendEntry records on an item's first entry. The fake's
+	// own name until SetBoundFlow says otherwise.
+	boundFlow string
+
 	// worktrees is one checkout per item; see Worktree.
 	worktrees       map[string]*fakeWorktree
 	nothingToCommit bool
 	branchHeads     map[string]string
 	initialBranch   flow.BranchName
+	drift           flow.Drift
 }
 
 // defaultSupportedArtifacts is the schema an unconfigured fake reports — the
@@ -121,11 +126,26 @@ type itemRecord struct {
 	claimedAt time.Time
 	holder    flow.Holder
 
+	// journal is the durable route: every completed step execution, in order.
+	// APPEND-ONLY — AppendEntry adds, Reset clears, and nothing rewrites an
+	// entry, which is the property Load's contract turns on.
+	journal []flow.JournalEntry
+	// ledger is the treasurer's record, keyed by StepId. Rows are written by the
+	// ledger methods and by nothing else.
+	ledger flow.Ledger
+	// creator is the account that filed the item; awaits is what it currently
+	// awaits, derived from the last entry as it is appended; finalizedAs is the
+	// disposition Finalize recorded.
+	creator     flow.AccountId
+	awaits      flow.Awaits
+	finalizedAs flow.Disposition
+
+	// artifacts is the PROJECTION of the journal's latest result per artifact,
+	// derived inside AppendEntry. Not a second store: nothing writes it directly.
 	artifacts   map[flow.ArtifactId]*flow.ArtifactRecord
 	signals     map[flow.SignalId]flow.SignalState
 	questions   []flow.Question
 	nextQID     int
-	seeded      bool
 	parkRequest *flow.ParkRequest
 
 	// blockedBy holds the fake ids of declared blockers. Blockedness is DERIVED
@@ -154,6 +174,7 @@ func New(signals ...flow.SignalDef) *Orchestrator {
 		arena:           flow.Arena{Host: "fakehost", Id: "/fake/arena"},
 		arenaRoot:       "/fake/arena",
 		account:         "fake-account",
+		boundFlow:       "fake",
 		// The ambient account holds everything by default. A fake exists to let
 		// a flow's own logic be exercised, and an ambient account that could
 		// assume no role would refuse before any of it ran — so the default is
@@ -268,12 +289,41 @@ func (b *Orchestrator) AddItem(id string, item flow.Item) {
 	}
 	item.Ref = b.refFor(id)
 	b.items[id] = &itemRecord{
-		id:        id,
-		item:      item,
-		created:   b.clock(),
-		artifacts: map[flow.ArtifactId]*flow.ArtifactRecord{},
-		signals:   map[flow.SignalId]flow.SignalState{},
+		id:      id,
+		item:    item,
+		created: b.clock(),
+		// A test may hand AddItem an item that already carries a journal, a
+		// ledger or a creator — the fake is how a flow's own logic is exercised
+		// mid-route, and a fixture that could only start from nothing could not
+		// set one up. They are copied out of the item and into the record's own
+		// fields, so from here on there is exactly one writable copy of each.
+		journal:     slices.Clone(item.Journal),
+		ledger:      cloneLedger(item.Ledger),
+		creator:     item.Creator,
+		awaits:      item.Awaits,
+		finalizedAs: item.FinalizedAs,
+		artifacts:   map[flow.ArtifactId]*flow.ArtifactRecord{},
+		signals:     map[flow.SignalId]flow.SignalState{},
 	}
+}
+
+// cloneLedger deep-copies a ledger so the store and its caller never share a
+// map or a grant slice.
+func cloneLedger(l flow.Ledger) flow.Ledger {
+	out := flow.Ledger{
+		TotalCostUSD: l.TotalCostUSD,
+		TotalActive:  l.TotalActive,
+		TotalWaiting: l.TotalWaiting,
+	}
+	if l.Steps == nil {
+		return out
+	}
+	out.Steps = make(map[flow.StepId]flow.LedgerRow, len(l.Steps))
+	for k, row := range l.Steps {
+		row.Granted = slices.Clone(row.Granted)
+		out.Steps[k] = row
+	}
+	return out
 }
 
 // Ref returns the ItemRef the fake mints for an id. Tests addressing an item
@@ -424,7 +474,7 @@ func (b *Orchestrator) ResolveRef(ctx context.Context, input string) (flow.ItemR
 
 // List returns the items at the given scope. Get and ListAutoSelectable are
 // derived from the same per-item computation, so the three cannot disagree.
-func (b *Orchestrator) List(ctx context.Context, scope flow.ItemScope, binary flow.BinaryName, acceptsType func(flow.ItemType) bool) ([]flow.ItemInfo, error) {
+func (b *Orchestrator) List(ctx context.Context, scope flow.ItemScope, binary flow.BinaryName, acceptsType func(flow.ItemType) bool, assumesRole func(flow.RoleName) bool) ([]flow.ItemInfo, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	type keyed struct {
@@ -433,7 +483,7 @@ func (b *Orchestrator) List(ctx context.Context, scope flow.ItemScope, binary fl
 	}
 	items := make([]keyed, 0, len(b.items))
 	for _, rec := range b.items {
-		info := b.itemInfoFor(rec, acceptsType)
+		info := b.itemInfoFor(rec, acceptsType, assumesRole)
 		if !info.Availability.InScope(scope) {
 			continue
 		}
@@ -476,7 +526,7 @@ func selectionKeyOf(rec *itemRecord) flow.SelectionKey {
 // what makes "must answer identically to List" structural rather than a
 // promise: an item that read blocked in `list` and available in `status` is a
 // contradiction an operator cannot resolve.
-func (b *Orchestrator) Get(ctx context.Context, ref flow.ItemRef, binary flow.BinaryName, acceptsType func(flow.ItemType) bool) (*flow.ItemInfo, error) {
+func (b *Orchestrator) Get(ctx context.Context, ref flow.ItemRef, binary flow.BinaryName, acceptsType func(flow.ItemType) bool, assumesRole func(flow.RoleName) bool) (*flow.ItemInfo, error) {
 	id, err := refID(ref)
 	if err != nil {
 		return nil, err
@@ -487,14 +537,14 @@ func (b *Orchestrator) Get(ctx context.Context, ref flow.ItemRef, binary flow.Bi
 	if rec == nil {
 		return nil, fmt.Errorf("fake: item %q not registered", id)
 	}
-	info := b.itemInfoFor(rec, acceptsType)
+	info := b.itemInfoFor(rec, acceptsType, assumesRole)
 	return &info, nil
 }
 
 // ListAutoSelectable returns the refs an unattended resolve may start on. It
 // runs the same derivation and drops anything blocked, so the rule has one
 // owner.
-func (b *Orchestrator) ListAutoSelectable(ctx context.Context, tags []flow.TagId) ([]flow.ItemRef, error) {
+func (b *Orchestrator) ListAutoSelectable(ctx context.Context, tags []flow.TagId, assumesRole func(flow.RoleName) bool) ([]flow.ItemRef, error) {
 	for _, t := range tags {
 		if !t.Valid() {
 			return nil, fmt.Errorf("fake: %q is not a valid tag", string(t))
@@ -525,6 +575,13 @@ func (b *Orchestrator) ListAutoSelectable(ctx context.Context, tags []flow.TagId
 		if rec.item.Urgency.OrNeutral() == flow.UrgencyDeferred {
 			continue
 		}
+		// An item awaiting a role this account cannot assume is ABSENT for the
+		// same reason a deferred one is: somebody else's move is not this
+		// runner's work, and a caller handed it can only claim work it cannot
+		// advance. Eligibility, not a sort key.
+		if !b.roleAssumable(rec, assumesRole) {
+			continue
+		}
 		selectable = append(selectable, rec)
 	}
 	slices.SortFunc(selectable, func(x, y *itemRecord) int {
@@ -545,9 +602,10 @@ func (b *Orchestrator) ListAutoSelectable(ctx context.Context, tags []flow.TagId
 
 // itemInfoFor is the ONE derivation behind List, Get and selection. Caller
 // holds b.mu.
-func (b *Orchestrator) itemInfoFor(rec *itemRecord, acceptsType func(flow.ItemType) bool) flow.ItemInfo {
+func (b *Orchestrator) itemInfoFor(rec *itemRecord, acceptsType func(flow.ItemType) bool, assumesRole func(flow.RoleName) bool) flow.ItemInfo {
 	blocked, kind, reason := b.blockednessOf(rec)
 	info := flow.ItemInfo{
+		Awaits:      b.awaitsOf(rec),
 		Ref:         b.refFor(rec.id),
 		Type:        rec.item.Type,
 		Title:       rec.item.Title,
@@ -567,16 +625,55 @@ func (b *Orchestrator) itemInfoFor(rec *itemRecord, acceptsType func(flow.ItemTy
 		BlockReason: reason,
 		Manual:      rec.item.Manual,
 	}
-	info.Availability = b.availabilityOf(rec, blocked, acceptsType)
+	info.Availability = b.availabilityOf(rec, blocked, acceptsType, assumesRole)
 	return info
 }
 
-func (b *Orchestrator) availabilityOf(rec *itemRecord, blocked bool, acceptsType func(flow.ItemType) bool) flow.Availability {
+// awaitsOf is the item's stored marker, with the account of record filled in
+// from the journal. One derivation, so Load and the listing cannot disagree
+// about whose move it is.
+func (b *Orchestrator) awaitsOf(rec *itemRecord) flow.Awaits {
+	a := rec.awaits
+	if a.Role != "" && a.Account == "" {
+		it := flow.Item{Journal: rec.journal}
+		a.Account = it.AccountForRole(a.Role)
+	}
+	return a
+}
+
+// roleAssumable reports whether this account may take the item's next move. An
+// item awaiting nothing, awaiting a SIGNAL, or asked with no predicate is
+// assumable: an awaited signal is nobody's move, which the blocked rung reports,
+// and a nil predicate filters nothing.
+func (b *Orchestrator) roleAssumable(rec *itemRecord, assumesRole func(flow.RoleName) bool) bool {
+	if assumesRole == nil {
+		return true
+	}
+	role := rec.awaits.Role
+	if role == "" {
+		return true
+	}
+	return assumesRole(role)
+}
+
+func (b *Orchestrator) availabilityOf(
+	rec *itemRecord,
+	blocked bool,
+	acceptsType func(flow.ItemType) bool,
+	assumesRole func(flow.RoleName) bool,
+) flow.Availability {
 	if rec.item.Status == flow.StatusTerminal {
 		return flow.AvailClosed
 	}
 	if acceptsType != nil && !acceptsType(rec.item.Type) {
-		return flow.AvailUnhandled
+		return flow.AvailOutsideRemit
+	}
+	// Level 4: actionable — the awaited role is one this account can assume.
+	// Above outside-remit and below blocked: an item outside the remit is not
+	// this binary's at all, and a blocked item is one this account WOULD act on
+	// if it could.
+	if !b.roleAssumable(rec, assumesRole) {
+		return flow.AvailAwaits
 	}
 	if blocked {
 		return flow.AvailBlocked
@@ -655,8 +752,8 @@ func (b *Orchestrator) blockednessOf(rec *itemRecord) (bool, flow.BlockKind, str
 			if len(rec.questions) == 0 || anyPending(rec.questions) {
 				return true, flow.WaitsOnPerson, "waiting for an answer"
 			}
-		case flow.ParkBudgetExhausted:
-			return true, flow.WaitsOnPerson, "budget exhausted"
+		case flow.ParkTreasurerRefused:
+			return true, flow.WaitsOnPerson, "the treasurer refused the next dispatch"
 		}
 	}
 	return false, "", ""
@@ -817,9 +914,13 @@ func (b *Orchestrator) loadLocked(rec *itemRecord) *flow.Item {
 	it.Urgency = rec.item.Urgency.OrNeutral()
 	// The journal as it stands, cloned like every other slice here so a caller
 	// holding a loaded item cannot rewrite the store's record of the route.
-	// Nothing appends yet — AppendEntry is #239 — so what Load returns is what
-	// a test put on the item.
-	it.Journal = slices.Clone(rec.item.Journal)
+	// EXACTLY WHAT WAS APPENDED, IN ORDER: the pending step is derived from the
+	// last entry, so a journal read short or reordered re-routes the item.
+	it.Journal = slices.Clone(rec.journal)
+	it.Ledger = cloneLedger(rec.ledger)
+	it.Creator = rec.creator
+	it.Awaits = b.awaitsOf(rec)
+	it.FinalizedAs = rec.finalizedAs
 	it.BlockedBy = b.blockersOf(rec)
 	it.Blocked, it.BlockKind, it.BlockReason = b.blockednessOf(rec)
 	it.Artifacts = make(map[flow.ArtifactId]flow.ArtifactRecord, len(rec.artifacts))
@@ -836,7 +937,15 @@ func (b *Orchestrator) loadLocked(rec *itemRecord) *flow.Item {
 	return &it
 }
 
-func (b *Orchestrator) SeedState(ctx context.Context, ref flow.ItemRef, specs []flow.ArtifactSpec) error {
+// Reset clears the flow's whole record on the item so the next resolution
+// starts from an empty journal: journal, ledger, park, artifacts, the awaited
+// marker, the flow binding, the finalization, and every draft.
+//
+// The QUESTIONS THEMSELVES stay; what goes is the outstanding-question marker,
+// which here is the question park. A question is never removed — one leaves the
+// pending set by being answered, not by being deleted — so an unanswered ask
+// stays reachable by the id `answer --question` needs.
+func (b *Orchestrator) Reset(ctx context.Context, ref flow.ItemRef) error {
 	id, err := refID(ref)
 	if err != nil {
 		return err
@@ -847,38 +956,15 @@ func (b *Orchestrator) SeedState(ctx context.Context, ref flow.ItemRef, specs []
 	if rec == nil {
 		return fmt.Errorf("fake: item %q not registered", id)
 	}
-	if rec.seeded {
-		return errors.New("fake: item already seeded; second SeedState refused")
-	}
-	for _, sp := range specs {
-		rec.artifacts[sp.Id] = &flow.ArtifactRecord{
-			Id:                          sp.Id,
-			Type:                        sp.Type,
-			Required:                    sp.Required,
-			GrantedInvocations:          sp.Budget.MaxInvocations,
-			GrantedPromptsPerInvocation: sp.Budget.MaxPromptsPerInvocation,
-			GrantedCostUSD:              sp.Budget.MaxCostUSD,
-			GrantedTimeout:              sp.Budget.Timeout,
-		}
-	}
-	rec.seeded = true
-	return nil
-}
-
-func (b *Orchestrator) ResetSeed(ctx context.Context, ref flow.ItemRef) error {
-	id, err := refID(ref)
-	if err != nil {
-		return err
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	rec := b.items[id]
-	if rec == nil {
-		return fmt.Errorf("fake: item %q not registered", id)
-	}
-	rec.seeded = false
+	rec.journal = nil
+	rec.ledger = flow.Ledger{}
+	rec.awaits = flow.Awaits{}
 	rec.artifacts = map[flow.ArtifactId]*flow.ArtifactRecord{}
 	rec.parkRequest = nil
+	rec.work = nil
+	rec.item.Flow = ""
+	rec.item.Finalized = false
+	rec.finalizedAs = ""
 	return nil
 }
 
@@ -1047,10 +1133,24 @@ func (b *Orchestrator) findCycle(from string, blockers []string) string {
 }
 
 // ---------------------------------------------------------------------------
-// Artifacts and budget
+// Journal and ledger
 // ---------------------------------------------------------------------------
 
-func (b *Orchestrator) ResolveArtifact(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId, body flow.ArtifactBody) error {
+// AppendEntry appends ONE completed step execution and, in the same critical
+// section, moves everything derived from it: the artifact projection, the
+// awaited marker, and — on the first entry — the flow binding.
+//
+// Together or not at all. The result and the route are one write, so a caller
+// can never observe a captured artifact whose route has not been recorded; and
+// the projection cannot drift from the journal, because there is only one place
+// it is written from.
+//
+// It refuses what the writes it replaces refused: an unclaimed item, or one held
+// by another arena. And it refuses an EMPTY artifact body, because the fake
+// stores the bytes — the contract allows an empty body only where the
+// orchestrator can verify the content it stands for exists somewhere else, and
+// this one has no somewhere else to look.
+func (b *Orchestrator) AppendEntry(ctx context.Context, ref flow.ItemRef, entry flow.JournalEntry) error {
 	itemID, err := refID(ref)
 	if err != nil {
 		return err
@@ -1061,60 +1161,123 @@ func (b *Orchestrator) ResolveArtifact(ctx context.Context, ref flow.ItemRef, id
 	if rec == nil {
 		return fmt.Errorf("fake: item %q not registered", itemID)
 	}
+	if rec.claim == nil {
+		return fmt.Errorf("fake: item %q is not claimed by this arena: %w", itemID, flow.ErrUnavailable)
+	}
+	if rec.holder.Arena != b.arena {
+		return fmt.Errorf("fake: item %q is held by arena %s/%s, not %s/%s: %w",
+			itemID, rec.holder.Arena.Host, rec.holder.Arena.Id, b.arena.Host, b.arena.Id, flow.ErrUnavailable)
+	}
+	if entry.Step == "" {
+		return errors.New("fake: journal entry names no step")
+	}
+	// A zero Result.Type is a signal step or a wait: its result IS the
+	// observation, and there is no body to be empty.
+	if entry.Result.Type != 0 && entry.Result.Empty() {
+		return fmt.Errorf(
+			"fake: step %q completed with an empty %s body and this orchestrator stores the bytes itself — "+
+				"there is no out-of-band content for it to stand for",
+			entry.Step, entry.Result.Type)
+	}
+
+	// The first entry binds the flow: an item with an empty journal is bound to
+	// nothing, and the binding is a consequence of work being recorded.
+	if len(rec.journal) == 0 && rec.item.Flow == "" {
+		rec.item.Flow = b.boundFlow
+	}
+	rec.journal = append(rec.journal, entry)
+	rec.awaits = entry.Awaits
+	if entry.Result.Type != 0 {
+		b.projectArtifact(rec, entry)
+	}
+	// A park recorded against this step is obsolete the moment the step
+	// completes — keeping it would make Load report a reason that no longer
+	// holds.
+	if rec.parkRequest != nil && rec.parkRequest.Step == entry.Step {
+		rec.parkRequest = nil
+	}
+	// The step has a result now, so its scaffolding is done. Clearing it here is
+	// what makes the result and the end of the draft one write.
+	delete(rec.work, entry.Step)
+	return nil
+}
+
+// SetBoundFlow names the flow the fake records at an item's first entry. Tests
+// that assert on Item.Flow set it; unset, the binding is the fake's own name,
+// which is an honest answer for an orchestrator nothing configured.
+func (b *Orchestrator) SetBoundFlow(name string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.boundFlow = name
+}
+
+// projectArtifact derives the artifact record from the entry being appended.
+// Caller holds b.mu.
+func (b *Orchestrator) projectArtifact(rec *itemRecord, entry flow.JournalEntry) {
+	id := flow.ArtifactId(entry.Step)
 	art := rec.artifacts[id]
 	if art == nil {
-		return fmt.Errorf("fake: artifact %q not seeded on item %q", id, itemID)
+		art = &flow.ArtifactRecord{Id: id}
+		rec.artifacts[id] = art
 	}
-	if body.Type != art.Type {
-		return flow.ErrTypeMismatch{Step: string(id), Expected: art.Type, Got: body.Type}
-	}
+	body := entry.Result
+	art.Type = body.Type
 	art.Resolved = true
-	art.Stale = false
 	art.CommitHash = body.CommitHash
 	art.Markdown = body.Markdown
 	art.JSON = body.JSON
 	art.File = body.File
 	art.Patch = body.Patch
-	art.ProducedAt = b.clock()
-	art.Version++
-	art.ResolvedBy = string(rec.holder.Account)
-	art.PromptsThisInvocation = 0 // resets at successful resolve
-	// A park recorded against this step is obsolete the moment the step
-	// resolves — keeping it would make Load report a reason that no longer
-	// holds.
-	if rec.parkRequest != nil && rec.parkRequest.Step == flow.StepId(id) {
-		rec.parkRequest = nil
+	art.ProducedAt = entry.At
+	if art.ProducedAt.IsZero() {
+		art.ProducedAt = b.clock()
 	}
-	return nil
+	art.Version = entry.Execution
+	art.ResolvedBy = string(entry.By)
 }
 
-func (b *Orchestrator) MarkStale(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId) error {
-	return b.withArtifact(ref, id, func(a *flow.ArtifactRecord) { a.Stale = true })
-}
-
-func (b *Orchestrator) BumpInvocations(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId) error {
-	return b.withArtifact(ref, id, func(a *flow.ArtifactRecord) {
-		a.Invocations++
-		a.PromptsThisInvocation = 0
-		a.LastRunAt = b.clock()
+func (b *Orchestrator) RecordDispatch(ctx context.Context, ref flow.ItemRef, step flow.StepId) error {
+	return b.withLedgerRow(ref, step, func(row *flow.LedgerRow, l *flow.Ledger) {
+		row.Dispatches++
+		row.LastRunAt = b.clock()
 	})
 }
 
-func (b *Orchestrator) BumpPrompts(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId) error {
-	return b.withArtifact(ref, id, func(a *flow.ArtifactRecord) { a.PromptsThisInvocation++ })
+func (b *Orchestrator) RecordResumption(ctx context.Context, ref flow.ItemRef, step flow.StepId) error {
+	return b.withLedgerRow(ref, step, func(row *flow.LedgerRow, l *flow.Ledger) {
+		row.Resumptions++
+	})
 }
 
-func (b *Orchestrator) AddCost(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId, usd float64) error {
-	return b.withArtifact(ref, id, func(a *flow.ArtifactRecord) { a.CostUSDSpent += usd })
+func (b *Orchestrator) AddCost(ctx context.Context, ref flow.ItemRef, step flow.StepId, usd float64) error {
+	return b.withLedgerRow(ref, step, func(row *flow.LedgerRow, l *flow.Ledger) {
+		row.CostUSD += usd
+		l.TotalCostUSD += usd
+	})
 }
 
-func (b *Orchestrator) AddDuration(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId, d time.Duration) error {
-	return b.withArtifact(ref, id, func(a *flow.ArtifactRecord) { a.DurationWorked += d })
+// AddDuration adds ACTIVE time. Waiting never lands here: it is evidence about
+// contention rather than about the work, and the two are kept apart so a
+// treasurer reading the row cannot mistake one for the other.
+func (b *Orchestrator) AddDuration(ctx context.Context, ref flow.ItemRef, step flow.StepId, d time.Duration) error {
+	return b.withLedgerRow(ref, step, func(row *flow.LedgerRow, l *flow.Ledger) {
+		row.Active += d
+		l.TotalActive += d
+	})
 }
 
-// Grant adds budget to the artifact record and clears a ParkBudgetExhausted
-// park that the grant actually satisfies (see the Orchestrator.Grant contract).
-func (b *Orchestrator) Grant(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId, g flow.Grant) error {
+func (b *Orchestrator) AddWaiting(ctx context.Context, ref flow.ItemRef, step flow.StepId, d time.Duration) error {
+	return b.withLedgerRow(ref, step, func(row *flow.LedgerRow, l *flow.Ledger) {
+		row.Waiting += d
+		l.TotalWaiting += d
+	})
+}
+
+// Grant records the extension against the step's row and clears a
+// treasurer-refused park the extension actually satisfies (see the
+// Orchestrator.Grant contract). The decision is flow.GrantClearsPark's, so both
+// orchestrators apply one rule.
+func (b *Orchestrator) Grant(ctx context.Context, ref flow.ItemRef, step flow.StepId, g flow.Grant) error {
 	itemID, err := refID(ref)
 	if err != nil {
 		return err
@@ -1125,24 +1288,47 @@ func (b *Orchestrator) Grant(ctx context.Context, ref flow.ItemRef, id flow.Arti
 	if rec == nil {
 		return fmt.Errorf("fake: item %q not registered", itemID)
 	}
-	art := rec.artifacts[id]
-	if art == nil {
-		return fmt.Errorf("fake: artifact %q not seeded on item %q", id, itemID)
+	row := b.ledgerRow(rec, step)
+	now := b.clock()
+	for _, gr := range grantRecords(g, now) {
+		row.Granted = append(row.Granted, gr)
 	}
-	art.GrantedInvocations += g.Invocations
-	art.GrantedPromptsPerInvocation += g.PromptsPerInvocation
-	art.GrantedCostUSD += g.CostUSD
-	art.GrantedTimeout += time.Duration(g.TimeoutAdd) * time.Second
-	if flow.GrantClearsPark(rec.parkRequest, id, *art, g) {
+	rec.ledger.Steps[step] = *row
+	if flow.GrantClearsPark(rec.parkRequest, step, *row, g) {
 		rec.parkRequest = nil
 	}
 	return nil
 }
 
-func (b *Orchestrator) withArtifact(ref flow.ItemRef, id flow.ArtifactId, mutate func(*flow.ArtifactRecord)) error {
+// grantRecords splits one Grant into the per-axis records the ledger keeps.
+// Zero on an axis means "no change", so it records nothing there — a row of
+// zero-amount entries would be a history of grants that granted nothing.
+func grantRecords(g flow.Grant, at time.Time) []flow.GrantRecord {
+	var out []flow.GrantRecord
+	if g.Invocations != 0 {
+		out = append(out, flow.GrantRecord{Axis: flow.AxisInvocations, Amount: float64(g.Invocations), At: at})
+	}
+	if g.PromptsPerInvocation != 0 {
+		out = append(out, flow.GrantRecord{Axis: flow.AxisPrompts, Amount: float64(g.PromptsPerInvocation), At: at})
+	}
+	if g.CostUSD != 0 {
+		out = append(out, flow.GrantRecord{Axis: flow.AxisCost, Amount: g.CostUSD, At: at})
+	}
+	if g.TimeoutAdd != 0 {
+		out = append(out, flow.GrantRecord{Axis: flow.AxisTimeout, Amount: float64(g.TimeoutAdd), At: at})
+	}
+	return out
+}
+
+// withLedgerRow applies a mutation to one row and to the item-level totals in
+// one critical section, so a total can never disagree with the rows under it.
+func (b *Orchestrator) withLedgerRow(ref flow.ItemRef, step flow.StepId, mutate func(*flow.LedgerRow, *flow.Ledger)) error {
 	itemID, err := refID(ref)
 	if err != nil {
 		return err
+	}
+	if step == "" {
+		return errors.New("fake: ledger write names no step")
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -1150,12 +1336,24 @@ func (b *Orchestrator) withArtifact(ref flow.ItemRef, id flow.ArtifactId, mutate
 	if rec == nil {
 		return fmt.Errorf("fake: item %q not registered", itemID)
 	}
-	art := rec.artifacts[id]
-	if art == nil {
-		return fmt.Errorf("fake: artifact %q not seeded on item %q", id, itemID)
-	}
-	mutate(art)
+	row := b.ledgerRow(rec, step)
+	mutate(row, &rec.ledger)
+	rec.ledger.Steps[step] = *row
 	return nil
+}
+
+// ledgerRow returns a mutable copy of the step's row, creating one on first
+// use. A step that has never been dispatched has spent nothing, which is what
+// the zero row says — so a missing row is not an error.
+func (b *Orchestrator) ledgerRow(rec *itemRecord, step flow.StepId) *flow.LedgerRow {
+	if rec.ledger.Steps == nil {
+		rec.ledger.Steps = map[flow.StepId]flow.LedgerRow{}
+	}
+	row, ok := rec.ledger.Steps[step]
+	if !ok {
+		row = flow.LedgerRow{Step: step}
+	}
+	return &row
 }
 
 // ---------------------------------------------------------------------------
@@ -1321,7 +1519,7 @@ func (b *Orchestrator) PostAnswer(ctx context.Context, ref flow.ItemRef, id flow
 // the orchestrator says it is not. The refusal is ErrUnavailable rather than
 // ErrUnsupported: the item may reach terminal later, so asking again is exactly
 // what a caller should do.
-func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef) error {
+func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef, d flow.Disposition) error {
 	id, err := refID(ref)
 	if err != nil {
 		return err
@@ -1338,6 +1536,11 @@ func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef) error {
 			id, rec.item.Status, flow.StatusTerminal, flow.ErrUnavailable)
 	}
 	rec.item.Finalized = true
+	// The disposition the finalizing election carried, recorded beside the flag
+	// — the read is required with the write, so Load can report both.
+	rec.finalizedAs = d
+	// A finished flow awaits nobody.
+	rec.awaits = flow.Awaits{}
 	b.mu.Unlock()
 	return b.Release(ctx, ref)
 }
@@ -1372,6 +1575,7 @@ func (b *Orchestrator) Worktree(ctx context.Context, ref flow.ItemRef) (flow.Wor
 	wt.supportsRequest = b.supportsRequest
 	wt.nothingToCommit = b.nothingToCommit
 	wt.branchHeads = b.branchHeads
+	wt.drift = b.drift
 	if b.initialBranch != "" && wt.branch == "" {
 		wt.branch = b.initialBranch
 	}
@@ -1410,6 +1614,18 @@ func (b *Orchestrator) SetInitialBranch(name flow.BranchName) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.initialBranch = name
+}
+
+// SetDrift sets what Worktree.Drift reports on every worktree, existing and
+// future. A reading is evidence for a route election, so a test exercising the
+// behind-the-mainline route says how far behind.
+func (b *Orchestrator) SetDrift(d flow.Drift) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.drift = d
+	for _, wt := range b.worktrees {
+		wt.drift = d
+	}
 }
 
 // SetDirty makes Worktree.IsDirty report true for all existing worktrees and
@@ -1451,6 +1667,9 @@ type fakeWorktree struct {
 	// branch-specific value when set. Models the real-world fact that
 	// switching branches changes the SHA HEAD resolves to.
 	branchHeads map[string]string
+	// drift is what Drift reports — a recorded pair, since the fake has no
+	// mainline to have moved.
+	drift flow.Drift
 }
 
 func (w *fakeWorktree) Branch(ctx context.Context, name, base flow.BranchName) (bool, error) {
@@ -1494,6 +1713,11 @@ func (w *fakeWorktree) Commit(ctx context.Context, msg string) error {
 }
 
 func (w *fakeWorktree) Push(ctx context.Context) error { return nil }
+
+// Drift returns the recorded pair. A MEASUREMENT and nothing more: the fake
+// models the reading, not a repository, so a test that wants a branch behind
+// the mainline says so with SetDrift.
+func (w *fakeWorktree) Drift(ctx context.Context) (flow.Drift, error) { return w.drift, nil }
 
 // RevParse models a branch that advances only when a commit lands, so a caller
 // can tell recorded work from a no-op commit — the distinction the real

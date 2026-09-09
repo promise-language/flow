@@ -325,11 +325,9 @@ func TestBackend_TheQuestionParkClearsWhenTheAskingStepResolves(t *testing.T) {
 		t.Fatal("the needs-answer marker cleared with a question still pending")
 	}
 
-	if err := b.ResolveArtifact(t.Context(), claim.ItemRef, "plan", flow.ArtifactBody{
+	appendResult(t, b, claim.ItemRef, "plan", 1, flow.ArtifactBody{
 		Type: flow.ArtifactMarkdown, Markdown: "the plan",
-	}); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
-	}
+	})
 	item, err = b.Load(t.Context(), claim.ItemRef)
 	if err != nil {
 		t.Fatalf("Load: %v", err)

@@ -29,12 +29,12 @@ func (app *App) cmdReseed(ctx context.Context, args []string) int {
 	}
 
 	if !*force {
-		fmt.Fprintf(app.Err, "reseed: would discard artifact records, budget counters, and park state on %s\n", claim.ItemRef.Display)
+		fmt.Fprintf(app.Err, "reseed: would discard the journal, the ledger, artifact records and park state on %s\n", claim.ItemRef.Display)
 		fmt.Fprintln(app.Err, "run again with --force to proceed")
 		return 1
 	}
 
-	if err := app.Orchestrator.ResetSeed(ctx, claim.ItemRef); err != nil {
+	if err := app.Orchestrator.Reset(ctx, claim.ItemRef); err != nil {
 		if errors.Is(err, flow.ErrUnsupported) {
 			fmt.Fprintf(app.Err, "reseed: backend %q does not support reseed\n", app.Orchestrator.Name())
 			return 1
@@ -43,6 +43,6 @@ func (app *App) cmdReseed(ctx context.Context, args []string) int {
 		return 1
 	}
 
-	fmt.Fprintf(app.Out, "reseeded %s — artifact records, budget counters, and park state cleared\n", claim.ItemRef.Display)
+	fmt.Fprintf(app.Out, "reseeded %s — journal, ledger, artifact records and park state cleared\n", claim.ItemRef.Display)
 	return 0
 }

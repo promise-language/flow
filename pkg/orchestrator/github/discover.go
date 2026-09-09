@@ -26,7 +26,7 @@ import (
 // The auto-select path must never call it — List reports blocked items, and
 // widening auto-select would let a bare `resolve` pick an arbitrary open issue
 // and begin work on it.
-func (b *Orchestrator) List(ctx context.Context, scope flow.ItemScope, binary flow.BinaryName, acceptsType func(flow.ItemType) bool) ([]flow.ItemInfo, error) {
+func (b *Orchestrator) List(ctx context.Context, scope flow.ItemScope, binary flow.BinaryName, acceptsType func(flow.ItemType) bool, assumesRole func(flow.RoleName) bool) ([]flow.ItemInfo, error) {
 	issues, err := b.fetchIssuesForScope(ctx, scope)
 	if err != nil {
 		return nil, err
@@ -45,7 +45,7 @@ func (b *Orchestrator) List(ctx context.Context, scope flow.ItemScope, binary fl
 		if iss.IsPullRequest() {
 			continue // the Issues API includes PRs; skip them
 		}
-		info, err := b.itemInfoFor(ctx, iss, binary, acceptsType)
+		info, err := b.itemInfoFor(ctx, iss, binary, acceptsType, assumesRole)
 		if err != nil {
 			return nil, err
 		}
@@ -85,7 +85,7 @@ func (b *Orchestrator) List(ctx context.Context, scope flow.ItemScope, binary fl
 }
 
 // Get answers about one item through the same derivation List uses.
-func (b *Orchestrator) Get(ctx context.Context, ref flow.ItemRef, binary flow.BinaryName, acceptsType func(flow.ItemType) bool) (*flow.ItemInfo, error) {
+func (b *Orchestrator) Get(ctx context.Context, ref flow.ItemRef, binary flow.BinaryName, acceptsType func(flow.ItemType) bool, assumesRole func(flow.RoleName) bool) (*flow.ItemInfo, error) {
 	issueNum, err := b.issueNumber(ref)
 	if err != nil {
 		return nil, err
@@ -94,7 +94,7 @@ func (b *Orchestrator) Get(ctx context.Context, ref flow.ItemRef, binary flow.Bi
 	if err != nil {
 		return nil, fmt.Errorf("get issue %d: %w", issueNum, err)
 	}
-	info, err := b.itemInfoFor(ctx, iss, binary, acceptsType)
+	info, err := b.itemInfoFor(ctx, iss, binary, acceptsType, assumesRole)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +110,7 @@ func (b *Orchestrator) Get(ctx context.Context, ref flow.ItemRef, binary flow.Bi
 // a narrowing step and never the comparison: without the post-filter one --tag
 // value means two different things across `list` and `resolve`, which are meant
 // to read as symmetrical.
-func (b *Orchestrator) ListAutoSelectable(ctx context.Context, tags []flow.TagId) ([]flow.ItemRef, error) {
+func (b *Orchestrator) ListAutoSelectable(ctx context.Context, tags []flow.TagId, assumesRole func(flow.RoleName) bool) ([]flow.ItemRef, error) {
 	for _, t := range tags {
 		// Refused rather than interpolated. A TagId is spliced into the query
 		// below, where a value carrying a space does not fail — it silently
@@ -175,6 +175,17 @@ func (b *Orchestrator) ListAutoSelectable(ctx context.Context, tags []flow.TagId
 		if b.labels.UrgencyOf(lbls) == flow.UrgencyDeferred {
 			continue
 		}
+		// MUST NOT return an item whose awaited role this account cannot assume:
+		// somebody else's move is not this runner's work, and claiming it would
+		// hold work its holder cannot advance. Eligibility, not a sort key, for
+		// the same reason a blocked item is absent rather than ranked last.
+		awaits, err := b.awaitsOfIssue(ctx, issue.GetNumber(), lbls)
+		if err != nil {
+			return nil, err
+		}
+		if !roleAssumable(awaits, assumesRole) {
+			continue
+		}
 		selectable = append(selectable, keyed{
 			ref: b.refFromIssue(issue.GetNumber()),
 			key: b.selectionKeyOf(issue, lbls),
@@ -218,7 +229,7 @@ func quoteSearchTerm(s string) string {
 // itemInfoFor is the single per-item derivation. List maps it over a search,
 // Get calls it on one issue, and ListAutoSelectable uses the same blockedness
 // rule underneath.
-func (b *Orchestrator) itemInfoFor(ctx context.Context, iss *github.Issue, binary flow.BinaryName, acceptsType func(flow.ItemType) bool) (flow.ItemInfo, error) {
+func (b *Orchestrator) itemInfoFor(ctx context.Context, iss *github.Issue, binary flow.BinaryName, acceptsType func(flow.ItemType) bool, assumesRole func(flow.RoleName) bool) (flow.ItemInfo, error) {
 	lblNames := labelNamesOf(iss.Labels)
 	itemType := itemTypeFromLabels(b.labels, lblNames, b.cfg.DefaultType)
 
@@ -229,7 +240,13 @@ func (b *Orchestrator) itemInfoFor(ctx context.Context, iss *github.Issue, binar
 	blocked, kind, reason := b.blockedness(blockers, lblNames)
 	holder, _ := b.holderFromLabels(lblNames)
 
+	awaits, err := b.awaitsOfIssue(ctx, iss.GetNumber(), lblNames)
+	if err != nil {
+		return flow.ItemInfo{}, err
+	}
+
 	info := flow.ItemInfo{
+		Awaits:      awaits,
 		Ref:         b.refFromIssue(iss.GetNumber()),
 		Type:        itemType,
 		Title:       iss.GetTitle(),
@@ -247,11 +264,57 @@ func (b *Orchestrator) itemInfoFor(ctx context.Context, iss *github.Issue, binar
 		BlockReason: reason,
 		Manual:      hasLabel(lblNames, b.labels.Manual()),
 	}
-	info.Availability, err = b.availabilityOf(ctx, iss, lblNames, itemType, blocked, binary, acceptsType)
+	info.Availability, err = b.availabilityOf(ctx, iss, lblNames, itemType, blocked, awaits, binary, acceptsType, assumesRole)
 	if err != nil {
 		return flow.ItemInfo{}, err
 	}
 	return info, nil
+}
+
+// awaitsOfIssue reads the item's awaited marker: the last journal entry's, with
+// the account of record beside it.
+//
+// It reads the STATE COMMENT, which costs a fetch per item — and it skips the
+// fetch for an item this binary has not begun, whose journal is empty by
+// construction and which therefore awaits nobody. The seeded marker is what
+// says so without reading anything. #240 replaces the read outright with the
+// `flow:awaits:<…>` label it maintains, at which point this is a label scan like
+// every other rung.
+func (b *Orchestrator) awaitsOfIssue(ctx context.Context, issueNum int, lblNames []string) (flow.Awaits, error) {
+	if !hasLabel(lblNames, b.labels.Seeded()) {
+		return flow.Awaits{}, nil
+	}
+	body, stateID, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
+	if err != nil {
+		return flow.Awaits{}, err
+	}
+	if body == "" {
+		return flow.Awaits{}, nil
+	}
+	b.mu.Lock()
+	b.stateCommentCache[issueNum] = stateID
+	b.mu.Unlock()
+	doc, _, found, perr := extractStateDoc(body)
+	if perr != nil {
+		return flow.Awaits{}, fmt.Errorf("parse state comment on #%d: %w", issueNum, perr)
+	}
+	if !found {
+		return flow.Awaits{}, nil
+	}
+	return awaitsFromDoc(doc), nil
+}
+
+// roleAssumable reports whether this account may take the item's next move.
+//
+// An item awaiting nothing, awaiting a SIGNAL, or asked with no predicate is
+// assumable: an awaited signal is nobody's move — the blocked rung reports it as
+// waits-on-condition — and a nil predicate filters nothing, matching the
+// acceptsType convention.
+func roleAssumable(awaits flow.Awaits, assumesRole func(flow.RoleName) bool) bool {
+	if assumesRole == nil || awaits.Role == "" {
+		return true
+	}
+	return assumesRole(awaits.Role)
 }
 
 // fetchIssuesForScope fetches issues from the Issues API with the narrowest
@@ -292,20 +355,31 @@ func (b *Orchestrator) availabilityOf(
 	lblNames []string,
 	itemType flow.ItemType,
 	blocked bool,
+	awaits flow.Awaits,
 	binary flow.BinaryName,
 	acceptsType func(flow.ItemType) bool,
+	assumesRole func(flow.RoleName) bool,
 ) (flow.Availability, error) {
 	if iss.GetState() == "closed" {
 		return flow.AvailClosed, nil
 	}
 
 	// Level 3: processable — type acceptance, matching the normative
-	// definition of unhandled: "no flow in this binary accepts the type."
+	// definition: an item whose type is outside this binary's remit is
+	// another binary's work, not an error.
 	if acceptsType != nil && !acceptsType(itemType) {
-		return flow.AvailUnhandled, nil
+		return flow.AvailOutsideRemit, nil
 	}
 
-	// Level 4: workable — not blocked.
+	// Level 4: actionable — the awaited role is one this account can assume.
+	// Above blocked, because a blocked item is one this account WOULD act on if
+	// it could, and an `awaits` item is somebody else's move whether or not
+	// anything blocks it.
+	if !roleAssumable(awaits, assumesRole) {
+		return flow.AvailAwaits, nil
+	}
+
+	// Level 5: workable — not blocked.
 	if blocked {
 		return flow.AvailBlocked, nil
 	}
@@ -315,7 +389,7 @@ func (b *Orchestrator) availabilityOf(
 		return "", err
 	}
 
-	// Level 5: free — no OTHER ARENA holds it. The comparison is the same one
+	// Level 6: free — no OTHER ARENA holds it. The comparison is the same one
 	// Claim's preflight makes, so `list` cannot report `auto` for an item a
 	// claim would refuse — including an item another arena under this very
 	// account is running, which an account comparison reads as our own.
@@ -323,7 +397,7 @@ func (b *Orchestrator) availabilityOf(
 		return flow.AvailHeld, nil
 	}
 
-	// Level 6: auto — opted in (binary label present) AND assigned to me, and
+	// Level 7: auto — opted in (binary label present) AND assigned to me, and
 	// not deferred. Deferral is NOT a rung of its own: a deferred item is open,
 	// unblocked, free and opted in, and what is true of it is that
 	// auto-selection will not take it — exactly the boundary `available`

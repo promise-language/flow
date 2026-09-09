@@ -7,33 +7,19 @@ import (
 	"github.com/promise-language/flow"
 )
 
-// newQuestionEnv claims and seeds issue 42 — the state the ask half of
-// park-for-answer always runs in, since the mandatory-seed gate precedes any
-// handler that could ask.
+// newQuestionEnv claims issue 42 — the state the ask half of park-for-answer
+// always runs in. Nothing seeds an item any more: the ask itself brings the
+// state comment into being, which is what these tests exercise.
 func newQuestionEnv(t *testing.T) (*ghMock, *Orchestrator, flow.Claim) {
-	t.Helper()
-	return newQuestionEnvSeeded(t, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true,
-			Budget: flow.StepBudget{MaxInvocations: 3, MaxCostUSD: 10}},
-	})
-}
-
-// newQuestionEnvSeeded is newQuestionEnv with the checklist named, for a test
-// that needs a step other than the one the park is against.
-func newQuestionEnvSeeded(t *testing.T, specs []flow.ArtifactSpec) (*ghMock, *Orchestrator, flow.Claim) {
 	t.Helper()
 	mock := newGHMock(t)
 	srv := mock.server()
 	t.Cleanup(srv.Close)
 	b := newMockedOrchestrator(t, mock, srv)
 
-	ctx := t.Context()
-	claim, err := b.Claim(ctx, b.refFromIssue(42), nil)
+	claim, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
-	}
-	if err := b.SeedState(ctx, claim.ItemRef, specs); err != nil {
-		t.Fatalf("SeedState: %v", err)
 	}
 	return mock, b, claim
 }
@@ -190,48 +176,44 @@ func storedQuestions(t *testing.T, mock *ghMock) []stateQuestionDoc {
 // Once the wait ends the questions go with the park: the record is dropped
 // from the document, not merely hidden by the read gate, so nothing can
 // inherit it later.
-func TestBackend_QuestionsSurviveTheStepResolving(t *testing.T) {
+func TestBackend_QuestionsSurviveTheStepCompleting(t *testing.T) {
 	mock, b, claim := newQuestionEnv(t)
 	askOne(t, b, claim, flow.AskText("base", "which base branch?"))
 	parkOnQuestion(t, b, claim)
 
-	if err := b.ResolveArtifact(t.Context(), claim.ItemRef, "plan", flow.ArtifactBody{
-		Type: flow.ArtifactMarkdown, Markdown: "the plan",
-	}); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
-	}
+	appendMarkdown(t, b, claim.ItemRef, "plan", "the plan")
 	state, err := b.Load(t.Context(), claim.ItemRef)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if state.Parked() {
-		t.Fatalf("park = %+v, want cleared by the resolve", state.Park)
+		t.Fatalf("park = %+v, want cleared by the completion", state.Park)
 	}
 	if len(state.Questions) != 1 {
-		t.Errorf("Questions = %d after the step resolved, want the one that was asked", len(state.Questions))
+		t.Errorf("Questions = %d after the step completed, want the one that was asked", len(state.Questions))
 	}
 	if q := storedQuestions(t, mock); len(q) != 1 {
-		t.Errorf("state comment carries %d question(s) after the resolve, want 1: %+v", len(q), q)
+		t.Errorf("state comment carries %d question(s) after the entry, want 1: %+v", len(q), q)
 	}
 }
 
-// ResetSeed clears the checklist and the park that named a step in it. The
-// questions are neither: they record what was asked of a person, and a reseed
-// does not answer one.
-func TestBackend_QuestionsSurviveResetSeed(t *testing.T) {
+// Reset clears the journal, the ledger and the park that named a step. The
+// questions are none of those: they record what was asked of a person, and a
+// reset does not answer one.
+func TestBackend_QuestionsSurviveReset(t *testing.T) {
 	mock, b, claim := newQuestionEnv(t)
 	askOne(t, b, claim, flow.AskText("base", "which base branch?"))
 	parkOnQuestion(t, b, claim)
 
-	if err := b.ResetSeed(t.Context(), claim.ItemRef); err != nil {
-		t.Fatalf("ResetSeed: %v", err)
+	if err := b.Reset(t.Context(), claim.ItemRef); err != nil {
+		t.Fatalf("Reset: %v", err)
 	}
 	state, err := b.Load(t.Context(), claim.ItemRef)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(state.Questions) != 1 {
-		t.Errorf("Questions = %d after ResetSeed, want the one that was asked", len(state.Questions))
+		t.Errorf("Questions = %d after Reset, want the one that was asked", len(state.Questions))
 	}
 	if q := storedQuestions(t, mock); len(q) != 1 {
 		t.Errorf("state comment carries %d question(s) after the reset, want 1: %+v", len(q), q)
@@ -247,13 +229,13 @@ func TestBackend_QuestionsSurviveASupersedingPark(t *testing.T) {
 	parkOnQuestion(t, b, claim)
 
 	if err := b.Park(t.Context(), claim.ItemRef, flow.ParkRequest{
-		Kind: flow.ParkBudgetExhausted, Step: "plan", Axis: flow.AxisInvocations,
-		Reason: "ran 3 times without resolving \"plan\"",
+		Kind: flow.ParkTreasurerRefused, Step: "plan", Axis: flow.AxisInvocations,
+		Reason: "ran 3 times without completing \"plan\"",
 	}); err != nil {
 		t.Fatalf("Park: %v", err)
 	}
 	if q := storedQuestions(t, mock); len(q) != 1 {
-		t.Errorf("state comment carries %d question(s) under a budget park, want 1: %+v", len(q), q)
+		t.Errorf("state comment carries %d question(s) under a treasurer park, want 1: %+v", len(q), q)
 	}
 }
 
@@ -291,30 +273,21 @@ func TestBackend_AnAnsweredQuestionStopsBeingPending(t *testing.T) {
 }
 
 // The record is dropped by the step the park names, and only by that step. A
-// resolve elsewhere on the checklist leaves the question park standing, so
-// dropping the questions with it would reproduce the reported defect exactly:
-// an item parked on a question `answer` has no id to name.
-func TestBackend_QuestionsSurviveAnUnrelatedStepResolving(t *testing.T) {
-	mock, b, claim := newQuestionEnvSeeded(t, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true,
-			Budget: flow.StepBudget{MaxInvocations: 3, MaxCostUSD: 10}},
-		{Id: "impl", Type: flow.ArtifactMarkdown, Required: true,
-			Budget: flow.StepBudget{MaxInvocations: 3, MaxCostUSD: 10}},
-	})
+// completion elsewhere leaves the question park standing, so dropping the
+// questions with it would reproduce the reported defect exactly: an item parked
+// on a question `answer` has no id to name.
+func TestBackend_QuestionsSurviveAnUnrelatedStepCompleting(t *testing.T) {
+	mock, b, claim := newQuestionEnv(t)
 	asked := askOne(t, b, claim, flow.AskText("base", "which base branch?"))
 	parkOnQuestion(t, b, claim) // against "plan"
 
-	if err := b.ResolveArtifact(t.Context(), claim.ItemRef, "impl", flow.ArtifactBody{
-		Type: flow.ArtifactMarkdown, Markdown: "the code",
-	}); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
-	}
+	appendMarkdown(t, b, claim.ItemRef, "impl", "the code")
 	state, err := b.Load(t.Context(), claim.ItemRef)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if !state.Parked() {
-		t.Fatal("park cleared by a resolve of another step")
+		t.Fatal("park cleared by the completion of another step")
 	}
 	if len(state.PendingQuestions()) != 1 {
 		t.Fatalf("PendingQuestions = %d, want 1 — the park it belongs to is still standing",
@@ -414,11 +387,12 @@ func TestBackend_AskQuestionAppends(t *testing.T) {
 	}
 }
 
-// A question cannot be asked before the item is seeded — the mandatory-seed
-// gate runs first — so a missing state comment here means the record that
-// makes the question answerable was not written. That is an error, not the
-// tolerated case Park has.
-func TestBackend_AskQuestionsWithoutStateCommentFails(t *testing.T) {
+// A question is asked mid-handler, before any dispatch is counted and before
+// any entry is appended, so the first one on an item arrives at an empty
+// record. The ask BRINGS THE DOCUMENT INTO BEING rather than being refused:
+// refusing it is what would leave a question park nothing can clear, because
+// `answer --question <id>` would have no id to name.
+func TestBackend_AskQuestionOnAnItemWithNoRecordCreatesIt(t *testing.T) {
 	mock := newGHMock(t)
 	srv := mock.server()
 	defer srv.Close()
@@ -429,14 +403,33 @@ func TestBackend_AskQuestionsWithoutStateCommentFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	// Deliberately not seeded.
-	if _, err := b.AskQuestion(ctx, claim.ItemRef, flow.AskText("base", "which base branch?")); err == nil {
-		t.Fatal("AskQuestion succeeded with no state comment, want an error")
+	// Nothing has been recorded on this item at all.
+	before, err := b.Load(ctx, claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
 	}
-	// Nothing may advertise "a human must answer this" when nothing recorded
-	// the question.
-	if hasLabel(mock.labelNames(), b.labels.NeedsAnswer()) {
-		t.Errorf("labels = %v, want %q absent", mock.labelNames(), b.labels.NeedsAnswer())
+	if len(before.Journal) != 0 || len(before.Questions) != 0 {
+		t.Fatalf("pre-ask state = journal %+v questions %+v, want both empty", before.Journal, before.Questions)
+	}
+
+	asked, err := b.AskQuestion(ctx, claim.ItemRef, flow.AskText("base", "which base branch?"))
+	if err != nil {
+		t.Fatalf("AskQuestion on an item with no record: %v", err)
+	}
+	state, err := b.Load(ctx, claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.Questions) != 1 || state.Questions[0].ID != asked.ID {
+		t.Fatalf("Questions = %+v, want the one that was asked", state.Questions)
+	}
+	// The label may advertise "a human must answer this" only because the
+	// record that lets `answer` name a question now exists.
+	if !hasLabel(mock.labelNames(), b.labels.NeedsAnswer()) {
+		t.Errorf("labels = %v, want %q present", mock.labelNames(), b.labels.NeedsAnswer())
+	}
+	if q := storedQuestions(t, mock); len(q) != 1 {
+		t.Errorf("state comment carries %d question(s), want 1: %+v", len(q), q)
 	}
 }
 
@@ -456,23 +449,37 @@ func TestBackend_AskQuestionsLabelsOnlyAfterRecording(t *testing.T) {
 	tape := append([]string(nil), mock.mutations[before:]...)
 	mock.mu.Unlock()
 
-	recordedAt, labelledAt := -1, -1
+	// Stated as the contract rather than by tape position: the label is the
+	// LAST write the ask makes, so at no point does the item advertise an
+	// answer it cannot accept. Which comment write records the question — a
+	// PATCH of an existing state comment, or the POST that creates one on an
+	// item with no record — is not the subject.
+	labelledAt := -1
 	for i, m := range tape {
-		if recordedAt < 0 && strings.HasPrefix(m, "PATCH ") && strings.Contains(m, "/issues/comments/") {
-			recordedAt = i
-		}
-		if labelledAt < 0 && strings.HasPrefix(m, "POST ") && strings.HasSuffix(m, "/labels") {
+		if strings.HasPrefix(m, "POST ") && strings.HasSuffix(m, "/labels") {
 			labelledAt = i
+			break
 		}
-	}
-	if recordedAt < 0 {
-		t.Fatalf("no state-comment write on the tape: %v", tape)
 	}
 	if labelledAt < 0 {
 		t.Fatalf("no needs-answer label write on the tape: %v", tape)
 	}
-	if recordedAt > labelledAt {
-		t.Errorf("label written before the question was recorded: %v", tape)
+	for _, m := range tape[labelledAt+1:] {
+		if strings.Contains(m, "/comments") {
+			t.Errorf("a comment write follows the needs-answer label: %v", tape)
+		}
+	}
+	// And the record itself must be on the tape: a label with no comment write
+	// before it would pass the loop above vacuously.
+	var comments int
+	for _, m := range tape[:labelledAt] {
+		if strings.Contains(m, "/comments") {
+			comments++
+		}
+	}
+	// The question comment, and the state-comment write that records it.
+	if comments < 2 {
+		t.Errorf("only %d comment write(s) before the label, want the question and the record: %v", comments, tape)
 	}
 }
 

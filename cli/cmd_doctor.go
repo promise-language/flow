@@ -129,7 +129,7 @@ func (app *App) checkOrchestrator(ctx context.Context) check {
 		}
 		return check{name: name, detail: fmt.Sprintf("%s reachable and usable", app.Orchestrator.Name())}
 	}
-	if _, err := app.Orchestrator.ListAutoSelectable(ctx, nil); err != nil {
+	if _, err := app.Orchestrator.ListAutoSelectable(ctx, nil, app.assumesRole(ctx)); err != nil {
 		return check{name: name, status: checkFail,
 			detail: fmt.Sprintf("orchestrator.ListAutoSelectable failed: %s", err)}
 	}

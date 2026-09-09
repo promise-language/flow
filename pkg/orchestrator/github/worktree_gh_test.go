@@ -141,11 +141,6 @@ func TestMergeSignalTracksWhetherGhMerged(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Claim: %v", err)
 			}
-			if err := b.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
-				{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
-			}); err != nil {
-				t.Fatalf("SeedState: %v", err)
-			}
 
 			git := b.git.runner
 			b.git.runner = func(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
@@ -305,5 +300,171 @@ func TestVerifyRefusesEmptyCmd(t *testing.T) {
 	}
 	if run.Outcome != "" {
 		t.Errorf("Outcome = %q, want none — no command ran", run.Outcome)
+	}
+}
+
+// --- Drift ---
+//
+// A measurement over two real repositories, because the whole subject is what
+// git reports: a mocked runner would assert the arguments and not the counts.
+
+// driftRepo builds a bare "origin" holding a `main` branch and a clone of it,
+// and returns a worktree pointed at the clone. Every commit helper below acts
+// on one side or the other, so a test says only how the two diverged.
+func driftRepo(t *testing.T) (*worktree, *gitOps, *gitOps) {
+	t.Helper()
+	ctx := t.Context()
+
+	// The orchestrator first: it sets FLOW_DIR and owns the one gitOps the
+	// worktree reads through, so the clone is made INSIDE its worktree dir
+	// rather than substituted for it.
+	mock := newGHMock(t)
+	srv := mock.server()
+	t.Cleanup(srv.Close)
+	b := newMockedOrchestrator(t, mock, srv)
+	// REAL git: the whole subject is what git reports, and the harness's
+	// recorder would assert the arguments instead of the counts. The one gitOps
+	// stays shared with the seam — only its runner goes back to the real one.
+	b.git.runner = defaultGitRunner
+	local := b.git
+
+	upstreamDir := t.TempDir()
+	up := initTestRepoIn(t, upstreamDir)
+	// The mock repository reports `main` as its default branch, and Drift asks
+	// the orchestrator for it, so the upstream must actually carry that name.
+	if _, stderr, err := up.run(ctx, "branch", "-M", "main"); err != nil {
+		t.Fatalf("git branch -M main: %v (%s)", err, string(stderr))
+	}
+
+	if _, stderr, err := local.run(ctx, "clone", upstreamDir, "."); err != nil {
+		t.Fatalf("git clone: %v (%s)", err, string(stderr))
+	}
+	for _, args := range [][]string{
+		{"config", "user.email", "test@test"},
+		{"config", "user.name", "test"},
+	} {
+		if _, stderr, err := local.run(ctx, args...); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, string(stderr))
+		}
+	}
+	return &worktree{b: b, issueNum: 42}, local, up
+}
+
+// commitOn adds one commit to the repository, on whatever branch it is on.
+func commitOn(t *testing.T, g *gitOps, name string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(g.dir, name), []byte(name), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Commit(t.Context(), "add "+name); err != nil {
+		t.Fatalf("commit %s: %v", name, err)
+	}
+}
+
+func TestWorktreeDrift_Level(t *testing.T) {
+	wt, _, _ := driftRepo(t)
+	got, err := wt.Drift(t.Context())
+	if err != nil {
+		t.Fatalf("Drift: %v", err)
+	}
+	if got.Ahead != 0 || got.Behind != 0 {
+		t.Errorf("Drift = %+v, want (0, 0) on a fresh clone", got)
+	}
+	if !got.Level() {
+		t.Error("Level() = false on a level pair")
+	}
+	// A measurement is stamped with when it was taken: it is already stale when
+	// returned, and a reading with no time is one nobody can judge the age of.
+	if got.At.IsZero() {
+		t.Error("Drift.At is zero; a measurement carries when it was taken")
+	}
+}
+
+func TestWorktreeDrift_AheadOnly(t *testing.T) {
+	wt, local, _ := driftRepo(t)
+	commitOn(t, local, "a")
+	commitOn(t, local, "b")
+
+	got, err := wt.Drift(t.Context())
+	if err != nil {
+		t.Fatalf("Drift: %v", err)
+	}
+	if got.Ahead != 2 || got.Behind != 0 {
+		t.Errorf("Drift = %+v, want ahead 2 behind 0", got)
+	}
+	if got.Level() {
+		t.Error("Level() = true on a branch that is ahead")
+	}
+}
+
+func TestWorktreeDrift_BehindOnly(t *testing.T) {
+	wt, _, up := driftRepo(t)
+	commitOn(t, up, "upstream-1")
+	commitOn(t, up, "upstream-2")
+	commitOn(t, up, "upstream-3")
+
+	got, err := wt.Drift(t.Context())
+	if err != nil {
+		t.Fatalf("Drift: %v", err)
+	}
+	if got.Ahead != 0 || got.Behind != 3 {
+		t.Errorf("Drift = %+v, want ahead 0 behind 3", got)
+	}
+}
+
+// Both sides moved: the symmetric difference reports each side's own commits,
+// which is what tells "rebase deserves review" from "landing is mechanical".
+func TestWorktreeDrift_AheadAndBehind(t *testing.T) {
+	wt, local, up := driftRepo(t)
+	commitOn(t, local, "mine")
+	commitOn(t, up, "theirs-1")
+	commitOn(t, up, "theirs-2")
+
+	got, err := wt.Drift(t.Context())
+	if err != nil {
+		t.Fatalf("Drift: %v", err)
+	}
+	if got.Ahead != 1 || got.Behind != 2 {
+		t.Errorf("Drift = %+v, want ahead 1 behind 2", got)
+	}
+}
+
+// A base that will not resolve is an ERROR rather than a zero pair: (0, 0) means
+// the branch is level, and reporting it for a mainline that was never compared
+// against would elect the mechanical land on no evidence at all.
+func TestWorktreeDrift_UnresolvableBaseErrors(t *testing.T) {
+	wt, local, _ := driftRepo(t)
+	// The remote no longer carries the default branch the orchestrator names.
+	if _, stderr, err := local.run(t.Context(), "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone")); err != nil {
+		t.Fatalf("git remote set-url: %v (%s)", err, string(stderr))
+	}
+
+	got, err := wt.Drift(t.Context())
+	if err == nil {
+		t.Fatalf("Drift = %+v, want an error naming the base it could not resolve", got)
+	}
+	if got != (flow.Drift{}) {
+		t.Errorf("Drift returned %+v alongside its error; want the zero value", got)
+	}
+	if !strings.Contains(err.Error(), "Drift") {
+		t.Errorf("error %q does not name the measurement that failed", err)
+	}
+}
+
+// RevListLeftRight is the counting half, and it refuses a revision that will not
+// resolve for the same reason: two zeroes is a real answer.
+func TestRevListLeftRight_UnresolvableRevisionErrors(t *testing.T) {
+	t.Setenv("FLOW_DIR", t.TempDir())
+	g := initTestRepo(t)
+	if _, _, err := g.RevListLeftRight(t.Context(), "no/such/ref", "HEAD"); err == nil {
+		t.Fatal("RevListLeftRight on an unresolvable revision = nil, want an error")
+	}
+	// And it answers (0, 0) where that is the truth.
+	l, r, err := g.RevListLeftRight(t.Context(), "HEAD", "HEAD")
+	if err != nil {
+		t.Fatalf("RevListLeftRight(HEAD...HEAD): %v", err)
+	}
+	if l != 0 || r != 0 {
+		t.Errorf("RevListLeftRight(HEAD...HEAD) = (%d, %d), want (0, 0)", l, r)
 	}
 }

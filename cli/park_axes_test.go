@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -165,7 +166,7 @@ func TestNonBudgetParkReportsNoAxes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
-	if res.Park == nil || res.Park.Kind != flow.ParkStepDidNotResolve {
+	if res.Park == nil || res.Park.Kind != flow.ParkStepDidNotComplete {
 		t.Fatalf("res = %+v, want a did-not-resolve park", res)
 	}
 	if len(res.Park.Axes) != 0 {
@@ -241,13 +242,11 @@ func TestParkLineOmitsAxesWhenAbsent(t *testing.T) {
 func TestGrantAcceptsFlagForParkReportedFlatAxis(t *testing.T) {
 	env := newParkGrantEnv(t)
 	// Actually spend the cost cap, so the park below describes a real record.
-	if err := env.be.AddCost(context.Background(), env.claim.ItemRef, "plan", 10); err != nil {
-		t.Fatalf("AddCost: %v", err)
-	}
+	env.spend(t, "plan", 10)
 	// Parked on cost; prompts is flat too, and only the park knows it — the
 	// record's per-invocation counter has already reset.
 	env.park(t, flow.ParkRequest{
-		Kind: flow.ParkBudgetExhausted, Step: "plan", Axis: flow.AxisCost,
+		Kind: flow.ParkTreasurerRefused, Step: "plan", Axis: flow.AxisCost,
 		Reason: "test park",
 		Axes: []flow.AxisReport{
 			flow.NewAxisReport(flow.AxisPrompts, 1, 1),
@@ -258,14 +257,14 @@ func TestGrantAcceptsFlagForParkReportedFlatAxis(t *testing.T) {
 	if code := env.grant("--prompts", "4"); code != 0 {
 		t.Fatalf("exit = %d, want 0. stderr=%s", code, env.err.String())
 	}
-	rec := env.rec(t, "plan")
-	if rec.GrantedPromptsPerInvocation != 5 {
-		t.Errorf("GrantedPromptsPerInvocation = %d, want 5 (1 + 4)", rec.GrantedPromptsPerInvocation)
+	eff := env.budget(t, "plan")
+	if eff.MaxPromptsPerInvocation != 5 {
+		t.Errorf("MaxPromptsPerInvocation = %d, want 5 (1 policy + 4 granted)", eff.MaxPromptsPerInvocation)
 	}
 	// The parked axis is still topped up in the same grant — one write, one
 	// unpark.
-	if rec.GrantedCostUSD <= 10 {
-		t.Errorf("GrantedCostUSD = %v, want > 10", rec.GrantedCostUSD)
+	if eff.MaxCostUSD <= 10 {
+		t.Errorf("MaxCostUSD = %v, want > 10", eff.MaxCostUSD)
 	}
 }
 
@@ -273,7 +272,7 @@ func TestGrantStillRefusesFlagForAxisWithHeadroom(t *testing.T) {
 	env := newParkGrantEnv(t)
 	// Parked on cost, and the report says prompts has room to spare.
 	env.park(t, flow.ParkRequest{
-		Kind: flow.ParkBudgetExhausted, Step: "plan", Axis: flow.AxisCost,
+		Kind: flow.ParkTreasurerRefused, Step: "plan", Axis: flow.AxisCost,
 		Reason: "test park",
 		Axes: []flow.AxisReport{
 			flow.NewAxisReport(flow.AxisPrompts, 0, 1),
@@ -287,8 +286,8 @@ func TestGrantStillRefusesFlagForAxisWithHeadroom(t *testing.T) {
 	if !strings.Contains(env.err.String(), "does not apply") {
 		t.Errorf("stderr = %q, want a refusal", env.err.String())
 	}
-	if got := env.rec(t, "plan").GrantedPromptsPerInvocation; got != 1 {
-		t.Errorf("GrantedPromptsPerInvocation = %d, want 1 (a refusal must not write)", got)
+	if got := env.budget(t, "plan").MaxPromptsPerInvocation; got != 1 {
+		t.Errorf("MaxPromptsPerInvocation = %d, want 1 (a refusal must not write)", got)
 	}
 }
 
@@ -296,12 +295,113 @@ func TestGrantStillRefusesFlagForAxisWithHeadroom(t *testing.T) {
 // behaving exactly as before.
 func TestGrantUnchangedForParkWithoutAxisReport(t *testing.T) {
 	env := newParkGrantEnv(t)
-	env.park(t, budgetExhausted("plan", flow.AxisCost))
+	env.park(t, treasurerRefused("plan", flow.AxisCost))
 
 	if code := env.grant("--prompts", "4"); code != 2 {
 		t.Fatalf("exit = %d, want 2. stderr=%s", code, env.err.String())
 	}
-	if got := env.rec(t, "plan").GrantedPromptsPerInvocation; got != 1 {
-		t.Errorf("GrantedPromptsPerInvocation = %d, want 1 (unchanged)", got)
+	if got := env.budget(t, "plan").MaxPromptsPerInvocation; got != 1 {
+		t.Errorf("MaxPromptsPerInvocation = %d, want 1 (unchanged)", got)
+	}
+}
+
+// --- The exhaustion park the runner writes ---
+
+// The pre-dispatch gate parks `treasurer-refused` and reports EVERY axis, not
+// just the one that tripped: the axes go flat together, and a park naming one
+// sends the operator back for a second grant as soon as the next dispatch
+// re-parks on the next axis. The snapshot is also what flow.GrantClearsPark
+// reads the refused cap from, so a park without it can never be cleared.
+func TestRunOne_ExhaustionParkCarriesEveryAxis(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, errors.New("boom")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
+		MaxInvocations:          1,
+		MaxPromptsPerInvocation: 2,
+		MaxCostUSD:              10,
+		Timeout:                 30 * time.Minute,
+	}}
+
+	// Burn the single invocation.
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "failed" {
+		t.Fatalf("first RunOne = (%+v, %v), want failed", res, err)
+	}
+	// The next dispatch is refused before the handler runs.
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("second RunOne: %v", err)
+	}
+	if res.Status != "parked" || res.Park == nil {
+		t.Fatalf("res = %+v, want parked", res)
+	}
+	if res.Park.Kind != flow.ParkTreasurerRefused {
+		t.Errorf("Park.Kind = %q, want treasurer-refused", res.Park.Kind)
+	}
+	if res.Park.Axis != flow.AxisInvocations {
+		t.Errorf("Park.Axis = %q, want invocations", res.Park.Axis)
+	}
+	seen := map[flow.BudgetAxis]flow.AxisReport{}
+	for _, ax := range res.Park.Axes {
+		seen[ax.Axis] = ax
+	}
+	for _, want := range []flow.BudgetAxis{flow.AxisInvocations, flow.AxisPrompts, flow.AxisCost, flow.AxisTimeout} {
+		if _, ok := seen[want]; !ok {
+			t.Errorf("park axes %+v missing %q — every axis is reported, not just the one that tripped", res.Park.Axes, want)
+		}
+	}
+	if inv := seen[flow.AxisInvocations]; inv.Used != 1 || inv.Granted != 1 || !inv.Exhausted {
+		t.Errorf("invocations axis = %+v, want 1/1 exhausted", inv)
+	}
+	// The caps come from the binary's policy, which is what `grant` tops up.
+	if cost := seen[flow.AxisCost]; cost.Granted != 10 || cost.Exhausted {
+		t.Errorf("cost axis = %+v, want a cap of 10 with headroom", cost)
+	}
+	// The park is recorded, not merely reported.
+	if p := be.ParkRequest("1"); p == nil || p.Kind != flow.ParkTreasurerRefused || len(p.Axes) != 4 {
+		t.Errorf("recorded park = %+v, want the treasurer-refused park with all four axes", p)
+	}
+}
+
+// A grant on the axis that tripped clears the park; one on another axis does
+// not — the rule is flow.GrantClearsPark's, and this proves the runner's park
+// carries what that rule needs to read.
+func TestGrant_ClearsTheRunnersOwnExhaustionParkOnTheTrippingAxisOnly(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, errors.New("boom")
+		}, flow.StepConfig{})
+	}, &stubAgent{name: "stub"})
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxInvocations: 1}}
+	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+	app.Out, app.Err = out, errBuf
+
+	if _, err := RunOne(context.Background(), app, claim); err != nil {
+		t.Fatalf("first RunOne: %v", err)
+	}
+	if _, err := RunOne(context.Background(), app, claim); err != nil {
+		t.Fatalf("second RunOne: %v", err)
+	}
+	if be.ParkRequest("1") == nil {
+		t.Fatal("the item is not parked, so this test would prove nothing")
+	}
+
+	// Cost is not the parked axis: the grant lands on the row, and the park
+	// stands — granting elsewhere gives the refused axis no headroom.
+	if code := app.cmdGrant(context.Background(), []string{"plan", "--cost", "5"}); code != 0 {
+		t.Fatalf("grant --cost = %d; stderr=%q", code, errBuf.String())
+	}
+	if be.ParkRequest("1") == nil {
+		t.Fatal("park cleared by a grant on an axis the park did not name")
+	}
+
+	// The tripping axis clears it.
+	if code := app.cmdGrant(context.Background(), []string{"plan", "--invocations", "1"}); code != 0 {
+		t.Fatalf("grant --invocations = %d; stderr=%q", code, errBuf.String())
+	}
+	if p := be.ParkRequest("1"); p != nil {
+		t.Errorf("park = %+v, want cleared once invocations had headroom", p)
 	}
 }

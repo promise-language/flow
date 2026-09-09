@@ -117,7 +117,7 @@ func TestBackend_Discover_BasicScopes(t *testing.T) {
 	acceptsTask := func(t flow.ItemType) bool { return t == "task" }
 
 	// ScopeOpen: both issues visible.
-	items, err := b.List(ctx, flow.ScopeOpen, "implement", acceptsTask)
+	items, err := b.List(ctx, flow.ScopeOpen, "implement", acceptsTask, nil)
 	if err != nil {
 		t.Fatalf("List(open): %v", err)
 	}
@@ -127,7 +127,7 @@ func TestBackend_Discover_BasicScopes(t *testing.T) {
 
 	// ScopeProcessable: #42 has type:task (accepted by acceptsTask). #43 has
 	// no type:* label and DefaultType is "" → type "" is not accepted → unhandled.
-	items, err = b.List(ctx, flow.ScopeProcessable, "implement", acceptsTask)
+	items, err = b.List(ctx, flow.ScopeProcessable, "implement", acceptsTask, nil)
 	if err != nil {
 		t.Fatalf("List(processable): %v", err)
 	}
@@ -201,7 +201,7 @@ func TestBackend_Discover_UnseededAcceptedType(t *testing.T) {
 
 	acceptsTask := func(t flow.ItemType) bool { return t == "task" }
 
-	items, err := b.List(t.Context(), flow.ScopeProcessable, "implement", acceptsTask)
+	items, err := b.List(t.Context(), flow.ScopeProcessable, "implement", acceptsTask, nil)
 	if err != nil {
 		t.Fatalf("List(processable): %v", err)
 	}
@@ -264,7 +264,7 @@ func TestBackend_Discover_DefaultTypeUnseeded(t *testing.T) {
 
 	acceptsTask := func(t flow.ItemType) bool { return t == "task" }
 
-	items, err := b.List(t.Context(), flow.ScopeProcessable, "implement", acceptsTask)
+	items, err := b.List(t.Context(), flow.ScopeProcessable, "implement", acceptsTask, nil)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -301,30 +301,32 @@ func TestBackend_Discover_AvailabilityStates(t *testing.T) {
 		binaryName  string
 		acceptsType func(flow.ItemType) bool
 		itemType    flow.ItemType
+		awaits      flow.Awaits
+		assumesRole func(flow.RoleName) bool
 		want        flow.Availability
 	}{
-		{"closed issue", []string{"flow:implement"}, nil, "closed", "alice", "implement", acceptsAll, "task", flow.AvailClosed},
-		{"type not accepted = unhandled", []string{"bug"}, nil, "open", "alice", "implement", acceptsNone, "bug", flow.AvailUnhandled},
-		{"type accepted, no binary label = available", []string{"bug"}, nil, "open", "alice", "implement", acceptsAll, "bug", flow.AvailAvailable},
-		{"type accepted, no binary label, assigned = available (not auto)", []string{"bug"}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "bug", flow.AvailAvailable},
-		{"blocked label", []string{"flow:implement", "flow:blocked"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.AvailBlocked},
-		{"disabled label", []string{"flow:implement", "flow:disabled"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.AvailBlocked},
-		{"needs-answer label", []string{"flow:implement", "flow:needs-answer"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.AvailBlocked},
-		{"budget-exhausted", []string{"flow:implement", "flow:budget-exhausted:plan"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.AvailBlocked},
-		{"held by another", []string{"flow:implement", "flow:owner:bob"}, []string{"bob"}, "open", "alice", "implement", acceptsAll, "task", flow.AvailHeld},
-		{"available — not assigned", []string{"flow:implement"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.AvailAvailable},
-		{"auto — assigned, binary label present", []string{"flow:implement"}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.AvailAuto},
-		{"auto — owned+assigned by this arena", []string{"flow:implement", "flow:owner:alice", ours}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.AvailAuto},
+		{"closed issue", []string{"flow:implement"}, nil, "closed", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailClosed},
+		{"type not accepted = outside the remit", []string{"bug"}, nil, "open", "alice", "implement", acceptsNone, "bug", flow.Awaits{}, nil, flow.AvailOutsideRemit},
+		{"type accepted, no binary label = available", []string{"bug"}, nil, "open", "alice", "implement", acceptsAll, "bug", flow.Awaits{}, nil, flow.AvailAvailable},
+		{"type accepted, no binary label, assigned = available (not auto)", []string{"bug"}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "bug", flow.Awaits{}, nil, flow.AvailAvailable},
+		{"blocked label", []string{"flow:implement", "flow:blocked"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailBlocked},
+		{"disabled label", []string{"flow:implement", "flow:disabled"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailBlocked},
+		{"needs-answer label", []string{"flow:implement", "flow:needs-answer"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailBlocked},
+		{"treasurer refused", []string{"flow:implement", "flow:budget-exhausted:plan"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailBlocked},
+		{"held by another", []string{"flow:implement", "flow:owner:bob"}, []string{"bob"}, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailHeld},
+		{"available — not assigned", []string{"flow:implement"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailAvailable},
+		{"auto — assigned, binary label present", []string{"flow:implement"}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailAuto},
+		{"auto — owned+assigned by this arena", []string{"flow:implement", "flow:owner:alice", ours}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailAuto},
 		// #210: the three rows an account comparison cannot tell apart. All
 		// three carry OUR OWN login, because that is what every arena on a
 		// single-operator fleet writes; only the arena half separates them.
-		{"held by another arena on this account", []string{"flow:implement", "flow:owner:alice", theirs}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.AvailHeld},
-		{"held — owner label recording no arena", []string{"flow:implement", "flow:owner:alice"}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.AvailHeld},
+		{"held by another arena on this account", []string{"flow:implement", "flow:owner:alice", theirs}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailHeld},
+		{"held — owner label recording no arena", []string{"flow:implement", "flow:owner:alice"}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailHeld},
 		// The ladder is ordered, and level 4 sits above level 5: an item this
 		// arena cannot take because someone else holds it is still reported as
 		// blocked when it is also blocked, because blocked is what an operator
 		// has to go act on.
-		{"blocked outranks held by another arena", []string{"flow:implement", "flow:blocked", "flow:owner:alice", theirs}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.AvailBlocked},
+		{"blocked outranks held by another arena", []string{"flow:implement", "flow:blocked", "flow:owner:alice", theirs}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailBlocked},
 	}
 
 	for _, tt := range tests {
@@ -332,7 +334,7 @@ func TestBackend_Discover_AvailabilityStates(t *testing.T) {
 			iss := &gh.Issue{State: &tt.state, Assignees: ghUsers(tt.assignees)}
 			blocked, _, _ := b.blockedness(nil, tt.labels)
 			got, err := b.availabilityOf(t.Context(), iss, tt.labels, tt.itemType,
-				blocked, flow.BinaryName(tt.binaryName), tt.acceptsType)
+				blocked, tt.awaits, flow.BinaryName(tt.binaryName), tt.acceptsType, tt.assumesRole)
 			if err != nil {
 				t.Fatalf("availabilityOf: %v", err)
 			}
@@ -402,7 +404,7 @@ func TestBackend_Discover_SkipsPullRequests(t *testing.T) {
 	b := newMockedOrchestrator(t, mock, srv)
 
 	acceptsAll := func(flow.ItemType) bool { return true }
-	items, err := b.List(t.Context(), flow.ScopeOpen, "implement", acceptsAll)
+	items, err := b.List(t.Context(), flow.ScopeOpen, "implement", acceptsAll, nil)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -453,7 +455,7 @@ func TestBackend_Discover_HolderFromOwnerLabel(t *testing.T) {
 	b := newMockedOrchestrator(t, mock, srv)
 
 	acceptsAll := func(flow.ItemType) bool { return true }
-	items, err := b.List(t.Context(), flow.ScopeOpen, "implement", acceptsAll)
+	items, err := b.List(t.Context(), flow.ScopeOpen, "implement", acceptsAll, nil)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -506,7 +508,7 @@ func TestBackend_Discover_BlockReason(t *testing.T) {
 	b := newMockedOrchestrator(t, mock, srv)
 
 	acceptsAll := func(flow.ItemType) bool { return true }
-	items, err := b.List(t.Context(), flow.ScopeProcessable, "implement", acceptsAll)
+	items, err := b.List(t.Context(), flow.ScopeProcessable, "implement", acceptsAll, nil)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -639,7 +641,7 @@ func TestBackend_ListAutoSelectable_TagsMatchExactly(t *testing.T) {
 			var query string
 			b := searchingOrchestrator(t, newGHMock(t), tc.labels, &query)
 
-			refs, err := b.ListAutoSelectable(t.Context(), []flow.TagId{"priority:high"})
+			refs, err := b.ListAutoSelectable(t.Context(), []flow.TagId{"priority:high"}, nil)
 			if err != nil {
 				t.Fatalf("ListAutoSelectable: %v", err)
 			}
@@ -660,7 +662,7 @@ func TestBackend_ListAutoSelectable_QuotesTheSearchTerms(t *testing.T) {
 	var query string
 	b := searchingOrchestrator(t, newGHMock(t), []string{"flow:implement", "priority:high"}, &query)
 
-	if _, err := b.ListAutoSelectable(t.Context(), []flow.TagId{"priority:high"}); err != nil {
+	if _, err := b.ListAutoSelectable(t.Context(), []flow.TagId{"priority:high"}, nil); err != nil {
 		t.Fatalf("ListAutoSelectable: %v", err)
 	}
 	if !strings.Contains(query, `label:"priority:high"`) {
@@ -676,7 +678,7 @@ func TestBackend_ListAutoSelectable_RefusesAnInvalidTag(t *testing.T) {
 			var query string
 			b := searchingOrchestrator(t, newGHMock(t), []string{"flow:implement"}, &query)
 
-			if _, err := b.ListAutoSelectable(t.Context(), []flow.TagId{tag}); err == nil {
+			if _, err := b.ListAutoSelectable(t.Context(), []flow.TagId{tag}, nil); err == nil {
 				t.Fatalf("ListAutoSelectable accepted the invalid tag %q", string(tag))
 			}
 			if query != "" {
@@ -695,7 +697,7 @@ func TestBackend_ListAutoSelectable_OmitsBlockedItems(t *testing.T) {
 			var query string
 			b := searchingOrchestrator(t, newGHMock(t), []string{"flow:implement", blocking}, &query)
 
-			refs, err := b.ListAutoSelectable(t.Context(), nil)
+			refs, err := b.ListAutoSelectable(t.Context(), nil, nil)
 			if err != nil {
 				t.Fatalf("ListAutoSelectable: %v", err)
 			}

@@ -54,17 +54,17 @@ func requireIntegration(t *testing.T) (owner, repo string, issueNum int, ownerLo
 	return owner, repo, num, ownerLogin
 }
 
-// TestIntegration_ClaimSeedResolveCycle exercises the full Claim →
-// SeedState → ResolveArtifact → Release cycle against a real GitHub
-// repository. Cleans up after itself (Release removes the assignee + owner
-// label; the state comment is left in the issue thread).
-func TestIntegration_ClaimSeedResolveCycle(t *testing.T) {
+// TestIntegration_ClaimAppendReleaseCycle exercises the full Claim →
+// AppendEntry → Release cycle against a real GitHub repository. Cleans up after
+// itself (Release removes the assignee + owner label; the state comment is left
+// in the issue thread).
+func TestIntegration_ClaimAppendReleaseCycle(t *testing.T) {
 	owner, repo, issueNum, _ := requireIntegration(t)
 	cfg := Config{
 		Owner:      owner,
 		Repo:       repo,
 		BinaryName: "flow-integration-test",
-		// This test's subject is the claim/seed/resolve cycle against a real
+		// This test's subject is the claim/append cycle against a real
 		// sandbox repository, not the guard, and without one nothing would be
 		// published at all. What the guard refuses is asserted against the
 		// mock, where no bytes leave the machine.
@@ -95,33 +95,37 @@ func TestIntegration_ClaimSeedResolveCycle(t *testing.T) {
 		}
 	})
 
-	specs := []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
-	}
-	if err := b.SeedState(ctx, claim.ItemRef, specs); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
-
+	// Nothing seeds an item: the first entry is what brings its record into
+	// being, so the item carries no artifact at all until one is appended.
 	state, err := b.Load(ctx, claim.ItemRef)
 	if err != nil {
-		t.Fatalf("Load (post-seed): %v", err)
+		t.Fatalf("Load (pre-append): %v", err)
 	}
-	rec, ok := state.Artifacts["plan"]
-	if !ok || rec.Resolved {
-		t.Fatalf("post-seed plan = %+v, want present + unresolved", rec)
+	if rec, ok := state.Artifacts["plan"]; ok && rec.Resolved {
+		t.Fatalf("pre-append plan = %+v, want nothing recorded", rec)
+	}
+	if len(state.Journal) != 0 {
+		t.Fatalf("pre-append journal = %+v, want empty", state.Journal)
 	}
 
 	body := flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: fmt.Sprintf("Integration test plan @ %s", time.Now().Format(time.RFC3339))}
-	if err := b.ResolveArtifact(ctx, claim.ItemRef, "plan", body); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
+	if err := b.AppendEntry(ctx, claim.ItemRef, flow.JournalEntry{
+		Step: "plan", Execution: 1, Result: body,
+		Route: flow.Route{Next: "impl"}, Awaits: flow.Awaits{Role: "contributor"},
+		By: flow.AccountId(cfg.BinaryName), Role: "contributor", At: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
 	}
 
 	state, err = b.Load(ctx, claim.ItemRef)
 	if err != nil {
-		t.Fatalf("Load (post-resolve): %v", err)
+		t.Fatalf("Load (post-append): %v", err)
 	}
-	rec = state.Artifacts["plan"]
+	if len(state.Journal) != 1 || state.Journal[0].Step != "plan" {
+		t.Fatalf("post-append journal = %+v, want the one entry", state.Journal)
+	}
+	rec := state.Artifacts["plan"]
 	if !rec.Resolved || rec.Version != 1 {
-		t.Errorf("post-resolve plan = %+v, want Resolved version=1", rec)
+		t.Errorf("post-append plan = %+v, want Resolved version=1", rec)
 	}
 }

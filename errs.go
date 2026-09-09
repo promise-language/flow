@@ -37,7 +37,7 @@ var (
 //
 //	InvocationResult{Status: "parked", Park: {Kind: ParkInfraTransient, ...}}
 //
-// and SKIPS the BumpInvocations call, so a flapping runner does not burn
+// and does not count the dispatch, so a flapping runner does not burn
 // the step's invocation budget. Wrap a concrete cause with fmt.Errorf
 // using %w so callers can errors.Is against ErrTransient.
 //
@@ -54,7 +54,7 @@ var ErrTransient = errors.New("flow: transient infrastructure failure")
 //
 //	InvocationResult{Status: "parked", Park: {Kind: ParkRefused, ...}}
 //
-// and SKIPS the BumpInvocations call, so a deterministic refusal does not
+// and does not count the dispatch, so a deterministic refusal does not
 // burn the step's invocation budget. The park reason is the refusal's own
 // message, so the operator sees what was refused rather than a generic
 // "budget exhausted" after the budget drains on identical no-op retries.
@@ -69,7 +69,7 @@ var ErrRefused = errors.New("flow: deterministic refusal")
 //
 //	InvocationResult{Status: "blocked", ...}
 //
-// and SKIPS the BumpInvocations call: a full disk is a condition, not a
+// and does not count the dispatch: a full disk is a condition, not a
 // failure, and a condition that ends on its own must not consume budget.
 // No park is written — a park names a step and persists until cleared, but
 // a machine condition travels with nobody and ends the moment the machine
@@ -151,7 +151,7 @@ func (e ErrQuestion) Error() string {
 //
 //	InvocationResult{Status: "blocked", BlockKind: WaitsOnItems, BlockedBy: ...}
 //
-// and SKIPS the BumpInvocations call: the work exists elsewhere and will land,
+// and does not count the dispatch: the work exists elsewhere and will land,
 // and nobody touches this item until it does — a dispatch charged for finding
 // that out would spend the budget on a wait.
 //

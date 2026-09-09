@@ -51,7 +51,7 @@ func displaysOf[T any](items []T, display func(T) string) []string {
 func TestBackend_ListAutoSelectable_ReturnsTheSelectionOrder(t *testing.T) {
 	b := discoveringOrchestrator(t, newGHMock(t), selectionFixture(), nil)
 
-	refs, err := b.ListAutoSelectable(t.Context(), nil)
+	refs, err := b.ListAutoSelectable(t.Context(), nil, nil)
 	if err != nil {
 		t.Fatalf("ListAutoSelectable: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestBackend_ListAutoSelectable_OmitsADeferredItem(t *testing.T) {
 	})
 	b := discoveringOrchestrator(t, newGHMock(t), fixture, nil)
 
-	refs, err := b.ListAutoSelectable(t.Context(), nil)
+	refs, err := b.ListAutoSelectable(t.Context(), nil, nil)
 	if err != nil {
 		t.Fatalf("ListAutoSelectable: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestBackend_ListAutoSelectable_OmitsADeferredItem(t *testing.T) {
 	// At scope `auto` the listing IS the selectable set, so it leaves the same
 	// item out. Two answers to "what runs next" that disagreed would send an
 	// operator reading `list --scope auto` after an item no `resolve` will take.
-	auto, err := b.List(t.Context(), flow.ScopeAuto, "implement", func(flow.ItemType) bool { return true })
+	auto, err := b.List(t.Context(), flow.ScopeAuto, "implement", func(flow.ItemType) bool { return true }, nil)
 	if err != nil {
 		t.Fatalf("List(auto): %v", err)
 	}
@@ -110,7 +110,7 @@ func TestBackend_ListAutoSelectable_AMisspelledAxisLabelSortsAsTheNeutralValue(t
 	})
 	b := discoveringOrchestrator(t, newGHMock(t), fixture, nil)
 
-	refs, err := b.ListAutoSelectable(t.Context(), nil)
+	refs, err := b.ListAutoSelectable(t.Context(), nil, nil)
 	if err != nil {
 		t.Fatalf("ListAutoSelectable: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestBackend_List_OrdersScopeAutoAndLeavesWiderScopesAlone(t *testing.T) {
 	b := discoveringOrchestrator(t, newGHMock(t), selectionFixture(), nil)
 	acceptsAll := func(flow.ItemType) bool { return true }
 
-	auto, err := b.List(t.Context(), flow.ScopeAuto, "implement", acceptsAll)
+	auto, err := b.List(t.Context(), flow.ScopeAuto, "implement", acceptsAll, nil)
 	if err != nil {
 		t.Fatalf("List(auto): %v", err)
 	}
@@ -139,7 +139,7 @@ func TestBackend_List_OrdersScopeAutoAndLeavesWiderScopesAlone(t *testing.T) {
 		t.Errorf("scope auto = %v, want the selection order %v", got, selectionOrder)
 	}
 
-	wide, err := b.List(t.Context(), flow.ScopeProcessable, "implement", acceptsAll)
+	wide, err := b.List(t.Context(), flow.ScopeProcessable, "implement", acceptsAll, nil)
 	if err != nil {
 		t.Fatalf("List(processable): %v", err)
 	}
@@ -159,7 +159,7 @@ func TestBackend_ReportsTheNeutralValuesWhenNeitherLabelIsPresent(t *testing.T) 
 	_, b := editingOrchestrator(t, "flow:implement")
 	acceptsAll := func(flow.ItemType) bool { return true }
 
-	info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", acceptsAll)
+	info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", acceptsAll, nil)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestBackend_ReportsBothAxesFromTheLabels(t *testing.T) {
 	_, b := editingOrchestrator(t, "flow:implement", "flow:priority:critical", "flow:urgency:next")
 	acceptsAll := func(flow.ItemType) bool { return true }
 
-	info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", acceptsAll)
+	info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", acceptsAll, nil)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestBackend_ReadsAnUnrecognizedAxisLabelAsTheNeutralValue(t *testing.T) {
 		{"flow:implement", "flow:priority:medium", "flow:urgency:default"},
 	} {
 		_, b := editingOrchestrator(t, labels...)
-		info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", func(flow.ItemType) bool { return true })
+		info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", func(flow.ItemType) bool { return true }, nil)
 		if err != nil {
 			t.Fatalf("Get: %v", err)
 		}
@@ -228,7 +228,7 @@ func TestBackend_AnUnrecognizedAxisLabelDoesNotMaskAValidOne(t *testing.T) {
 		"flow:priority:hihg", "flow:priority:critical",
 		"flow:urgency:soon", "flow:urgency:next")
 
-	info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", func(flow.ItemType) bool { return true })
+	info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", func(flow.ItemType) bool { return true }, nil)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestBackend_ADeferredItemReportsAvailableNotAuto(t *testing.T) {
 	acceptsAll := func(flow.ItemType) bool { return true }
 
 	b := assignedOrchestrator("flow:implement", "flow:urgency:deferred")
-	info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", acceptsAll)
+	info, err := b.Get(t.Context(), b.refFromIssue(42), "implement", acceptsAll, nil)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestBackend_ADeferredItemReportsAvailableNotAuto(t *testing.T) {
 	// The same item without the label reaches auto, so the assertion above is
 	// about deferral and not about the fixture failing some other boundary.
 	b2 := assignedOrchestrator("flow:implement")
-	opted, err := b2.Get(t.Context(), b2.refFromIssue(42), "implement", acceptsAll)
+	opted, err := b2.Get(t.Context(), b2.refFromIssue(42), "implement", acceptsAll, nil)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

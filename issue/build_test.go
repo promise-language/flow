@@ -245,7 +245,7 @@ func (b *buildTestBackend) SupportedArtifacts() []flow.ArtifactDef {
 		flow.Artifact("merge-commit", flow.ArtifactCommitHash),
 	}
 }
-func (b *buildTestBackend) ListAutoSelectable(context.Context, []flow.TagId) ([]flow.ItemRef, error) {
+func (b *buildTestBackend) ListAutoSelectable(context.Context, []flow.TagId, func(flow.RoleName) bool) ([]flow.ItemRef, error) {
 	return nil, nil
 }
 func (b *buildTestBackend) Claim(context.Context, flow.ItemRef, []flow.ClaimOverride) (flow.Claim, error) {
@@ -261,29 +261,26 @@ func (b *buildTestBackend) LookupActiveClaim(context.Context) (*flow.Claim, erro
 func (b *buildTestBackend) Load(context.Context, flow.ItemRef) (*flow.Item, error) {
 	return nil, nil
 }
-func (b *buildTestBackend) SeedState(context.Context, flow.ItemRef, []flow.ArtifactSpec) error {
+func (b *buildTestBackend) Reset(context.Context, flow.ItemRef) error { return nil }
+func (b *buildTestBackend) AppendEntry(context.Context, flow.ItemRef, flow.JournalEntry) error {
 	return nil
 }
-func (b *buildTestBackend) ResetSeed(context.Context, flow.ItemRef) error { return nil }
-func (b *buildTestBackend) ResolveArtifact(context.Context, flow.ItemRef, flow.ArtifactId, flow.ArtifactBody) error {
+func (b *buildTestBackend) RecordDispatch(context.Context, flow.ItemRef, flow.StepId) error {
 	return nil
 }
-func (b *buildTestBackend) MarkStale(context.Context, flow.ItemRef, flow.ArtifactId) error {
+func (b *buildTestBackend) RecordResumption(context.Context, flow.ItemRef, flow.StepId) error {
 	return nil
 }
-func (b *buildTestBackend) BumpInvocations(context.Context, flow.ItemRef, flow.ArtifactId) error {
+func (b *buildTestBackend) AddCost(context.Context, flow.ItemRef, flow.StepId, float64) error {
 	return nil
 }
-func (b *buildTestBackend) BumpPrompts(context.Context, flow.ItemRef, flow.ArtifactId) error {
+func (b *buildTestBackend) AddDuration(context.Context, flow.ItemRef, flow.StepId, time.Duration) error {
 	return nil
 }
-func (b *buildTestBackend) AddCost(context.Context, flow.ItemRef, flow.ArtifactId, float64) error {
+func (b *buildTestBackend) AddWaiting(context.Context, flow.ItemRef, flow.StepId, time.Duration) error {
 	return nil
 }
-func (b *buildTestBackend) AddDuration(context.Context, flow.ItemRef, flow.ArtifactId, time.Duration) error {
-	return nil
-}
-func (b *buildTestBackend) Grant(context.Context, flow.ItemRef, flow.ArtifactId, flow.Grant) error {
+func (b *buildTestBackend) Grant(context.Context, flow.ItemRef, flow.StepId, flow.Grant) error {
 	return nil
 }
 func (b *buildTestBackend) Park(context.Context, flow.ItemRef, flow.ParkRequest) error { return nil }
@@ -309,11 +306,13 @@ func (b *buildTestBackend) ClearWorkInProgress(context.Context, flow.ItemRef, fl
 func (b *buildTestBackend) PostAnswer(context.Context, flow.ItemRef, flow.QuestionId, string) error {
 	return flow.ErrUnsupported
 }
-func (b *buildTestBackend) Finalize(context.Context, flow.ItemRef) error { return nil }
-func (b *buildTestBackend) Get(context.Context, flow.ItemRef, flow.BinaryName, func(flow.ItemType) bool) (*flow.ItemInfo, error) {
+func (b *buildTestBackend) Finalize(context.Context, flow.ItemRef, flow.Disposition) error {
+	return nil
+}
+func (b *buildTestBackend) Get(context.Context, flow.ItemRef, flow.BinaryName, func(flow.ItemType) bool, func(flow.RoleName) bool) (*flow.ItemInfo, error) {
 	return nil, flow.ErrUnsupported
 }
-func (b *buildTestBackend) List(context.Context, flow.ItemScope, flow.BinaryName, func(flow.ItemType) bool) ([]flow.ItemInfo, error) {
+func (b *buildTestBackend) List(context.Context, flow.ItemScope, flow.BinaryName, func(flow.ItemType) bool, func(flow.RoleName) bool) ([]flow.ItemInfo, error) {
 	return nil, nil
 }
 func (b *buildTestBackend) Edit(context.Context, flow.ItemRef) (flow.ItemEditor, error) {

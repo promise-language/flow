@@ -1,6 +1,7 @@
 package flow
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -300,5 +301,105 @@ func TestAccountForRole_EmptyJournal(t *testing.T) {
 	it := &Item{Journal: []JournalEntry{{Step: "plan", By: "ann"}}}
 	if got := it.AccountForRole(""); got != "" {
 		t.Errorf("AccountForRole(\"\") = %q, want empty", got)
+	}
+}
+
+// --- AwaitsAfter ---
+//
+// The awaited marker is the one value on an entry the SDK computes, because the
+// step-to-role mapping is the flow's and an orchestrator holds no flow. These
+// cases pin the three answers a route can have.
+
+func TestAwaitsAfter_RoleSuccessorAwaitsThatRole(t *testing.T) {
+	f := journalFlow(t)
+	got := f.AwaitsAfter(Route{Next: "impl"})
+	if got.Role != "contributor" {
+		t.Errorf("AwaitsAfter(->impl).Role = %q, want contributor", got.Role)
+	}
+	if got.Signal != "" {
+		t.Errorf("AwaitsAfter(->impl).Signal = %q, want empty — a role step is nobody's signal", got.Signal)
+	}
+	// Never set here: the entry records a decision, and who holds the role is
+	// read from the journal (AccountForRole).
+	if got.Account != "" {
+		t.Errorf("AwaitsAfter(->impl).Account = %q, want empty", got.Account)
+	}
+}
+
+func TestAwaitsAfter_SignalWaitSuccessorAwaitsTheSignal(t *testing.T) {
+	f := journalFlow(t)
+	got := f.AwaitsAfter(Route{Next: "pr-merged"})
+	if got.Signal != "pr-merged" {
+		t.Errorf("AwaitsAfter(->pr-merged).Signal = %q, want pr-merged", got.Signal)
+	}
+	// A wait belongs to no role: nobody's move is not somebody else's.
+	if got.Role != "" {
+		t.Errorf("AwaitsAfter(->pr-merged).Role = %q, want empty", got.Role)
+	}
+	if got.Empty() {
+		t.Error("AwaitsAfter(->pr-merged).Empty() = true, want false — the item awaits the signal")
+	}
+}
+
+// A signal STEP is not a signal wait: it has a handler and a role, and the item
+// awaits whoever runs it.
+func TestAwaitsAfter_SignalStepAwaitsItsRole(t *testing.T) {
+	f := journalFlow(t)
+	got := f.AwaitsAfter(Route{Next: "pr-open"})
+	if got.Role != "contributor" || got.Signal != "" {
+		t.Errorf("AwaitsAfter(->pr-open) = %+v, want role=contributor with no signal", got)
+	}
+}
+
+func TestAwaitsAfter_FinalizingRouteAwaitsNobody(t *testing.T) {
+	f := journalFlow(t)
+	got := f.AwaitsAfter(Route{Finalize: DispositionRejected})
+	if !got.Empty() {
+		t.Errorf("AwaitsAfter(finalize) = %+v, want the zero value — a finished flow awaits nobody", got)
+	}
+}
+
+// A route naming nothing registered awaits nothing. Position refuses that route
+// loudly, which is where the defect is reported; answering with a role invented
+// for an id that names nothing would be worse than answering empty.
+func TestAwaitsAfter_UnknownSuccessorAwaitsNobody(t *testing.T) {
+	f := journalFlow(t)
+	if got := f.AwaitsAfter(Route{Next: "no-such-step"}); !got.Empty() {
+		t.Errorf("AwaitsAfter(->no-such-step) = %+v, want the zero value", got)
+	}
+}
+
+// --- LedgerRow ---
+
+func TestLedgerRow_GrantedOnSumsPerAxis(t *testing.T) {
+	row := LedgerRow{Step: "plan", Granted: []GrantRecord{
+		{Axis: AxisInvocations, Amount: 2},
+		{Axis: AxisCost, Amount: 5.50},
+		{Axis: AxisInvocations, Amount: 3},
+	}}
+	if got := row.GrantedOn(AxisInvocations); got != 5 {
+		t.Errorf("GrantedOn(invocations) = %v, want 5 (2+3)", got)
+	}
+	if got := row.GrantedOn(AxisCost); got != 5.50 {
+		t.Errorf("GrantedOn(cost) = %v, want 5.50", got)
+	}
+	// No extension is an extension of nothing, not an unknown.
+	if got := row.GrantedOn(AxisTimeout); got != 0 {
+		t.Errorf("GrantedOn(timeout) = %v, want 0 — nothing was granted on it", got)
+	}
+}
+
+func TestLedger_RowOfAnUndispatchedStepIsZero(t *testing.T) {
+	l := Ledger{Steps: map[StepId]LedgerRow{"plan": {Step: "plan", Dispatches: 2}}}
+	if got := l.Row("impl"); !reflect.DeepEqual(got, LedgerRow{}) {
+		t.Errorf("Row(impl) = %+v, want the zero row — it has never been dispatched", got)
+	}
+	if got := l.Row("plan").Dispatches; got != 2 {
+		t.Errorf("Row(plan).Dispatches = %d, want 2", got)
+	}
+	// The nil map answers the same way rather than panicking: a ledger nobody
+	// has written to is a ledger in which nothing has been spent.
+	if got := (Ledger{}).Row("plan"); !reflect.DeepEqual(got, LedgerRow{}) {
+		t.Errorf("Row on a nil ledger = %+v, want the zero row", got)
 	}
 }

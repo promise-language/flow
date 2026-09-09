@@ -64,6 +64,35 @@ type Spend struct {
 	Duration time.Duration
 }
 
+// Awaits is what an item awaits: a role, or the signal a pending wait is held
+// on, plus that role's account of record.
+//
+// ONE TYPE FOR BOTH READERS. A JournalEntry sets Role OR Signal — the successor
+// the election named — and leaves Account empty: the entry records a decision,
+// and who holds the role is read from the journal, not written into it
+// (docs/resolution.md § Whose move it is). Item and ItemInfo carry the same
+// pair with Account filled in, because a caller asking "whose move is it" needs
+// the account as well as the role. A second type would be the same three fields
+// with one of them conventionally unset, and nothing could check which.
+//
+// The zero value means "awaits nobody": an unstarted item, or a finalized one.
+type Awaits struct {
+	// Role is the successor step's declared role. Empty on a signal wait.
+	Role RoleName
+	// Signal is the wait's signal, set only when the successor is a pure
+	// AwaitSignal. An awaited signal reports the item blocked
+	// (waits-on-condition), never `awaits`: nobody's move is not somebody
+	// else's (docs/orchestrator.md § `ItemInfo`).
+	Signal SignalId
+	// Account is the role's account of record — the By of the last entry
+	// appended in that role (Item.AccountForRole). Empty on a JournalEntry,
+	// and empty on an item whose awaited role has not acted yet.
+	Account AccountId
+}
+
+// Empty reports whether the item awaits nothing at all.
+func (a Awaits) Empty() bool { return a.Role == "" && a.Signal == "" }
+
 // JournalEntry is one completed step execution.
 //
 // An execution spans from the first dispatch of the pending step, across any
@@ -77,13 +106,10 @@ type Spend struct {
 // field (docs/github-schema.md § Journal entries) exists because a wire reader
 // has no flow; it is derived at write time.
 //
-// Nor does it carry the AWAITED marker yet — the successor's role, or the
-// signal when the successor is a wait (docs/orchestrator.md § Writing
-// payloads). That one is not derivable by its reader: the orchestrator has no
-// flow, so the SDK must hand it the value for the `flow:awaits:<…>` label it
-// maintains. It lands with the write path that needs it, AppendEntry (#239);
-// here, where the entry is only read back, there is nothing to compute it from
-// and nothing that would read it.
+// It DOES carry the awaited marker, and that one the SDK computes: the
+// orchestrator has no flow, so the step-to-role mapping is not derivable by its
+// reader (docs/orchestrator.md § Writing payloads). Flow.AwaitsAfter is the one
+// place it is derived from a route.
 type JournalEntry struct {
 	// Step is the step's result id — a step's identity everywhere.
 	Step StepId
@@ -97,6 +123,12 @@ type JournalEntry struct {
 	// Route is the election: the successor, or finalization with its
 	// disposition.
 	Route Route
+	// Awaits is what the item awaits once this entry lands — the successor's
+	// declared role, or the signal when the successor is a wait. The zero value
+	// on a finalizing entry. Computed by the SDK (Flow.AwaitsAfter) because the
+	// orchestrator has no flow to derive it from, and it is what the awaited
+	// marker an orchestrator maintains is written from.
+	Awaits Awaits
 	// Message is why the successor is being run, from the step that decided —
 	// or, on a finalizing entry, the closing reasons.
 	Message string
@@ -149,3 +181,72 @@ func (i *Item) AccountForRole(role RoleName) AccountId {
 	}
 	return ""
 }
+
+// GrantRecord is one operator extension recorded against a step: which axis it
+// raised, by how much, and when. Amount is in the axis's own unit — whole
+// counts for invocations and prompts, dollars for cost, SECONDS for timeout —
+// as float64 so one field covers all four, the way AxisReport does.
+//
+// The extensions are kept as a list rather than folded into a running cap
+// because the cap is not the orchestrator's to know: it is the binary's policy
+// plus these (EffectiveBudget), and an orchestrator that stored a total would
+// be storing a number it could not recompute.
+type GrantRecord struct {
+	Axis   BudgetAxis
+	Amount float64
+	At     time.Time
+}
+
+// LedgerRow is the treasurer's durable record for one step
+// (docs/github-schema.md § Ledger). Keyed by StepId, because the result a step
+// produces is that step's identity and it is the only name `grant` accepts —
+// which is what gives a signal step a row too.
+//
+// ACTIVE AND WAITING ARE SEPARATE. Time blocked on a declared exclusion is
+// evidence about contention, not about the work, so it never lands in Active
+// (docs/resolution.md § The treasurer).
+type LedgerRow struct {
+	Step StepId
+	// Dispatches counts every dispatch of this step, attempts that did not
+	// complete included. Resumptions counts the times a park on it was resumed.
+	Dispatches  int
+	Resumptions int
+	CostUSD     float64
+	// Active is time spent doing work; Waiting is time blocked on a declared
+	// exclusion, reported by the party that held the wait.
+	Active  time.Duration
+	Waiting time.Duration
+	// Granted is every extension recorded against this step, in the order they
+	// were granted.
+	Granted []GrantRecord
+	// LastRunAt is when the last dispatch started.
+	LastRunAt time.Time
+}
+
+// GrantedOn sums the extensions recorded on one axis, in that axis's own unit.
+// The zero value for an axis nothing was granted on, which is the honest
+// reading: no extension is an extension of nothing.
+func (r LedgerRow) GrantedOn(axis BudgetAxis) float64 {
+	var total float64
+	for _, g := range r.Granted {
+		if g.Axis == axis {
+			total += g.Amount
+		}
+	}
+	return total
+}
+
+// Ledger is the treasurer's record whole: a row per step, and the item-level
+// totals. Load returns it; nothing in the SDK writes it except through the
+// ledger methods on Orchestrator.
+type Ledger struct {
+	Steps        map[StepId]LedgerRow
+	TotalCostUSD float64
+	TotalActive  time.Duration
+	TotalWaiting time.Duration
+}
+
+// Row returns the ledger row for a step, or the zero row when the step has none
+// — a step that has never been dispatched has spent nothing, which is what the
+// zero row says.
+func (l Ledger) Row(step StepId) LedgerRow { return l.Steps[step] }
