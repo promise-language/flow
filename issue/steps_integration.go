@@ -36,7 +36,17 @@ func (b *builder) stepVerifyMerge(ctx flow.StepCtx) (flow.StepResult, error) {
 		return flow.StepResult{}, err
 	}
 
-	ctx.Notify("", "this binary carries through to merge — this is not independent review")
+	// The caveat belongs to the ARRANGEMENT, not to the step. It was
+	// unconditional while these steps existed only in a carry-through
+	// composition; on the one graph an independent maintainer reaches them too,
+	// and telling that operator their review is not independent is false in the
+	// direction that matters. What carrying through does not provide — "a single
+	// principal reviewing their own agent's work is not independent review" —
+	// is said by the binary that is doing it (docs/resolution-standalone.md
+	// § Declaring what a binary may do).
+	if b.cfg.CarryThrough {
+		ctx.Notify("", "this binary carries through to merge — this is not independent review")
+	}
 
 	// Prepare the merge result so the gate measures what will actually land
 	// rather than the branch in isolation. These are direct calls now: the two

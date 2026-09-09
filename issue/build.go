@@ -18,15 +18,16 @@ import (
 // integrate. That matters because the alternative is discovering a
 // misconfiguration partway through a claimed item.
 //
-// What a step set cannot PERFORM is a different question and is refused at
-// dispatch, by a gate: a binary whose account backs no role, or whose role's
-// steps do not exist yet, still answers `list`, `status`, `grant`, `answer` and
-// `doctor` — the commands an operator reaches for precisely then.
+// What this binary may not PERFORM is a different question and is refused at
+// dispatch, by a gate: a binary whose account backs no role, or whose coverage
+// does not reach the step the route stands on, still answers `list`, `status`,
+// `grant`, `answer` and `doctor` — the commands an operator reaches for
+// precisely then.
 //
 // One caveat worth stating plainly: when Config.Role is UNSET, BuildApp makes a
 // live call to detect it, and BuildApp runs before every command — so on an
 // expired token `doctor` cannot start to tell you the token expired. Role has
-// to be known here because it selects the step set and cli.App's flow list is
+// to be known here because it fixes this binary's coverage, and cli.App is
 // fixed once built. Set Config.Role to remove the call entirely; base branch
 // and principal are already lazy and cost nothing at startup.
 func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
@@ -41,11 +42,12 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 			"it is what a producing step works with, and what the prompts tell the agent to satisfy")
 	}
 
-	// Role decides which step set is registered, and cli.App's flow list is
-	// fixed once built, so it has to be known here. With Config.Role set that
-	// costs nothing; otherwise it is one probe. Base branch and principal
-	// resolve lazily on the steps that need them, so a binary configured with
-	// an explicit Role starts — and `doctor` runs — with no network at all.
+	// Role decides which of the one graph's steps this binary may perform, and
+	// cli.App is fixed once built, so it has to be known here. With Config.Role
+	// set that costs nothing; otherwise it is one probe. Base branch and
+	// principal resolve lazily on the steps that need them, so a binary
+	// configured with an explicit Role starts — and `doctor` runs — with no
+	// network at all.
 	// A typo'd prompt key is invisible at run time: PromptID is a string type,
 	// so `issue.PromptID("implementaion")` compiles, misses every lookup, and
 	// the step silently runs on the generic library default. The project's

@@ -3,6 +3,7 @@ package issue
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -173,16 +174,41 @@ func TestStepVerifyMerge_GatePassesMergeResultAccepted(t *testing.T) {
 	if idx != len(want) {
 		t.Errorf("calls = %v, want subsequence %v", wt.fakeWorktree.calls, want)
 	}
-	// The carry-through caveat should have been notified.
-	found := false
-	for _, n := range ctx.notices {
-		if n == "this binary carries through to merge — this is not independent review" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("carry-through caveat not notified; notices = %v", ctx.notices)
+}
+
+// carryThroughCaveat is the sentence a binary covering both sides owes the
+// operator before it reviews its own proposal.
+const carryThroughCaveat = "this binary carries through to merge — this is not independent review"
+
+// It is said by the binary that is carrying through, and only by that one. On
+// the one graph these steps are also an independent maintainer's, and the same
+// sentence there tells a genuinely independent reviewer the opposite of the
+// truth — which is the direction that matters, because it is what someone would
+// act on.
+func TestStepVerifyMerge_TheCarryThroughCaveatIsSaidOnlyWhenItIsTrue(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		carryThrough bool
+		want         bool
+	}{
+		{"carrying through", true, true},
+		{"an independent maintainer", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wt := newIntegrationWorktree()
+			wt.envelope = []byte(`{"coverage": 95}`)
+			wt.thresholds = []byte(`{"coverage": 80}`)
+			ctx := newIntegrationCtx(wt)
+
+			b := testBuilder(t)
+			b.cfg.CarryThrough = tc.carryThrough
+			if _, err := b.stepVerifyMerge(ctx); err != nil {
+				t.Fatalf("stepVerifyMerge: %v", err)
+			}
+			if got := slices.Contains(ctx.notices, carryThroughCaveat); got != tc.want {
+				t.Errorf("caveat notified = %t, want %t; notices = %v", got, tc.want, ctx.notices)
+			}
+		})
 	}
 }
 
