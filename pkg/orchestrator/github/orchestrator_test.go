@@ -722,10 +722,6 @@ func ghCommentJSON(c ghMockComment) map[string]any {
 	}
 }
 
-// newMockedOrchestrator wires a Orchestrator at the mock server. Uses Test mode (no
-// real network), no real gh CLI. Sets FLOW_DIR to a tempdir so Orchestrator.Claim
-// (which now writes .flow/active.json via pkg/clistate) doesn't pollute
-// the package directory.
 // activeJSONPath is clistate.ActiveJSONPath with its error turned into a test
 // failure. The tests calling it are about what the lease file says; that the
 // state directory can be located at all is FLOW_DIR's business, and every one
@@ -739,6 +735,10 @@ func activeJSONPath(t *testing.T) string {
 	return p
 }
 
+// newMockedOrchestrator wires a Orchestrator at the mock server. Uses Test mode (no
+// real network), no real gh CLI. Sets FLOW_DIR to a tempdir so Orchestrator.Claim
+// (which now writes .flow/active.json via pkg/clistate) doesn't pollute
+// the package directory.
 func newMockedOrchestrator(t *testing.T, mock *ghMock, srv *httptest.Server) *Orchestrator {
 	t.Helper()
 	t.Setenv("FLOW_DIR", t.TempDir())

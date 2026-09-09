@@ -132,3 +132,45 @@ func TestNewKeepsAnAbsoluteWorktreeDir(t *testing.T) {
 		t.Errorf("ArenaId = %q, want the worktree %q", got, dir)
 	}
 }
+
+// ONE WORKTREE IS ONE ARENA, however it was spelled. The ArenaId is the
+// worktree path compared by string equality — the fingerprint on the item is a
+// digest of it — so "/w/repo/", "/w/./repo" and "/w/repo" must not be three
+// arenas. That is the same "one checkout, two arenas" error #286 reports,
+// arriving through a spelling rather than through a cwd: the exclusion that
+// keeps one item to one arena would not fire, and two runs would proceed on the
+// same item.
+//
+// filepath.Abs down in arena() used to normalize this incidentally. Removing it
+// (rightly — it was also what turned "." into the operator's cwd) took the
+// normalization with it, so it belongs here, where the location is decided.
+func TestResolveWorktreeDirCanonicalizesOneWorktreeToOneArena(t *testing.T) {
+	const want = "/w/repo"
+	for _, spelling := range []string{"/w/repo", "/w/repo/", "/w/./repo", "/w/sibling/../repo", "/w//repo"} {
+		got, err := resolveWorktreeDir(spelling)
+		if err != nil {
+			t.Fatalf("resolveWorktreeDir(%q): %v", spelling, err)
+		}
+		if got != want {
+			t.Errorf("resolveWorktreeDir(%q) = %q, want %q — one worktree spelled two ways is two arenas",
+				spelling, got, want)
+		}
+	}
+
+	// And the identity that reaches the item follows: one fingerprint, not one
+	// per spelling.
+	trailing := (&Orchestrator{cfg: Config{WorktreeDir: mustResolveWorktree(t, "/w/repo/")}}).arenaFingerprint()
+	bare := (&Orchestrator{cfg: Config{WorktreeDir: mustResolveWorktree(t, "/w/repo")}}).arenaFingerprint()
+	if trailing != bare {
+		t.Errorf("flow:arena fingerprints differ (%s vs %s) for one worktree spelled two ways", trailing, bare)
+	}
+}
+
+func mustResolveWorktree(t *testing.T, dir string) string {
+	t.Helper()
+	got, err := resolveWorktreeDir(dir)
+	if err != nil {
+		t.Fatalf("resolveWorktreeDir(%q): %v", dir, err)
+	}
+	return got
+}

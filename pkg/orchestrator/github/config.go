@@ -111,13 +111,20 @@ func (c Config) withDefaults() Config {
 
 // resolveWorktreeDir turns the configured worktree into the absolute path every
 // consumer of the field inherits: empty derives it from the binary's own
-// location, absolute passes through, relative is refused.
+// location, absolute is cleaned and kept, relative is refused.
 //
 // filepath.Abs is deliberately NOT applied to an explicit relative value.
 // Resolving one would re-import the process working directory through the back
 // door — the caller would have configured a path and got wherever the operator
 // stood — which is the ambient dependency this whole field exists to be free
 // of. A caller that means a directory says which one.
+//
+// CLEANED, because this value IS the ArenaId: "/w/repo/" and "/w/repo" are one
+// worktree, and an identity compared by string equality would make them two
+// arenas with two flow:arena:<fingerprint> labels — the same "one checkout, two
+// arenas" error #286 reports, arriving through a spelling instead of a cwd.
+// filepath.Abs used to normalize incidentally, down in arena(); the one place a
+// location is decided is where that has to happen now.
 func resolveWorktreeDir(dir string) (string, error) {
 	if dir == "" {
 		root, err := flow.DeriveArenaRoot()
@@ -131,7 +138,7 @@ func resolveWorktreeDir(dir string) (string, error) {
 			"github orchestrator: Config.WorktreeDir %q is relative — it must be an absolute "+
 				"path, or empty to derive the checkout this binary lives in", dir)
 	}
-	return dir, nil
+	return filepath.Clean(dir), nil
 }
 
 // validate returns an error if Config is missing fields NewBackend couldn't
