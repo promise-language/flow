@@ -1,6 +1,7 @@
 package github
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -180,6 +181,161 @@ func TestBackend_AppendEntry_RefusesAnEntryNamingNoStep(t *testing.T) {
 	err := b.AppendEntry(t.Context(), claim.ItemRef, flow.JournalEntry{Execution: 1})
 	if err == nil {
 		t.Fatal("AppendEntry with no step = nil, want a refusal")
+	}
+}
+
+// The draft ends where the result begins, inside the one write. It matters
+// beyond hygiene under the journal: a route can return to a step it already
+// completed, and a draft left from the earlier execution would reach that
+// dispatch's agent as its own prior thinking.
+func TestBackend_AppendEntry_ClearsTheStepsDraft(t *testing.T) {
+	_, b, claim := newJournalEnv(t)
+	ctx := t.Context()
+
+	if err := b.SaveWorkInProgress(ctx, claim.ItemRef, "plan", "half a plan"); err != nil {
+		t.Fatalf("SaveWorkInProgress: %v", err)
+	}
+	if err := b.SaveWorkInProgress(ctx, claim.ItemRef, "review", "half a review"); err != nil {
+		t.Fatalf("SaveWorkInProgress: %v", err)
+	}
+
+	appendMarkdown(t, b, claim.ItemRef, "plan", "the plan")
+
+	if got, err := b.LoadWorkInProgress(ctx, claim.ItemRef, "plan"); err != nil || got != "" {
+		t.Errorf("draft after the step completed = (%q, %v), want empty", got, err)
+	}
+	// Only this step's. Another step's draft is its own scaffolding and is not
+	// finished by this one completing.
+	if got, _ := b.LoadWorkInProgress(ctx, claim.ItemRef, "review"); got != "half a review" {
+		t.Errorf("another step's draft = %q, want it untouched", got)
+	}
+}
+
+// A refused append leaves the draft alone: the caller stashes what was refused
+// there and parks, so clearing it would discard the very text the resume needs.
+func TestBackend_AppendEntry_RefusedAppendKeepsTheDraft(t *testing.T) {
+	_, b, claim := newJournalEnv(t)
+	ctx := t.Context()
+
+	if err := b.SaveWorkInProgress(ctx, claim.ItemRef, "plan", "half a plan"); err != nil {
+		t.Fatalf("SaveWorkInProgress: %v", err)
+	}
+	if err := b.AppendEntry(ctx, claim.ItemRef,
+		resultEntry("plan", 1, flow.ArtifactBody{Type: flow.ArtifactMarkdown})); err == nil {
+		t.Fatal("AppendEntry with an empty body = nil, want a refusal")
+	}
+	if got, _ := b.LoadWorkInProgress(ctx, claim.ItemRef, "plan"); got != "half a plan" {
+		t.Errorf("draft after a refused append = %q, want it kept", got)
+	}
+}
+
+// commentCount is how many comments stand on the issue. The refusal tests read
+// it before and after: every refusal lands BEFORE the publish, so a refused
+// append leaves no comment for a step whose route was never recorded.
+func commentCount(mock *ghMock) int {
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	return len(mock.comments)
+}
+
+// This orchestrator stores the bytes, so it is the party that must verify them:
+// an empty body has no out-of-band content to stand for, and is refused naming
+// what is missing (docs/orchestrator.md § What an orchestrator may refuse).
+func TestBackend_AppendEntry_RefusesAnEmptyBody(t *testing.T) {
+	mock, b, claim := newJournalEnv(t)
+	before := commentCount(mock)
+
+	// One case per shape, each under a step whose DECLARED type it matches (or
+	// none), so what is being refused is the emptiness and not the type.
+	for _, tc := range []struct {
+		step flow.StepId
+		body flow.ArtifactBody
+	}{
+		{"plan", flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "  \n\t "}},
+		{"implementation", flow.ArtifactBody{Type: flow.ArtifactCommitHash}},
+		{"inspection", flow.ArtifactBody{Type: flow.ArtifactJSON}},
+		{"spilled-file", flow.ArtifactBody{Type: flow.ArtifactFile, File: flow.FileBody{Name: "notes.txt"}}},
+		{"spilled-patch", flow.ArtifactBody{Type: flow.ArtifactPatch}},
+	} {
+		err := b.AppendEntry(t.Context(), claim.ItemRef, resultEntry(tc.step, 1, tc.body))
+		if err == nil {
+			t.Errorf("AppendEntry with an empty %s body = nil, want a refusal", tc.body.Type)
+		}
+	}
+	if got := commentCount(mock); got != before {
+		t.Errorf("a refused append published %d comment(s); every refusal comes before the publish", got-before)
+	}
+	if doc := storedDocOrNil(mock); doc != nil && len(doc.Journal) != 0 {
+		t.Errorf("a refused append journaled %d entries, want 0", len(doc.Journal))
+	}
+
+	// A FLAG is never empty: it has no payload at all, and the fact of the
+	// write is the whole record.
+	appendResult(t, b, claim.ItemRef, "branch-closed", 1, flow.ArtifactBody{Type: flow.ArtifactFlag})
+}
+
+// The body's shape against the schema this orchestrator declares. Startup
+// validation answers for the flow's DECLARATION; this answers for the value
+// actually recorded, which a declaration cannot.
+func TestBackend_AppendEntry_RefusesADeclaredIdRecordedWithAnotherType(t *testing.T) {
+	mock, b, claim := newJournalEnv(t)
+	before := commentCount(mock)
+
+	// `plan` is declared markdown.
+	err := b.AppendEntry(t.Context(), claim.ItemRef, resultEntry("plan", 1, flow.ArtifactBody{
+		Type: flow.ArtifactCommitHash, CommitHash: "0123456789abcdef0123456789abcdef01234567",
+	}))
+	var mismatch flow.ErrTypeMismatch
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("AppendEntry = %v, want ErrTypeMismatch", err)
+	}
+	if mismatch.Expected != flow.ArtifactMarkdown || mismatch.Got != flow.ArtifactCommitHash {
+		t.Errorf("mismatch = %+v, want markdown expected / commit-hash got", mismatch)
+	}
+	if got := commentCount(mock); got != before {
+		t.Errorf("a refused append published %d comment(s), want none", got-before)
+	}
+
+	// A step id the schema does not declare has no declared type to disagree
+	// with, so it is recorded as given — which is what lets this orchestrator
+	// carry the file and patch shapes it declares no artifact for.
+	appendResult(t, b, claim.ItemRef, "spilled-file", 1, flow.ArtifactBody{
+		Type: flow.ArtifactFile,
+		File: flow.FileBody{Name: "notes.txt", Content: []byte("bytes")},
+	})
+}
+
+// Holding the lease is a precondition the ORCHESTRATOR checks, not a value the
+// caller supplies. An arena that lost the item to an `already-held` takeover
+// would otherwise keep journaling under revoked authority.
+func TestBackend_AppendEntry_RefusesAnUnclaimedItem(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	t.Cleanup(srv.Close)
+	b := newMockedOrchestrator(t, mock, srv)
+
+	before := commentCount(mock)
+	err := b.AppendEntry(t.Context(), b.refFromIssue(42),
+		resultEntry("plan", 1, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"}))
+	if !errors.Is(err, flow.ErrUnavailable) {
+		t.Fatalf("AppendEntry on an unclaimed item = %v, want ErrUnavailable", err)
+	}
+	if got := commentCount(mock); got != before {
+		t.Errorf("a refused append published %d comment(s), want none", got-before)
+	}
+	if doc := storedDocOrNil(mock); doc != nil && len(doc.Journal) != 0 {
+		t.Error("a refused append brought a state document into being")
+	}
+}
+
+// The arena holding another item is not the arena for this one: one arena holds
+// at most one claim, and an append addresses the item it names.
+func TestBackend_AppendEntry_RefusesAnItemThisArenaDoesNotHold(t *testing.T) {
+	_, b, _ := newJournalEnv(t) // claims #42
+	err := b.AppendEntry(t.Context(), b.refFromIssue(43),
+		resultEntry("plan", 1, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"}))
+	if !errors.Is(err, flow.ErrUnavailable) {
+		t.Fatalf("AppendEntry on an item this arena does not hold = %v, want ErrUnavailable", err)
 	}
 }
 

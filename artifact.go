@@ -102,6 +102,35 @@ type ArtifactBody struct {
 	Patch      PatchBody
 }
 
+// Empty reports whether the body carries no content of its own.
+//
+// ONE DEFINITION, because more than one orchestrator has to apply it: an
+// AppendEntry whose orchestrator STORES THE BYTES must refuse an empty body,
+// and two spellings of "empty" would mean the same entry is legal against one
+// store and refused by another (docs/orchestrator.md § What an orchestrator may
+// refuse).
+//
+// A FLAG is never empty: it has no payload at all, and the fact of the write is
+// the whole record. A body naming no type is empty — there is nothing it could
+// be carrying.
+func (b ArtifactBody) Empty() bool {
+	switch b.Type {
+	case ArtifactFlag:
+		return false
+	case ArtifactCommitHash:
+		return strings.TrimSpace(b.CommitHash) == ""
+	case ArtifactMarkdown:
+		return strings.TrimSpace(b.Markdown) == ""
+	case ArtifactJSON:
+		return len(b.JSON) == 0
+	case ArtifactFile:
+		return len(b.File.Content) == 0
+	case ArtifactPatch:
+		return len(b.Patch.Diff) == 0
+	}
+	return true
+}
+
 // ArtifactRecord — the orchestrator's projection of the journal's latest result
 // per artifact: the value, and where it came from.
 //

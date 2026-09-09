@@ -41,6 +41,10 @@ var errNoStateComment = errors.New("no state comment")
 //
 // The state comment is CREATED when the item has none. Nothing seeds an item any
 // more, so the first entry is what brings its record into being.
+//
+// EVERY REFUSAL COMES BEFORE THE PUBLISH. An append that is going to be refused
+// must not first post a comment for a step whose route is never recorded — the
+// one thing the single write exists to prevent.
 func (b *Orchestrator) AppendEntry(ctx context.Context, ref flow.ItemRef, entry flow.JournalEntry) error {
 	issueNum, err := b.issueNumber(ref)
 	if err != nil {
@@ -52,6 +56,36 @@ func (b *Orchestrator) AppendEntry(ctx context.Context, ref flow.ItemRef, entry 
 	}
 	if entry.Step == "" {
 		return errors.New("github: journal entry names no step")
+	}
+	// Holding the lease is a PRECONDITION THE ORCHESTRATOR CHECKS, not a value
+	// the caller supplies (docs/orchestrator.md § What an orchestrator may
+	// refuse). It is the whole of what a claim protects on the write path: an
+	// arena that lost the item to an `already-held` takeover would otherwise
+	// keep journaling under revoked authority, and its entry would route the
+	// item out from under the arena that now holds it.
+	if err := b.requireOwnClaim(ctx, ref, "AppendEntry"); err != nil {
+		return err
+	}
+	// This orchestrator STORES THE BYTES — a comment, or a file on the orphan
+	// branch — so it has no somewhere-else in which to verify that the content
+	// an empty body stands for exists. An empty body is therefore refused, named
+	// (docs/orchestrator.md § What an orchestrator may refuse). Accepting one
+	// would post an empty artifact comment and journal the step as completed,
+	// which reads as a result nobody produced.
+	//
+	// A zero Result.Type is a signal step or a wait: its result IS the
+	// observation, and there is no body to be empty.
+	if entry.Result.Type != 0 && entry.Result.Empty() {
+		return fmt.Errorf(
+			"github: step %q completed with an empty %s body and this orchestrator stores the bytes itself — "+
+				"there is no out-of-band content for it to stand for",
+			entry.Step, entry.Result.Type)
+	}
+	// The body's shape against the schema this orchestrator declares. Startup
+	// validation covers the flow's DECLARATION; this covers the value actually
+	// recorded, which is the half a declaration cannot answer for.
+	if err := checkDeclaredArtifactType(entry); err != nil {
+		return err
 	}
 
 	// Publish the payload, if the entry carries one. Version is the entry's own
@@ -97,6 +131,17 @@ func (b *Orchestrator) AppendEntry(ctx context.Context, ref flow.ItemRef, entry 
 	}); err != nil {
 		return err
 	}
+	// The step has a result now, so its scaffolding is done: THE DRAFT ENDS
+	// WHERE THE RESULT BEGINS, which is why it is cleared inside this write and
+	// nowhere else (docs/step-handler.md § Drafts). It matters beyond hygiene
+	// under the journal: a route can return to a step it has already completed,
+	// and a draft left from the earlier execution would reach that dispatch's
+	// agent as its own prior thinking.
+	//
+	// AFTER the entry has landed, and best-effort. Clearing first would discard
+	// what a refused append has to stash; failing here would report a failure
+	// for work that is recorded, and send the caller back to append it twice.
+	_ = b.ClearWorkInProgress(ctx, ref, entry.Step)
 	b.removeParkLabel(ctx, ref, clearedLabel)
 	if firstEntry {
 		// The markers that say this binary has begun on the item. They used to
@@ -109,6 +154,32 @@ func (b *Orchestrator) AppendEntry(ctx context.Context, ref flow.ItemRef, entry 
 			b.labels.Seeded(),
 			b.labels.Binary(b.cfg.BinaryName),
 		})
+	}
+	return nil
+}
+
+// checkDeclaredArtifactType refuses a recorded body whose type is not the one
+// this orchestrator's schema declares for that step's artifact id.
+//
+// A step id outside the schema is not checked: SupportedArtifacts is the set a
+// FLOW's declaration is validated against at startup, and an id nothing
+// declared has no declared type to disagree with.
+func checkDeclaredArtifactType(entry flow.JournalEntry) error {
+	if entry.Result.Type == 0 {
+		return nil
+	}
+	for _, def := range githubSupportedArtifacts {
+		if def.Id != flow.ArtifactId(entry.Step) {
+			continue
+		}
+		if def.Type != entry.Result.Type {
+			return flow.ErrTypeMismatch{
+				Step:     string(entry.Step),
+				Expected: def.Type,
+				Got:      entry.Result.Type,
+			}
+		}
+		return nil
 	}
 	return nil
 }
@@ -259,7 +330,15 @@ func (b *Orchestrator) Reset(ctx context.Context, ref flow.ItemRef) error {
 	}
 	// Drafts are worktree-local and go whether or not a state comment exists:
 	// scratch prose kept past the record it belonged to has nothing to resume.
-	if derr := clistate.ClearItemWork(strconv.Itoa(issueNum)); derr != nil {
+	//
+	// Keyed through workItemKey, the same function the writes use: a second
+	// spelling of the key would clear a directory nothing stores records in, and
+	// nothing would report that it had.
+	workItem, err := b.workItemKey(ref)
+	if err != nil {
+		return err
+	}
+	if derr := clistate.ClearItemWork(workItem); derr != nil {
 		return fmt.Errorf("github.Reset: clear drafts for #%d: %w", issueNum, derr)
 	}
 	if body == "" || stateID == 0 {

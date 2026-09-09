@@ -900,7 +900,10 @@ func driveAResolution(t *testing.T, b *Orchestrator, tape *spawnTape) (prURL flo
 	// resolution — the test constructs a worktree directly, and Open checks
 	// that CurrentBranch returns the claim branch.
 	tape.setBranch(b.claimBranch(42))
-	appendResult(t, b, claim.ItemRef, "plan", 1, flow.ArtifactBody{
+	// An id OUTSIDE the curated schema, because no declared artifact carries a
+	// file body and AppendEntry refuses a declared id recorded with the wrong
+	// type. What this drive needs is the spill route, not a particular step.
+	appendResult(t, b, claim.ItemRef, "spilled-file", 1, flow.ArtifactBody{
 		Type: flow.ArtifactFile,
 		File: flow.FileBody{Name: "notes.txt", Content: []byte("the spilled bytes")},
 	})
@@ -1254,7 +1257,9 @@ func TestArtifactPathCarriesTheAgentFilename(t *testing.T) {
 	const filename = "an-agent-chose-this.txt"
 	resolve := func(content string) {
 		t.Helper()
-		appendResult(t, b, claim.ItemRef, "plan", 1, flow.ArtifactBody{
+		// Outside the curated schema: no declared artifact carries a file body,
+		// and a declared id recorded with another type is refused.
+		appendResult(t, b, claim.ItemRef, "spilled-file", 1, flow.ArtifactBody{
 			Type: flow.ArtifactFile,
 			File: flow.FileBody{Name: filename, Content: []byte(content)},
 		})

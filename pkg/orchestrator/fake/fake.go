@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -1174,7 +1173,7 @@ func (b *Orchestrator) AppendEntry(ctx context.Context, ref flow.ItemRef, entry 
 	}
 	// A zero Result.Type is a signal step or a wait: its result IS the
 	// observation, and there is no body to be empty.
-	if entry.Result.Type != 0 && artifactBodyEmpty(entry.Result) {
+	if entry.Result.Type != 0 && entry.Result.Empty() {
 		return fmt.Errorf(
 			"fake: step %q completed with an empty %s body and this orchestrator stores the bytes itself — "+
 				"there is no out-of-band content for it to stand for",
@@ -1235,27 +1234,6 @@ func (b *Orchestrator) projectArtifact(rec *itemRecord, entry flow.JournalEntry)
 	}
 	art.Version = entry.Execution
 	art.ResolvedBy = string(entry.By)
-}
-
-// artifactBodyEmpty reports whether a body carries no content of its own. A
-// FLAG is never empty: it has no payload at all, and the fact of the write is
-// the record.
-func artifactBodyEmpty(body flow.ArtifactBody) bool {
-	switch body.Type {
-	case flow.ArtifactFlag:
-		return false
-	case flow.ArtifactCommitHash:
-		return strings.TrimSpace(body.CommitHash) == ""
-	case flow.ArtifactMarkdown:
-		return strings.TrimSpace(body.Markdown) == ""
-	case flow.ArtifactJSON:
-		return len(body.JSON) == 0
-	case flow.ArtifactFile:
-		return len(body.File.Content) == 0
-	case flow.ArtifactPatch:
-		return len(body.Patch.Diff) == 0
-	}
-	return true
 }
 
 func (b *Orchestrator) RecordDispatch(ctx context.Context, ref flow.ItemRef, step flow.StepId) error {

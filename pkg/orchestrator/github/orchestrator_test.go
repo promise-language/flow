@@ -1107,10 +1107,12 @@ func TestBackend_ResolvePatchArtifactSpills(t *testing.T) {
 		Type:  flow.ArtifactPatch,
 		Patch: flow.PatchBody{Diff: patch, BaseSHA: "abc1234", BaseBranch: "main"},
 	}
-	appendResult(t, b, claim.ItemRef, "implementation", 1, body)
+	// An id outside the curated schema: no declared artifact carries a patch
+	// body, and AppendEntry refuses a declared id recorded with another type.
+	appendResult(t, b, claim.ItemRef, "spilled-patch", 1, body)
 
 	mock.mu.Lock()
-	_, ok := mock.orphanFiles[artifactFilePath(42, "implementation", "patch.diff")]
+	_, ok := mock.orphanFiles[artifactFilePath(42, "spilled-patch", "patch.diff")]
 	mock.mu.Unlock()
 	if !ok {
 		t.Errorf("patch.diff was not committed to orphan branch")
