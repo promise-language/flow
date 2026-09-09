@@ -3,7 +3,7 @@ package flow
 import "time"
 
 // StepBudget is the resolved set of caps for one step, computed by combining
-// StepConfig values with package defaults.
+// the binary's cap policy with the package defaults.
 type StepBudget struct {
 	MaxInvocations          int
 	MaxPromptsPerInvocation int
@@ -37,9 +37,15 @@ var defaultStepBudget = StepBudget{
 // inspection / tests.
 func DefaultStepBudget() StepBudget { return defaultStepBudget }
 
-// resolveBudget overlays any opt-set axes onto the package defaults. Unset
-// fields in `over` (zero value) leave the default in place.
-func resolveBudget(over StepBudget) StepBudget {
+// ResolveStepBudget overlays any set axes onto the package defaults. Unset
+// fields in `over` (zero value) leave the default in place, so the zero
+// StepBudget resolves to the defaults whole.
+//
+// Exported because the caps are no longer part of a step's declaration: they
+// are the binary's policy (cli.App.StepBudgets today, the treasurer's once it
+// lands), so the resolution has to happen wherever that policy is read rather
+// than only inside this package.
+func ResolveStepBudget(over StepBudget) StepBudget {
 	out := defaultStepBudget
 	if over.MaxInvocations != 0 {
 		out.MaxInvocations = over.MaxInvocations

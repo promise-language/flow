@@ -331,11 +331,12 @@ func TestCmdStatus_InspectsById(t *testing.T) {
 	f := flow.NewFlow("implement", []flow.ItemType{"task"})
 	f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 		return ctx.ResolveMarkdown("the plan")
-	}, flow.StepConfig{Budget: flow.StepBudget{
+	}, flow.StepConfig{})
+	app.Flows = []*flow.Flow{f}
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations: 3, MaxPromptsPerInvocation: 1, MaxCostUSD: 10,
 		Timeout: 30 * time.Minute,
-	}})
-	app.Flows = []*flow.Flow{f}
+	}}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}

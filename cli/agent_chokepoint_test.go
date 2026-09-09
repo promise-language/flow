@@ -71,8 +71,11 @@ func TestStepHandler_StillReachesTheRealAgent(t *testing.T) {
 		f.AddStep("spend", "plan", func(ctx flow.StepCtx) error {
 			_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "real work"})
 			return err
-		}, flow.StepConfig{Budget: flow.StepBudget{MaxInvocations: 1, MaxPromptsPerInvocation: 1}})
+		}, flow.StepConfig{})
 	}, agent)
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{
+		"plan": {MaxInvocations: 1, MaxPromptsPerInvocation: 1},
+	}
 
 	if _, err := RunOne(context.Background(), app, claim); err != nil {
 		t.Fatalf("RunOne: %v", err)

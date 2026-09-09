@@ -11,16 +11,16 @@ import (
 )
 
 func TestResolveBudget_OverlaysOnDefaults(t *testing.T) {
-	got := resolveBudget(StepBudget{MaxInvocations: 7})
+	got := ResolveStepBudget(StepBudget{MaxInvocations: 7})
 	want := DefaultStepBudget()
 	want.MaxInvocations = 7
 	if got != want {
-		t.Errorf("resolveBudget(MaxInvocations=7) = %+v, want %+v", got, want)
+		t.Errorf("ResolveStepBudget(MaxInvocations=7) = %+v, want %+v", got, want)
 	}
 }
 
 func TestResolveBudget_PartialOverlay(t *testing.T) {
-	got := resolveBudget(StepBudget{
+	got := ResolveStepBudget(StepBudget{
 		MaxPromptsPerInvocation: 5,
 		Timeout:                 10 * time.Minute,
 	})
@@ -40,8 +40,8 @@ func TestResolveBudget_PartialOverlay(t *testing.T) {
 }
 
 func TestResolveBudget_EmptyMatchesDefault(t *testing.T) {
-	if resolveBudget(StepBudget{}) != DefaultStepBudget() {
-		t.Errorf("resolveBudget(zero) should equal DefaultStepBudget()")
+	if ResolveStepBudget(StepBudget{}) != DefaultStepBudget() {
+		t.Errorf("ResolveStepBudget(zero) should equal DefaultStepBudget()")
 	}
 }
 

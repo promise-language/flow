@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/promise-language/flow"
+	"github.com/promise-language/flow/cli"
+	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
 
 // ---------------------------------------------------------------------------
@@ -110,6 +112,63 @@ func TestCarryThroughFlowComposition(t *testing.T) {
 		if items[i].Name != want {
 			t.Errorf("step %d = %q, want %q", i, items[i].Name, want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The maintainer stand-in refuses before it seeds.
+// ---------------------------------------------------------------------------
+
+// A maintainer-capability binary without carry-through has no step set, and
+// what it must NOT do is seed the item on its way to saying so.
+//
+// Seeding is one-shot. An item checklisted with the `review-maint` artifact
+// would never re-seed, so an admin who ran this once and then set
+// Config.Role to contributor would find an item carrying none of the
+// contributor artifacts, with every step dead on "artifact not seeded" and no
+// way back short of hand-editing the state comment.
+//
+// The verdict is `blocked`, not `failed`: nothing failed, and no later cycle
+// passes until a person sets Config.Role.
+func TestMaintainerStandInBlocksWithoutSeeding(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "test#1"})
+
+	app, err := BuildApp(context.Background(), Config{
+		BinaryName: "test",
+		VerifyCmd:  []string{"bin/verify"},
+		Role:       RoleMaintainer,
+		BaseBranch: "main",
+	}, Deps{Orchestrator: be, Agent: &scriptedAgent{}})
+	if err != nil {
+		t.Fatalf("BuildApp: %v", err)
+	}
+
+	ctx := context.Background()
+	claim, err := be.Claim(ctx, be.Ref("1"), nil)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+
+	res, err := cli.RunOne(ctx, &app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusBlocked) {
+		t.Errorf("status = %q, want %q; res = %+v", res.Status, flow.StatusBlocked, res)
+	}
+	if !strings.Contains(res.Reason, missingMaintainerSteps) {
+		t.Errorf("reason = %q, want it to carry %q", res.Reason, missingMaintainerSteps)
+	}
+
+	state, err := be.Load(ctx, be.Ref("1"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.Artifacts) != 0 {
+		t.Errorf("item was seeded with %d artifact record(s) %v — seeding is one-shot, "+
+			"so this permanently checklists the issue for a step set that does not exist",
+			len(state.Artifacts), state.Artifacts)
 	}
 }
 

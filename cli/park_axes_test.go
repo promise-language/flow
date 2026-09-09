@@ -33,13 +33,14 @@ func TestParkReportsEveryAxis(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) error {
 			return errors.New("boom")
-		}, flow.StepConfig{Budget: flow.StepBudget{
-			MaxInvocations:          1,
-			MaxPromptsPerInvocation: 2,
-			MaxCostUSD:              10,
-			Timeout:                 30 * time.Minute,
-		}})
+		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
+		MaxInvocations:          1,
+		MaxPromptsPerInvocation: 2,
+		MaxCostUSD:              10,
+		Timeout:                 30 * time.Minute,
+	}}
 
 	// Burn the only invocation, then park on it.
 	if _, err := RunOne(context.Background(), app, claim); err != nil {
@@ -90,11 +91,12 @@ func TestTimeoutParkReportsInvocationsAsFlat(t *testing.T) {
 		f.AddStep("slow", "plan", func(ctx flow.StepCtx) error {
 			<-ctx.Context().Done()
 			return ctx.Context().Err()
-		}, flow.StepConfig{Budget: flow.StepBudget{
-			MaxInvocations: 1,
-			Timeout:        50 * time.Millisecond,
-		}})
+		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
+		MaxInvocations: 1,
+		Timeout:        50 * time.Millisecond,
+	}}
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -128,13 +130,14 @@ func TestParkReportsPromptsSpentByTheRun(t *testing.T) {
 				}
 			}
 			return nil
-		}, flow.StepConfig{Budget: flow.StepBudget{
-			MaxInvocations:          3,
-			MaxPromptsPerInvocation: 2,
-			MaxCostUSD:              10,
-			Timeout:                 time.Minute,
-		}})
+		}, flow.StepConfig{})
 	}, agent)
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
+		MaxInvocations:          3,
+		MaxPromptsPerInvocation: 2,
+		MaxCostUSD:              10,
+		Timeout:                 time.Minute,
+	}}
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {

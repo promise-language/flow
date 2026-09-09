@@ -1310,25 +1310,6 @@ func TestClosesRefUsesGitHubSyntax(t *testing.T) {
 	}
 }
 
-// The maintainer stand-in must not SEED the item. Seeding is one-shot, so a
-// required maintainer artifact would permanently checklist the issue with a
-// step set that does not exist — and switching to the contributor role
-// afterwards would never re-seed, leaving every step dead on "not seeded".
-func TestMaintainerStandInDoesNotSeed(t *testing.T) {
-	app, err := BuildApp(context.Background(), Config{
-		Role: RoleMaintainer, BaseBranch: "main", VerifyCmd: []string{"true"},
-	}, Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
-	if err != nil {
-		t.Fatalf("BuildApp: %v", err)
-	}
-	for _, spec := range app.Flows[0].SeedSpec(nil) {
-		if spec.Required {
-			t.Errorf("stand-in seeds required artifact %q — this permanently "+
-				"checklists the issue for a step set that does not exist", spec.Id)
-		}
-	}
-}
-
 // A misspelled prompt key compiles (PromptID is a string type) and would
 // silently fall back to the generic library default — running the one thing
 // this package exists to let a project replace.

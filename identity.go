@@ -68,6 +68,18 @@ type ArenaId string
 // not this.
 type StepId string
 
+// RoleName is one declared role: the standing a runner must hold to perform a
+// step (docs/flow-registration.md § Roles). Every step is tagged with exactly
+// one; signal waits belong to no role.
+//
+// The vocabulary is OPEN — a flow names whatever roles its work needs, and the
+// SDK knows none of them. What is closed is the flow's own declared set, which
+// every step's tag is matched against at startup: a tag outside it is a typo
+// that would otherwise match nothing at runtime and silently make the step
+// nobody's move. That check arrives with the declaration surface for roles;
+// this type is the name it will check.
+type RoleName string
+
 // QuestionId names one asked question. Assigned by the orchestrator in
 // AskQuestion and returned on the persisted Question; opaque to the SDK.
 //

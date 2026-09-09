@@ -359,13 +359,14 @@ func TestCmdRun_BudgetParkNarratesAxes(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) error {
 			return errors.New("boom")
-		}, flow.StepConfig{Budget: flow.StepBudget{
-			MaxInvocations:          1,
-			MaxPromptsPerInvocation: 2,
-			MaxCostUSD:              10,
-			Timeout:                 30 * time.Minute,
-		}})
+		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
+		MaxInvocations:          1,
+		MaxPromptsPerInvocation: 2,
+		MaxCostUSD:              10,
+		Timeout:                 30 * time.Minute,
+	}}
 
 	// Burn the only invocation.
 	res1, err := RunOne(context.Background(), app, claim)

@@ -155,3 +155,54 @@ func TestAllPrioritiesAndUrgencies_ExhaustiveAgainstAST(t *testing.T) {
 		t.Errorf("AllUrgencies() contains duplicates: %v", flow.AllUrgencies())
 	}
 }
+
+// The four vocabularies this file guards for the step-model amendment. Same
+// AST check as the ones above, and load-bearing for the same reason the
+// selection axes are: each of these has a DEFINED ZERO — StepConfig.normalized
+// maps the empty string onto the loosest member — so a member declared without
+// joining its enumerator would not fail to compile. It would simply never be
+// Valid(), and every registration naming it would panic as though it were a
+// typo.
+func TestStepModelEnums_ExhaustiveAgainstAST(t *testing.T) {
+	cases := []struct {
+		file    string
+		typ     string
+		members []string // the enumerator's values, as strings
+	}{
+		{"wire.go", "Disposition", stringsOf(flow.AllDispositions())},
+		{"step.go", "CaptureSource", stringsOf(flow.AllCaptureSources())},
+		{"step.go", "NeedsState", stringsOf(flow.AllNeedsStates())},
+		{"step.go", "LeavesState", stringsOf(flow.AllLeavesStates())},
+	}
+	for _, tc := range cases {
+		t.Run(tc.typ, func(t *testing.T) {
+			declared := constNamesOfType(t, tc.file, tc.typ)
+			if len(declared) == 0 {
+				t.Fatalf("found no %s constants in %s; the parse is wrong, not the code", tc.typ, tc.file)
+			}
+			if len(tc.members) != len(declared) {
+				t.Fatalf("All%ss() returns %d members, but %s declares %d %s constants: %v",
+					tc.typ, len(tc.members), tc.file, len(declared), tc.typ, declared)
+			}
+			// A duplicate keeps the count right while pushing another member
+			// out — the same silent hole the count is meant to catch.
+			seen := map[string]bool{}
+			for _, m := range tc.members {
+				if seen[m] {
+					t.Errorf("All%ss() contains %q twice: %v", tc.typ, m, tc.members)
+				}
+				seen[m] = true
+			}
+		})
+	}
+}
+
+// stringsOf renders any enumerator of a string-kinded vocabulary as plain
+// strings, so one table can hold four of them.
+func stringsOf[T ~string](members []T) []string {
+	out := make([]string, len(members))
+	for i, m := range members {
+		out[i] = string(m)
+	}
+	return out
+}

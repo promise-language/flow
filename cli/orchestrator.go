@@ -193,7 +193,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// NEVER runs a step against an unseeded item, and there is no fallback.
 	// This binds step-selection to the seed instead of the compiled-in step
 	// list. (Signal-only flows declare no required artifacts and are exempt.)
-	seedSpecs := f.SeedSpec(app.artifactById)
+	seedSpecs := f.SeedSpec(app.artifactById, app.StepBudgets)
 	requiresSeed := false
 	for _, s := range seedSpecs {
 		if s.Required {
@@ -254,7 +254,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 				Kind:   flow.ParkBudgetExhausted,
 				Step:   li.Result(),
 				Axis:   flow.AxisInvocations,
-				Axes:   axisReports(art, effectiveTimeout(li, art), art.PromptsThisInvocation, 0),
+				Axes:   axisReports(art, app.effectiveTimeout(li, art), art.PromptsThisInvocation, 0),
 				Reason: fmt.Sprintf("ran %d times without resolving %q", art.Invocations, li.ArtifactId),
 			})
 		}
@@ -263,7 +263,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 				Kind:   flow.ParkBudgetExhausted,
 				Step:   li.Result(),
 				Axis:   flow.AxisCost,
-				Axes:   axisReports(art, effectiveTimeout(li, art), art.PromptsThisInvocation, 0),
+				Axes:   axisReports(art, app.effectiveTimeout(li, art), art.PromptsThisInvocation, 0),
 				Reason: fmt.Sprintf("spent $%.2f without resolving %q", art.CostUSDSpent, li.ArtifactId),
 			})
 		}
@@ -275,7 +275,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// to the step's compiled-in budget and then the package default. A signal
 	// step owns no record yet, so Artifact returns the zero record and the
 	// flow definition applies.
-	timeout := effectiveTimeout(li, art)
+	timeout := app.effectiveTimeout(li, art)
 	stepCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -555,18 +555,15 @@ func translateHandlerError(
 }
 
 // effectiveTimeout resolves a step's per-run deadline: the granted timeout
-// from the record wins when set (`grant --timeout` raises it), then the step's
-// compiled-in budget, then the package default. Shared by the dispatch
-// deadline and the park-time axis snapshot so the two can never disagree about
-// what the cap actually was.
-func effectiveTimeout(li flow.LifecycleItem, rec flow.ArtifactRecord) time.Duration {
+// from the record wins when set (`grant --timeout` raises it), then the
+// binary's policy for the step, which already falls back to the package
+// default. Shared by the dispatch deadline and the park-time axis snapshot so
+// the two can never disagree about what the cap actually was.
+func (app *App) effectiveTimeout(li flow.LifecycleItem, rec flow.ArtifactRecord) time.Duration {
 	if rec.GrantedTimeout > 0 {
 		return rec.GrantedTimeout
 	}
-	if li.Budget.Timeout > 0 {
-		return li.Budget.Timeout
-	}
-	return flow.DefaultStepBudget().Timeout
+	return app.stepBudget(li.Result()).Timeout
 }
 
 // axisReports snapshots all four budget axes for a budget park.
