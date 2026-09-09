@@ -49,11 +49,11 @@ func TestWorkInProgress_BackendWithoutAStore(t *testing.T) {
 		saveErr error
 	)
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			gotBody, gotErr = ctx.WorkInProgress()
 			saveErr = ctx.RecordWorkInProgress("half a plan")
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Orchestrator = noWorkBackend{app.Orchestrator}
 
@@ -82,22 +82,22 @@ func TestWorkInProgress_SurvivesToTheNextDispatch(t *testing.T) {
 		dispatches     int
 	)
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			dispatches++
 			seen, err := ctx.WorkInProgress()
 			if err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			if dispatches == 1 {
 				if err := ctx.RecordWorkInProgress("what I worked out"); err != nil {
-					return err
+					return flow.StepResult{}, err
 				}
 				sameInvocation, _ = ctx.WorkInProgress()
-				return ctx.Park(flow.ParkRequest{Kind: flow.ParkBlocked, Reason: "stopping here to test the next dispatch"})
+				return flow.StepResult{}, ctx.Park(flow.ParkRequest{Kind: flow.ParkBlocked, Reason: "stopping here to test the next dispatch"})
 			}
 			nextInvocation = seen
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "parked" {
@@ -118,12 +118,12 @@ func TestWorkInProgress_SurvivesToTheNextDispatch(t *testing.T) {
 // mistakes for a record.
 func TestWorkInProgress_ClearedWhenTheStepResolves(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			if err := ctx.RecordWorkInProgress("half a plan"); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
@@ -144,12 +144,12 @@ func TestWorkInProgress_ClearedWhenTheStepResolves(t *testing.T) {
 func TestWorkInProgress_ClearFailureDoesNotFailTheStep(t *testing.T) {
 	tel := &recordingTelemetry{}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			if err := ctx.RecordWorkInProgress("half a plan"); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Telemetry = tel
 	app.Orchestrator = clearFailsBackend{Orchestrator: be, err: errors.New("disk went away")}
@@ -182,19 +182,19 @@ func TestWorkInProgress_ClearFailureDoesNotFailTheStep(t *testing.T) {
 func TestWorkInProgress_IsNotVisibleToAnotherStep(t *testing.T) {
 	var reviewSaw string
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			if err := ctx.RecordWorkInProgress("the plan step's reasoning"); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.Park(flow.ParkRequest{Kind: flow.ParkBlocked, Reason: "stopping here so the record outlives the step"})
+			return flow.StepResult{}, ctx.Park(flow.ParkRequest{Kind: flow.ParkBlocked, Reason: "stopping here so the record outlives the step"})
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	// A second step, added after the helper's own validate so the artifact it
 	// produces can be declared alongside it.
-	app.Flow.AddStep("review", "review", func(ctx flow.StepCtx) error {
+	app.Flow.AddStep("review", "review", func(ctx flow.StepCtx) (flow.StepResult, error) {
 		reviewSaw, _ = ctx.WorkInProgress()
-		return ctx.ResolveMarkdown("the review")
-	}, flow.StepConfig{})
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the review"), nil
+	}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	app.Artifacts = append(app.Artifacts, flow.Artifact("review", flow.ArtifactMarkdown))
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -257,11 +257,11 @@ func TestWorkInProgress_ReadFailureReachesTheStep(t *testing.T) {
 		wantErr = errors.New("store is unreachable")
 	)
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			body, first = ctx.WorkInProgress()
 			_, second = ctx.WorkInProgress()
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	store := &loadFailsBackend{Orchestrator: be, err: wantErr}
 	app.Orchestrator = store
@@ -294,11 +294,11 @@ func TestWorkInProgress_SaveFailureReachesTheStepAndStashesNothing(t *testing.T)
 		wantErr  = errors.New("disk went away")
 	)
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			saveErr = ctx.RecordWorkInProgress("half a plan")
 			readBack, _ = ctx.WorkInProgress()
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Orchestrator = saveFailsBackend{Orchestrator: be, err: wantErr}
 

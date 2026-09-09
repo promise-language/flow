@@ -67,9 +67,9 @@ var _ flow.Orchestrator = (*takeoverBackend)(nil)
 func TestCmdRun_ManualSetsManualAndClearsPark(t *testing.T) {
 	a := &stubAgent{name: "stub"}
 	app, be, _ := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, a)
 	wrapped := &takeoverBackend{Orchestrator: be}
@@ -96,9 +96,9 @@ func TestCmdRun_ManualSetsManualAndClearsPark(t *testing.T) {
 func TestCmdRun_OrchestratedSkipsTakeover(t *testing.T) {
 	a := &stubAgent{name: "stub"}
 	app, be, _ := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, a)
 	wrapped := &takeoverBackend{Orchestrator: be}
@@ -121,9 +121,9 @@ func TestCmdRun_OrchestratedSkipsTakeover(t *testing.T) {
 func TestCmdRun_TakeoverFailureDoesNotBlockStep(t *testing.T) {
 	a := &stubAgent{name: "stub"}
 	app, be, _ := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, a)
 	wrapped := &takeoverBackend{Orchestrator: be, failWith: errors.New("tracker unreachable")}
@@ -155,9 +155,9 @@ func TestCmdRun_JSONModeCompactOutput(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(outputEnv, tc.env)
 			app, _, _ := testApp(t, func(f *flow.Flow) {
-				f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-					return ctx.ResolveMarkdown("the plan")
-				}, flow.StepConfig{})
+				f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+					return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+				}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 			}, &stubAgent{name: "stub"})
 			out := &bytes.Buffer{}
 			app.Out = out
@@ -185,9 +185,9 @@ func TestCmdRun_JSONModeCompactOutput(t *testing.T) {
 // not raw JSON.
 func TestCmdRun_HumanModeOneLine(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	out := &bytes.Buffer{}
 	app.Out = out
@@ -213,9 +213,9 @@ func TestCmdRun_HumanModeOneLine(t *testing.T) {
 // blocked), the reason appears in the human one-liner.
 func TestCmdRun_HumanModeWithReason(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	// Use a preflight that returns ErrBlocked to produce a reason.
@@ -244,9 +244,9 @@ func TestCmdRun_HumanModeWithReason(t *testing.T) {
 func TestCmdRun_AutoDetectsHuman(t *testing.T) {
 	t.Setenv(outputEnv, "")
 	app, _, _ := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	out := &bytes.Buffer{}
 	app.Out = out
@@ -269,9 +269,9 @@ func TestCmdRun_AutoDetectsHuman(t *testing.T) {
 func TestCmdRun_PipedStdoutSelectsJSON(t *testing.T) {
 	t.Setenv(outputEnv, "")
 	app, _, _ := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	r, w, err := os.Pipe()
@@ -303,9 +303,9 @@ func TestCmdRun_PipedStdoutSelectsJSON(t *testing.T) {
 func TestCmdRun_EnvHumanProducesHumanOutput(t *testing.T) {
 	t.Setenv(outputEnv, "human")
 	app, _, _ := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	// Use an os.Pipe so auto-detect would pick JSON — the env var must override.
@@ -339,9 +339,9 @@ func TestCmdRun_EnvHumanProducesHumanOutput(t *testing.T) {
 // error (exit 2).
 func TestCmdRun_MutuallyExclusiveFlags(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	code := app.cmdRun(context.Background(), []string{"--json", "--human"})
@@ -357,8 +357,8 @@ func TestCmdRun_MutuallyExclusiveFlags(t *testing.T) {
 func TestCmdRun_BudgetParkNarratesAxes(t *testing.T) {
 	t.Setenv(outputEnv, "")
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) error {
-			return errors.New("boom")
+		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, errors.New("boom")
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
@@ -400,9 +400,9 @@ func TestCmdRun_BudgetParkNarratesAxes(t *testing.T) {
 func TestCmdRun_BlockedOnItemsNarratesTheBlockers(t *testing.T) {
 	t.Setenv(outputEnv, "")
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("the step must not dispatch on a blocked item")
-			return nil
+			return flow.StepResult{}, nil
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "landed"})
@@ -432,9 +432,9 @@ func TestCmdRun_BlockedOnItemsNarratesTheBlockers(t *testing.T) {
 func TestCmdRun_BlockedOnItemsJSONCarriesTheKindAndBlockers(t *testing.T) {
 	t.Setenv(outputEnv, "")
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("the step must not dispatch on a blocked item")
-			return nil
+			return flow.StepResult{}, nil
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "still open"})
@@ -460,8 +460,8 @@ func TestCmdRun_BlockedOnItemsJSONCarriesTheKindAndBlockers(t *testing.T) {
 func TestCmdRun_NonBudgetParkOmitsAxes(t *testing.T) {
 	t.Setenv(outputEnv, "")
 	app, _, _ := testApp(t, func(f *flow.Flow) {
-		f.AddStep("silent", "plan", func(ctx flow.StepCtx) error {
-			return nil // returns without resolving
+		f.AddStep("silent", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, nil // returns without resolving
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	out := &bytes.Buffer{}

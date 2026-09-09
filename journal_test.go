@@ -55,8 +55,8 @@ func wantPending(t *testing.T, f *Flow, it *Item, want string) {
 	if pos.Finalized {
 		t.Fatalf("Position reports finalized (%q), want pending step %q", pos.Disposition, want)
 	}
-	if pos.Step.Name != want {
-		t.Errorf("pending step = %q, want %q", pos.Step.Name, want)
+	if pos.Step.Description != want {
+		t.Errorf("pending step = %q, want %q", pos.Step.Description, want)
 	}
 }
 
@@ -151,8 +151,8 @@ func TestPosition_FinalizingEntryReportsFinalizedWithItsDisposition(t *testing.T
 	if pos.Disposition != DispositionRejected {
 		t.Errorf("disposition = %q, want %q", pos.Disposition, DispositionRejected)
 	}
-	if pos.Step.Name != "" {
-		t.Errorf("pending step = %q, want none on a finalized position", pos.Step.Name)
+	if pos.Step.Description != "" {
+		t.Errorf("pending step = %q, want none on a finalized position", pos.Step.Description)
 	}
 }
 
@@ -179,8 +179,8 @@ func TestPosition_RouteToASignalWaitPendsTheWaitWhole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Position: %v", err)
 	}
-	if pos.Step.Name != "wait for the merge" {
-		t.Errorf("pending step = %q, want %q", pos.Step.Name, "wait for the merge")
+	if pos.Step.Description != "wait for the merge" {
+		t.Errorf("pending step = %q, want %q", pos.Step.Description, "wait for the merge")
 	}
 	if pos.Step.Kind != LifecycleAwait {
 		t.Errorf("pending kind = %v, want LifecycleAwait (%v)", pos.Step.Kind, LifecycleAwait)
@@ -261,5 +261,43 @@ func TestItem_LastEntryOnAnEmptyJournal(t *testing.T) {
 	}
 	if last.Step != "impl" {
 		t.Errorf("LastEntry().Step = %q, want %q", last.Step, "impl")
+	}
+}
+
+// AccountForRole reads the binding out of the journal — the record of who ran
+// every step — rather than from anything that stores it separately.
+func TestAccountForRole_LatestEntryInTheRoleWins(t *testing.T) {
+	it := &Item{Journal: []JournalEntry{
+		{Step: "plan", By: "ann", Role: "contributor"},
+		{Step: "review", By: "bo", Role: "maintainer"},
+		{Step: "impl", By: "cass", Role: "contributor"},
+	}}
+	if got := it.AccountForRole("contributor"); got != "cass" {
+		t.Errorf("AccountForRole(contributor) = %q, want the account of the latest entry in that role", got)
+	}
+	if got := it.AccountForRole("maintainer"); got != "bo" {
+		t.Errorf("AccountForRole(maintainer) = %q, want bo", got)
+	}
+}
+
+// Empty means "declared and has not acted yet" — a state a caller waits on. It
+// never means "no such role": that refusal is StepCtx.RoleAccount's, against
+// the flow's declaration.
+func TestAccountForRole_EmptyWhenTheRoleHasNotActed(t *testing.T) {
+	it := &Item{Journal: []JournalEntry{{Step: "plan", By: "ann", Role: "contributor"}}}
+	if got := it.AccountForRole("maintainer"); got != "" {
+		t.Errorf("AccountForRole(maintainer) = %q, want empty — the role has not acted", got)
+	}
+}
+
+func TestAccountForRole_EmptyJournal(t *testing.T) {
+	if got := (&Item{}).AccountForRole("contributor"); got != "" {
+		t.Errorf("AccountForRole on an empty journal = %q, want empty", got)
+	}
+	// The empty role is nobody's: a step with no tag declares nothing, so a
+	// lookup on "" must not match the entries that carry no role either.
+	it := &Item{Journal: []JournalEntry{{Step: "plan", By: "ann"}}}
+	if got := it.AccountForRole(""); got != "" {
+		t.Errorf("AccountForRole(\"\") = %q, want empty", got)
 	}
 }

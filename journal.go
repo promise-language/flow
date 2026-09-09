@@ -124,3 +124,28 @@ func (i *Item) LastEntry() (JournalEntry, bool) {
 	}
 	return i.Journal[len(i.Journal)-1], true
 }
+
+// AccountForRole returns the account of record for a role on this item: the By
+// of the last entry appended in that role, and the empty account when the role
+// has not acted.
+//
+// The journal decides who acted — "the binding is read from the journal, which
+// already carries who ran every step" (docs/resolution.md § Whose move it is) —
+// and it decides here only, so a route returning to a role and a handler asking
+// who holds it read one answer.
+//
+// The empty account means "declared and not yet acted", which is a state a
+// caller waits on. It never means "no such role": a role reference is checked
+// against the flow's declaration before it reaches this (StepCtx.RoleAccount →
+// Flow.DeclaresRole), so an unknown name is refused rather than answered empty.
+func (i *Item) AccountForRole(role RoleName) AccountId {
+	if i == nil || role == "" {
+		return ""
+	}
+	for k := len(i.Journal) - 1; k >= 0; k-- {
+		if i.Journal[k].Role == role {
+			return i.Journal[k].By
+		}
+	}
+	return ""
+}

@@ -511,8 +511,8 @@ func TestCmdList_EmptyDiscovery(t *testing.T) {
 func makeTestFlow(t *testing.T) *flow.Flow {
 	t.Helper()
 	f := flow.NewFlow("implement", []flow.ItemType{"task"})
-	f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-		return ctx.ResolveMarkdown("the plan")
-	}, flow.StepConfig{})
+	f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+	}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	return f
 }

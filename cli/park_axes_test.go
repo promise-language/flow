@@ -31,8 +31,8 @@ func axisOf(t *testing.T, park *flow.ParkRequest, axis flow.BudgetAxis) flow.Axi
 
 func TestParkReportsEveryAxis(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) error {
-			return errors.New("boom")
+		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, errors.New("boom")
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
@@ -88,9 +88,9 @@ func TestParkReportsEveryAxis(t *testing.T) {
 // time alone buys a dispatch that re-parks on invocations.
 func TestTimeoutParkReportsInvocationsAsFlat(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("slow", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("slow", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			<-ctx.Context().Done()
-			return ctx.Context().Err()
+			return flow.StepResult{}, ctx.Context().Err()
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
@@ -123,13 +123,13 @@ func TestParkReportsPromptsSpentByTheRun(t *testing.T) {
 		{LastText: "one"}, {LastText: "two"},
 	}}
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("chatty", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("chatty", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			for i := 0; i < 3; i++ {
 				if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{}); err != nil {
-					return err
+					return flow.StepResult{}, err
 				}
 			}
-			return nil
+			return flow.StepResult{}, nil
 		}, flow.StepConfig{})
 	}, agent)
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
@@ -156,8 +156,8 @@ func TestParkReportsPromptsSpentByTheRun(t *testing.T) {
 // an empty report is what tells a reader that.
 func TestNonBudgetParkReportsNoAxes(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("silent", "plan", func(ctx flow.StepCtx) error {
-			return nil // returns without resolving
+		f.AddStep("silent", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, nil // returns without resolving
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 

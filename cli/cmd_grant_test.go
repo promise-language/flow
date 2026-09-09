@@ -17,9 +17,9 @@ func grantTestSetup(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer, func() fl
 	t.Helper()
 	a := &stubAgent{name: "stub"}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, a)
 
@@ -177,9 +177,9 @@ func TestCmdGrant_TypeOutsideTheRemitStillGrants(t *testing.T) {
 		flow.Item{Ref: itemRefFor("1"), Type: "chore", Title: "chore#1"},
 		[]flow.ItemType{"task"}, // "chore" is outside the remit
 		func(f *flow.Flow) {
-			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-				return ctx.ResolveMarkdown("the plan")
-			}, flow.StepConfig{})
+			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+				return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+			}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 		}, a)
 
 	if err := be.SeedState(context.Background(), claim.ItemRef, []flow.ArtifactSpec{

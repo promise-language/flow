@@ -2,6 +2,7 @@ package flow
 
 import (
 	"context"
+	"fmt"
 	"slices"
 )
 
@@ -202,4 +203,24 @@ type Disclosure struct {
 // one that was never written.
 type DisclosureGuard interface {
 	Examine(ctx context.Context, d Disclosure) error
+}
+
+// RefusedRecord is what a refused offer leaves behind for the next invocation:
+// the guard's answer, and the text it refused. Both, because the text alone
+// would be re-offered unchanged and refused identically, and the answer alone
+// does not say what to revise.
+//
+// One wording, in the package that owns the refusal, because two parties keep
+// this record — the SDK's capture path, when publishing a step's result is
+// refused, and a handler that offered text of its own — and a reader who has
+// learned to recognise one of them has learned to recognise the other.
+//
+// It is stashed locally and NEVER published: the guard's answer quotes what it
+// caught (docs/disclosure.md § What a refusal carries), so a record repeating it
+// carries the refused fragment.
+func RefusedRecord(refused ErrDisclosureRefused, body string) string {
+	return fmt.Sprintf(
+		"An earlier run produced this text and the disclosure guard refused to publish it.\n\n"+
+			"The refusal:\n\n%s\n\nThe text that was refused:\n\n%s",
+		refused.Error(), body)
 }

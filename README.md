@@ -90,7 +90,7 @@ of most bugs.
 | **Item** | persistent | The unit of work (a GitHub Issue, a tracker task). Carries a `Type` (routes flow selection), a title/body, durable **artifacts**, **signals**, and questions. The orchestrator supplies it; it is opaque to the SDK beyond these fields. |
 | **Flow** | code | An ordered list of **lifecycle items** (steps) selected for an item by its `Type` and `RequireSignal` preconditions. The binary *is* the source of truth — no YAML. |
 | **Step / lifecycle item** | code | One entry in a flow. Three kinds: an **artifact step** (`AddStep`, runs a handler that produces one artifact), a **signal step** (`AddSignalStep`, runs a handler whose side effect makes the orchestrator set a signal), or a **pure wait** (`AwaitSignal`, no handler). |
-| **Artifact** | persistent | A durable product of one step — a plan, a patch, a commit hash, a review summary. The handler calls `ctx.Resolve*`. A flow is *complete* when every required artifact is attached. |
+| **Artifact** | persistent | A durable product of one step — a plan, a patch, a commit hash, a review summary. The handler returns it in its `StepResult`, and the SDK captures it when the step completes. |
 | **Signal** | persistent | An orchestrator-*observed* boolean (`pr-open`, `pr-merged`). Never handler-writable — the orchestrator sets it from a side effect or a poll. |
 | **Claim (lease)** | persistent | An exclusive binding **item ↔ arena**. "This item's work lives in this worktree." One arena holds at most one claim; one item is claimed by at most one arena. |
 | **Arena** | long-lived | A worktree plus a stable identity. Where work physically happens. Must survive at least one item's full lifecycle (across any restarts), then may be reclaimed. For the GitHub orchestrator the arena is simply the local checkout; `.flow/active.json` records the claim. |
@@ -165,14 +165,18 @@ func main() {
     }
 
     f := flow.NewFlow("fix", []flow.ItemType{"task"})
-    f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+    f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
         resp, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{
             Prompt: "Plan implementation of: " + ctx.Item().Title,
         })
         if err != nil {
-            return err
+            return flow.StepResult{}, err
         }
-        return ctx.ResolveMarkdown(resp.LastText)
+        return ctx.Finalize(flow.DispositionResolved, "the plan is written").
+            Markdown(resp.LastText), nil
+    }, flow.StepConfig{
+        Entry:       true,
+        MayFinalize: []flow.Disposition{flow.DispositionResolved},
     })
 
     os.Exit(cli.Run(cli.App{
@@ -281,7 +285,7 @@ See [docs/flow-registration.md](docs/flow-registration.md) § What a flow is.
 ### `StepHandler` and `StepCtx`
 
 ```go
-type StepHandler func(ctx flow.StepCtx) error
+type StepHandler func(ctx flow.StepCtx) (flow.StepResult, error)
 ```
 
 The `StepCtx` is the handler's whole world:
@@ -289,27 +293,35 @@ The `StepCtx` is the handler's whole world:
 ```go
 ctx.Context()        // the per-step context (carries the Timeout deadline)
 ctx.Item()           // Item: ID, Type, Title, Body, URL, Finalized
-ctx.Result()         // this step's result id
+ctx.Result()         // this step's result id — the step's identity
+ctx.Description()    // this step's human description — display only
+
+// Who is here, and what the journal says (see docs/step-handler.md):
+ctx.Runner() / ctx.Role() / ctx.RoleAccount(role)
+ctx.Journal() / ctx.Transfer() / ctx.Notes() / ctx.RunNumber()
 
 // Read prior artifacts (typed; ok=false if missing/unresolved/wrong type):
 ctx.Markdown(id) / ctx.Patch(id) / ctx.CommitHash(id) / ctx.JSON(id) /
 ctx.File(id) / ctx.Flag(id) / ctx.Artifact(id)
 ctx.Signal(id) bool  // read a signal (handlers can't write signals)
 
-// Write THIS step's artifact (exactly one, matching its declared type):
-ctx.ResolveMarkdown(body) / ctx.ResolvePatch(body) / ctx.ResolveCommitHash(sha) /
-ctx.ResolveJSON(raw) / ctx.ResolveFile(name, bytes) / ctx.ResolveFlag()
+// COMPLETE by returning an election — a declared successor, or a permitted
+// finalization — carrying the message the successor is run with, and THIS
+// step's artifact as the payload matching its declared type:
+ctx.Next(stepId, message)        // route to a declared successor
+ctx.Finalize(disposition, why)   // end the item: resolved / rejected
+    .WithNote(note)              // a standing note, for every later step
+    .Markdown(body) / .Patch(body) / .CommitHash(sha) /
+    .JSON(raw) / .File(name, bytes) / .Flag()
 
 // Non-completion outcomes (sentinel errors the SDK translates to InvocationResult):
-ctx.Skip(reason)                 // no progress possible right now
 ctx.Park(req)                    // blocked / waiting; structured reason
 ctx.AskQuestions(q1, q2, ...)    // park until the user answers (see below)
-ctx.MarkStale(id)                // force a prior artifact to re-run
 
 // Work in progress — what THIS step keeps when it stops without completing,
 // so the next dispatch continues rather than restarts. Scaffolding, not a
-// result: it resolves nothing, no other step reads it, it is never published,
-// and it is cleared when the step resolves. Needs an orchestrator implementing
+// result: it completes nothing, no other step reads it, it is never published,
+// and it is cleared when the step completes. Needs an orchestrator implementing
 // WorkInProgress; without one, reads are empty and the write returns
 // ErrUnsupported.
 ctx.WorkInProgress()             // (body, error) — "" when nothing was stashed
@@ -322,10 +334,14 @@ ctx.Claim()          // the active claim (read-only; read-only)
 ctx.RefreshItem()    // re-pull item state mid-handler
 ```
 
-The cardinal handler contract: an artifact step **must** call its `Resolve*`
-before returning `nil`, or the SDK fails the invocation with
-`ErrStepDidNotResolve`. Calling the wrong `Resolve*` returns `ErrTypeMismatch`;
-calling any `Resolve*` on a signal step returns `ErrSignalNotWritable`.
+The cardinal handler contract: a handler **completes by returning its
+election**, and the SDK captures the result and the route together — a step
+never lands half of its completion. Returning the zero `StepResult` with a nil
+error parks the item with `ErrStepDidNotComplete`, as does an artifact step that
+elected a route but produced no payload. An election outside the step's declared
+`Next` / `MayFinalize` fails it with `ErrRouteNotDeclared`, a payload of the
+wrong type with `ErrTypeMismatch`, and a payload on a signal step with
+`ErrSignalNotWritable` — nothing is captured in any of those cases.
 
 ### Artifacts: the six value types
 
@@ -419,12 +435,11 @@ scratch** with the answer available in `ItemState.Questions`. Because the step
 re-runs from the top, **ask early** — before doing expensive work a re-run
 would redo.
 
-### Parking, skipping, and transient failures
+### Parking and transient failures
 
 The handler's return value drives the `InvocationResult.Status`:
 
-- `nil` (after `Resolve*`) → `done`
-- `ctx.Skip(reason)` / `ErrSkip` → `skipped` (no budget beyond the invocation)
+- a valid election, nil error → `done`
 - `ctx.Park(req)` / `ErrPark` → `parked` with a `ParkKind`
   (`blocked` / `question` / `budget-exhausted` / `step-did-not-resolve` /
   `infra-transient`)
@@ -775,7 +790,7 @@ usage and exits 0 without running it.
 ├── doc.go                  package doc
 ├── flow.go                 Flow, NewFlow, AddStep/AddSignalStep/AwaitSignal/RequireSignal, DeriveNext/IsDone/IsReady
 ├── step.go                 StepHandler + StepOption (Required/Optional, StaleAfter/StaleOnCommit, Max*/Timeout)
-├── stepctx.go              StepCtx interface — typed read/Resolve* surface, Agent(), Worktree(), AskQuestions
+├── stepctx.go              StepCtx interface — typed read surface, Next/Finalize, Agent(), Worktree(), AskQuestions
 ├── artifact.go             ArtifactDef/ArtifactType (the six types), ArtifactRecord, PatchBody/FileBody
 ├── signal.go               SignalDef + SignalState
 ├── orchestrator.go         Orchestrator, ItemEditor, Worktree, RequestManager, Item, ItemInfo, Claim, ItemRef

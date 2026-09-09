@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -314,14 +315,16 @@ func (w *fakeWorktree) Merge(context.Context, flow.RequestUrl) error    { return
 func (w *fakeWorktree) Mergeable(context.Context, string) (bool, error) { return true, nil }
 
 type fakeCtx struct {
-	item       flow.Item
-	arts       map[flow.ArtifactId]flow.ArtifactRecord
-	wt         *fakeWorktree
-	agent      flow.Agent
-	park       *flow.ParkRequest
-	resolved   flow.ArtifactBody
-	didResolve bool
-	asked      []flow.AgentQuestion
+	item  flow.Item
+	arts  map[flow.ArtifactId]flow.ArtifactRecord
+	wt    *fakeWorktree
+	agent flow.Agent
+	park  *flow.ParkRequest
+	asked []flow.AgentQuestion
+	// journal is what ctx.Journal and its accessors read. Empty in most tests:
+	// nothing appends entries yet, so a handler reading the journal reads the
+	// one the orchestrator loaded.
+	journal []flow.JournalEntry
 	// waitedOn is every ref the step declared through WaitOnItems, in order.
 	waitedOn []flow.ItemRef
 	// wip is this step's work-in-progress record. wipErr / wipSaveErr model a
@@ -334,11 +337,6 @@ type fakeCtx struct {
 	// wtErr makes Worktree() return this error, modelling an environment
 	// where no worktree is available.
 	wtErr error
-	// resolveErrs is what ResolveMarkdown returns on successive calls, so a
-	// test can script a disclosure refusal followed by an acceptance. A shorter
-	// slice than the number of calls means every later call succeeds.
-	resolveErrs []error
-	resolves    []string
 	// askErrs is what AskQuestions returns on successive calls, so a test
 	// can script a disclosure refusal followed by an acceptance. A shorter
 	// slice than the number of calls means every later call returns a
@@ -350,9 +348,47 @@ type fakeCtx struct {
 
 func (c *fakeCtx) Context() context.Context { return context.Background() }
 func (c *fakeCtx) Flow() string             { return "resolve" }
-func (c *fakeCtx) StepName() string         { return "step" }
+func (c *fakeCtx) Description() string      { return "step" }
 func (c *fakeCtx) Result() flow.ArtifactId  { return "implementation" }
 func (c *fakeCtx) Item() flow.Item          { return c.item }
+func (c *fakeCtx) Runner() flow.AccountId   { return "runner" }
+func (c *fakeCtx) Role() flow.RoleName      { return "" }
+
+// RoleAccount refuses every role, as the real one does for a flow that
+// declares none: no shipped step carries a tag yet.
+func (c *fakeCtx) RoleAccount(role flow.RoleName) (flow.AccountId, error) {
+	return "", flow.ErrUnknownRole{Role: role}
+}
+
+func (c *fakeCtx) Journal() []flow.JournalEntry { return slices.Clone(c.journal) }
+
+func (c *fakeCtx) Transfer() *flow.JournalEntry {
+	if len(c.journal) == 0 {
+		return nil
+	}
+	last := c.journal[len(c.journal)-1]
+	return &last
+}
+
+func (c *fakeCtx) Notes() []flow.JournalEntry {
+	var out []flow.JournalEntry
+	for _, e := range c.journal {
+		if e.Note != "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func (c *fakeCtx) RunNumber() int { return 1 }
+
+func (c *fakeCtx) Next(step flow.StepId, message string) flow.StepResult {
+	return flow.StepResult{Route: flow.Route{Next: step}, Message: message}
+}
+
+func (c *fakeCtx) Finalize(d flow.Disposition, message string) flow.StepResult {
+	return flow.StepResult{Route: flow.Route{Finalize: d}, Message: message}
+}
 
 // Artifact filters unresolved records, as the real StepCtx does: a seeded but
 // unresolved entry is not a value a step may read.
@@ -383,32 +419,6 @@ func (c *fakeCtx) File(flow.ArtifactId) (string, []byte, bool)  { return "", nil
 func (c *fakeCtx) Patch(flow.ArtifactId) (flow.PatchBody, bool) { return flow.PatchBody{}, false }
 func (c *fakeCtx) Signal(flow.SignalId) bool                    { return false }
 func (c *fakeCtx) ParkedOn() *flow.ParkRequest                  { return c.park }
-func (c *fakeCtx) ResolveFlag() error {
-	c.didResolve, c.resolved = true, flow.ArtifactBody{Type: flow.ArtifactFlag}
-	return nil
-}
-func (c *fakeCtx) ResolveCommitHash(sha string) error {
-	c.didResolve, c.resolved = true, flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: sha}
-	return nil
-}
-func (c *fakeCtx) ResolveMarkdown(b string) error {
-	c.resolves = append(c.resolves, b)
-	if n := len(c.resolves) - 1; n < len(c.resolveErrs) && c.resolveErrs[n] != nil {
-		// A refused offer leaves the step re-offerable, as the real StepCtx
-		// does: writeResolve marks it resolved only when the write lands.
-		return c.resolveErrs[n]
-	}
-	c.didResolve, c.resolved = true, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: b}
-	return nil
-}
-func (c *fakeCtx) ResolveJSON(json.RawMessage) error { c.didResolve = true; return nil }
-func (c *fakeCtx) ResolveFile(string, []byte) error  { c.didResolve = true; return nil }
-func (c *fakeCtx) ResolvePatch(b flow.PatchBody) error {
-	c.didResolve, c.resolved = true, flow.ArtifactBody{Type: flow.ArtifactPatch, Patch: b}
-	return nil
-}
-func (c *fakeCtx) Skip(string) error               { return nil }
-func (c *fakeCtx) MarkStale(flow.ArtifactId) error { return nil }
 func (c *fakeCtx) Park(req flow.ParkRequest) error {
 	c.park = &req
 	return errors.New("parked")
@@ -533,21 +543,22 @@ func TestStepOpenBranch_RecordsTheCommitTheBranchWasCutFrom(t *testing.T) {
 	wt := newFakeWorktree()
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	if err := testBuilder(t).stepOpenBranch(ctx); err != nil {
+	res, err := testBuilder(t).stepOpenBranch(ctx)
+	if err != nil {
 		t.Fatalf("stepOpenBranch: %v", err)
 	}
 	if wt.branch != testBranch {
 		t.Errorf("worktree is on %q, want the claim branch %q", wt.branch, testBranch)
 	}
-	if ctx.resolved.Type != flow.ArtifactCommitHash {
-		t.Fatalf("resolved a %v, want a commit hash", ctx.resolved.Type)
+	if res.Payload.Type != flow.ArtifactCommitHash {
+		t.Fatalf("resolved a %v, want a commit hash", res.Payload.Type)
 	}
-	if ctx.resolved.CommitHash != "base" {
-		t.Errorf("recorded %q, want the commit the branch sits on", ctx.resolved.CommitHash)
+	if res.Payload.CommitHash != "base" {
+		t.Errorf("recorded %q, want the commit the branch sits on", res.Payload.CommitHash)
 	}
 	// Mechanical: no prose, and no agent turn.
-	if len(ctx.resolves) != 0 {
-		t.Errorf("resolved markdown %v — this step produces a commit, not prose", ctx.resolves)
+	if res.Payload.Markdown != "" {
+		t.Errorf("produced markdown %q — this step produces a commit, not prose", res.Payload.Markdown)
 	}
 	if agent, ok := ctx.agent.(*scriptedAgent); ok && agent.calls != 0 {
 		t.Errorf("agent ran %d times in a mechanical step", agent.calls)
@@ -562,7 +573,7 @@ func TestStepOpenBranch_ADirtyTreeFailsHere(t *testing.T) {
 	wt.dirty = []byte("diff --git a/left-behind.go b/left-behind.go\n")
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	err := testBuilder(t).stepOpenBranch(ctx)
+	res, err := testBuilder(t).stepOpenBranch(ctx)
 	if err == nil {
 		t.Fatal("want the checkout's failure surfaced by this step")
 	}
@@ -571,7 +582,7 @@ func TestStepOpenBranch_ADirtyTreeFailsHere(t *testing.T) {
 	if !strings.Contains(err.Error(), testBranch) || !strings.Contains(err.Error(), "dirty") {
 		t.Errorf("err = %v, want it to name the branch and the dirty tree", err)
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("recorded a branch that was never opened")
 	}
 	if agent, ok := ctx.agent.(*scriptedAgent); ok && agent.calls != 0 {
@@ -588,11 +599,12 @@ func TestStepOpenBranch_ResumedBranchRecordsItsOwnHead(t *testing.T) {
 	wt.base = "base-moved-on" // the base branch has advanced since
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	if err := testBuilder(t).stepOpenBranch(ctx); err != nil {
+	res, err := testBuilder(t).stepOpenBranch(ctx)
+	if err != nil {
 		t.Fatalf("stepOpenBranch on a resumed branch: %v", err)
 	}
-	if ctx.resolved.CommitHash != "cut-from" {
-		t.Errorf("recorded %q, want the commit the branch actually sits on", ctx.resolved.CommitHash)
+	if res.Payload.CommitHash != "cut-from" {
+		t.Errorf("recorded %q, want the commit the branch actually sits on", res.Payload.CommitHash)
 	}
 }
 
@@ -608,11 +620,11 @@ func TestStepImplement_RefusesWhenTheBranchGainedNothing(t *testing.T) {
 	wt.noCommit = true
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	err := testBuilder(t).stepImplement(ctx)
+	res, err := testBuilder(t).stepImplement(ctx)
 	if err == nil || !strings.Contains(err.Error(), "no commits beyond") {
 		t.Fatalf("err = %v, want a refusal naming the empty branch", err)
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("resolved an implementation artifact for a branch with no commits")
 	}
 }
@@ -631,11 +643,11 @@ func TestStepImplement_RefusesAnEmptyBranchWhoseBaseHasMovedOn(t *testing.T) {
 	ctx.arts["branch"] = flow.ArtifactRecord{
 		Resolved: true, Type: flow.ArtifactCommitHash, CommitHash: "cut-from"}
 
-	err := testBuilder(t).stepImplement(ctx)
+	res, err := testBuilder(t).stepImplement(ctx)
 	if err == nil || !strings.Contains(err.Error(), "no commits beyond") {
 		t.Fatalf("err = %v, want a refusal — the branch carries nothing", err)
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("resolved an implementation for an empty branch whose base had moved")
 	}
 }
@@ -650,17 +662,18 @@ func TestStepImplement_AcceptsWorkCommittedByAnEarlierRun(t *testing.T) {
 	wt.noCommit = true // nothing left to stage
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	if err := testBuilder(t).stepImplement(ctx); err != nil {
+	res, err := testBuilder(t).stepImplement(ctx)
+	if err != nil {
 		t.Fatalf("stepImplement = %v, want the already-committed work accepted", err)
 	}
-	if !ctx.didResolve {
+	if res.Payload == nil {
 		t.Error("did not resolve despite the branch carrying work")
 	}
 	// The record names the commit that is there, which is exactly why it is a
 	// commit and not a patch: a patch captured on this path is empty, and an
 	// empty record cannot be told from "the step did nothing".
-	if ctx.resolved.CommitHash != "sha-1" {
-		t.Errorf("recorded %q, want the commit the earlier run left", ctx.resolved.CommitHash)
+	if res.Payload.CommitHash != "sha-1" {
+		t.Errorf("recorded %q, want the commit the earlier run left", res.Payload.CommitHash)
 	}
 }
 
@@ -685,7 +698,7 @@ func TestStepImplement_RefusesWithoutAPlan(t *testing.T) {
 			agent := &scriptedAgent{}
 			ctx := ctxWithPlan(resumedWorktree(), agent)
 			ctx.arts["plan"] = plan
-			err := testBuilder(t).stepImplement(ctx)
+			res, err := testBuilder(t).stepImplement(ctx)
 			if err == nil || !strings.Contains(err.Error(), "plan") {
 				t.Errorf("err = %v, want a refusal naming the plan", err)
 			}
@@ -695,7 +708,7 @@ func TestStepImplement_RefusesWithoutAPlan(t *testing.T) {
 			if agent.calls != 0 {
 				t.Errorf("agent ran %d times, want 0 — the guard runs before the dispatch", agent.calls)
 			}
-			if ctx.didResolve {
+			if res.Payload != nil {
 				t.Error("implemented against something that is not a plan")
 			}
 			// An empty artifact and a resolved non-plan send a reader to
@@ -722,7 +735,7 @@ func TestStepImplement_AHeadedPlanPassesTheGuard(t *testing.T) {
 		Markdown: "## Plan\n\nChange the thing.",
 	}
 
-	_ = testBuilder(t).stepImplement(ctx)
+	_, _ = testBuilder(t).stepImplement(ctx)
 	if agent.calls == 0 {
 		t.Error("agent never ran — a headed plan must pass the guard")
 	}
@@ -740,11 +753,11 @@ func TestStepImplement_RefusesWithoutTheBranchRecord(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx := ctxWithPlan(resumedWorktree(), &scriptedAgent{})
 			ctx.arts["branch"] = branch
-			err := testBuilder(t).stepImplement(ctx)
+			res, err := testBuilder(t).stepImplement(ctx)
 			if err == nil || !strings.Contains(err.Error(), "branch artifact") {
 				t.Errorf("err = %v, want a refusal naming the branch record", err)
 			}
-			if ctx.didResolve {
+			if res.Payload != nil {
 				t.Error("implemented without knowing what the branch was cut from")
 			}
 		})
@@ -759,7 +772,7 @@ func TestStepImplement_RefusesWhenWorkSurvivesTheCommit(t *testing.T) {
 	wt.noCommit = true                              // nothing lands...
 	wt.dirty = []byte("diff --git a/x.go b/x.go\n") // ...but the tree still carries work
 
-	err := testBuilder(t).stepImplement(ctxWithPlan(wt, &scriptedAgent{}))
+	_, err := testBuilder(t).stepImplement(ctxWithPlan(wt, &scriptedAgent{}))
 	if err == nil || !strings.Contains(err.Error(), "uncommitted") {
 		t.Fatalf("err = %v, want a refusal naming the uncommitted work", err)
 	}
@@ -772,7 +785,7 @@ func TestStepImplement_LoopsOnFailingVerifyAndKeepsOneSession(t *testing.T) {
 	agent := &scriptedAgent{}
 	ctx := ctxWithPlan(wt, agent)
 
-	if err := testBuilder(t).stepImplement(ctx); err != nil {
+	if _, err := testBuilder(t).stepImplement(ctx); err != nil {
 		t.Fatalf("stepImplement = %v", err)
 	}
 	if agent.calls != 3 {
@@ -796,7 +809,7 @@ func TestStepImplement_StopsAfterMaxFixRounds(t *testing.T) {
 	b.cfg.MaxFixRounds = 2
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	err := b.stepImplement(ctx)
+	_, err := b.stepImplement(ctx)
 	if err == nil || !strings.Contains(err.Error(), "still failing after 2 fix attempts") {
 		t.Fatalf("err = %v, want a bounded failure", err)
 	}
@@ -817,17 +830,18 @@ func TestStepImplement_StopsAfterMaxFixRounds(t *testing.T) {
 func TestStepImplement_RecordsTheCommitItProduced(t *testing.T) {
 	wt := resumedWorktree()
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
-	if err := testBuilder(t).stepImplement(ctx); err != nil {
+	res, err := testBuilder(t).stepImplement(ctx)
+	if err != nil {
 		t.Fatalf("stepImplement: %v", err)
 	}
-	if ctx.resolved.Type != flow.ArtifactCommitHash {
-		t.Fatalf("resolved a %v, want a commit hash", ctx.resolved.Type)
+	if res.Payload.Type != flow.ArtifactCommitHash {
+		t.Fatalf("resolved a %v, want a commit hash", res.Payload.Type)
 	}
-	if ctx.resolved.CommitHash != string(wt.head) {
-		t.Errorf("recorded %q, want HEAD after the commit (%q)", ctx.resolved.CommitHash, wt.head)
+	if res.Payload.CommitHash != string(wt.head) {
+		t.Errorf("recorded %q, want HEAD after the commit (%q)", res.Payload.CommitHash, wt.head)
 	}
-	if len(ctx.resolved.Patch.Diff) != 0 {
-		t.Errorf("resolved a patch as well: %q", ctx.resolved.Patch.Diff)
+	if len(res.Payload.Patch.Diff) != 0 {
+		t.Errorf("resolved a patch as well: %q", res.Payload.Patch.Diff)
 	}
 	// The commit is this handler's job: the prompts tell the agent not to, and
 	// nothing else records the work before the request is opened.
@@ -848,21 +862,21 @@ func TestConsumingStepsRefuseAMissingBranch(t *testing.T) {
 	// empty change, and the request propose one. Cutting a branch is the open
 	// branch step's job, and only its.
 	b := testBuilder(t)
-	for name, step := range map[string]func(flow.StepCtx) error{
+	for name, step := range map[string]func(flow.StepCtx) (flow.StepResult, error){
 		"implement":    b.stepImplement,
 		"review":       b.stepReview,
 		"coverage":     b.stepCoverage,
-		"open request": b.stepOpenPR,
+		"open request": openRequest(b),
 	} {
 		t.Run(name, func(t *testing.T) {
 			wt := newFakeWorktree()
 			ctx := ctxWithPlan(wt, &scriptedAgent{})
-			err := step(ctx)
+			res, err := step(ctx)
 			if err == nil || !strings.Contains(err.Error(), "did not exist") {
 				t.Errorf("err = %v, want a refusal that the branch is absent", err)
 			}
-			if ctx.didResolve {
-				t.Error("resolved an artifact describing a tree that has no implementation")
+			if res.Payload != nil {
+				t.Error("produced an artifact describing a tree that has no implementation")
 			}
 			if wt.commits != 0 {
 				t.Errorf("committed %d times onto a branch it had just cut", wt.commits)
@@ -882,7 +896,7 @@ func TestAgentQuestionParksThroughAnyStep(t *testing.T) {
 	}}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepReview(ctx)
+	res, err := testBuilder(t).stepReview(ctx)
 	if err == nil {
 		t.Fatal("want the ask sentinel to stop the step")
 	}
@@ -896,7 +910,7 @@ func TestAgentQuestionParksThroughAnyStep(t *testing.T) {
 	if !strings.Contains(ctx.asked[0].Text, "both are plausible") {
 		t.Errorf("Text = %q, want the evidence block", ctx.asked[0].Text)
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("resolved an artifact despite needing a human decision")
 	}
 }
@@ -913,7 +927,7 @@ func TestStepOpenPR_RefusesAPullRequestWithNoPlanInIt(t *testing.T) {
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 	ctx.arts["plan"] = flow.ArtifactRecord{Resolved: true, Type: flow.ArtifactMarkdown}
 
-	err := testBuilder(t).stepOpenPR(ctx)
+	_, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch))
 	if err == nil || !strings.Contains(err.Error(), "no plan") {
 		t.Fatalf("err = %v, want a refusal to open an empty pull request", err)
 	}
@@ -926,7 +940,7 @@ func TestStepOpenPR_BodyClosesTheIssue(t *testing.T) {
 	wt := resumedWorktree()
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	if err := testBuilder(t).stepOpenPR(ctx); err != nil {
+	if _, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch)); err != nil {
 		t.Fatalf("stepOpenPR: %v", err)
 	}
 	if !strings.Contains(wt.openBody, "Closes #42") {
@@ -1010,13 +1024,13 @@ func TestStepsOnlyRevParseTheGuaranteedRevisions(t *testing.T) {
 
 	// The whole mechanical-and-producing sequence over one worktree, because a
 	// step reaching outside the pair does so wherever it runs.
-	if err := b.stepOpenBranch(ctx); err != nil {
+	if _, err := b.stepOpenBranch(ctx); err != nil {
 		t.Fatalf("stepOpenBranch: %v", err)
 	}
-	if err := b.stepImplement(ctx); err != nil {
+	if _, err := b.stepImplement(ctx); err != nil {
 		t.Fatalf("stepImplement: %v", err)
 	}
-	if err := b.stepOpenPR(ctx); err != nil {
+	if _, err := b.stepOpenPR(ctx, flow.StepId(StepCloseBranch)); err != nil {
 		t.Fatalf("stepOpenPR: %v", err)
 	}
 	for _, rev := range wt.revsAsked {
@@ -1043,7 +1057,7 @@ func TestStepOpenPR_RecordsWhatTheCheckingStepsChanged(t *testing.T) {
 	wt.dirty = []byte("diff --git a/cli/app.go b/cli/app.go\n")
 
 	before := wt.commits
-	if err := testBuilder(t).stepOpenPR(ctxWithPlan(wt, &scriptedAgent{})); err != nil {
+	if _, err := testBuilder(t).stepOpenPR(ctxWithPlan(wt, &scriptedAgent{}), flow.StepId(StepCloseBranch)); err != nil {
 		t.Fatalf("stepOpenPR: %v", err)
 	}
 	if wt.commits != before+1 {
@@ -1062,7 +1076,7 @@ func TestStepOpenPR_CleanTreeRecordsNothing(t *testing.T) {
 	wt.commits = 1
 	wt.noCommit = true // git lands nothing with nothing staged
 
-	if err := testBuilder(t).stepOpenPR(ctxWithPlan(wt, &scriptedAgent{})); err != nil {
+	if _, err := testBuilder(t).stepOpenPR(ctxWithPlan(wt, &scriptedAgent{}), flow.StepId(StepCloseBranch)); err != nil {
 		t.Fatalf("stepOpenPR: %v", err)
 	}
 	if wt.commits != 1 {
@@ -1079,7 +1093,7 @@ func TestStepOpenPR_RefusesWhenWorkSurvivesRecording(t *testing.T) {
 	wt.noCommit = true                        // nothing lands...
 	wt.dirty = []byte("diff --git a/x b/x\n") // ...but the tree still carries work
 
-	err := testBuilder(t).stepOpenPR(ctxWithPlan(wt, &scriptedAgent{}))
+	_, err := testBuilder(t).stepOpenPR(ctxWithPlan(wt, &scriptedAgent{}), flow.StepId(StepCloseBranch))
 	if err == nil || !strings.Contains(err.Error(), "uncommitted") {
 		t.Fatalf("err = %v, want a refusal naming the uncommitted work", err)
 	}
@@ -1099,7 +1113,7 @@ func TestStepOpenPR_BodyCarriesTheCheckingStepsBriefings(t *testing.T) {
 	ctx.arts["coverage"] = flow.ArtifactRecord{
 		Resolved: true, Type: flow.ArtifactMarkdown, Markdown: "added the arity cases"}
 
-	if err := testBuilder(t).stepOpenPR(ctx); err != nil {
+	if _, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch)); err != nil {
 		t.Fatalf("stepOpenPR: %v", err)
 	}
 	for _, want := range []string{"## Review", "routed grant through usageError", "## Coverage", "added the arity cases"} {
@@ -1159,14 +1173,14 @@ func TestOnlyTheImplementCommitCarriesTheClosesReference(t *testing.T) {
 	// A slice, not a map: the sequence is the property.
 	for _, step := range []struct {
 		name string
-		run  func(flow.StepCtx) error
+		run  func(flow.StepCtx) (flow.StepResult, error)
 	}{
 		{"implement", b.stepImplement},
 		{"review", b.stepReview},
 		{"coverage", b.stepCoverage},
-		{"open request", b.stepOpenPR},
+		{"open request", openRequest(b)},
 	} {
-		if err := step.run(ctx); err != nil {
+		if _, err := step.run(ctx); err != nil {
 			t.Fatalf("%s: %v", step.name, err)
 		}
 	}
@@ -1206,7 +1220,7 @@ func TestStepOpenPR_MeasuresTheBranchAsItWillBeProposed(t *testing.T) {
 	wt.commits = 1 // implement already committed
 	wt.dirty = []byte("diff --git a/cli/app.go b/cli/app.go\n")
 
-	if err := testBuilder(t).stepOpenPR(ctxWithPlan(wt, &scriptedAgent{})); err != nil {
+	if _, err := testBuilder(t).stepOpenPR(ctxWithPlan(wt, &scriptedAgent{}), flow.StepId(StepCloseBranch)); err != nil {
 		t.Fatalf("stepOpenPR: %v", err)
 	}
 	// One gate, and it is the one a decision may rest on.
@@ -1241,7 +1255,7 @@ func TestStepOpenPR_DoesNotProposeWhatWasNeverMeasured(t *testing.T) {
 			wt.gateOutcome = map[flow.GateName]flow.Outcome{flow.GateIntegration: outcome}
 			ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-			err := testBuilder(t).stepOpenPR(ctx)
+			_, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch))
 			if err == nil {
 				t.Fatal("opened a request over a gate that measured nothing")
 			}
@@ -1275,7 +1289,7 @@ func TestStepOpenPR_AGateThatCouldNotRunIsNotTheChangeFailing(t *testing.T) {
 	wt.gateErr = errors.New("bin/gate: permission denied")
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	err := testBuilder(t).stepOpenPR(ctx)
+	_, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch))
 	if err == nil {
 		t.Fatal("opened a request over a gate that never ran")
 	}
@@ -1301,7 +1315,7 @@ func TestStepOpenPR_ABrokenJudgeIsNotARefusal(t *testing.T) {
 	wt.judgeErr = errors.New("bin/run: no such file or directory")
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	err := testBuilder(t).stepOpenPR(ctx)
+	_, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch))
 	if err == nil {
 		t.Fatal("opened a request with no verdict about it")
 	}
@@ -1328,7 +1342,7 @@ func TestStepOpenPR_DoesNotProposeWhatTheJudgeRefuses(t *testing.T) {
 	wt.judgeDetail = "coverage 61.2% is below the floor of 70%"
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	err := testBuilder(t).stepOpenPR(ctx)
+	_, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch))
 	if err == nil {
 		t.Fatal("proposed a change the maintainer's own gate will reject")
 	}
@@ -1357,7 +1371,7 @@ func TestStepOpenPR_BodyCarriesTheGatesResult(t *testing.T) {
 	wt.judgeDetail = "every measurement is within this project's thresholds"
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	if err := testBuilder(t).stepOpenPR(ctx); err != nil {
+	if _, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch)); err != nil {
 		t.Fatalf("stepOpenPR: %v", err)
 	}
 	for _, want := range []string{
@@ -1401,7 +1415,7 @@ func TestStepOpenPR_PushRefusal_AgentRepairs_RetrySucceeds(t *testing.T) {
 	agent := &scriptedAgent{}
 	ctx := ctxWithPlan(wt, agent)
 
-	if err := testBuilder(t).stepOpenPR(ctx); err != nil {
+	if _, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch)); err != nil {
 		t.Fatalf("stepOpenPR: %v", err)
 	}
 	if agent.calls != 1 {
@@ -1432,7 +1446,7 @@ func TestStepOpenPR_PushRefusalTwice_Parks(t *testing.T) {
 	agent := &scriptedAgent{}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepOpenPR(ctx)
+	_, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch))
 	if err == nil || !strings.Contains(err.Error(), "parked") {
 		t.Fatalf("err = %v, want a park", err)
 	}
@@ -1465,7 +1479,7 @@ func TestStepOpenPR_NonPushRefusalPassesThrough(t *testing.T) {
 	agent := &scriptedAgent{}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepOpenPR(ctx)
+	_, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch))
 	if err == nil {
 		t.Fatal("expected error to pass through")
 	}
@@ -1488,7 +1502,7 @@ func TestStepOpenPR_InfraErrorPassesThrough(t *testing.T) {
 	agent := &scriptedAgent{}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepOpenPR(ctx)
+	_, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch))
 	if err == nil || !strings.Contains(err.Error(), "network timeout") {
 		t.Fatalf("err = %v, want the infrastructure error passed through", err)
 	}
@@ -1508,7 +1522,7 @@ func TestStepOpenPR_PushRefusalThenInfraError_Parks(t *testing.T) {
 	agent := &scriptedAgent{}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepOpenPR(ctx)
+	_, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch))
 	if err == nil || !strings.Contains(err.Error(), "parked") {
 		t.Fatalf("err = %v, want a park (preserves the rebase work)", err)
 	}
@@ -1534,7 +1548,7 @@ func TestStepOpenPR_PushRefusal_AgentFails_ReturnsAgentError(t *testing.T) {
 	agent := &scriptedAgent{errs: []error{fmt.Errorf("substrate died")}}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepOpenPR(ctx)
+	_, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch))
 	if err == nil || !strings.Contains(err.Error(), "substrate died") {
 		t.Fatalf("err = %v, want the agent error propagated", err)
 	}
@@ -1562,7 +1576,7 @@ func TestStepOpenPR_PushRefusalTwice_WIPUpdatedTwice(t *testing.T) {
 	agent := &scriptedAgent{}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepOpenPR(ctx)
+	_, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch))
 	if err == nil || !strings.Contains(err.Error(), "parked") {
 		t.Fatalf("err = %v, want a park", err)
 	}
@@ -1588,7 +1602,7 @@ func TestStepOpenPR_PushRefusalThenInfraError_WIPNotUpdatedTwice(t *testing.T) {
 	agent := &scriptedAgent{}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepOpenPR(ctx)
+	_, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch))
 	if err == nil || !strings.Contains(err.Error(), "parked") {
 		t.Fatalf("err = %v, want a park", err)
 	}
@@ -1626,16 +1640,17 @@ func TestStepCloseBranch_ReturnsTheWorktreeToTheBase(t *testing.T) {
 	wt.exists["main"] = true
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	if err := testBuilder(t).stepCloseBranch(ctx); err != nil {
+	res, err := testBuilder(t).stepCloseBranch(ctx)
+	if err != nil {
 		t.Fatalf("stepCloseBranch: %v", err)
 	}
 	if wt.branch != "main" {
 		t.Errorf("worktree is on %q, want the base branch — the arena owes the next "+
 			"item a clean starting point", wt.branch)
 	}
-	if ctx.resolved.Type != flow.ArtifactFlag {
+	if res.Payload.Type != flow.ArtifactFlag {
 		t.Errorf("resolved a %v, want the flag — this step restores rather than produces",
-			ctx.resolved.Type)
+			res.Payload.Type)
 	}
 	// The branch is the product: it carries the request, which outlives the
 	// resolution that opened it.
@@ -1651,7 +1666,7 @@ func TestStepCloseBranch_RefusesWhenTheBaseIsNotInTheWorktree(t *testing.T) {
 	wt := resumedWorktree() // "main" is not among the branches
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	err := testBuilder(t).stepCloseBranch(ctx)
+	res, err := testBuilder(t).stepCloseBranch(ctx)
 	if err == nil || !strings.Contains(err.Error(), "main") {
 		t.Fatalf("err = %v, want a refusal naming the base branch that is missing", err)
 	}
@@ -1659,7 +1674,7 @@ func TestStepCloseBranch_RefusesWhenTheBaseIsNotInTheWorktree(t *testing.T) {
 		t.Errorf("err = %v, want it to wrap flow.ErrRefused — a missing base branch "+
 			"is deterministic and cannot change on retry", err)
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("recorded the worktree as restored when it was not")
 	}
 }
@@ -1672,7 +1687,7 @@ func TestStepCloseBranch_RefusesADirtyWorktree(t *testing.T) {
 	wt.dirty = []byte("diff --git a/x b/x\n")
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	err := testBuilder(t).stepCloseBranch(ctx)
+	res, err := testBuilder(t).stepCloseBranch(ctx)
 	if err == nil || !strings.Contains(err.Error(), "dirty") {
 		t.Fatalf("err = %v, want a refusal naming the dirty tree", err)
 	}
@@ -1680,7 +1695,7 @@ func TestStepCloseBranch_RefusesADirtyWorktree(t *testing.T) {
 		t.Errorf("err = %v, want it to wrap flow.ErrTransient — a dirty tree is an "+
 			"environment condition that may resolve", err)
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("recorded the worktree as restored over uncommitted work")
 	}
 	if wt.branch != testBranch {
@@ -1692,7 +1707,7 @@ func TestStepCloseBranch_WorktreeUnavailableWrapsErrTransient(t *testing.T) {
 	ctx := ctxWithPlan(resumedWorktree(), &scriptedAgent{})
 	ctx.wtErr = errors.New("no worktree allocated")
 
-	err := testBuilder(t).stepCloseBranch(ctx)
+	res, err := testBuilder(t).stepCloseBranch(ctx)
 	if err == nil {
 		t.Fatal("want an error when worktree is unavailable")
 	}
@@ -1703,7 +1718,7 @@ func TestStepCloseBranch_WorktreeUnavailableWrapsErrTransient(t *testing.T) {
 	if !strings.Contains(err.Error(), "no worktree allocated") {
 		t.Errorf("err = %v, want the original message preserved for diagnosis", err)
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("resolved the flag after a worktree failure")
 	}
 }
@@ -1715,7 +1730,7 @@ func TestStepCloseBranch_BaseBranchLookupFailureWrapsErrTransient(t *testing.T) 
 	// A builder with no pre-stored base and a backend that cannot resolve it.
 	b := &builder{cfg: Config{}, role: RoleContributor, backend: &bareBackend{}}
 
-	err := b.stepCloseBranch(ctx)
+	res, err := b.stepCloseBranch(ctx)
 	if err == nil {
 		t.Fatal("want an error when base branch lookup fails")
 	}
@@ -1726,7 +1741,7 @@ func TestStepCloseBranch_BaseBranchLookupFailureWrapsErrTransient(t *testing.T) 
 	if !strings.Contains(err.Error(), "cannot report") {
 		t.Errorf("err = %v, want the underlying message preserved for diagnosis", err)
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("resolved the flag after a failed base-branch lookup")
 	}
 }
@@ -1745,7 +1760,7 @@ func TestAgentQuestionKeepsTheWorkThatProducedIt(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{reply}}
 	ctx := ctxWithPlan(wt, agent)
 
-	if err := testBuilder(t).stepReview(ctx); err == nil {
+	if _, err := testBuilder(t).stepReview(ctx); err == nil {
 		t.Fatal("want the ask sentinel to stop the step")
 	}
 	if len(ctx.asked) != 1 {
@@ -1764,7 +1779,7 @@ func TestAgentQuestionParksEvenWhenTheStashFails(t *testing.T) {
 	ctx := ctxWithPlan(wt, agent)
 	ctx.wipSaveErr = errors.New("nowhere to write")
 
-	if err := testBuilder(t).stepReview(ctx); err == nil {
+	if _, err := testBuilder(t).stepReview(ctx); err == nil {
 		t.Fatal("want the ask sentinel to stop the step")
 	}
 	if len(ctx.asked) != 1 {
@@ -1849,7 +1864,7 @@ func TestQuestionDisclosureRevisionSucceedsOnFirstRetry(t *testing.T) {
 	ctx := ctxWithPlan(resumedWorktree(), agent)
 	ctx.askErrs = []error{questionRefusal("an absolute home path names the machine's user")}
 
-	err := testBuilder(t).stepReview(ctx)
+	_, err := testBuilder(t).stepReview(ctx)
 	if err == nil {
 		t.Fatal("want the ask sentinel to stop the step")
 	}
@@ -1897,7 +1912,7 @@ func TestQuestionDisclosureExhaustionParks(t *testing.T) {
 	}
 	ctx.askErrs = askErrs
 
-	err := testBuilder(t).stepReview(ctx)
+	_, err := testBuilder(t).stepReview(ctx)
 	if err == nil {
 		t.Fatal("want the step to stop when the guard will not take the question")
 	}
@@ -1939,7 +1954,7 @@ func TestQuestionDisclosureRevisionDropsQuestion(t *testing.T) {
 	ctx := ctxWithPlan(resumedWorktree(), agent)
 	ctx.askErrs = []error{questionRefusal("an absolute home path was found")}
 
-	err := testBuilder(t).stepReview(ctx)
+	_, err := testBuilder(t).stepReview(ctx)
 	// No ErrQuestion sentinel — the step continues.
 	if err != nil {
 		t.Fatalf("want nil error when the agent drops the question, got %v", err)
@@ -1961,7 +1976,7 @@ func TestQuestionNonDisclosureErrorPassesThrough(t *testing.T) {
 	boom := errors.New("github: 502 bad gateway")
 	ctx.askErrs = []error{boom}
 
-	err := testBuilder(t).stepReview(ctx)
+	_, err := testBuilder(t).stepReview(ctx)
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the backend's own error unchanged", err)
 	}
@@ -1989,7 +2004,7 @@ func TestQuestionDisclosureSecondRefusalRevisesTheRevision(t *testing.T) {
 		questionRefusal("second refusal"),
 	}
 
-	err := testBuilder(t).stepReview(ctx)
+	_, err := testBuilder(t).stepReview(ctx)
 	if err == nil {
 		t.Fatal("want the ask sentinel to stop the step")
 	}
@@ -2032,7 +2047,7 @@ func TestQuestionDisclosureLoopSurvivesWIPSaveFailure(t *testing.T) {
 	ctx.askErrs = []error{questionRefusal("an absolute home path was found")}
 	ctx.wipSaveErr = errors.New("nowhere to write")
 
-	err := testBuilder(t).stepReview(ctx)
+	_, err := testBuilder(t).stepReview(ctx)
 	if err == nil {
 		t.Fatal("want the ask sentinel to stop the step")
 	}
@@ -2065,7 +2080,7 @@ func TestQuestionDisclosureParkReasonCarriesTheAct(t *testing.T) {
 	}
 	ctx.askErrs = askErrs
 
-	testBuilder(t).stepReview(ctx)
+	_, _ = testBuilder(t).stepReview(ctx)
 	if ctx.park == nil {
 		t.Fatal("no park recorded")
 	}
@@ -2088,7 +2103,7 @@ func TestQuestionRevisionThatCannotRunKeepsTheRefusedWork(t *testing.T) {
 	ctx := ctxWithPlan(resumedWorktree(), agent)
 	ctx.askErrs = []error{questionRefusal("an absolute home path was found")}
 
-	err := testBuilder(t).stepReview(ctx)
+	_, err := testBuilder(t).stepReview(ctx)
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the agent's own error", err)
 	}
@@ -2118,7 +2133,7 @@ func TestQuestionRevisionPromptCarriesTheRefusedText(t *testing.T) {
 	ctx := ctxWithPlan(resumedWorktree(), agent)
 	ctx.askErrs = []error{questionRefusal("an absolute home path was found")}
 
-	testBuilder(t).stepReview(ctx)
+	_, _ = testBuilder(t).stepReview(ctx)
 	if agent.calls < 2 {
 		t.Fatalf("agent ran %d times, want at least 2", agent.calls)
 	}
@@ -2129,289 +2144,22 @@ func TestQuestionRevisionPromptCarriesTheRefusedText(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// The refused-write door.
-// ---------------------------------------------------------------------------
-
-// refusal is a disclosure refusal shaped like the one the guard actually
-// returns: the act, and the guard's own answer naming what it found.
-func refusal(what string) flow.ErrDisclosureRefused {
-	return flow.ErrDisclosureRefused{
-		Act:    flow.ActArtifactComment,
-		Reason: errors.New(what),
+// openRequest binds the pull request step to the successor the contributor
+// composition declares for it, so a test can call it with the one-argument
+// handler shape every other step has.
+func openRequest(b *builder) func(flow.StepCtx) (flow.StepResult, error) {
+	return func(ctx flow.StepCtx) (flow.StepResult, error) {
+		return b.stepOpenPR(ctx, flow.StepId(StepCloseBranch))
 	}
 }
 
-// docs/disclosure.md: "A refusal is not a failure of the step. The text is
-// revised and re-offered." The revision costs one prompt, in the session the
-// agent is already holding — not an invocation, and not a re-derivation.
 // planned wraps a fixture so it passes stepPlan's structural check (#85), which
-// refuses an artifact that is both unstructured and short. These tests are
-// about the disclosure-revision loop, not about plan content, so their
-// fixtures stay as short and distinguishable as they were — the heading is the
-// only thing added, and the original text is preserved verbatim for the
-// assertions that match on it.
+// refuses an artifact that is both unstructured and short. The fixtures using
+// it are about what the step elects rather than about plan content, so they
+// stay as short and distinguishable as they were — the heading is the only
+// thing added, and the original text is preserved verbatim for the assertions
+// that match on it.
 func planned(s string) string { return "## Plan\n\n" + s }
-
-func TestRefusedProseIsRevisedAndPublished(t *testing.T) {
-	agent := &scriptedAgent{replies: []string{planned("the plan mentioning /home/someone/"), planned("the plan, relative")}}
-	ctx := ctxWithPlan(newFakeWorktree(), agent)
-	ctx.resolveErrs = []error{refusal(`an absolute home path names the machine's user`)}
-
-	if err := testBuilder(t).stepPlan(ctx); err != nil {
-		t.Fatalf("stepPlan: %v", err)
-	}
-	if !ctx.didResolve || ctx.resolved.Markdown != planned("the plan, relative") {
-		t.Errorf("resolved %q, want the REVISED text", ctx.resolved.Markdown)
-	}
-	if agent.calls != 2 {
-		t.Errorf("agent ran %d times, want 2 (the plan, then one revision)", agent.calls)
-	}
-	if ctx.park != nil {
-		t.Errorf("parked (%+v) — a refusal is not a failure of the step", ctx.park)
-	}
-	// The revision fixes a sentence. It must not be able to edit the tree: the
-	// wording is what is wrong, and a producing step has already committed by
-	// the time it runs.
-	rev := agent.reqs[1]
-	if rev.PermissionMode != "plan" {
-		t.Errorf("revision PermissionMode = %q, want plan", rev.PermissionMode)
-	}
-	if rev.ResumeSessionID != "session-1" {
-		t.Errorf("revision ResumeSessionID = %q, want the session that wrote the text", rev.ResumeSessionID)
-	}
-	// Carried in the prompt as well as the session, because ResumeSessionID is
-	// documented as best-effort.
-	if !strings.Contains(rev.Prompt, "the plan mentioning /home/someone/") {
-		t.Errorf("revision prompt does not carry the refused text: %q", rev.Prompt)
-	}
-	if !strings.Contains(rev.Prompt, "an absolute home path names the machine's user") {
-		t.Errorf("revision prompt does not carry the guard's reason: %q", rev.Prompt)
-	}
-}
-
-// The case from the issue, end to end: an agent that keeps producing the same
-// refused detail. It parks rather than failing, and the work survives — which
-// is what makes the next run differ from this one instead of being the same
-// attempt with a bigger budget.
-func TestProseRefusedEveryTimeParksAndKeepsTheWork(t *testing.T) {
-	// Stands for the fragment a real refusal quotes back — "what it found and
-	// where", which is the disclosure itself.
-	const guardAnswer = "an absolute home path was found"
-	agent := &scriptedAgent{replies: []string{planned("the plan")}}
-	ctx := ctxWithPlan(newFakeWorktree(), agent)
-	ctx.resolveErrs = []error{
-		refusal(guardAnswer), refusal(guardAnswer),
-		refusal(guardAnswer), refusal(guardAnswer),
-	}
-
-	err := testBuilder(t).stepPlan(ctx)
-	if err == nil {
-		t.Fatal("want the step to stop when the guard will not take the text")
-	}
-	if ctx.park == nil {
-		t.Fatal("no park recorded — a refusal must not be reported as a failed step")
-	}
-	if ctx.park.Kind != flow.ParkBlocked {
-		t.Errorf("park kind = %q, want %q", ctx.park.Kind, flow.ParkBlocked)
-	}
-	if !strings.Contains(ctx.park.Reason, "disclosure guard refused") {
-		t.Errorf("park reason = %q, want it to name the disclosure refusal", ctx.park.Reason)
-	}
-	if strings.Contains(ctx.park.Reason, "\n") {
-		t.Errorf("park reason spans lines: %q", ctx.park.Reason)
-	}
-	// A park is PUBLISHED — Backend.Park posts the whole request as an issue
-	// comment, through the same guard. A reason repeating what the guard said
-	// carries the fragment the guard just refused, so the park record is
-	// refused too, Backend.Park errors, and the item never parks at all.
-	if strings.Contains(ctx.park.Reason, guardAnswer) {
-		t.Errorf("park reason repeats the guard's answer, which is the one text that cannot be published: %q",
-			ctx.park.Reason)
-	}
-	// What it can say instead: the act, which is the SDK's own vocabulary.
-	if !strings.Contains(ctx.park.Reason, string(flow.ActArtifactComment)) {
-		t.Errorf("park reason = %q, want it to name the refused act", ctx.park.Reason)
-	}
-	if ctx.didResolve {
-		t.Error("resolved the artifact after every offer was refused")
-	}
-	// The stash is the point: an issue comment is the one place refused text
-	// cannot go, so without this the work is gone — and it is where the guard's
-	// answer lives, since the park cannot carry it.
-	last := ctx.wipSaves[len(ctx.wipSaves)-1]
-	if !strings.Contains(last, guardAnswer) {
-		t.Errorf("stashed record does not carry the guard's reason: %q", last)
-	}
-	if !strings.Contains(last, "done") {
-		t.Errorf("stashed record does not carry the refused text: %q", last)
-	}
-	// Bounded, so a loop against the guard cannot eat the step's whole prompt
-	// budget: the opening turn plus maxDisclosureRevisions revisions.
-	if agent.calls != maxDisclosureRevisions+1 {
-		t.Errorf("agent ran %d times, want %d", agent.calls, maxDisclosureRevisions+1)
-	}
-}
-
-// Anything that is not a refusal is a real failure of the write. Re-prompting
-// over it would ask an agent to revise text that was never examined.
-func TestANonRefusalFromResolveIsReturnedUnchanged(t *testing.T) {
-	agent := &scriptedAgent{replies: []string{planned("the plan")}}
-	ctx := ctxWithPlan(newFakeWorktree(), agent)
-	boom := errors.New("github: 502 bad gateway")
-	ctx.resolveErrs = []error{boom}
-
-	err := testBuilder(t).stepPlan(ctx)
-	if !errors.Is(err, boom) {
-		t.Fatalf("err = %v, want the write's own error unchanged", err)
-	}
-	if agent.calls != 1 {
-		t.Errorf("agent ran %d times, want 1 — nothing should have been revised", agent.calls)
-	}
-	if ctx.park != nil {
-		t.Errorf("parked (%+v) on an error that is not a refusal", ctx.park)
-	}
-	if len(ctx.wipSaves) != 0 {
-		t.Errorf("stashed %v for a write that was never refused", ctx.wipSaves)
-	}
-}
-
-// An empty revision is not an empty artifact. Recording one would resolve the
-// step with nothing in it — the plan section of a pull request, blank.
-func TestAnEmptyRevisionIsAnError(t *testing.T) {
-	agent := &scriptedAgent{replies: []string{planned("the plan"), "   "}}
-	ctx := ctxWithPlan(newFakeWorktree(), agent)
-	ctx.resolveErrs = []error{refusal("an absolute home path was found")}
-
-	err := testBuilder(t).stepPlan(ctx)
-	if err == nil || !strings.Contains(err.Error(), "revise") {
-		t.Fatalf("err = %v, want a refusal to record an empty revision", err)
-	}
-	if ctx.didResolve {
-		t.Error("resolved an artifact from an empty revision")
-	}
-}
-
-// Every step that publishes prose goes through the one revise path. A step
-// that resolved directly would fail on a refusal and lose its work — which is
-// the defect, reintroduced one step at a time.
-func TestEveryProseStepRevisesARefusal(t *testing.T) {
-	for name, step := range map[string]func(*builder, flow.StepCtx) error{
-		"plan":     (*builder).stepPlan,
-		"review":   (*builder).stepReview,
-		"coverage": (*builder).stepCoverage,
-	} {
-		t.Run(name, func(t *testing.T) {
-			wt := resumedWorktree()
-			agent := &scriptedAgent{replies: []string{planned("first draft"), planned("revised draft")}}
-			ctx := ctxWithPlan(wt, agent)
-			ctx.resolveErrs = []error{refusal("an absolute home path was found")}
-
-			if err := step(testBuilder(t), ctx); err != nil {
-				t.Fatalf("%s: %v", name, err)
-			}
-			if !ctx.didResolve || ctx.resolved.Markdown != planned("revised draft") {
-				t.Errorf("resolved %q, want the revised text", ctx.resolved.Markdown)
-			}
-			if len(ctx.wipSaves) != 1 {
-				t.Errorf("stashed %d times, want 1 — the refused text has nowhere else to go", len(ctx.wipSaves))
-			}
-		})
-	}
-}
-
-// A refusal that comes back a second time has to produce a different round:
-// the agent is asked to fix the text it just wrote, in the session that wrote
-// it. A round that re-sent the ORIGINAL text would ask for a change already
-// made, and the loop could only run out its rounds and park.
-func TestASecondRefusalRevisesTheRevision(t *testing.T) {
-	agent := &scriptedAgent{replies: []string{planned("draft one"), planned("draft two"), planned("draft three")}}
-	ctx := ctxWithPlan(newFakeWorktree(), agent)
-	ctx.resolveErrs = []error{refusal("first refusal"), refusal("second refusal")}
-
-	if err := testBuilder(t).stepPlan(ctx); err != nil {
-		t.Fatalf("stepPlan: %v", err)
-	}
-	if ctx.resolved.Markdown != planned("draft three") {
-		t.Errorf("resolved %q, want the second revision", ctx.resolved.Markdown)
-	}
-	if agent.calls != 3 {
-		t.Fatalf("agent ran %d times, want 3 (the plan, then two revisions)", agent.calls)
-	}
-	second := agent.reqs[2]
-	if !strings.Contains(second.Prompt, "draft two") {
-		t.Errorf("the second revision does not carry the text just refused: %q", second.Prompt)
-	}
-	if strings.Contains(second.Prompt, "draft one") {
-		t.Errorf("the second revision re-sends the text the first one already replaced: %q", second.Prompt)
-	}
-	if !strings.Contains(second.Prompt, "second refusal") {
-		t.Errorf("the second revision carries the first refusal's reason, not this one's: %q", second.Prompt)
-	}
-	if second.ResumeSessionID != "session-2" {
-		t.Errorf("second revision resumes %q, want the session that wrote draft two", second.ResumeSessionID)
-	}
-	// Each round replaces the stash, so what survives a park is the newest
-	// refused text — the one the next run should start from.
-	if len(ctx.wipSaves) != 2 {
-		t.Fatalf("stashed %d times, want one per refusal", len(ctx.wipSaves))
-	}
-	if !strings.Contains(ctx.wipSaves[1], "draft two") || !strings.Contains(ctx.wipSaves[1], "second refusal") {
-		t.Errorf("the last stash is not the last refusal: %q", ctx.wipSaves[1])
-	}
-}
-
-// The stash is what makes the work survive, but it is not what makes the
-// revision possible — that is the session and the prompt. A store that cannot
-// take the text must cost the record and nothing else.
-func TestRefusedProseIsRevisedEvenWhenTheStashFails(t *testing.T) {
-	agent := &scriptedAgent{replies: []string{planned("the plan, absolute"), planned("the plan, relative")}}
-	ctx := ctxWithPlan(newFakeWorktree(), agent)
-	ctx.resolveErrs = []error{refusal("an absolute home path was found")}
-	ctx.wipSaveErr = errors.New("nowhere to write")
-
-	if err := testBuilder(t).stepPlan(ctx); err != nil {
-		t.Fatalf("stepPlan: %v", err)
-	}
-	if ctx.resolved.Markdown != planned("the plan, relative") {
-		t.Errorf("resolved %q, want the revised text", ctx.resolved.Markdown)
-	}
-	var reported bool
-	for _, n := range ctx.notices {
-		if strings.Contains(n, "could not record refused text") {
-			reported = true
-		}
-	}
-	if !reported {
-		t.Errorf("the failed stash went unreported; notices = %v", ctx.notices)
-	}
-}
-
-// The stash happens before the revision is attempted, so a substrate that dies
-// between the refusal and the fix still leaves the next run something to start
-// from. Stashing after the revision would lose exactly the text that a run
-// stopped here can no longer reach — it was never published.
-func TestARevisionThatCannotRunKeepsTheRefusedWork(t *testing.T) {
-	boom := errors.New("agent substrate is down")
-	agent := &scriptedAgent{replies: []string{planned("the plan")}, errs: []error{nil, boom}}
-	ctx := ctxWithPlan(newFakeWorktree(), agent)
-	ctx.resolveErrs = []error{refusal("an absolute home path was found")}
-
-	err := testBuilder(t).stepPlan(ctx)
-	if !errors.Is(err, boom) {
-		t.Fatalf("err = %v, want the agent's own error", err)
-	}
-	if ctx.didResolve {
-		t.Error("resolved an artifact after the revision could not run")
-	}
-	if len(ctx.wipSaves) != 1 {
-		t.Fatalf("stashed %d times, want the refused text kept before the revision ran", len(ctx.wipSaves))
-	}
-	if !strings.Contains(ctx.wipSaves[0], "the plan") ||
-		!strings.Contains(ctx.wipSaves[0], "an absolute home path was found") {
-		t.Errorf("the stash carries neither the text nor the reason: %q", ctx.wipSaves[0])
-	}
-}
 
 // ---------------------------------------------------------------------------
 // The plan is what was submitted, not what was narrated.
@@ -2427,17 +2175,18 @@ func TestPlanStepResolvesTheSubmittedPlanNotTheNarration(t *testing.T) {
 	}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	if err := testBuilder(t).stepPlan(ctx); err != nil {
+	res, err := testBuilder(t).stepPlan(ctx)
+	if err != nil {
 		t.Fatalf("stepPlan: %v", err)
 	}
-	if !ctx.didResolve {
+	if res.Payload == nil {
 		t.Fatal("plan artifact was not resolved")
 	}
-	if !strings.Contains(ctx.resolved.Markdown, "Change the parser") {
-		t.Errorf("resolved %q, want the SUBMITTED plan", ctx.resolved.Markdown)
+	if !strings.Contains(res.Payload.Markdown, "Change the parser") {
+		t.Errorf("resolved %q, want the SUBMITTED plan", res.Payload.Markdown)
 	}
-	if strings.Contains(ctx.resolved.Markdown, "Now let me write the plan") {
-		t.Errorf("resolved the turn's narration: %q", ctx.resolved.Markdown)
+	if strings.Contains(res.Payload.Markdown, "Now let me write the plan") {
+		t.Errorf("resolved the turn's narration: %q", res.Payload.Markdown)
 	}
 }
 
@@ -2456,15 +2205,15 @@ func TestPlanStepRefusesWhenASubmittedPlanWasLost(t *testing.T) {
 	}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	err := testBuilder(t).stepPlan(ctx)
+	res, err := testBuilder(t).stepPlan(ctx)
 	if err == nil {
 		t.Fatal("stepPlan succeeded on a lost plan — narration would publish as the design")
 	}
 	if !strings.Contains(err.Error(), "submitted a plan") {
 		t.Errorf("error = %v, want it to name the lost submission", err)
 	}
-	if ctx.didResolve {
-		t.Errorf("resolved the plan artifact anyway: %q", ctx.resolved.Markdown)
+	if res.Payload != nil {
+		t.Errorf("resolved the plan artifact anyway: %q", res.Payload.Markdown)
 	}
 }
 
@@ -2474,11 +2223,12 @@ func TestPlanStepStillAcceptsATurnThatNeverSubmitted(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{"## Plan\n\nDo the thing."}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	if err := testBuilder(t).stepPlan(ctx); err != nil {
+	res, err := testBuilder(t).stepPlan(ctx)
+	if err != nil {
 		t.Fatalf("stepPlan: %v", err)
 	}
-	if !strings.Contains(ctx.resolved.Markdown, "Do the thing") {
-		t.Errorf("resolved %q, want the agent's text", ctx.resolved.Markdown)
+	if !strings.Contains(res.Payload.Markdown, "Do the thing") {
+		t.Errorf("resolved %q, want the agent's text", res.Payload.Markdown)
 	}
 }
 
@@ -2502,7 +2252,7 @@ func TestPlanStepSavesPlanAsWIPWhenAgentAlsoAsksAQuestion(t *testing.T) {
 	}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	err := testBuilder(t).stepPlan(ctx)
+	res, err := testBuilder(t).stepPlan(ctx)
 	if err == nil {
 		t.Fatal("want the ask sentinel to stop the step")
 	}
@@ -2510,7 +2260,7 @@ func TestPlanStepSavesPlanAsWIPWhenAgentAlsoAsksAQuestion(t *testing.T) {
 		t.Fatalf("asked %d questions, want 1", len(ctx.asked))
 	}
 	// The step must NOT resolve — the question may require changing the plan.
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Fatal("resolved the plan artifact despite an open question — " +
 			"the answer may need to change the plan, so the step must not resolve")
 	}
@@ -2538,11 +2288,11 @@ func TestPlanStepDoesNotResolveEmptyPlanOnQuestion(t *testing.T) {
 	}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	err := testBuilder(t).stepPlan(ctx)
+	res, err := testBuilder(t).stepPlan(ctx)
 	if err == nil {
 		t.Fatal("want the ask sentinel to stop the step")
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("resolved a plan artifact from an agent that produced no plan")
 	}
 	// The WIP should carry the agent's reasoning.
@@ -2561,7 +2311,7 @@ func TestPlanStepParksOnQuestionEvenWhenWIPSaveFails(t *testing.T) {
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 	ctx.wipSaveErr = errors.New("nowhere to write")
 
-	err := testBuilder(t).stepPlan(ctx)
+	res, err := testBuilder(t).stepPlan(ctx)
 	if err == nil {
 		t.Fatal("want the ask sentinel to stop the step")
 	}
@@ -2569,7 +2319,7 @@ func TestPlanStepParksOnQuestionEvenWhenWIPSaveFails(t *testing.T) {
 		t.Fatalf("asked %d questions, want 1 — a failed WIP save must not swallow the park", len(ctx.asked))
 	}
 	// The step must not resolve.
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("resolved the plan despite the step not completing")
 	}
 	// A notice should report the failure.
@@ -2593,7 +2343,7 @@ func TestPlanStepSkipsWIPSaveWhenPlanTextIsWhitespaceOnly(t *testing.T) {
 	}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	err := testBuilder(t).stepPlan(ctx)
+	_, err := testBuilder(t).stepPlan(ctx)
 	if err == nil {
 		t.Fatal("want the ask sentinel to stop the step")
 	}
@@ -2611,11 +2361,11 @@ func TestPlanStepPropagatesAgentHardError(t *testing.T) {
 	agent := &scriptedAgent{errs: []error{boom}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	err := testBuilder(t).stepPlan(ctx)
+	res, err := testBuilder(t).stepPlan(ctx)
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the agent's error", err)
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("resolved a plan from an agent that crashed")
 	}
 	// No WIP save should happen — resp is nil.
@@ -2643,7 +2393,7 @@ func TestPlanStepRefusalParksBlocked(t *testing.T) {
 			agent := &scriptedAgent{replies: []string{tc.reply}}
 			ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-			err := testBuilder(t).stepPlan(ctx)
+			res, err := testBuilder(t).stepPlan(ctx)
 			if err == nil {
 				t.Fatal("want the step to park on a refusal")
 			}
@@ -2660,7 +2410,7 @@ func TestPlanStepRefusalParksBlocked(t *testing.T) {
 			if !strings.Contains(ctx.park.Reason, string(tc.wantKind)) {
 				t.Errorf("park reason = %q, want it to carry the refusal kind", ctx.park.Reason)
 			}
-			if ctx.didResolve {
+			if res.Payload != nil {
 				t.Error("resolved the plan artifact on a refusal — downstream steps must not run")
 			}
 			// The reasoning must survive in WIP.
@@ -2719,7 +2469,7 @@ func TestPlanStepWaitsOnItemsDeclaresThemAndStops(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{waitsOnReply}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	err := waitingBuilder(t, nil).stepPlan(ctx)
+	res, err := waitingBuilder(t, nil).stepPlan(ctx)
 	if err == nil {
 		t.Fatal("want the step to stop on the items it waits on")
 	}
@@ -2733,7 +2483,7 @@ func TestPlanStepWaitsOnItemsDeclaresThemAndStops(t *testing.T) {
 	if ctx.park != nil {
 		t.Errorf("parked (%+v) — waiting on items is not a park", ctx.park)
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("resolved the plan artifact on a wait — downstream steps must not run")
 	}
 	if len(ctx.wipSaves) == 0 {
@@ -2756,7 +2506,7 @@ func TestPlanStepQuestionBeatsWaitsOn(t *testing.T) {
 	}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	err := waitingBuilder(t, nil).stepPlan(ctx)
+	_, err := waitingBuilder(t, nil).stepPlan(ctx)
 	if err == nil {
 		t.Fatal("want the step to stop")
 	}
@@ -2777,7 +2527,7 @@ func TestPlanStepWaitsOnBeatsRefusal(t *testing.T) {
 	}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	err := waitingBuilder(t, nil).stepPlan(ctx)
+	_, err := waitingBuilder(t, nil).stepPlan(ctx)
 	if err == nil {
 		t.Fatal("want the step to stop")
 	}
@@ -2798,7 +2548,7 @@ func TestPlanStepWaitsOnUnresolvableRefFailsNamingIt(t *testing.T) {
 	}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	err := waitingBuilder(t, map[string]error{"99": errors.New("no such issue")}).stepPlan(ctx)
+	res, err := waitingBuilder(t, map[string]error{"99": errors.New("no such issue")}).stepPlan(ctx)
 	if err == nil || !strings.Contains(err.Error(), "99") || !strings.Contains(err.Error(), "no such issue") {
 		t.Fatalf("err = %v, want a failure naming the token and the orchestrator's answer", err)
 	}
@@ -2810,8 +2560,8 @@ func TestPlanStepWaitsOnUnresolvableRefFailsNamingIt(t *testing.T) {
 	if len(ctx.waitedOn) != 0 {
 		t.Errorf("waited on %+v, want nothing declared when one token does not resolve", ctx.waitedOn)
 	}
-	if ctx.park != nil || ctx.didResolve {
-		t.Errorf("park %+v resolved %v, want neither", ctx.park, ctx.didResolve)
+	if ctx.park != nil || res.Payload != nil {
+		t.Errorf("park %+v resolved %v, want neither", ctx.park, res.Payload != nil)
 	}
 	// The step still fails — a malformed sentinel is what a retry re-derives —
 	// but the turn is not lost: the retry resumes from the reasoning it paid for.
@@ -2844,7 +2594,7 @@ func TestPlanStepWaitsOnUnresolvableRefEchoesTheProseItSkipped(t *testing.T) {
 	}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	err := waitingBuilder(t, map[string]error{"99": errors.New("no such issue")}).stepPlan(ctx)
+	res, err := waitingBuilder(t, map[string]error{"99": errors.New("no such issue")}).stepPlan(ctx)
 	if err == nil {
 		t.Fatal("want the step to fail on the reference that does not resolve")
 	}
@@ -2858,7 +2608,7 @@ func TestPlanStepWaitsOnUnresolvableRefEchoesTheProseItSkipped(t *testing.T) {
 	if !strings.Contains(wip, "Do the work.") || !strings.Contains(wip, WaitsOnSentinel) {
 		t.Errorf("work in progress = %q, want both the submitted plan and the reasoning behind the stop", wip)
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("resolved the plan artifact on a failed wait — the plan is kept as work in progress, not published")
 	}
 }
@@ -2873,7 +2623,7 @@ func TestPlanStepWaitsOnWrappedNoteIsNotARef(t *testing.T) {
 	}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	err := waitingBuilder(t, nil).stepPlan(ctx)
+	res, err := waitingBuilder(t, nil).stepPlan(ctx)
 	if err == nil {
 		t.Fatal("want the step to stop on the items it waits on")
 	}
@@ -2884,8 +2634,8 @@ func TestPlanStepWaitsOnWrappedNoteIsNotARef(t *testing.T) {
 	if want := []string{"owner/repo#12", "owner/repo#13"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("waited on %v, want %v — the wrapped note is not a reference", got, want)
 	}
-	if ctx.park != nil || ctx.didResolve {
-		t.Errorf("park %+v resolved %v, want neither", ctx.park, ctx.didResolve)
+	if ctx.park != nil || res.Payload != nil {
+		t.Errorf("park %+v resolved %v, want neither", ctx.park, res.Payload != nil)
 	}
 }
 
@@ -2902,13 +2652,14 @@ func TestPlanStepWaitsOnBlockWithNoRefsResolvesThePlan(t *testing.T) {
 	}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	if err := waitingBuilder(t, nil).stepPlan(ctx); err != nil {
+	res, err := waitingBuilder(t, nil).stepPlan(ctx)
+	if err != nil {
 		t.Fatalf("stepPlan: %v — a block naming no item is not a sentinel", err)
 	}
 	if len(ctx.waitedOn) != 0 {
 		t.Errorf("waited on %+v, want nothing — the block named no item", ctx.waitedOn)
 	}
-	if !ctx.didResolve {
+	if res.Payload == nil {
 		t.Error("did not resolve the plan artifact — the submitted plan is the turn's deliverable")
 	}
 }
@@ -2924,7 +2675,7 @@ func TestPlanStepWaitsOnWithPlanTextCombinesWIP(t *testing.T) {
 	}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	if err := waitingBuilder(t, nil).stepPlan(ctx); err == nil {
+	if _, err := waitingBuilder(t, nil).stepPlan(ctx); err == nil {
 		t.Fatal("want the step to stop on the items it waits on")
 	}
 	if len(ctx.waitedOn) != 2 {
@@ -2948,14 +2699,15 @@ func TestPlanStepWaitsOnWIPSaveFailureStillStops(t *testing.T) {
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 	ctx.wipSaveErr = errors.New("disk full")
 
-	if err := waitingBuilder(t, nil).stepPlan(ctx); err == nil {
+	res, err := waitingBuilder(t, nil).stepPlan(ctx)
+	if err == nil {
 		t.Fatal("want the step to stop on the items it waits on")
 	}
 	if len(ctx.waitedOn) != 2 {
 		t.Errorf("waited on %+v, want both declared items — the failed stash must not prevent the stop", ctx.waitedOn)
 	}
-	if ctx.park != nil || ctx.didResolve {
-		t.Errorf("park %+v resolved %v, want neither", ctx.park, ctx.didResolve)
+	if ctx.park != nil || res.Payload != nil {
+		t.Errorf("park %+v resolved %v, want neither", ctx.park, res.Payload != nil)
 	}
 	found := false
 	for _, n := range ctx.notices {
@@ -2981,14 +2733,14 @@ func TestPlanStepRefusalUnknownKindTreatedAsNormalPlan(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{planBody + "\n\nPLAN-REFUSAL: wontfix Not worth doing"}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	err := testBuilder(t).stepPlan(ctx)
+	res, err := testBuilder(t).stepPlan(ctx)
 	if err != nil {
 		t.Fatalf("stepPlan: %v — an unknown refusal kind should resolve as a normal plan", err)
 	}
 	if ctx.park != nil {
 		t.Error("parked on an unknown refusal kind — should resolve as normal plan")
 	}
-	if !ctx.didResolve {
+	if res.Payload == nil {
 		t.Error("did not resolve the plan — an unknown kind is not a refusal")
 	}
 }
@@ -2997,14 +2749,14 @@ func TestPlanStepRefusalNotAtColumnZeroTreatedAsNormalPlan(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{planBody + "\n\n    PLAN-REFUSAL: already-done Something"}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	err := testBuilder(t).stepPlan(ctx)
+	res, err := testBuilder(t).stepPlan(ctx)
 	if err != nil {
 		t.Fatalf("stepPlan: %v", err)
 	}
 	if ctx.park != nil {
 		t.Error("parked on an indented refusal — should resolve as normal plan")
 	}
-	if !ctx.didResolve {
+	if res.Payload == nil {
 		t.Error("did not resolve the plan")
 	}
 }
@@ -3026,14 +2778,14 @@ func TestPlanStepRefusalWithoutEvidenceBlockTreatedAsNormalPlan(t *testing.T) {
 			agent := &scriptedAgent{replies: []string{planBody + "\n\n" + tc.reply}}
 			ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-			err := testBuilder(t).stepPlan(ctx)
+			res, err := testBuilder(t).stepPlan(ctx)
 			if err != nil {
 				t.Fatalf("stepPlan: %v — a refusal without evidence should resolve as a normal plan", err)
 			}
 			if ctx.park != nil {
 				t.Error("parked on a refusal without evidence — should resolve as normal plan")
 			}
-			if !ctx.didResolve {
+			if res.Payload == nil {
 				t.Error("did not resolve the plan — a bare refusal is not a refusal")
 			}
 		})
@@ -3048,7 +2800,7 @@ func TestPlanStepRefusalWithPlanTextCombinesWIP(t *testing.T) {
 	}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	err := testBuilder(t).stepPlan(ctx)
+	_, err := testBuilder(t).stepPlan(ctx)
 	if err == nil {
 		t.Fatal("want the step to park")
 	}
@@ -3072,7 +2824,7 @@ func TestPlanStepRefusalWIPSaveFailureStillParks(t *testing.T) {
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 	ctx.wipSaveErr = errors.New("disk full")
 
-	err := testBuilder(t).stepPlan(ctx)
+	_, err := testBuilder(t).stepPlan(ctx)
 	if err == nil {
 		t.Fatal("want the step to park")
 	}
@@ -3103,7 +2855,7 @@ func TestPlanStepQuestionTakesPriorityOverRefusal(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{reply}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	err := testBuilder(t).stepPlan(ctx)
+	_, err := testBuilder(t).stepPlan(ctx)
 	if err == nil {
 		t.Fatal("want the step to stop (question or refusal)")
 	}
@@ -3122,7 +2874,7 @@ func TestPlanStepRefusalReasonIncludesSummary(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{reply}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	_ = testBuilder(t).stepPlan(ctx)
+	_, _ = testBuilder(t).stepPlan(ctx)
 	if ctx.park == nil {
 		t.Fatal("no park recorded")
 	}
@@ -3138,7 +2890,7 @@ func TestPlanStepRefusalWithoutPlanTextSavesBarLastText(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{reply}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	_ = testBuilder(t).stepPlan(ctx)
+	_, _ = testBuilder(t).stepPlan(ctx)
 	if len(ctx.wipSaves) == 0 {
 		t.Fatal("no WIP saved")
 	}
@@ -3194,7 +2946,8 @@ func TestCommitRepair_Succeeds(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{"done", "deleted the file"}}
 	ctx := ctxWithPlan(wt, agent)
 
-	if err := testBuilder(t).stepImplement(ctx); err != nil {
+	res, err := testBuilder(t).stepImplement(ctx)
+	if err != nil {
 		t.Fatalf("stepImplement: %v", err)
 	}
 	// The agent was called twice: once for implement, once for repair.
@@ -3214,7 +2967,7 @@ func TestCommitRepair_Succeeds(t *testing.T) {
 		t.Error("verify was not called after the repair")
 	}
 	// The step should resolve normally.
-	if !ctx.didResolve {
+	if res.Payload == nil {
 		t.Error("step did not resolve after a successful repair")
 	}
 	// The orchestrator must see a notification — it is the only observable
@@ -3252,7 +3005,7 @@ func TestCommitRepair_SecondRefusalParks(t *testing.T) {
 	agent := &scriptedAgent{replies: replies}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepImplement(ctx)
+	_, err := testBuilder(t).stepImplement(ctx)
 	if err == nil {
 		t.Fatal("want an error from parking")
 	}
@@ -3291,7 +3044,7 @@ func TestCommitRepair_RecordOutstanding(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{"deleted the file"}}
 	ctx := ctxWithPlan(wt, agent)
 
-	if err := testBuilder(t).stepOpenPR(ctx); err != nil {
+	if _, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch)); err != nil {
 		t.Fatalf("stepOpenPR: %v", err)
 	}
 	// The repair agent was called.
@@ -3340,7 +3093,7 @@ func TestCommitRepair_AgentFailurePropagates(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{"done"}, errs: []error{nil, boom}}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepImplement(ctx)
+	_, err := testBuilder(t).stepImplement(ctx)
 	if err == nil {
 		t.Fatal("want an error from the agent")
 	}
@@ -3366,14 +3119,15 @@ func TestCommitRepair_ContentRepairSucceeds(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{"done", "edited the fixture"}}
 	ctx := ctxWithPlan(wt, agent)
 
-	if err := testBuilder(t).stepImplement(ctx); err != nil {
+	res, err := testBuilder(t).stepImplement(ctx)
+	if err != nil {
 		t.Fatalf("stepImplement: %v", err)
 	}
 	// Verify ran after the repair.
 	if wt.validates < 1 {
 		t.Error("verify was not called after the content repair")
 	}
-	if !ctx.didResolve {
+	if res.Payload == nil {
 		t.Error("step did not resolve after a successful content repair")
 	}
 }
@@ -3423,7 +3177,8 @@ func TestCommitRepair_MultipleRounds(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{"done", "first try", "second try"}}
 	ctx := ctxWithPlan(wt, agent)
 
-	if err := testBuilder(t).stepImplement(ctx); err != nil {
+	res, err := testBuilder(t).stepImplement(ctx)
+	if err != nil {
 		t.Fatalf("stepImplement: %v", err)
 	}
 	// Agent: 1 implement + 2 repairs.
@@ -3434,7 +3189,7 @@ func TestCommitRepair_MultipleRounds(t *testing.T) {
 	if wt.validates < 2 {
 		t.Errorf("verify ran %d times, want at least 2 (one per repair round)", wt.validates)
 	}
-	if !ctx.didResolve {
+	if res.Payload == nil {
 		t.Error("step did not resolve after multiple repair rounds")
 	}
 }
@@ -3457,7 +3212,7 @@ func TestCommitRepair_ExhaustsAllRoundsThenParks(t *testing.T) {
 	agent := &scriptedAgent{replies: replies}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepImplement(ctx)
+	_, err := testBuilder(t).stepImplement(ctx)
 	if err == nil {
 		t.Fatal("want an error from parking")
 	}
@@ -3506,7 +3261,7 @@ func TestCommitRepair_ParkReasonOmitsHookText(t *testing.T) {
 	agent := &scriptedAgent{replies: replies}
 	ctx := ctxWithPlan(wt, agent)
 
-	_ = testBuilder(t).stepImplement(ctx)
+	_, _ = testBuilder(t).stepImplement(ctx)
 	if ctx.park == nil {
 		t.Fatal("no park recorded")
 	}
@@ -3545,7 +3300,7 @@ func TestCommitRepair_InLoopStageFailurePropagates(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{"done", "fixed"}}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepImplement(ctx)
+	_, err := testBuilder(t).stepImplement(ctx)
 	if err == nil {
 		t.Fatal("want an error from the in-loop stage failure")
 	}
@@ -3580,7 +3335,7 @@ func TestCommitRepair_WIPStashPreservesBothErrors(t *testing.T) {
 	agent := &scriptedAgent{replies: replies}
 	ctx := ctxWithPlan(wt, agent)
 
-	_ = testBuilder(t).stepImplement(ctx)
+	_, _ = testBuilder(t).stepImplement(ctx)
 	if len(ctx.wipSaves) == 0 {
 		t.Fatal("no WIP stash")
 	}
@@ -3615,7 +3370,7 @@ func TestCommitRepair_NotificationsCarryRoundNumber(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{"done", "first try", "second try"}}
 	ctx := ctxWithPlan(wt, agent)
 
-	if err := testBuilder(t).stepImplement(ctx); err != nil {
+	if _, err := testBuilder(t).stepImplement(ctx); err != nil {
 		t.Fatalf("stepImplement: %v", err)
 	}
 	// Find the repair notifications — there should be one per failed round.
@@ -3648,7 +3403,8 @@ func TestStageRepair_Succeeds(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{"done", "deleted the file"}}
 	ctx := ctxWithPlan(wt, agent)
 
-	if err := testBuilder(t).stepImplement(ctx); err != nil {
+	res, err := testBuilder(t).stepImplement(ctx)
+	if err != nil {
 		t.Fatalf("stepImplement: %v", err)
 	}
 	// The agent was called twice: once for implement, once for stage repair.
@@ -3664,7 +3420,7 @@ func TestStageRepair_Succeeds(t *testing.T) {
 		t.Errorf("repair PermissionMode = %q, want acceptEdits", agent.reqs[1].PermissionMode)
 	}
 	// The step should resolve normally.
-	if !ctx.didResolve {
+	if res.Payload == nil {
 		t.Error("step did not resolve after a successful stage repair")
 	}
 	// The orchestrator must see a notification.
@@ -3689,7 +3445,7 @@ func TestStageRepair_SecondRefusalParks(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{"done", "deleted the file"}}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepImplement(ctx)
+	_, err := testBuilder(t).stepImplement(ctx)
 	if err == nil {
 		t.Fatal("want an error wrapping ErrRefused")
 	}
@@ -3717,7 +3473,7 @@ func TestStageRepair_AgentFailurePropagates(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{"done"}, errs: []error{nil, boom}}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepImplement(ctx)
+	_, err := testBuilder(t).stepImplement(ctx)
 	if err == nil {
 		t.Fatal("want an error from the agent")
 	}
@@ -3758,7 +3514,7 @@ func TestStageRepair_RecordOutstanding(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{"deleted the file"}}
 	ctx := ctxWithPlan(wt, agent)
 
-	if err := testBuilder(t).stepOpenPR(ctx); err != nil {
+	if _, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch)); err != nil {
 		t.Fatalf("stepOpenPR: %v", err)
 	}
 	// The repair agent was called.
@@ -3782,7 +3538,8 @@ func TestStageRepair_ThenCommitRepair(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{"done", "deleted the ignored file", "deleted the binary"}}
 	ctx := ctxWithPlan(wt, agent)
 
-	if err := testBuilder(t).stepImplement(ctx); err != nil {
+	res, err := testBuilder(t).stepImplement(ctx)
+	if err != nil {
 		t.Fatalf("stepImplement: %v", err)
 	}
 	if agent.calls != 3 {
@@ -3796,7 +3553,7 @@ func TestStageRepair_ThenCommitRepair(t *testing.T) {
 	if !strings.Contains(agent.prompts[2], "pre-commit") {
 		t.Errorf("third prompt = %q, want commit repair", agent.prompts[2])
 	}
-	if !ctx.didResolve {
+	if res.Payload == nil {
 		t.Error("step did not resolve after both repairs succeeded")
 	}
 }
@@ -3825,11 +3582,11 @@ func TestPlanStepRefusesNarrationArtifact(t *testing.T) {
 			agent := &scriptedAgent{replies: []string{tc.text}}
 			ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-			err := testBuilder(t).stepPlan(ctx)
+			res, err := testBuilder(t).stepPlan(ctx)
 			if err == nil {
 				t.Fatal("stepPlan resolved narration as a plan, want a refusal")
 			}
-			if ctx.didResolve {
+			if res.Payload != nil {
 				t.Error("plan artifact resolved despite the refusal")
 			}
 			// The message has to show what was rejected: an operator reading
@@ -3852,11 +3609,12 @@ func TestPlanStepAcceptsShortPlanWithHeading(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{"## Plan\n\nDelete the fallback."}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	if err := testBuilder(t).stepPlan(ctx); err != nil {
+	res, err := testBuilder(t).stepPlan(ctx)
+	if err != nil {
 		t.Fatalf("stepPlan: %v", err)
 	}
-	if !strings.Contains(ctx.resolved.Markdown, "Delete the fallback") {
-		t.Errorf("resolved %q, want the plan", ctx.resolved.Markdown)
+	if !strings.Contains(res.Payload.Markdown, "Delete the fallback") {
+		t.Errorf("resolved %q, want the plan", res.Payload.Markdown)
 	}
 }
 
@@ -3871,10 +3629,11 @@ func TestPlanStepAcceptsLongProsePlanWithoutHeading(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{prose}}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	if err := testBuilder(t).stepPlan(ctx); err != nil {
+	res, err := testBuilder(t).stepPlan(ctx)
+	if err != nil {
 		t.Fatalf("stepPlan: %v", err)
 	}
-	if !ctx.didResolve {
+	if res.Payload == nil {
 		t.Error("long headingless prose was refused, want it accepted")
 	}
 }
@@ -3889,11 +3648,12 @@ func TestPlanStepChecksTheSubmittedPlanNotTheNarration(t *testing.T) {
 	}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	if err := testBuilder(t).stepPlan(ctx); err != nil {
+	res, err := testBuilder(t).stepPlan(ctx)
+	if err != nil {
 		t.Fatalf("stepPlan refused a submitted plan because the narration was short: %v", err)
 	}
-	if !strings.Contains(ctx.resolved.Markdown, "ErrRefused") {
-		t.Errorf("resolved %q, want the submitted plan", ctx.resolved.Markdown)
+	if !strings.Contains(res.Payload.Markdown, "ErrRefused") {
+		t.Errorf("resolved %q, want the submitted plan", res.Payload.Markdown)
 	}
 }
 
@@ -3908,7 +3668,7 @@ func TestStepPlan_NotifiesAwaitingTheAgent(t *testing.T) {
 	}
 	ctx := ctxWithPlan(newFakeWorktree(), agent)
 
-	if err := testBuilder(t).stepPlan(ctx); err != nil {
+	if _, err := testBuilder(t).stepPlan(ctx); err != nil {
 		t.Fatalf("stepPlan: %v", err)
 	}
 	found := false
@@ -3930,7 +3690,7 @@ func TestStepImplement_HappyPathNotifications(t *testing.T) {
 	wt := resumedWorktree()
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	if err := testBuilder(t).stepImplement(ctx); err != nil {
+	if _, err := testBuilder(t).stepImplement(ctx); err != nil {
 		t.Fatalf("stepImplement: %v", err)
 	}
 	want := []string{
@@ -3962,7 +3722,7 @@ func TestStepImplement_FixLoopNotifications(t *testing.T) {
 	wt.verifyAfter = 1 // fails once, passes on round 2
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	if err := testBuilder(t).stepImplement(ctx); err != nil {
+	if _, err := testBuilder(t).stepImplement(ctx); err != nil {
 		t.Fatalf("stepImplement: %v", err)
 	}
 	want := []string{
@@ -3993,7 +3753,7 @@ func TestStepOpenPR_SubPhaseNotifications(t *testing.T) {
 	wt := resumedWorktree()
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	if err := testBuilder(t).stepOpenPR(ctx); err != nil {
+	if _, err := testBuilder(t).stepOpenPR(ctx, flow.StepId(StepCloseBranch)); err != nil {
 		t.Fatalf("stepOpenPR: %v", err)
 	}
 	want := []string{
@@ -4022,7 +3782,7 @@ func TestStepImplement_ExhaustedRoundsOmitStagingNotification(t *testing.T) {
 	b.cfg.MaxFixRounds = 1
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	err := b.stepImplement(ctx)
+	_, err := b.stepImplement(ctx)
 	if err == nil {
 		t.Fatal("stepImplement succeeded, want an error after exhausting rounds")
 	}
@@ -4052,7 +3812,7 @@ func TestProducingMarkdownStep_NotifiesAwaitingTheAgent(t *testing.T) {
 	agent := &scriptedAgent{replies: []string{"looks good"}}
 	ctx := ctxWithPlan(wt, agent)
 
-	if err := testBuilder(t).stepReview(ctx); err != nil {
+	if _, err := testBuilder(t).stepReview(ctx); err != nil {
 		t.Fatalf("stepReview: %v", err)
 	}
 	found := false
@@ -4082,7 +3842,7 @@ func TestStepImplement_VerifyFailOnUnfitMachineReturnsErrUnfit(t *testing.T) {
 	agent := &scriptedAgent{}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepImplement(ctx)
+	_, err := testBuilder(t).stepImplement(ctx)
 	if err == nil {
 		t.Fatal("expected an error from an unfit machine, got nil")
 	}
@@ -4106,7 +3866,7 @@ func TestStepImplement_VerifyFailOnFitMachineProceeds(t *testing.T) {
 	agent := &scriptedAgent{}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepImplement(ctx)
+	_, err := testBuilder(t).stepImplement(ctx)
 	if err != nil {
 		t.Fatalf("stepImplement: %v", err)
 	}

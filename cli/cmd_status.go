@@ -292,7 +292,7 @@ func stepPayloads(f *flow.Flow, state *flow.Item) []stepPayload {
 	for _, li := range items {
 		sp := stepPayload{
 			ID:       string(li.Result()),
-			Label:    li.Name,
+			Label:    li.Description,
 			Required: li.Required,
 		}
 		switch li.Kind {

@@ -25,15 +25,15 @@ type parkGrantEnv struct {
 func newParkGrantEnv(t *testing.T) *parkGrantEnv {
 	t.Helper()
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
-		f.AddStep("record the commit", "commit", func(ctx flow.StepCtx) error {
-			return ctx.ResolveCommitHash("abc")
-		}, flow.StepConfig{})
-		f.AddSignalStep("create pull request", "pr-open", func(ctx flow.StepCtx) error {
-			return nil
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Next("commit", "the plan is written").Markdown("the plan"), nil
+		}, flow.StepConfig{Entry: true, Next: []flow.StepId{"commit"}})
+		f.AddStep("record the commit", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Next("pr-open", "the change is committed").CommitHash("abc"), nil
+		}, flow.StepConfig{Next: []flow.StepId{"pr-open"}})
+		f.AddSignalStep("create pull request", "pr-open", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "the change is proposed"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	// The cap the sweep and the increment are computed against — the binary's
@@ -165,9 +165,9 @@ func TestGrantTarget_RejectsUnseededId(t *testing.T) {
 	// No SeedState call: the flow declares "plan" but the item has no budget
 	// record for it yet.
 	app, _, _ := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("x")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("x"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	errBuf := &bytes.Buffer{}
 	app.Out, app.Err = &bytes.Buffer{}, errBuf

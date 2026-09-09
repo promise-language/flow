@@ -104,14 +104,6 @@ func (e ErrDisclosureRefused) Error() string {
 
 func (e ErrDisclosureRefused) Unwrap() error { return e.Reason }
 
-// ErrSkip — handler decided no progress is possible right now. The SDK marks
-// the invocation skipped (no budget consumed beyond the invocation count).
-type ErrSkip struct {
-	Reason string
-}
-
-func (e ErrSkip) Error() string { return "skip: " + e.Reason }
-
 // ErrPark — handler raised a structured park request. The SDK forwards
 // req to Backend.Park — with one exception: Kind ParkQuestion fails the step
 // instead of parking. This route registers no question, so the park it would
@@ -206,15 +198,67 @@ func (e ErrSignalNotWritable) Error() string {
 	return fmt.Sprintf("step %q produces signal %q; signals are not handler-writable", e.Step, e.Signal)
 }
 
-// ErrStepDidNotResolve — handler returned nil but never called Resolve*
-// (artifact step) or the matching signal never set (signal step).
-type ErrStepDidNotResolve struct {
+// ErrStepDidNotComplete — the handler returned without completing: it elected
+// no route at all, or it elected one and produced no payload for the artifact
+// it owes. Both are the same failure — the step said it was done and did not do
+// its job (docs/step-handler.md § Error semantics).
+//
+// Step is the lifecycle item's description, Result its result id: a description
+// alone is display text, and an id alone is not what the reader wrote down.
+type ErrStepDidNotComplete struct {
 	Step   string
 	Result string
 }
 
-func (e ErrStepDidNotResolve) Error() string {
-	return fmt.Sprintf("step %q returned without resolving %q", e.Step, e.Result)
+func (e ErrStepDidNotComplete) Error() string {
+	return fmt.Sprintf("step %q completed without producing %q", e.Step, e.Result)
+}
+
+// ErrRouteNotDeclared — the handler elected a route the step does not declare:
+// a successor outside StepConfig.Next, or a finalization outside
+// StepConfig.MayFinalize.
+//
+// It names both sides. What was elected alone leaves the reader to go and find
+// the registration, and what was declared alone does not say what the handler
+// tried to do — and the fix is always one or the other: either the handler
+// elects a declared route, or the registration declares the route the handler
+// needs.
+type ErrRouteNotDeclared struct {
+	Step        string
+	Elected     Route
+	Next        []StepId
+	MayFinalize []Disposition
+}
+
+func (e ErrRouteNotDeclared) Error() string {
+	if e.Elected.Finalizes() {
+		return fmt.Sprintf("step %q elected finalization %q, which it does not declare; it may finalize as %v",
+			e.Step, e.Elected.Finalize, e.MayFinalize)
+	}
+	return fmt.Sprintf("step %q elected successor %q, which it does not declare; its declared successors are %v",
+		e.Step, e.Elected.Next, e.Next)
+}
+
+// ErrUnknownRole — a lookup named a role the flow does not declare.
+//
+// Refused loudly rather than answered empty, because the two readings are
+// indistinguishable to the caller and only one of them ever clears: empty means
+// "declared, and has not acted yet", which a handler waits on. A typo read that
+// way waits forever (docs/resolution.md § Whose move it is: "A reference that
+// names no declaration is refused loudly, never left to match nothing").
+//
+// Declared names the alternatives when the raiser can enumerate them, and is
+// empty when it cannot — the message says which.
+type ErrUnknownRole struct {
+	Role     RoleName
+	Declared []RoleName
+}
+
+func (e ErrUnknownRole) Error() string {
+	if len(e.Declared) == 0 {
+		return fmt.Sprintf("role %q is not declared by this flow", e.Role)
+	}
+	return fmt.Sprintf("role %q is not declared by this flow; declared roles are %v", e.Role, e.Declared)
 }
 
 // ErrBudgetExhausted — pre-dispatch or in-handler budget check refused the

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -319,8 +320,10 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	})
 	defer clistate.ClearRunning()
 
-	// Dispatch.
-	handlerErr := li.Handler(sctx)
+	// Dispatch. The handler completes by RETURNING its election; res is read
+	// only on the completion path (translateHandlerError's nil-error branch),
+	// because every other way a dispatch ends is one where nothing was elected.
+	res, handlerErr := li.Handler(sctx)
 
 	// Timeout (deadline reached during handler). Counts as an invocation —
 	// the handler ran, it just didn't finish in time.
@@ -466,7 +469,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		}
 	}
 
-	return sctx.stampResult(translateHandlerError(ctx, app, ref, result, li, sctx, handlerErr))
+	return sctx.stampResult(translateHandlerError(ctx, app, ref, result, li, sctx, res, handlerErr))
 }
 
 // translateHandlerError converts the handler's return into an
@@ -479,29 +482,14 @@ func translateHandlerError(
 	result flow.InvocationResult,
 	li flow.LifecycleItem,
 	sctx *stepCtx,
+	res flow.StepResult,
 	handlerErr error,
 ) (flow.InvocationResult, error) {
 	if handlerErr == nil {
-		// For artifact steps, the handler must have called Resolve* — the
-		// metered StepCtx tracked it.
-		if li.Kind == flow.LifecycleArtifact && !sctx.resolved {
-			return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
-				Kind:   flow.ParkStepDidNotResolve,
-				Step:   li.Result(),
-				Reason: fmt.Sprintf("handler returned nil without calling ctx.Resolve* on %q", li.ArtifactId),
-			})
-		}
-		result.Status = string(flow.StatusDone)
-		return result, nil
+		return completeStep(ctx, app, ref, result, li, sctx, res)
 	}
 
 	// Sentinel translations.
-	var skip flow.ErrSkip
-	if errors.As(handlerErr, &skip) {
-		result.Status = string(flow.StatusSkipped)
-		result.Reason = skip.Reason
-		return result, nil
-	}
 	var park flow.ErrPark
 	if errors.As(handlerErr, &park) {
 		req := park.Req
@@ -569,6 +557,133 @@ func translateHandlerError(
 	result.Status = string(flow.StatusFailed)
 	result.Reason = handlerErr.Error()
 	return result, nil
+}
+
+// completeStep is the completion path: the handler returned an election, so it
+// is checked against the step's declaration and, on an artifact step, the
+// payload is captured.
+//
+// Capture happens HERE — after the handler returned — rather than mid-handler,
+// which puts it after RunOne's fitness catch-all and write-contract check. A
+// step that violated its WriteContract therefore no longer leaves a captured
+// artifact behind: the result is "verified before capture"
+// (docs/flow-registration.md § Step configuration).
+//
+// One election, one check (flow.StepResult.Elect), and two ways it can end
+// without a capture: a step that decided nothing PARKS, because a re-dispatch
+// can still do the job; a step that decided something it may not decide FAILS,
+// because only a change to the handler or the registration will help. Nothing
+// is journaled and nothing is published in either case.
+func completeStep(
+	ctx context.Context,
+	app *App,
+	ref flow.ItemRef,
+	result flow.InvocationResult,
+	li flow.LifecycleItem,
+	sctx *stepCtx,
+	res flow.StepResult,
+) (flow.InvocationResult, error) {
+	body, err := res.Elect(li, app.artifactById[li.ArtifactId].Type)
+	if err != nil {
+		var incomplete flow.ErrStepDidNotComplete
+		if errors.As(err, &incomplete) {
+			return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
+				Kind:   flow.ParkStepDidNotResolve,
+				Step:   li.Result(),
+				Reason: incomplete.Error(),
+			})
+		}
+		result.Status = string(flow.StatusFailed)
+		result.Reason = err.Error()
+		return result, nil
+	}
+	if li.Kind == flow.LifecycleArtifact {
+		if err := app.Orchestrator.ResolveArtifact(ctx, ref, li.ArtifactId, body); err != nil {
+			var refused flow.ErrDisclosureRefused
+			if errors.As(err, &refused) {
+				return refusedCapture(ctx, app, ref, result, li, sctx, refused, body)
+			}
+			result.Status = string(flow.StatusFailed)
+			result.Reason = err.Error()
+			return result, nil
+		}
+		// The step has a result now, so its scaffolding is done. Clearing lives
+		// HERE and nowhere else — the one place a step completes — so no handler
+		// can complete while leaving stale prose behind for a later reader to
+		// mistake for a record.
+		//
+		// Best-effort, and deliberately so. The artifact has already landed, so
+		// failing the step now would report a failure for work that is recorded
+		// — and a record that outlives its step is harmless anyway, because
+		// keying by (item, step) means the next dispatch of a resolved step
+		// never reads it. Keying is the correctness property; clearing is
+		// hygiene.
+		if err := app.Orchestrator.ClearWorkInProgress(ctx, ref, li.Result()); err != nil {
+			sctx.Notify("", "could not clear work in progress: "+err.Error())
+		}
+	}
+	result.Status = string(flow.StatusDone)
+	return result, nil
+}
+
+// refusedCapture is what a disclosure refusal at capture leaves behind.
+//
+// ResolveArtifact publishes, so it can refuse — and with capture after the
+// handler returns there is no in-invocation revision loop to catch it any more.
+// So the capture path does what that loop did on its last round: stash the
+// refusal and the text it refused in the step's work-in-progress record, which
+// is local and never published, and park.
+//
+// The park reason carries NOTHING the guard said. A park IS published — the
+// orchestrator posts the request through the same guard — and a refusal names
+// what it found and quotes it (docs/disclosure.md § What a refusal carries), so
+// a reason repeating the guard's answer carries the refused fragment into the
+// park and gets the park itself refused: the run would die with nobody told
+// anything. The act is the SDK's own closed vocabulary and is safe to publish;
+// the guard's answer stays in the stash, which the next dispatch's prompt reads.
+func refusedCapture(
+	ctx context.Context,
+	app *App,
+	ref flow.ItemRef,
+	result flow.InvocationResult,
+	li flow.LifecycleItem,
+	sctx *stepCtx,
+	refused flow.ErrDisclosureRefused,
+	body flow.ArtifactBody,
+) (flow.InvocationResult, error) {
+	// Best-effort: a stash that failed costs the next run a re-derivation, and
+	// turning it into a failure would lose the park as well as the work.
+	if err := sctx.RecordWorkInProgress(flow.RefusedRecord(refused, refusedPayload(body))); err != nil {
+		sctx.Notify("", "could not record refused text: "+err.Error())
+	}
+	return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
+		Kind: flow.ParkBlocked,
+		Step: li.Result(),
+		Reason: fmt.Sprintf(
+			"the disclosure guard refused this step's result (%s); "+
+				"what it refused and why are kept with the step for the next run",
+			refused.Act),
+	})
+}
+
+// refusedPayload renders a refused payload as the text to stash beside the
+// refusal. The next dispatch reads it as prose, so each type is rendered as
+// what a reader would need to see in order to revise it.
+func refusedPayload(body flow.ArtifactBody) string {
+	switch body.Type {
+	case flow.ArtifactCommitHash:
+		return body.CommitHash
+	case flow.ArtifactMarkdown:
+		return body.Markdown
+	case flow.ArtifactJSON:
+		return string(body.JSON)
+	case flow.ArtifactFile:
+		return fmt.Sprintf("%s\n\n%s", body.File.Name, body.File.Content)
+	case flow.ArtifactPatch:
+		return string(body.Patch.Diff)
+	}
+	// A flag carries no payload, so what was refused is the fact of the write.
+	return fmt.Sprintf("(the %s artifact carries no payload)", body.Type)
 }
 
 // effectiveTimeout resolves a step's per-run deadline: the granted timeout
@@ -777,9 +892,8 @@ type writeSnapshot struct {
 	commitSHA flow.CommitSha
 }
 
-// stepCtx is the concrete StepCtx the orchestrator hands to handlers. Tracks
-// whether the handler called the matching Resolve* (artifact steps) and
-// memoises the lazily-acquired Worktree.
+// stepCtx is the concrete StepCtx the orchestrator hands to handlers. It
+// memoises the lazily-acquired Worktree and the step's work-in-progress record.
 type stepCtx struct {
 	ctx      context.Context
 	app      *App
@@ -790,7 +904,6 @@ type stepCtx struct {
 	worktree flow.Worktree
 	wtErr    error
 	agent    *meteredAgent
-	resolved bool
 	// wip memoises the step's work-in-progress record for this invocation. A
 	// step that never asks never loads, which is what makes the record cost
 	// nothing to not use.
@@ -849,11 +962,93 @@ func (s *stepCtx) stampResult(r flow.InvocationResult, err error) (flow.Invocati
 
 func (s *stepCtx) Context() context.Context { return s.ctx }
 func (s *stepCtx) Flow() string             { return s.flow.Name() }
-func (s *stepCtx) StepName() string         { return s.li.Name }
+func (s *stepCtx) Description() string      { return s.li.Description }
 func (s *stepCtx) Result() flow.ArtifactId  { return s.li.ArtifactId }
 func (s *stepCtx) Item() flow.Item          { return *s.state }
 func (s *stepCtx) Claim() flow.Claim        { return s.claim }
 func (s *stepCtx) VerifyCmd() string        { return s.app.VerifyCmd }
+
+// Runner is the account this resolution acts as: the claim's, which is the
+// account every write of this dispatch is made by.
+func (s *stepCtx) Runner() flow.AccountId { return s.claim.Account }
+
+// Role is the declared role this dispatch runs under — the step's own tag, and
+// nothing derived at runtime.
+func (s *stepCtx) Role() flow.RoleName { return s.li.Role }
+
+// RoleAccount is the account of record for a role on this item.
+//
+// The declaration decides whether the question can be asked, and the journal
+// answers it: an undeclared name is refused rather than answered empty, because
+// empty means "declared and has not acted yet" and a handler waits on that
+// (docs/resolution.md § Whose move it is).
+func (s *stepCtx) RoleAccount(role flow.RoleName) (flow.AccountId, error) {
+	if !s.flow.DeclaresRole(role) {
+		return "", flow.ErrUnknownRole{Role: role}
+	}
+	return s.state.AccountForRole(role), nil
+}
+
+// Journal returns the item's journal whole — a COPY, so a handler ranging it
+// cannot rewrite the route through the slice it was handed. Symmetric with
+// Flow.Items, and for the same reason.
+func (s *stepCtx) Journal() []flow.JournalEntry {
+	if s.state == nil {
+		return nil
+	}
+	return slices.Clone(s.state.Journal)
+}
+
+// Transfer is the entry that routed here: the last one appended, carrying the
+// predecessor and its message.
+//
+// The same entry the pending step is derived from (Flow.Position), so "the
+// entry that routed here" has one definition. Nil on an empty journal, where
+// nothing routed anywhere and the item is at its entry step.
+func (s *stepCtx) Transfer() *flow.JournalEntry {
+	entry, ok := s.state.LastEntry()
+	if !ok {
+		return nil
+	}
+	return &entry
+}
+
+// Notes returns every entry carrying a standing note, in journal order.
+func (s *stepCtx) Notes() []flow.JournalEntry {
+	if s.state == nil {
+		return nil
+	}
+	var out []flow.JournalEntry
+	for _, e := range s.state.Journal {
+		if e.Note != "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// RunNumber is which dispatch of the pending step this is, 1-based.
+//
+// Read from the record's invocation counter, which the bump at the end of every
+// dispatch maintains: this dispatch is the one after those. A signal step owns
+// no record, so it reads 1 — accurate for the only counter it has.
+func (s *stepCtx) RunNumber() int {
+	if s.li.Kind != flow.LifecycleArtifact {
+		return 1
+	}
+	return s.state.Artifact(s.li.ArtifactId).Invocations + 1
+}
+
+// Next and Finalize build the two elections. They are on the context rather
+// than free functions because an election is made BY a step: the constructor a
+// handler reaches for is the one on the handle it was given.
+func (s *stepCtx) Next(step flow.StepId, message string) flow.StepResult {
+	return flow.StepResult{Route: flow.Route{Next: step}, Message: message}
+}
+
+func (s *stepCtx) Finalize(d flow.Disposition, message string) flow.StepResult {
+	return flow.StepResult{Route: flow.Route{Finalize: d}, Message: message}
+}
 
 func (s *stepCtx) Artifact(id flow.ArtifactId) (flow.ArtifactRecord, bool) {
 	rec, ok := s.state.Artifacts[id]
@@ -913,100 +1108,6 @@ func (s *stepCtx) Patch(id flow.ArtifactId) (flow.PatchBody, bool) {
 
 func (s *stepCtx) Signal(id flow.SignalId) bool {
 	return s.state.SignalSet(id)
-}
-
-// resolveGuard centralises the kind/type check shared by all Resolve* methods.
-// Returns the artifact's declared type on success; an error otherwise.
-func (s *stepCtx) resolveGuard(want flow.ArtifactType) error {
-	switch s.li.Kind {
-	case flow.LifecycleSignal, flow.LifecycleAwait:
-		return flow.ErrSignalNotWritable{Step: s.li.Name, Signal: s.li.SignalId}
-	}
-	def := s.app.artifactById[s.li.ArtifactId]
-	if def.Type != want {
-		return flow.ErrTypeMismatch{Step: s.li.Name, Expected: def.Type, Got: want}
-	}
-	if s.resolved {
-		return fmt.Errorf("step %q already resolved %q", s.li.Name, s.li.ArtifactId)
-	}
-	return nil
-}
-
-func (s *stepCtx) ResolveFlag() error {
-	if err := s.resolveGuard(flow.ArtifactFlag); err != nil {
-		return err
-	}
-	return s.writeResolve(flow.ArtifactBody{Type: flow.ArtifactFlag})
-}
-
-func (s *stepCtx) ResolveCommitHash(sha string) error {
-	if err := s.resolveGuard(flow.ArtifactCommitHash); err != nil {
-		return err
-	}
-	return s.writeResolve(flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: sha})
-}
-
-func (s *stepCtx) ResolveMarkdown(body string) error {
-	if err := s.resolveGuard(flow.ArtifactMarkdown); err != nil {
-		return err
-	}
-	return s.writeResolve(flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: body})
-}
-
-func (s *stepCtx) ResolveJSON(body json.RawMessage) error {
-	if err := s.resolveGuard(flow.ArtifactJSON); err != nil {
-		return err
-	}
-	return s.writeResolve(flow.ArtifactBody{Type: flow.ArtifactJSON, JSON: body})
-}
-
-func (s *stepCtx) ResolveFile(name string, content []byte) error {
-	if err := s.resolveGuard(flow.ArtifactFile); err != nil {
-		return err
-	}
-	return s.writeResolve(flow.ArtifactBody{Type: flow.ArtifactFile, File: flow.FileBody{Name: name, Content: content}})
-}
-
-func (s *stepCtx) ResolvePatch(body flow.PatchBody) error {
-	if err := s.resolveGuard(flow.ArtifactPatch); err != nil {
-		return err
-	}
-	// An EMPTY PatchBody is legal and must reach the backend. Backends whose
-	// patches live server-side attach the diff out-of-band (their
-	// Worktree.CapturePatch returns no bytes by design) and the handler calls
-	// ResolvePatch with a zero body purely to say "I'm done — verify the side
-	// effect"; the same is true when the work is already committed, where
-	// `git diff HEAD` is empty by definition. Only the backend knows where
-	// the evidence lives, so emptiness is ITS call: ResolveArtifact either
-	// confirms the attachment or fails with a message that names what is
-	// missing. Rejecting a zero body here made both shapes unrepresentable.
-	return s.writeResolve(flow.ArtifactBody{Type: flow.ArtifactPatch, Patch: body})
-}
-
-func (s *stepCtx) writeResolve(body flow.ArtifactBody) error {
-	if err := s.app.Orchestrator.ResolveArtifact(s.ctx, s.claim.ItemRef, s.li.ArtifactId, body); err != nil {
-		return err
-	}
-	s.resolved = true
-	// The step has a result now, so its scaffolding is done. Clearing lives
-	// HERE and nowhere else: one place that runs whichever Resolve* the step
-	// called, so no handler can complete while leaving stale prose behind for a
-	// later reader to mistake for a record.
-	//
-	// Best-effort, and deliberately so. The artifact has already landed, so
-	// failing the step now would report a failure for work that is recorded —
-	// and a record that outlives its step is harmless anyway, because keying by
-	// (item, step) means the next dispatch of a resolved step never reads it.
-	// Keying is the correctness property; clearing is hygiene.
-	if err := s.app.Orchestrator.ClearWorkInProgress(s.ctx, s.claim.ItemRef, s.li.Result()); err != nil {
-		s.Notify("", "could not clear work in progress: "+err.Error())
-	}
-	return nil
-}
-
-func (s *stepCtx) Skip(reason string) error { return flow.ErrSkip{Reason: reason} }
-func (s *stepCtx) MarkStale(id flow.ArtifactId) error {
-	return s.app.Orchestrator.MarkStale(s.ctx, s.claim.ItemRef, id)
 }
 
 func (s *stepCtx) Park(req flow.ParkRequest) error { return flow.ErrPark{Req: req} }

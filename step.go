@@ -14,8 +14,12 @@ const (
 // step is the internal record for one lifecycle item in a flow's ordered
 // list. Exposed surface is via Flow's Add*/Steps/DeriveNext helpers.
 type step struct {
-	kind        stepKind
-	name        string
+	kind stepKind
+	// description is the human label the registration gave this item. Display
+	// text, never an identity: the step's identity is its result id, which is
+	// what the journal, a grant and a park all key on (docs/flow-registration.md
+	// § Three kinds of lifecycle item).
+	description string
 	artifact    ArtifactId // set when kind==stepArtifact
 	signal      SignalId   // set when kind==stepSignal or stepAwait
 	handler     StepHandler
@@ -139,7 +143,17 @@ func (l LeavesState) Valid() bool { return slices.Contains(AllLeavesStates(), l)
 
 // StepHandler is the function dispatched by the SDK for AddStep/AddSignalStep
 // lifecycle items. AwaitSignal items have no handler.
-type StepHandler func(ctx StepCtx) error
+//
+// A handler completes by RETURNING its election — the route it elects and, on
+// an artifact step, the payload to capture — rather than by writing anything
+// mid-run: the SDK captures result and route together, so a step never lands
+// half of its completion (docs/step-handler.md § Handler signature).
+//
+// The error is for the ways a handler stops WITHOUT completing: the sentinels
+// (ErrPark, ErrQuestion, ErrWaitsOnItems, ErrTransient, ErrRefused) and plain
+// failure. Returning the zero StepResult with a nil error completes nothing and
+// is refused as ErrStepDidNotComplete.
+type StepHandler func(ctx StepCtx) (StepResult, error)
 
 // StepConfig is the per-step configuration passed to AddStep / AddSignalStep /
 // AwaitSignal. It is a plain data struct on purpose — every knob a step has is

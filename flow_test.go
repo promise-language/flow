@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func noopHandler(StepCtx) error { return nil }
+func noopHandler(StepCtx) (StepResult, error) { return StepResult{}, nil }
 
 func TestNewFlow_AddStepRegistersInOrder(t *testing.T) {
 	f := NewFlow("implement", []ItemType{"task"})
@@ -386,31 +386,31 @@ func TestStepConfig_ZeroValueNormalisesToTheLoosestMembers(t *testing.T) {
 
 	for _, li := range f.Items() {
 		if li.Capture != CaptureReturned {
-			t.Errorf("%s: Capture = %q, want %q", li.Name, li.Capture, CaptureReturned)
+			t.Errorf("%s: Capture = %q, want %q", li.Description, li.Capture, CaptureReturned)
 		}
 		if li.Needs != NeedsAny {
-			t.Errorf("%s: Needs = %q, want %q", li.Name, li.Needs, NeedsAny)
+			t.Errorf("%s: Needs = %q, want %q", li.Description, li.Needs, NeedsAny)
 		}
 		if li.Leaves != LeavesAsFound {
-			t.Errorf("%s: Leaves = %q, want %q", li.Name, li.Leaves, LeavesAsFound)
+			t.Errorf("%s: Leaves = %q, want %q", li.Description, li.Leaves, LeavesAsFound)
 		}
 		if li.Role != "" {
-			t.Errorf("%s: Role = %q, want empty", li.Name, li.Role)
+			t.Errorf("%s: Role = %q, want empty", li.Description, li.Role)
 		}
 		if li.Entry {
-			t.Errorf("%s: Entry = true, want false", li.Name)
+			t.Errorf("%s: Entry = true, want false", li.Description)
 		}
 		if len(li.Next) != 0 {
-			t.Errorf("%s: Next = %v, want none", li.Name, li.Next)
+			t.Errorf("%s: Next = %v, want none", li.Description, li.Next)
 		}
 		if len(li.MayFinalize) != 0 {
-			t.Errorf("%s: MayFinalize = %v, want none", li.Name, li.MayFinalize)
+			t.Errorf("%s: MayFinalize = %v, want none", li.Description, li.MayFinalize)
 		}
 		if li.Writes != (WriteContract{}) {
-			t.Errorf("%s: Writes = %+v, want the zero contract", li.Name, li.Writes)
+			t.Errorf("%s: Writes = %+v, want the zero contract", li.Description, li.Writes)
 		}
 		if !li.Required {
-			t.Errorf("%s: Required = false; every lifecycle item is required", li.Name)
+			t.Errorf("%s: Required = false; every lifecycle item is required", li.Description)
 		}
 	}
 }
@@ -622,4 +622,62 @@ func TestRegistration_PanicNamesTheRegistrarThatWasCalled(t *testing.T) {
 			mustPanic(t, tc.registrar, func() { tc.declare(f, StepConfig{Entry: true}) })
 		})
 	}
+}
+
+// DeclaresRole is the one predicate for "does this flow declare that role" —
+// the check every role reference is refused by when it names nothing.
+func TestDeclaresRole(t *testing.T) {
+	f := NewFlow("resolve", nil)
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{Role: "contributor"})
+	f.AddStep("review the work", "review", noopHandler, StepConfig{Role: "contributor"})
+	f.AddStep("record the merge", "merge-commit", noopHandler, StepConfig{Role: "maintainer"})
+
+	if !f.DeclaresRole("contributor") || !f.DeclaresRole("maintainer") {
+		t.Error("a role some registered step carries must be declared")
+	}
+	if f.DeclaresRole("reviewer") {
+		t.Error("a role no step carries must not be declared")
+	}
+	// The empty name is never declared: an untagged step declares nothing, so a
+	// lookup on "" would otherwise match every flow with one.
+	if f.DeclaresRole("") {
+		t.Error("the empty role name must never be declared")
+	}
+}
+
+func TestDeclaresRole_UntaggedFlowDeclaresNone(t *testing.T) {
+	f := NewFlow("resolve", nil)
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
+	if f.DeclaresRole("contributor") {
+		t.Error("a flow whose steps carry no role tag declares no roles")
+	}
+}
+
+// The step label is a DESCRIPTION, not a name: display text, never an identity.
+func TestLifecycleItem_CarriesTheDescription(t *testing.T) {
+	f := NewFlow("resolve", nil)
+	f.AddStep("write the implementation plan", "plan", noopHandler, StepConfig{})
+	li, ok := f.Item("write the implementation plan")
+	if !ok {
+		t.Fatal("Item did not find the step by its description")
+	}
+	if li.Description != "write the implementation plan" {
+		t.Errorf("Description = %q, want the registered description", li.Description)
+	}
+	if li.Result() != "plan" {
+		t.Errorf("Result = %q, want the result id — the step's identity", li.Result())
+	}
+}
+
+func TestAddStep_PanicsOnEmptyDescription(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic on an empty step description")
+		}
+		if !strings.Contains(r.(string), "empty step description") {
+			t.Errorf("panic = %v, want it to name the empty description", r)
+		}
+	}()
+	NewFlow("x", nil).AddStep("", "plan", noopHandler, StepConfig{})
 }

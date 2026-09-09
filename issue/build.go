@@ -147,53 +147,88 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 // contributorFlow is the canonical contributor step set, in order.
 func (b *builder) contributorFlow(cfg Config) *flow.Flow {
 	f := flow.NewFlow("resolve", itemTypes(cfg))
-	b.addContributorSteps(f)
-	// Closing the branch needs no "did the resolution complete" test of its
-	// own: DeriveNext returns the first PENDING step in registration order, so
-	// a run that parked, was blocked or failed never reaches a step registered
-	// after the request. The ordering is the condition.
-	f.AddStep("close branch", flow.ArtifactId(StepCloseBranch), b.stepCloseBranch,
-		flow.StepConfig{Writes: flow.WriteContract{MayBranch: true}})
+	b.addContributorSteps(f, flow.StepId(StepCloseBranch))
+	b.addCloseBranch(f)
 	return f
 }
 
 // addContributorSteps registers the plan-through-openPR steps that every
 // contributor-capable flow uses. Factored out so the carry-through flow
 // composes it with the integration steps without duplicating the list.
-func (b *builder) addContributorSteps(f *flow.Flow) {
+//
+// afterRequest is the successor of the pull request — the one edge that differs
+// between the two compositions — and it feeds BOTH the declaration and the
+// handler that elects it, so the edge has one home. A handler cannot elect a
+// successor the flow does not declare, so a second place to write it down is a
+// second place for the two to disagree, and the step would fail on the
+// disagreement.
+func (b *builder) addContributorSteps(f *flow.Flow, afterRequest flow.StepId) {
 	f.AddStep("write plan", flow.ArtifactId(StepPlan), b.stepPlan,
-		flow.StepConfig{})
+		flow.StepConfig{
+			Entry: true,
+			Next:  []flow.StepId{flow.StepId(StepBranch)},
+		})
 	f.AddStep("open branch", flow.ArtifactId(StepBranch), b.stepOpenBranch,
-		flow.StepConfig{Writes: flow.WriteContract{MayBranch: true, MayCommit: true}})
+		flow.StepConfig{
+			Next:   []flow.StepId{flow.StepId(StepImplement)},
+			Writes: flow.WriteContract{MayBranch: true, MayCommit: true},
+		})
 	f.AddStep("implement the change", flow.ArtifactId(StepImplement), b.stepImplement,
-		flow.StepConfig{Writes: flow.WriteContract{MayCommit: true, MayEditTree: true}})
+		flow.StepConfig{
+			Next:   []flow.StepId{flow.StepId(StepReview)},
+			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true},
+		})
 	f.AddStep("review the work", flow.ArtifactId(StepReview), b.stepReview,
-		flow.StepConfig{Writes: flow.WriteContract{MayCommit: true, MayEditTree: true}})
+		flow.StepConfig{
+			Next:   []flow.StepId{flow.StepId(StepCoverage)},
+			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true},
+		})
 	f.AddStep("analyze coverage", flow.ArtifactId(StepCoverage), b.stepCoverage,
-		flow.StepConfig{Writes: flow.WriteContract{MayCommit: true, MayEditTree: true}})
-	f.AddSignalStep("create pull request", flow.SignalId(StepOpenPR), b.stepOpenPR,
-		flow.StepConfig{Writes: flow.WriteContract{MayBranch: true, MayCommit: true}})
+		flow.StepConfig{
+			Next:   []flow.StepId{flow.StepId(StepOpenPR)},
+			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true},
+		})
+	f.AddSignalStep("create pull request", flow.SignalId(StepOpenPR),
+		func(ctx flow.StepCtx) (flow.StepResult, error) { return b.stepOpenPR(ctx, afterRequest) },
+		flow.StepConfig{
+			Next:   []flow.StepId{afterRequest},
+			Writes: flow.WriteContract{MayBranch: true, MayCommit: true},
+		})
 }
 
 // addIntegrationSteps registers the three integration steps: verify the merge
 // result, merge, record the merge commit.
 func (b *builder) addIntegrationSteps(f *flow.Flow) {
 	f.AddStep("verify merge result", flow.ArtifactId(StepVerifyMerge), b.stepVerifyMerge,
-		flow.StepConfig{Writes: flow.WriteContract{MayBranch: true, MayCommit: true}})
+		flow.StepConfig{
+			Next:   []flow.StepId{flow.StepId(StepMerge)},
+			Writes: flow.WriteContract{MayBranch: true, MayCommit: true},
+		})
 	f.AddSignalStep("merge pull request", flow.SignalId(StepMerge), b.stepMerge,
-		flow.StepConfig{})
+		flow.StepConfig{Next: []flow.StepId{flow.StepId(StepRecordMerge)}})
 	f.AddStep("record merge commit", flow.ArtifactId(StepRecordMerge), b.stepRecordMerge,
-		flow.StepConfig{})
+		flow.StepConfig{Next: []flow.StepId{flow.StepId(StepCloseBranch)}})
+}
+
+// addCloseBranch registers the step both compositions end at. It is the one
+// step that finalizes: closing the branch is the last thing either flow does,
+// and finalization is elected, never derived from a checklist
+// (docs/resolution.md § Finalizing).
+func (b *builder) addCloseBranch(f *flow.Flow) {
+	f.AddStep("close branch", flow.ArtifactId(StepCloseBranch), b.stepCloseBranch,
+		flow.StepConfig{
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+			Writes:      flow.WriteContract{MayBranch: true},
+		})
 }
 
 // carryThroughFlow composes the contributor steps and the integration steps
 // into one flow that ends at a merged change rather than a proposed one.
 func (b *builder) carryThroughFlow(cfg Config) *flow.Flow {
 	f := flow.NewFlow("resolve", itemTypes(cfg))
-	b.addContributorSteps(f)
+	b.addContributorSteps(f, flow.StepId(StepVerifyMerge))
 	b.addIntegrationSteps(f)
-	f.AddStep("close branch", flow.ArtifactId(StepCloseBranch), b.stepCloseBranch,
-		flow.StepConfig{Writes: flow.WriteContract{MayBranch: true}})
+	b.addCloseBranch(f)
 	return f
 }
 
@@ -235,10 +270,18 @@ func missingMaintainerStepsGate(context.Context, *flow.Item) error {
 func (b *builder) unimplementedMaintainerFlow(cfg Config) *flow.Flow {
 	f := flow.NewFlow("review", itemTypes(cfg))
 	f.AddStep("review the implementation", flow.ArtifactId(StepReviewMaint),
-		func(ctx flow.StepCtx) error {
-			return fmt.Errorf("issue: %s", missingMaintainerSteps)
+		func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, fmt.Errorf("issue: %s", missingMaintainerSteps)
 		},
-		flow.StepConfig{})
+		// The one step is the entry and the only way out: a graph of one has
+		// nowhere to route, so what it may do is finalize. Declared even though
+		// the handler never gets to elect it — the gate refuses the dispatch
+		// first — because a graph that could not end is not a stub, it is a
+		// graph that never terminates.
+		flow.StepConfig{
+			Entry:       true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+		})
 	return f
 }
 

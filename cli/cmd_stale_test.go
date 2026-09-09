@@ -18,9 +18,9 @@ func staleTestEnv(t *testing.T, resolve bool) (*App, *fake.Orchestrator, flow.Cl
 	t.Helper()
 	a := &stubAgent{name: "stub"}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 
 	ctx := context.Background()
@@ -96,9 +96,9 @@ func TestCmdStale_Pending(t *testing.T) {
 func TestCmdStale_Skipped(t *testing.T) {
 	a := &stubAgent{name: "stub"}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 
 	ctx := context.Background()
@@ -139,11 +139,11 @@ func TestCmdStale_UnknownStepID(t *testing.T) {
 func TestCmdStale_SignalStep(t *testing.T) {
 	a := &stubAgent{name: "stub"}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
-		f.AddSignalStep("create pr", "pr-open", func(ctx flow.StepCtx) error {
-			return nil
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		f.AddSignalStep("create pr", "pr-open", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, nil
 		}, flow.StepConfig{})
 	}, a)
 
@@ -185,9 +185,9 @@ func TestCmdStale_HumanLabel(t *testing.T) {
 func TestCmdStale_NotSeeded(t *testing.T) {
 	a := &stubAgent{name: "stub"}
 	app, _, _ := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 
 	var errBuf bytes.Buffer
@@ -206,9 +206,9 @@ func TestCmdStale_NotSeeded(t *testing.T) {
 func TestCmdStale_NoActiveClaim(t *testing.T) {
 	a := &stubAgent{name: "stub"}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 
 	// Release the claim so there is no active one.
@@ -361,9 +361,9 @@ func TestCmdStale_TypeOutsideTheRemitStillMarksStale(t *testing.T) {
 		flow.Item{Ref: itemRefFor("1"), Type: "chore", Title: "chore#1"},
 		[]flow.ItemType{"task"}, // "chore" is outside the remit
 		func(f *flow.Flow) {
-			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-				return ctx.ResolveMarkdown("the plan")
-			}, flow.StepConfig{})
+			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+				return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+			}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 		}, &stubAgent{name: "stub"})
 
 	ctx := context.Background()
@@ -398,9 +398,9 @@ func TestCmdStale_SeededButNotInFlow(t *testing.T) {
 	// the current flow definition — e.g. leftover from a previous flow version.
 	a := &stubAgent{name: "stub"}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 
 	ctx := context.Background()
