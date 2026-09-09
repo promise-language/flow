@@ -461,6 +461,63 @@ func TestAwaitSignal_PanicsOnRole(t *testing.T) {
 	})
 }
 
+// A wait elects nothing, so it cannot finalize — and the declaration would not
+// merely be inert: ValidateGraph reads MayFinalize as "this item can end the
+// flow", so a wait carrying one certifies finalize-reachability for a graph
+// where nothing ever finalizes.
+func TestAwaitSignal_PanicsOnMayFinalize(t *testing.T) {
+	f := NewFlow("x", nil)
+	mustPanic(t, "cannot finalize", func() {
+		f.AwaitSignal("await merge", "pr-merged", StepConfig{
+			Next:        []StepId{"plan"},
+			MayFinalize: []Disposition{DispositionResolved},
+		})
+	})
+}
+
+// Next and MayFinalize are slices, and a slice handed across a boundary is
+// shared unless it is copied. The graph is what startup validation certifies,
+// so neither the caller that registered a step nor a caller reading the
+// declaration back may still hold a handle that rewrites it.
+func TestStepConfig_DeclaredSlicesAreCopiedInAndOut(t *testing.T) {
+	f := NewFlow("x", nil)
+	next := []StepId{"impl"}
+	finals := []Disposition{DispositionResolved}
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Entry:       true,
+		Next:        next,
+		MayFinalize: finals,
+	})
+
+	// The caller still holds both slices.
+	next[0] = "somewhere-else"
+	finals[0] = DispositionRejected
+
+	li, ok := f.ItemByResult("plan")
+	if !ok {
+		t.Fatal("ItemByResult missing for the registered step")
+	}
+	if li.Next[0] != "impl" {
+		t.Errorf("Next[0] = %q after the caller mutated its slice, want impl", li.Next[0])
+	}
+	if li.MayFinalize[0] != DispositionResolved {
+		t.Errorf("MayFinalize[0] = %q after the caller mutated its slice, want %q",
+			li.MayFinalize[0], DispositionResolved)
+	}
+
+	// And the view handed back is itself a copy.
+	li.Next[0] = "somewhere-else"
+	li.MayFinalize[0] = DispositionRejected
+	again, _ := f.ItemByResult("plan")
+	if again.Next[0] != "impl" {
+		t.Errorf("Next[0] = %q after mutating a returned LifecycleItem, want impl", again.Next[0])
+	}
+	if again.MayFinalize[0] != DispositionResolved {
+		t.Errorf("MayFinalize[0] = %q after mutating a returned LifecycleItem, want %q",
+			again.MayFinalize[0], DispositionResolved)
+	}
+}
+
 func TestAddStep_PanicsOnUnknownCapture(t *testing.T) {
 	f := NewFlow("x", nil)
 	mustPanic(t, "Capture", func() {

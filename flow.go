@@ -131,6 +131,19 @@ func (f *Flow) AwaitSignal(name string, signal SignalId, cfg StepConfig) {
 		panic(fmt.Sprintf("flow.AwaitSignal: signal wait %q in flow %q declares Role %q; signal waits belong to no role",
 			name, f.name, cfg.Role))
 	}
+	// Nor may a wait finalize, for the same reason and with a sharper
+	// consequence. Only a step finalizes, by electing it as its route
+	// (docs/resolution.md § Finalizing); a wait's route is static — when the
+	// signal is observed its entry is appended carrying the one declared
+	// successor. Left declarable, the declaration would also be BELIEVED:
+	// ValidateGraph counts anything carrying a MayFinalize as a finalizer, so a
+	// wait with one would satisfy finalize-reachability for a graph in which
+	// nothing can ever end the flow — the exact defect that check exists to
+	// catch.
+	if len(cfg.MayFinalize) > 0 {
+		panic(fmt.Sprintf("flow.AwaitSignal: signal wait %q in flow %q declares MayFinalize %v; a wait elects nothing, so it cannot finalize",
+			name, f.name, cfg.MayFinalize))
+	}
 	s := f.prepareStep("AwaitSignal", stepAwait, name, cfg)
 	s.signal = signal
 	f.appendStep(s, StepId(signal))
@@ -196,13 +209,18 @@ func (f *Flow) prepareStep(registrar string, kind stepKind, name string, cfg Ste
 		seenNext[id] = true
 	}
 
+	// The two slices are COPIED in. A registration hands the flow a slice the
+	// caller still holds, and the graph is the thing startup validation
+	// certifies: keeping the caller's backing array would let a declaration be
+	// rewritten after it was checked, silently and from outside the package.
+	// Flow.RequireSignals already copies on the way out for the same reason.
 	return &step{
 		kind:        kind,
 		name:        name,
 		role:        cfg.Role,
 		entry:       cfg.Entry,
-		next:        cfg.Next,
-		mayFinalize: cfg.MayFinalize,
+		next:        slices.Clone(cfg.Next),
+		mayFinalize: slices.Clone(cfg.MayFinalize),
 		capture:     cfg.Capture,
 		writes:      cfg.Writes,
 		needs:       cfg.Needs,
@@ -381,12 +399,16 @@ func toLifecycleItem(st *step) LifecycleItem {
 		Name: st.name,
 		// Every lifecycle item is required: there is no step optionality to
 		// report. See LifecycleItem.Required.
-		Required:    true,
-		Handler:     st.handler,
-		Role:        st.role,
-		Entry:       st.entry,
-		Next:        st.next,
-		MayFinalize: st.mayFinalize,
+		Required: true,
+		Handler:  st.handler,
+		Role:     st.role,
+		Entry:    st.entry,
+		// Copied out, symmetrically with prepareStep's copy in: a
+		// LifecycleItem is a READ of the declaration, and a caller ranging
+		// Items() must not be able to rewrite the graph through the view it
+		// was handed.
+		Next:        slices.Clone(st.next),
+		MayFinalize: slices.Clone(st.mayFinalize),
 		Capture:     st.capture,
 		Needs:       st.needs,
 		Writes:      st.writes,

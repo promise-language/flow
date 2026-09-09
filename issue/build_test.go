@@ -116,6 +116,42 @@ func TestCarryThroughFlowComposition(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Budgets are the project's policy, handed to the SDK — not step declarations.
+// ---------------------------------------------------------------------------
+
+// Config.Budgets used to reach the SDK one StepConfig at a time; it now reaches
+// it once, as App.StepBudgets keyed by the step's result id. Nothing downstream
+// fails loudly if that hand-off is dropped — every step would simply fall back
+// to the package defaults — so the mapping is asserted here.
+func TestBuildApp_BudgetsBecomeAppPolicy(t *testing.T) {
+	app, err := BuildApp(context.Background(), Config{
+		BinaryName: "test",
+		VerifyCmd:  []string{"bin/verify"},
+		Role:       RoleContributor,
+		BaseBranch: "main",
+		Budgets: map[StepID]flow.StepBudget{
+			StepImplement: {MaxInvocations: 9, Timeout: 90 * time.Minute},
+		},
+	}, Deps{Orchestrator: &buildTestBackend{role: RoleContributor}, Agent: &scriptedAgent{}})
+	if err != nil {
+		t.Fatalf("BuildApp: %v", err)
+	}
+
+	got, ok := app.StepBudgets[flow.StepId(StepImplement)]
+	if !ok {
+		t.Fatalf("StepBudgets has no entry for %q; policy = %v", StepImplement, app.StepBudgets)
+	}
+	if got.MaxInvocations != 9 || got.Timeout != 90*time.Minute {
+		t.Errorf("StepBudgets[%q] = %+v, want {MaxInvocations: 9, Timeout: 90m}", StepImplement, got)
+	}
+	// A step the project says nothing about must stay absent: the resolution
+	// happens at read time, where an absent entry means the defaults whole.
+	if _, ok := app.StepBudgets[flow.StepId(StepPlan)]; ok {
+		t.Errorf("StepBudgets invented an entry for %q, which the project did not configure", StepPlan)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // The maintainer stand-in refuses before it seeds.
 // ---------------------------------------------------------------------------
 

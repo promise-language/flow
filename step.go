@@ -170,7 +170,8 @@ type StepConfig struct {
 	// everywhere; the description is for eyes.
 	Next []StepId
 	// MayFinalize is the set of finalization dispositions this step may elect.
-	// Empty means the step cannot end the flow.
+	// Empty means the step cannot end the flow. Absent on signal waits, which
+	// elect nothing and panic if given one.
 	MayFinalize []Disposition
 	// Capture declares an artifact step's result source. The zero value means
 	// CaptureReturned.
