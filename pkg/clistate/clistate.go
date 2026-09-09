@@ -33,33 +33,60 @@ const (
 	workDirRel    = "work"
 )
 
-// Dir returns the worktree-local state directory. Tests can override via
-// the FLOW_DIR env var.
-func Dir() string {
+// Dir returns the state directory: `.flow` inside the checkout the running
+// binary belongs to (flow.DeriveArenaRoot). Tests override it with the FLOW_DIR
+// env var, which must be an ABSOLUTE path.
+//
+// The error return is the whole shape of this. `.flow` was a bare relative name
+// resolved against the process working directory, so a `resolve` started from a
+// parent directory wrote its claim state THERE — the next invocation from
+// inside the checkout found no active claim, and the lease on the item was
+// orphaned with nothing local pointing at it. A Dir() that cannot say "I do not
+// know where the checkout is" has to invent an answer, and that invented answer
+// was the defect. It fails closed instead.
+func Dir() (string, error) {
 	if d := os.Getenv("FLOW_DIR"); d != "" {
-		return d
+		if !filepath.IsAbs(d) {
+			return "", fmt.Errorf("FLOW_DIR %q is relative — it must be an absolute path", d)
+		}
+		return d, nil
 	}
-	return flowDirName
+	// The ONE derivation, shared with the orchestrator's WorktreeDir rather
+	// than copied: a second copy is a second thing to get wrong, and the two
+	// disagreeing would put the claim state outside the arena that holds it.
+	root, err := flow.DeriveArenaRoot()
+	if err != nil {
+		return "", fmt.Errorf("locate the state dir: %w", err)
+	}
+	return filepath.Join(root, flowDirName), nil
 }
 
 // ActiveJSONPath returns the resolved path to active.json.
-func ActiveJSONPath() string {
-	return filepath.Join(Dir(), activeJSONRel)
+func ActiveJSONPath() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, activeJSONRel), nil
 }
 
 // Load reads the serialized Claim from `.flow/active.json`. Returns
 // (nil, nil) when no active claim exists on disk.
 func Load() (*flow.Claim, error) {
-	b, err := os.ReadFile(ActiveJSONPath())
+	path, err := ActiveJSONPath()
+	if err != nil {
+		return nil, err
+	}
+	b, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read %s: %w", ActiveJSONPath(), err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	var c flow.Claim
 	if err := json.Unmarshal(b, &c); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", ActiveJSONPath(), err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return &c, nil
 }
@@ -67,15 +94,20 @@ func Load() (*flow.Claim, error) {
 // Save writes the Claim to `.flow/active.json`, creating the directory
 // if needed.
 func Save(c flow.Claim) error {
-	if err := os.MkdirAll(Dir(), 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", Dir(), err)
+	dir, err := Dir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal claim: %w", err)
 	}
-	if err := os.WriteFile(ActiveJSONPath(), b, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", ActiveJSONPath(), err)
+	path := filepath.Join(dir, activeJSONRel)
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
 }
@@ -88,16 +120,22 @@ func Save(c flow.Claim) error {
 // again: releasing a claim ends that reasoning's life. Prose left on disk after
 // the work is over is a disclosure sitting around for no benefit.
 func Clear() error {
-	if err := os.RemoveAll(WorkDir()); err != nil {
-		return fmt.Errorf("remove %s: %w", WorkDir(), err)
+	dir, err := Dir()
+	if err != nil {
+		return err
+	}
+	workDir := filepath.Join(dir, workDirRel)
+	if err := os.RemoveAll(workDir); err != nil {
+		return fmt.Errorf("remove %s: %w", workDir, err)
 	}
 	if err := ClearRunning(); err != nil {
 		return fmt.Errorf("clear running: %w", err)
 	}
-	if err := os.Remove(ActiveJSONPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove %s: %w", ActiveJSONPath(), err)
+	active := filepath.Join(dir, activeJSONRel)
+	if err := os.Remove(active); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove %s: %w", active, err)
 	}
-	_ = os.Remove(Dir())
+	_ = os.Remove(dir)
 	return nil
 }
 
@@ -126,13 +164,23 @@ type workRecord struct {
 }
 
 // WorkDir returns the directory work-in-progress records live under.
-func WorkDir() string { return filepath.Join(Dir(), workDirRel) }
+func WorkDir() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, workDirRel), nil
+}
 
 // workPath is the file one (item, step) record lives at. Both segments are
 // sanitised because they are backend-supplied ids being used as path
 // components; the in-file check in LoadWork is what makes a collision safe.
-func workPath(item, step string) string {
-	return filepath.Join(WorkDir(), sanitizeSegment(item), sanitizeSegment(step)+".json")
+func workPath(item, step string) (string, error) {
+	dir, err := WorkDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, sanitizeSegment(item), sanitizeSegment(step)+".json"), nil
 }
 
 // sanitizeSegment reduces an id to characters that are safe in a path
@@ -162,7 +210,10 @@ func sanitizeSegment(s string) string {
 // whatever was there. The file is 0o600 because it may carry text a disclosure
 // guard refused to publish.
 func SaveWork(item, step, body string) error {
-	path := workPath(item, step)
+	path, err := workPath(item, step)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
 	}
@@ -189,7 +240,10 @@ func SaveWork(item, step, body string) error {
 // out of another item's agent when a crash, a kill, or an abandoned run leaves
 // `.flow/` behind.
 func LoadWork(item, step string) (string, error) {
-	path := workPath(item, step)
+	path, err := workPath(item, step)
+	if err != nil {
+		return "", err
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -210,7 +264,10 @@ func LoadWork(item, step string) (string, error) {
 // ClearWork removes the record for (item, step). Idempotent — no error if
 // already absent.
 func ClearWork(item, step string) error {
-	path := workPath(item, step)
+	path, err := workPath(item, step)
+	if err != nil {
+		return err
+	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove %s: %w", path, err)
 	}
@@ -232,8 +289,12 @@ func ClearWork(item, step string) error {
 const runningJSONRel = "running.json"
 
 // RunningJSONPath returns the resolved path to running.json.
-func RunningJSONPath() string {
-	return filepath.Join(Dir(), runningJSONRel)
+func RunningJSONPath() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, runningJSONRel), nil
 }
 
 // RunningRecord identifies the process executing a step.
@@ -247,15 +308,20 @@ type RunningRecord struct {
 // SaveRunning writes the running record to `.flow/running.json`, creating the
 // directory if needed.
 func SaveRunning(rec RunningRecord) error {
-	if err := os.MkdirAll(Dir(), 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", Dir(), err)
+	dir, err := Dir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	b, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal running record: %w", err)
 	}
-	if err := os.WriteFile(RunningJSONPath(), b, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", RunningJSONPath(), err)
+	path := filepath.Join(dir, runningJSONRel)
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
 }
@@ -263,16 +329,20 @@ func SaveRunning(rec RunningRecord) error {
 // LoadRunning reads the running record from `.flow/running.json`. Returns
 // (nil, nil) when no record exists on disk.
 func LoadRunning() (*RunningRecord, error) {
-	b, err := os.ReadFile(RunningJSONPath())
+	path, err := RunningJSONPath()
+	if err != nil {
+		return nil, err
+	}
+	b, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read %s: %w", RunningJSONPath(), err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	var rec RunningRecord
 	if err := json.Unmarshal(b, &rec); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", RunningJSONPath(), err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return &rec, nil
 }
@@ -280,8 +350,12 @@ func LoadRunning() (*RunningRecord, error) {
 // ClearRunning removes the running record. Idempotent — no error if already
 // absent.
 func ClearRunning() error {
-	if err := os.Remove(RunningJSONPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove %s: %w", RunningJSONPath(), err)
+	path, err := RunningJSONPath()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove %s: %w", path, err)
 	}
 	return nil
 }

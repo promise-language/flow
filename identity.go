@@ -1,7 +1,9 @@
 package flow
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -332,4 +334,72 @@ func DeriveHostId() HostId {
 		return ""
 	}
 	return NormalizeHostId(name)
+}
+
+// DeriveArenaRoot returns the checkout the running binary belongs to: the
+// nearest ancestor of its own executable holding a `.git` entry, as an absolute
+// path.
+//
+// It is the other half of the pair DeriveHostId gives the machine half of — an
+// arena is a worktree plus a stable identity — and it is derived for the same
+// reason: an identity an operator cannot supply is one they cannot get wrong.
+//
+// NOTHING HERE READS THE PROCESS WORKING DIRECTORY, and that is the whole
+// point. A directory a process happened to be started in is not a location: one
+// checkout invoked from two directories would be two arenas, two checkouts
+// invoked from a common parent would be one, and an ArenaId that changes when
+// the operator `cd`s is not the "stable across restarts" docs/orchestrator.md
+// requires of it. The binary knows where it lives; this is it saying so.
+//
+// Symlinks are resolved first, so a binary reached through a PATH symlink and
+// the same binary reached directly answer one value — and so the platforms
+// agree, since os.Executable resolves symlinks on some and not others and this
+// value must not depend on which.
+func DeriveArenaRoot() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locate the running binary: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return "", fmt.Errorf("resolve the running binary %s: %w", exe, err)
+	}
+	// An unknowable home is no home to refuse: the guard below is skipped
+	// rather than the derivation failing over a value it only ever excludes.
+	home, _ := os.UserHomeDir()
+	return checkoutRoot(filepath.Dir(resolved), home)
+}
+
+// checkoutRoot walks start and its ancestors and returns the first that holds a
+// `.git` entry.
+//
+// FILE OR DIRECTORY: a linked `git worktree` records its gitdir in a `.git`
+// file rather than a directory, and a linked worktree is exactly the arena this
+// project is about — accepting only the directory would refuse the case.
+//
+// The home directory is refused as a candidate rather than adopted, and the
+// walk stops there. A home that happens to be a dotfiles repo is not the
+// checkout a binary works on, and without the guard a binary installed at
+// ~/go/bin would silently take $HOME as its arena — an ArenaId shared by every
+// binary installed that way. home is a parameter so the walk is testable
+// without touching the real one; empty means no home to refuse.
+func checkoutRoot(start, home string) (string, error) {
+	dir := start
+	for {
+		if home != "" && dir == home {
+			return "", fmt.Errorf(
+				"no git checkout between %s and the home directory: a flow binary lives inside "+
+					"the checkout it works on, or is handed an absolute worktree path", start)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf(
+				"no git checkout at or above %s: a flow binary lives inside the checkout it "+
+					"works on, or is handed an absolute worktree path", start)
+		}
+		dir = parent
+	}
 }

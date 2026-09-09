@@ -162,9 +162,14 @@ func (g *gitOps) BranchExists(ctx context.Context, name string) (bool, error) {
 //
 // The SDK's own state directory must be invisible to git before anything is
 // staged, and a bare `git add -A` is what makes that true: it skips an ignored
-// directory, and an absolute state dir lives outside the worktree where git
-// cannot see it at all. The remaining case is refused rather than worked
-// around — a state dir inside the worktree that git does not ignore.
+// directory, and a state dir outside the worktree is somewhere git cannot see
+// at all. The remaining case is refused rather than worked around — a state dir
+// inside the worktree that git does not ignore.
+//
+// INSIDE is the question, not "is it relative?". The state dir is now always an
+// absolute path, and the ordinary one — <worktree>/.flow — is absolute and
+// inside, so an IsAbs short-circuit would wave through exactly the case this
+// check exists for and let claim state into a commit.
 //
 // Excluding it with a pathspec was the earlier approach and is wrong twice
 // over. It leaves the directory in the tree as a permanent third state —
@@ -175,12 +180,15 @@ func (g *gitOps) BranchExists(ctx context.Context, name string) (bool, error) {
 // named ignored path — which is the normal case for any project that ignores
 // .flow/, so the workaround broke the configuration it was meant to serve.
 func (g *gitOps) StageAll(ctx context.Context) error {
-	dir := clistate.Dir()
-	if !filepath.IsAbs(dir) && !g.ignored(ctx, dir) {
+	dir, err := clistate.Dir()
+	if err != nil {
+		return fmt.Errorf("git add -A: locate the SDK state dir: %w", err)
+	}
+	if rel, relErr := filepath.Rel(g.dir, dir); relErr == nil && filepath.IsLocal(rel) && !g.ignored(ctx, rel) {
 		return fmt.Errorf(
 			"git add -A: the SDK state dir %q is inside the worktree and git does not "+
 				"ignore it — add %q to .gitignore so claim state is never committed",
-			dir, dir+"/")
+			dir, rel+"/")
 	}
 	if _, stderr, err := g.run(ctx, "add", "-A"); err != nil {
 		return fmt.Errorf("git add -A: %w (%s)", err, string(stderr))

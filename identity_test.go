@@ -1,6 +1,11 @@
 package flow
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 // The TagId floor is load-bearing rather than decorative: a tag is
 // interpolated into the orchestrator's own query, where a value containing a
@@ -188,4 +193,145 @@ func TestVocabularies_AreClosed(t *testing.T) {
 	if CommandName("deploy").Valid() {
 		t.Error("an invented command name passed Valid")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// The arena anchor.
+//
+// checkoutRoot is the walk DeriveArenaRoot performs over the directory the
+// running binary lives in, with the executable and the real home directory
+// factored out so the walk itself is testable. Every fixture below is a
+// t.TempDir tree: an absolute path written into a test would be one operator's
+// machine baked into the suite, which is the class of thing this file exists to
+// remove.
+// ---------------------------------------------------------------------------
+
+// mkTree creates dir and returns it.
+func mkTree(t *testing.T, parts ...string) string {
+	t.Helper()
+	p := filepath.Join(parts...)
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", p, err)
+	}
+	return p
+}
+
+// gitDir marks dir as an ordinary checkout.
+func gitDir(t *testing.T, dir string) string {
+	t.Helper()
+	mkTree(t, dir, ".git")
+	return dir
+}
+
+// gitFile marks dir as a LINKED worktree, whose `.git` is a file naming the
+// gitdir rather than a directory holding it.
+func gitFile(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: ../main/.git/worktrees/w\n"), 0o644); err != nil {
+		t.Fatalf("write .git file: %v", err)
+	}
+	return dir
+}
+
+func TestCheckoutRootFindsTheCheckoutTheBinaryLivesIn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// build lays out a tree under tmp and returns the directory the
+		// executable sits in, plus the checkout that must be found from it.
+		build func(t *testing.T, tmp string) (start, want string)
+	}{
+		{
+			"the executable's own directory is the checkout",
+			func(t *testing.T, tmp string) (string, string) {
+				root := gitDir(t, mkTree(t, tmp, "checkout"))
+				return root, root
+			},
+		},
+		{
+			"a binary in <root>/bin — where every flow binary is built",
+			func(t *testing.T, tmp string) (string, string) {
+				root := gitDir(t, mkTree(t, tmp, "checkout"))
+				return mkTree(t, root, "bin"), root
+			},
+		},
+		{
+			"nested three deep",
+			func(t *testing.T, tmp string) (string, string) {
+				root := gitDir(t, mkTree(t, tmp, "checkout"))
+				return mkTree(t, root, "tools", "build", "bin"), root
+			},
+		},
+		{
+			// A linked `git worktree` records its gitdir in a FILE. A linked
+			// worktree is exactly the arena this project is about, so accepting
+			// only the directory form would refuse the case.
+			"a linked worktree, whose .git is a file",
+			func(t *testing.T, tmp string) (string, string) {
+				root := gitFile(t, mkTree(t, tmp, "linked"))
+				return mkTree(t, root, "bin"), root
+			},
+		},
+		{
+			// The NEAREST ancestor wins: a checkout inside a checkout is where
+			// the binary lives, and the outer one is somebody else's arena.
+			"nested checkouts — the nearest ancestor wins",
+			func(t *testing.T, tmp string) (string, string) {
+				outer := gitDir(t, mkTree(t, tmp, "outer"))
+				inner := gitDir(t, mkTree(t, outer, "vendor", "inner"))
+				return mkTree(t, inner, "bin"), inner
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start, want := tc.build(t, t.TempDir())
+			got, err := checkoutRoot(start, "")
+			if err != nil {
+				t.Fatalf("checkoutRoot(%s) = %v, want %s", start, err, want)
+			}
+			if got != want {
+				t.Errorf("checkoutRoot(%s) = %s, want %s", start, got, want)
+			}
+		})
+	}
+}
+
+// A binary that is inside no checkout gets an ERROR, never a guess. The guess
+// is what the defect was: `"."` is always an answer, and always the wrong one.
+func TestCheckoutRootRefusesWhatIsNotACheckout(t *testing.T) {
+	t.Run("no .git anywhere above the binary", func(t *testing.T) {
+		start := mkTree(t, t.TempDir(), "not", "a", "checkout")
+		got, err := checkoutRoot(start, "")
+		if err == nil {
+			t.Fatalf("checkoutRoot(%s) = %s, want an error — nothing there is a checkout", start, got)
+		}
+		if !strings.Contains(err.Error(), start) {
+			t.Errorf("error = %v, want it to name %s, the directory the operator has to look at", err, start)
+		}
+	})
+
+	// The home directory is refused as a candidate rather than adopted: a home
+	// that happens to be a dotfiles repo is not the checkout a binary works on,
+	// and without this a binary installed at ~/go/bin would take $HOME as its
+	// arena — one ArenaId shared by every binary installed that way.
+	t.Run("the home directory is not a checkout, even when it is a repo", func(t *testing.T) {
+		home := gitDir(t, mkTree(t, t.TempDir(), "home"))
+		start := mkTree(t, home, "go", "bin")
+		if got, err := checkoutRoot(start, home); err == nil {
+			t.Fatalf("checkoutRoot(%s, home=%s) = %s, want a refusal", start, home, got)
+		}
+	})
+
+	// The walk terminates rather than looping at the filesystem root.
+	t.Run("the walk reaches the filesystem root", func(t *testing.T) {
+		root := t.TempDir()
+		for parent := filepath.Dir(root); parent != root; parent = filepath.Dir(root) {
+			root = parent
+		}
+		if _, err := os.Stat(filepath.Join(root, ".git")); err == nil {
+			t.Skipf("%s is itself a checkout on this machine", root)
+		}
+		if got, err := checkoutRoot(root, ""); err == nil {
+			t.Fatalf("checkoutRoot(%s) = %s, want an error rather than a walk that never ends", root, got)
+		}
+	})
 }
