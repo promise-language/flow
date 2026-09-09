@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -38,7 +39,7 @@ func TestCmdList_DefaultScope(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{makeTestFlow(t)},
+		Flow:         makeTestFlow(t),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -255,7 +256,7 @@ func TestCmdList_WithDiscoverer_ScopeOpen(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{makeTestFlow(t)},
+		Flow:         makeTestFlow(t),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -289,7 +290,7 @@ func TestCmdList_WithDiscoverer_ScopeProcessable(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{makeTestFlow(t)},
+		Flow:         makeTestFlow(t),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -326,7 +327,7 @@ func TestCmdList_TagFilter(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{makeTestFlow(t)},
+		Flow:         makeTestFlow(t),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -355,7 +356,7 @@ func TestCmdList_UnknownScope(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{makeTestFlow(t)},
+		Flow:         makeTestFlow(t),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -385,7 +386,7 @@ func TestCmdList_JSON_Availability(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{makeTestFlow(t)},
+		Flow:         makeTestFlow(t),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -417,6 +418,66 @@ func TestCmdList_JSON_Availability(t *testing.T) {
 	}
 }
 
+// TestCmdList_RemitGatesTheListing: gating a listing is what the remit is FOR
+// (docs/flow-registration.md § Item types) — `list` must answer "is this our
+// work" statically, from the flow's declared types and without dispatching
+// anything. The predicate `list` hands the orchestrator is what decides that,
+// and nothing else asserts it is the remit: a `list` that passed nil, or a
+// predicate accepting everything, would report another binary's items as this
+// one's work at every scope.
+//
+// Both directions in one reading, at `open` scope, which is the widest scope
+// that still ranks by availability: the item in the remit is auto, the one
+// outside it is unhandled — and unhandled is exactly the rung `processable`
+// (the default scope) drops.
+func TestCmdList_RemitGatesTheListing(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "in remit"})
+	be.AddItem("2", flow.Item{Type: "chore", Title: "outside the remit"})
+
+	app := &App{
+		Orchestrator: be,
+		Agent:        &stubAgent{name: "stub"},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flow:         makeTestFlow(t), // remit: {"task"}
+	}
+	if err := app.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	out := &bytes.Buffer{}
+	app.Out, app.Err = out, newDiscardWriter()
+
+	if code := app.cmdList(context.Background(), []string{"--json", "--scope", "open"}); code != 0 {
+		t.Fatalf("cmdList = %d", code)
+	}
+	var payload listPayload
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	got := map[string]string{}
+	for _, it := range payload.Items {
+		got[it.Display] = it.Availability
+	}
+	if want := map[string]string{"1": "auto", "2": "unhandled"}; !maps.Equal(got, want) {
+		t.Errorf("availability by item = %v, want %v", got, want)
+	}
+
+	// And the default scope drops it, rather than merely labelling it: an
+	// operator asking what there is to work on is not offered another binary's
+	// item.
+	out.Reset()
+	if code := app.cmdList(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdList = %d", code)
+	}
+	payload = listPayload{}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].Display != "1" {
+		t.Errorf("processable items = %+v, want only the in-remit item", payload.Items)
+	}
+}
+
 // TestCmdList_EmptyDiscovery verifies the empty-result message includes the
 // scope name, not a generic "no eligible items".
 func TestCmdList_EmptyDiscovery(t *testing.T) {
@@ -428,7 +489,7 @@ func TestCmdList_EmptyDiscovery(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{makeTestFlow(t)},
+		Flow:         makeTestFlow(t),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)

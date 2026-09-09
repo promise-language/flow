@@ -33,7 +33,23 @@ func declaringApp(be flow.Orchestrator, gates ...flow.GateName) App {
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Gates:        gates,
-		Flows:        []*flow.Flow{f},
+		Flow:         f,
+	}
+}
+
+// A binary registers exactly one flow (docs/flow-registration.md § What a flow
+// is), so the field is required rather than a list that may be empty: an App
+// with no flow has no graph to route anything through, and every command below
+// would be answering about nothing.
+func TestApp_Validate_RejectsAMissingFlow(t *testing.T) {
+	app := declaringApp(fake.New())
+	app.Flow = nil
+	err := app.validate()
+	if err == nil {
+		t.Fatal("validate() = nil, want a refusal naming App.Flow")
+	}
+	if !strings.Contains(err.Error(), "App.Flow is required") {
+		t.Errorf("error %q does not name the missing field", err)
 	}
 }
 

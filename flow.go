@@ -5,9 +5,11 @@ import (
 	"slices"
 )
 
-// Flow is one ordered list of lifecycle items (steps + signal waits). A flow
-// is selected by cli.App for a given item if its Types() match item.Type and
-// all RequireSignal preconditions are satisfied.
+// Flow is one graph of lifecycle items (steps + signal waits) with one
+// declared entry. A binary registers exactly one — what differs by item is the
+// route through the graph, never which graph (docs/flow-registration.md § What
+// a flow is). `types` is its remit: which item types are this binary's work,
+// gating listing and selection and nothing else.
 type Flow struct {
 	name         string
 	types        []ItemType
@@ -239,8 +241,10 @@ func (f *Flow) appendStep(s *step, resultKey StepId) {
 	}
 }
 
-// RequireSignal adds an eligibility precondition. The flow is only selected
-// by cli.App once this signal is already set on the item.
+// RequireSignal adds an eligibility precondition. An item is only begun once
+// every required signal is already set on it — a gate on eligibility, not a
+// lifecycle item: it does not appear in the graph and is never routed to
+// (docs/flow-registration.md § Signal preconditions).
 func (f *Flow) RequireSignal(signal SignalId) {
 	if signal == "" {
 		panic("flow.RequireSignal: empty signal id")
@@ -248,14 +252,83 @@ func (f *Flow) RequireSignal(signal SignalId) {
 	f.requireSignals = append(f.requireSignals, signal)
 }
 
-// AcceptsType returns true if this flow handles the given item type. An empty
-// Types() set means universal (every type matches).
-func (f *Flow) AcceptsType(t ItemType) bool {
+// InRemit reports whether the given item type is this flow's REMIT — which
+// item types are this binary's work. An empty Types() set means universal
+// (every type is).
+//
+// The remit gates listing and selection, and nothing else, and it is consulted
+// before the journal's first entry and never after
+// (docs/flow-registration.md § Item types). It does not choose processing:
+// what a type means for an item's route is the entry step's business, elected
+// and recorded like every other decision.
+func (f *Flow) InRemit(t ItemType) bool {
 	if len(f.types) == 0 {
 		return true
 	}
 	return slices.Contains(f.types, t)
 }
+
+// Position is where the item stands: the pending lifecycle item, or the
+// finalization the flow ended with.
+type Position struct {
+	// Step is the pending lifecycle item — what runs next. The zero value when
+	// Finalized: a finished flow has no pending step.
+	Step LifecycleItem
+	// Finalized reports that a step elected finalization. That is the ONLY way
+	// a flow completes: there is no completion test beside the route — no
+	// checklist of required results, and no way to finish other than a step
+	// deciding to (docs/flow-registration.md § Routing and completion).
+	Finalized bool
+	// Disposition is what the finalizing election ended the flow with. Set only
+	// when Finalized.
+	Disposition Disposition
+}
+
+// Position derives where the item stands from its journal and nothing else:
+// the route its last entry elected, or the declared entry step when the
+// journal is empty (docs/resolution.md § Deriving the next step).
+//
+// One derivation answering both questions the documents ask of the journal —
+// what runs next, and whether the flow is done — so there is no second place
+// completion can be decided.
+//
+// Nothing else is consulted. Not the artifact records ("no resolved bit, no
+// checklist, no required flag" — docs/artifacts-and-signals.md § The record),
+// not the signals, and not how many times the pending step has already
+// completed: "a step runs when the route names it, and for no other reason …
+// reaching a step a second time is not an anomaly but a route".
+//
+// Both refusals are loud rather than answered empty: an empty position reads as
+// "nothing left to do", which is the one answer that would finish an item the
+// flow never ran.
+func (f *Flow) Position(it *Item) (Position, error) {
+	entry, ok := it.LastEntry()
+	if !ok {
+		if f.entry == nil {
+			return Position{}, fmt.Errorf("flow %q has an empty journal and declares no entry step: exactly one lifecycle item must be registered with StepConfig{Entry: true}",
+				f.name)
+		}
+		return Position{Step: toLifecycleItem(f.entry)}, nil
+	}
+	if entry.Route.Finalizes() {
+		return Position{Finalized: true, Disposition: entry.Route.Finalize}, nil
+	}
+	succ, ok := f.stepByResult[entry.Route.Next]
+	if !ok {
+		return Position{}, fmt.Errorf("flow %q: the journal's last entry, from step %q, elects successor %q, which names no registered lifecycle item",
+			f.name, entry.Step, entry.Route.Next)
+	}
+	return Position{Step: toLifecycleItem(succ)}, nil
+}
+
+// Pending, stepPending, DeriveNext, IsDone and TerminalReason below are the
+// OUTGOING derivation: position as a checklist walked in registration order,
+// which Flow.Position replaces. They are not a second copy of one rule kept in
+// sync with it — nothing reads both, and Position becomes the only derivation
+// once the route is elected (#233), appended (#239), persisted (#240) and
+// declared by the shipped flow (#245). The checklist cannot go before then:
+// until something appends an entry, Position would report "no entry declared"
+// for every item, which the advance reads as "nothing left to do".
 
 // Pending returns true iff the named lifecycle item is unresolved on the
 // given Item.
@@ -335,7 +408,7 @@ type LifecycleItem struct {
 	// is gone — routing subsumes it — but the checklist that reads this has
 	// not been retired yet (cli/cmd_status.go still renders it), so the field
 	// stays and reports the one value there now is. It goes with the checklist
-	// itself, in #232 (routing/journal) and #240.
+	// itself, in #240 and #242.
 	Required bool
 	Handler  StepHandler // nil when Kind==LifecycleAwait
 

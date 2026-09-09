@@ -44,8 +44,10 @@ func (app *App) cmdList(ctx context.Context, args []string) int {
 		return 1
 	}
 
-	acceptsType := func(t flow.ItemType) bool { return flowForType(app, t) != nil }
-	items, err := app.Orchestrator.List(ctx, scope, flow.BinaryName(app.Name), acceptsType)
+	// The remit gating a listing, which is what it is for
+	// (docs/flow-registration.md § Item types): it answers *is this our work*
+	// statically, without dispatching anything.
+	items, err := app.Orchestrator.List(ctx, scope, flow.BinaryName(app.Name), app.Flow.InRemit)
 	if err != nil {
 		fmt.Fprintln(app.Err, "list:", err)
 		return 1

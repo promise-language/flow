@@ -350,6 +350,49 @@ func TestCmdStale_WarningPendingQuestions(t *testing.T) {
 	}
 }
 
+// TestCmdStale_TypeOutsideTheRemitStillMarksStale: `stale` reads the binary's
+// one flow, whatever the item's type says. The remit gates listing and
+// selection and nothing else (docs/flow-registration.md § Item types), so a
+// claimed item whose type was edited after the claim is still repairable —
+// refusing here on the type would strand exactly the run a person is trying to
+// unstick, which is `grant`'s reasoning applied to the same situation.
+func TestCmdStale_TypeOutsideTheRemitStillMarksStale(t *testing.T) {
+	app, be, claim := testAppItem(t,
+		flow.Item{Ref: itemRefFor("1"), Type: "chore", Title: "chore#1"},
+		[]flow.ItemType{"task"}, // "chore" is outside the remit
+		func(f *flow.Flow) {
+			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+				return ctx.ResolveMarkdown("the plan")
+			}, flow.StepConfig{})
+		}, &stubAgent{name: "stub"})
+
+	ctx := context.Background()
+	if err := be.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
+		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
+	}); err != nil {
+		t.Fatalf("SeedState: %v", err)
+	}
+	if err := be.ResolveArtifact(ctx, claim.ItemRef, "plan", flow.ArtifactBody{
+		Type: flow.ArtifactMarkdown, Markdown: "the plan",
+	}); err != nil {
+		t.Fatalf("ResolveArtifact: %v", err)
+	}
+
+	var out, errBuf bytes.Buffer
+	app.Out, app.Err = &out, &errBuf
+
+	if code := app.cmdStale(ctx, []string{"plan"}); code != 0 {
+		t.Fatalf("cmdStale = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	state, err := be.Load(ctx, claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !state.Artifact("plan").Stale {
+		t.Error("plan is not stale — the mark must land on an item outside the remit")
+	}
+}
+
 func TestCmdStale_SeededButNotInFlow(t *testing.T) {
 	// A step ID that exists in the item's artifact records but is not part of
 	// the current flow definition — e.g. leftover from a previous flow version.

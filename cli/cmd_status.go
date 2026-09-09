@@ -72,12 +72,21 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		overrides = claim.Overrides
 	}
 
-	f, _ := SelectFlow(app, state)
-	// The flow that HANDLES this item's type, independent of step eligibility.
-	// A finalized/complete item has no eligible step (SelectFlow → nil), but it
-	// still belongs to its own flow — so show THAT flow's checklist, not every
-	// flow the binary defines (e.g. don't dump do-plan for a task/bug item).
-	typeFlow := flowForType(app, state.Type)
+	// The remit, read exactly as the advance reads it (inRemit) rather than
+	// assumed: an item outside it is not this binary's work, and RunOne blocks
+	// it without dispatching anything. Reporting the flow here regardless would
+	// have `status` call the item eligible while `resolve` stops before
+	// dispatch — the one fact answered two ways that statusFlowState exists to
+	// prevent.
+	var f, typeFlow *flow.Flow
+	if inRemit(app, state) {
+		// The binary's flow, independent of step eligibility. A
+		// finalized/complete item has no eligible step (SelectFlow → nil), but
+		// it still belongs to the flow — so its checklist is what gets rendered
+		// either way.
+		typeFlow = app.Flow
+		f, _ = SelectFlow(app, state)
+	}
 	if owner == "" {
 		owner = "(unclaimed)"
 	}
@@ -148,32 +157,18 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 	})
 }
 
-// flowForType returns the flow that handles itemType (the first whose
-// AcceptsType matches), or nil. Unlike SelectFlow it ignores step eligibility,
-// so a finalized/complete item still resolves to its own flow for display.
-func flowForType(app *App, itemType flow.ItemType) *flow.Flow {
-	for _, f := range app.Flows {
-		if f.AcceptsType(itemType) {
-			return f
-		}
-	}
-	return nil
-}
-
-// registeredTypes lists every item type some registered flow accepts, sorted
-// and deduplicated, for a message that has to tell an operator what the item's
-// type should have been. "none" when no flow declares any — which, because an
-// empty Types() set is universal, is also the only case where the caller's
-// no-match verdict could not have come from a type list at all.
+// registeredTypes lists the flow's remit, sorted and deduplicated, for a
+// message that has to tell an operator what the item's type should have been.
+// "none" when the flow declares no type — which, because an empty Types() set
+// is universal, is also the only case where the caller's no-match verdict could
+// not have come from a type list at all.
 func registeredTypes(app *App) string {
 	seen := map[flow.ItemType]bool{}
 	var types []string
-	for _, f := range app.Flows {
-		for _, t := range f.Types() {
-			if !seen[t] {
-				seen[t] = true
-				types = append(types, string(t))
-			}
+	for _, t := range app.Flow.Types() {
+		if !seen[t] {
+			seen[t] = true
+			types = append(types, string(t))
 		}
 	}
 	if len(types) == 0 {

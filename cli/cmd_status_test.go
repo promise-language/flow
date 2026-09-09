@@ -332,7 +332,7 @@ func TestCmdStatus_InspectsById(t *testing.T) {
 	f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 		return ctx.ResolveMarkdown("the plan")
 	}, flow.StepConfig{})
-	app.Flows = []*flow.Flow{f}
+	app.Flow = f
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations: 3, MaxPromptsPerInvocation: 1, MaxCostUSD: 10,
 		Timeout: 30 * time.Minute,
@@ -788,6 +788,73 @@ func TestStatusFlowState_BlockedDisplacesEligibleOnly(t *testing.T) {
 				t.Errorf("statusFlowLine = %q, want %q", got, tt.wantLine)
 			}
 		})
+	}
+}
+
+// The table above exercises the two renderers directly, so it can hand them a
+// combination the command must actually reach. This one goes through cmdStatus:
+// an item whose type is outside the remit is one RunOne blocks without
+// dispatching anything (docs/flow-registration.md § Item types), so `status`
+// must not report a step of the flow as pending on it. Announcing an eligible
+// step here while `resolve` stops before dispatch is the one fact answered two
+// ways that statusFlowState exists to prevent.
+func TestCmdStatus_ItemOutsideTheRemitReportsNoMatchingFlow(t *testing.T) {
+	app, _, _ := unmatchedTypeApp(t, flow.Item{Ref: itemRefFor("1"), Type: "chore", Title: "chore#1"})
+	out := &bytes.Buffer{}
+	errBuf := &bytes.Buffer{}
+	app.Out, app.Err = out, errBuf
+
+	if code := app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus --json = %d; stderr=%q", code, errBuf.String())
+	}
+	var payload statusPayload
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if payload.FlowState != flowStateNoMatchingFlow {
+		t.Errorf("flow_state = %q, want %q", payload.FlowState, flowStateNoMatchingFlow)
+	}
+	if payload.Flow != "" {
+		t.Errorf("flow = %q, want none for an item outside the remit", payload.Flow)
+	}
+	if len(payload.Steps) != 0 {
+		t.Errorf("steps = %+v, want none for an item outside the remit", payload.Steps)
+	}
+}
+
+// The other half of the same rule: the remit is consulted before the journal's
+// first entry and never after, so an item outside the remit that already has a
+// journal is one `resolve` advances (TestRunOne_RemitIsNotConsultedOnceTheJournalHasEntries).
+// `status` must report its flow and its checklist — reporting "no matching
+// flow" for an item the very next `resolve` will run a step on is the same
+// disagreement as the test above, inverted, and would read to an operator as a
+// binary that has stopped owning an item mid-resolution.
+func TestCmdStatus_ItemWithAJournalReportsTheFlow(t *testing.T) {
+	app, _, _ := unmatchedTypeApp(t, flow.Item{
+		Ref: itemRefFor("1"), Type: "chore", Title: "chore#1",
+		Journal: []flow.JournalEntry{{
+			Step: "plan", Execution: 1, Route: flow.Route{Next: "plan"},
+		}},
+	})
+	out := &bytes.Buffer{}
+	errBuf := &bytes.Buffer{}
+	app.Out, app.Err = out, errBuf
+
+	if code := app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus --json = %d; stderr=%q", code, errBuf.String())
+	}
+	var payload statusPayload
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if payload.FlowState == flowStateNoMatchingFlow {
+		t.Errorf("flow_state = %q — an item with a journal is past the remit", payload.FlowState)
+	}
+	if payload.Flow == "" {
+		t.Error("flow = \"\", want the binary's flow named for an item with a journal")
+	}
+	if len(payload.Steps) == 0 {
+		t.Error("steps = none, want the flow's checklist for an item with a journal")
 	}
 }
 

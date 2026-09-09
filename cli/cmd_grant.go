@@ -93,11 +93,12 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 		fmt.Fprintln(app.Err, "grant:", err)
 		return 1
 	}
-	f := flowForType(app, state.Type)
-	if f == nil {
-		fmt.Fprintf(app.Err, "grant: no flow in this binary handles item type %q — nothing to grant\n", state.Type)
-		return 1
-	}
+	// The binary's one flow, whatever the item's type says. The remit gates
+	// listing and selection and nothing else (docs/flow-registration.md § Item
+	// types): a claimed item passed that gate when it was claimed, and a type
+	// edited since redirects nothing — refusing to top up a budget on that
+	// basis would strand a run a person is trying to unstick.
+	f := app.Flow
 
 	amounts := grantAmounts{
 		invocations: *invocations,

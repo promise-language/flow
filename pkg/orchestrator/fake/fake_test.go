@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -142,6 +143,55 @@ func TestBackend_ClaimConflictIsTypedRefusal(t *testing.T) {
 	}
 	if !refused.ItemScoped {
 		t.Error("ItemScoped = false, want true (a different item could succeed)")
+	}
+}
+
+// Load returns the journal whole and IN ORDER, and hands back a copy. Position
+// is derived from the last entry alone (flow.Position), so a journal read short
+// or reordered re-routes the item, and a caller that could write through the
+// returned slice would rewrite the store's record of the route it is only
+// reading.
+func TestBackend_LoadReturnsTheJournalInOrderAndUnaliased(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	item := newItem("1")
+	item.Journal = []flow.JournalEntry{
+		{Step: "plan", Execution: 1, Route: flow.Route{Next: "impl"}},
+		{Step: "impl", Execution: 1, Route: flow.Route{Next: "plan"}},
+		{Step: "plan", Execution: 2, Route: flow.Route{Next: "impl"}},
+	}
+	b.AddItem("1", item)
+	ref := itemRef("1")
+
+	state, err := b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	var got []flow.StepId
+	for _, e := range state.Journal {
+		got = append(got, e.Step)
+	}
+	want := []flow.StepId{"plan", "impl", "plan"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("journal steps = %v, want %v", got, want)
+	}
+	if last := state.Journal[len(state.Journal)-1]; last.Execution != 2 {
+		t.Errorf("last entry execution = %d, want 2 — the entries are not the ones appended", last.Execution)
+	}
+
+	// Rewriting the loaded journal must not reach the store.
+	state.Journal[0].Route = flow.Route{Finalize: flow.DispositionRejected}
+	state.Journal = state.Journal[:1]
+
+	again, err := b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("second Load: %v", err)
+	}
+	if len(again.Journal) != len(want) {
+		t.Fatalf("journal length = %d after a caller truncated its copy, want %d", len(again.Journal), len(want))
+	}
+	if again.Journal[0].Route != (flow.Route{Next: "impl"}) {
+		t.Errorf("entry 0 route = %+v, want the recorded election — a caller rewrote the store's route", again.Journal[0].Route)
 	}
 }
 

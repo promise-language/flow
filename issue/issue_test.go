@@ -481,12 +481,12 @@ func TestBuildApp_MaintainerBuildsButRefusesOnDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildApp = %v, want an app that still serves read-only commands", err)
 	}
-	if len(app.Flows) != 1 {
-		t.Fatalf("got %d flows, want the stand-in", len(app.Flows))
+	if app.Flow == nil {
+		t.Fatal("BuildApp returned no flow, want the stand-in")
 	}
 	// Silently running the contributor set would have a maintainer opening a
 	// pull request against their own review, so the step must refuse.
-	li, ok := app.Flows[0].Item("review the implementation")
+	li, ok := app.Flow.Item("review the implementation")
 	if !ok {
 		t.Fatal("stand-in flow has no maintainer step")
 	}
@@ -506,8 +506,8 @@ func TestBuildApp_ContributorSliceWiresUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildApp: %v", err)
 	}
-	if len(app.Flows) != 1 {
-		t.Fatalf("got %d flows, want 1", len(app.Flows))
+	if app.Flow == nil {
+		t.Fatal("BuildApp returned no flow")
 	}
 	if app.VerifyCmd != "bin/verify --wasm" {
 		t.Errorf("VerifyCmd = %q, want the joined display form", app.VerifyCmd)
@@ -635,9 +635,9 @@ func TestContributorStepSetMatchesTheDocument(t *testing.T) {
 		{"create pull request", "pr-open", flow.LifecycleSignal},
 		{"close branch", "branch-closed", flow.LifecycleArtifact},
 	}
-	items := app.Flows[0].Items()
+	items := app.Flow.Items()
 	if len(items) != len(want) {
-		t.Fatalf("got %d steps %v, want %d", len(items), app.Flows[0].Steps(), len(want))
+		t.Fatalf("got %d steps %v, want %d", len(items), app.Flow.Steps(), len(want))
 	}
 	for i, w := range want {
 		got := items[i]
@@ -674,7 +674,7 @@ func TestEveryPromptSlotBelongsToARegisteredStep(t *testing.T) {
 		t.Fatalf("BuildApp: %v", err)
 	}
 	steps := map[string]bool{}
-	for _, it := range app.Flows[0].Items() {
+	for _, it := range app.Flow.Items() {
 		steps[string(it.ArtifactId)] = true
 		steps[string(it.SignalId)] = true
 	}

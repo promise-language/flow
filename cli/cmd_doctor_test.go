@@ -20,9 +20,7 @@ func TestCmdDoctor_OKGlyph(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows: []*flow.Flow{
-			newDummyFlow("x"),
-		},
+		Flow:         newDummyFlow("x"),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -47,7 +45,7 @@ func TestCmdDoctor_FailGlyph(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{newDummyFlow("x")},
+		Flow:         newDummyFlow("x"),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -205,7 +203,7 @@ func doctorApp(t *testing.T, orch flow.Orchestrator, agent flow.Agent) (*App, *b
 		Orchestrator: orch,
 		Agent:        agent,
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{newDummyFlow("x")},
+		Flow:         newDummyFlow("x"),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -283,7 +281,7 @@ func TestCmdDoctor_ReportsDeclaredGatesAndCommands(t *testing.T) {
 		Orchestrator: fake.New(),
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{newDummyFlow("x")},
+		Flow:         newDummyFlow("x"),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -311,7 +309,7 @@ func TestCmdDoctor_ReportsCarryThrough(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{newDummyFlow("x")},
+		Flow:         newDummyFlow("x"),
 		CarryThrough: true,
 	}
 	if err := app.validate(); err != nil {
@@ -341,7 +339,7 @@ func TestCmdDoctor_OmitsCarryThroughWhenDisabled(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{newDummyFlow("x")},
+		Flow:         newDummyFlow("x"),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -401,7 +399,7 @@ func TestCmdDoctor_NormativeDocsMissing(t *testing.T) {
 				Orchestrator: fake.New(),
 				Agent:        &stubAgent{name: "stub"},
 				Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-				Flows:        []*flow.Flow{newDummyFlow("x")},
+				Flow:         newDummyFlow("x"),
 			}
 			if err := app.validate(); err != nil {
 				t.Fatalf("validate: %v", err)

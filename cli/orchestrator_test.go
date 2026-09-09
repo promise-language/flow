@@ -449,7 +449,7 @@ func testAppItem(t *testing.T, item flow.Item, types []flow.ItemType, configure 
 	}
 	f := flow.NewFlow("implement", types)
 	configure(f)
-	app.Flows = []*flow.Flow{f}
+	app.Flow = f
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -1327,7 +1327,7 @@ func TestApp_Validate_RejectsUnknownArtifact(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{f},
+		Flow:         f,
 	}
 	if err := app.validate(); err == nil {
 		t.Errorf("expected validation error for unknown artifact")
@@ -1348,7 +1348,7 @@ func TestApp_Validate_RejectsUnsupportedArtifact(t *testing.T) {
 			flow.Artifact("plan", flow.ArtifactMarkdown),
 			flow.Artifact("report", flow.ArtifactMarkdown),
 		},
-		Flows: []*flow.Flow{f},
+		Flow: f,
 	}
 	if err := app.validate(); err == nil {
 		t.Errorf("expected validation error for artifact the backend cannot record")
@@ -1367,7 +1367,7 @@ func TestApp_Validate_RejectsArtifactTypeMismatch(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactJSON)},
-		Flows:        []*flow.Flow{f},
+		Flow:         f,
 	}
 	if err := app.validate(); err == nil {
 		t.Errorf("expected validation error for artifact declared with a type the backend cannot record")
@@ -1383,27 +1383,30 @@ func TestApp_Validate_RejectsUnsupportedSignal(t *testing.T) {
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Signals:      []flow.SignalDef{flow.Signal("pr-open", "x")},
-		Flows:        []*flow.Flow{f},
+		Flow:         f,
 	}
 	if err := app.validate(); err == nil {
 		t.Errorf("expected validation error for signal not in SupportedSignals")
 	}
 }
 
+// TestSelectFlow_RequireSignalGate: the flow's signal preconditions gate
+// selection. With one flow per binary there is nothing to pick BETWEEN, so what
+// the gate decides is whether the one flow is eligible at all — an unsatisfied
+// precondition leaves the item with no step to run, and satisfying it hands
+// back the pending one.
 func TestSelectFlow_RequireSignalGate(t *testing.T) {
 	be := fake.New(flow.Signal("pr-open", "x"))
-	a := flow.NewFlow("contributor", []flow.ItemType{"task"})
-	a.AddStep("plan", "plan", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
-	b := flow.NewFlow("maintainer", []flow.ItemType{"task"})
-	b.RequireSignal("pr-open")
-	b.AddStep("merge", "commit", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
+	f := flow.NewFlow("maintainer", []flow.ItemType{"task"})
+	f.RequireSignal("pr-open")
+	f.AddStep("merge", "commit", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
 
 	app := &App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
-		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown), flow.Artifact("commit", flow.ArtifactCommitHash)},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("commit", flow.ArtifactCommitHash)},
 		Signals:      []flow.SignalDef{flow.Signal("pr-open", "x")},
-		Flows:        []*flow.Flow{a, b},
+		Flow:         f,
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -1414,23 +1417,17 @@ func TestSelectFlow_RequireSignalGate(t *testing.T) {
 		Artifacts: map[flow.ArtifactId]flow.ArtifactRecord{},
 		Signals:   map[flow.SignalId]flow.SignalState{},
 	}
-	picked, _ := SelectFlow(app, state)
-	if picked == nil || picked.Name() != "contributor" {
-		t.Errorf("expected contributor before pr-open; got %v", picked)
-	}
-
-	// Resolve contributor's only step.
-	state.Artifacts["plan"] = flow.ArtifactRecord{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Resolved: true}
-	// Maintainer still gated on pr-open.
-	picked, _ = SelectFlow(app, state)
-	if picked != nil {
+	if picked, _ := SelectFlow(app, state); picked != nil {
 		t.Errorf("expected no eligible flow without pr-open; got %v", picked.Name())
 	}
 
 	state.Signals["pr-open"] = flow.SignalState{Set: true}
-	picked, _ = SelectFlow(app, state)
+	picked, next := SelectFlow(app, state)
 	if picked == nil || picked.Name() != "maintainer" {
-		t.Errorf("expected maintainer once pr-open set; got %v", picked)
+		t.Fatalf("expected maintainer once pr-open set; got %v", picked)
+	}
+	if next != "merge" {
+		t.Errorf("next = %q, want %q", next, "merge")
 	}
 }
 
@@ -1511,26 +1508,26 @@ func TestRunOne_RefusesFinalizeWhenRequiredArtifactPending(t *testing.T) {
 	}
 }
 
-// unmatchedTypeApp builds an app whose single flow accepts {task,bug} over an
+// unmatchedTypeApp builds an app whose flow has {task,bug} in its remit over an
 // item typed "chore" — the shape of an ordinary GitHub issue carrying no
-// type:* label against a binary that registers task/bug flows. The step handler
-// fails the test: nothing may run for an item no flow accepts.
+// type:* label against a binary that works task/bug items. The step handler
+// fails the test: nothing may run for an item outside the remit.
 func unmatchedTypeApp(t *testing.T, item flow.Item) (*App, *fake.Orchestrator, flow.Claim) {
 	t.Helper()
 	return testAppItem(t, item, []flow.ItemType{"task", "bug"}, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			t.Fatal("step handler ran for an item no flow accepts — must not happen")
+			t.Fatal("step handler ran for an item outside the remit — must not happen")
 			return nil
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 }
 
-// TestRunOne_BlocksWhenNoFlowAcceptsItemType (#10): an item whose type matches
-// no registered flow was never seeded and never ran a step, so it must NOT be
+// TestRunOne_BlocksWhenItemTypeIsOutsideTheRemit (#10): an item whose type is
+// outside the remit was never seeded and never ran a step, so it must NOT be
 // reported done and finalized — that reports success for work never attempted,
 // terminally. It is blocked, with a reason naming the item's type, the
 // registered types, and both ways a person can clear it.
-func TestRunOne_BlocksWhenNoFlowAcceptsItemType(t *testing.T) {
+func TestRunOne_BlocksWhenItemTypeIsOutsideTheRemit(t *testing.T) {
 	app, be, claim := unmatchedTypeApp(t, flow.Item{Ref: itemRefFor("1"), Type: "chore", Title: "test#1"})
 	wrapped := &finalizingBackend{Orchestrator: be}
 	app.Orchestrator = wrapped
@@ -1581,6 +1578,46 @@ func TestRunOne_BlocksUnmatchedTypeEvenWhenSeeded(t *testing.T) {
 	}
 }
 
+// TestRunOne_RemitIsNotConsultedOnceTheJournalHasEntries: the remit is
+// consulted before the journal's first entry and never after
+// (docs/flow-registration.md § Item types). An item whose type is outside the
+// remit but whose journal already carries an entry is past that point: the
+// route is the authority, retyping mid-resolution redirects nothing, and the
+// advance proceeds instead of reporting the item unworkable.
+func TestRunOne_RemitIsNotConsultedOnceTheJournalHasEntries(t *testing.T) {
+	ran := false
+	app, be, claim := testAppItem(t,
+		flow.Item{
+			Ref: itemRefFor("1"), Type: "chore", Title: "test#1",
+			// One completed execution, as #239's AppendEntry will record it.
+			// The election is not read here — the checklist derivation is still
+			// what picks the step (#245) — only its presence is.
+			Journal: []flow.JournalEntry{{
+				Step: "plan", Execution: 1, Route: flow.Route{Next: "plan"},
+			}},
+		},
+		[]flow.ItemType{"task", "bug"},
+		func(f *flow.Flow) {
+			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+				ran = true
+				return ctx.ResolveMarkdown("the plan")
+			}, flow.StepConfig{})
+		}, &stubAgent{name: "stub"})
+	wrapped := &finalizingBackend{Orchestrator: be}
+	app.Orchestrator = wrapped
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status == "blocked" {
+		t.Fatalf("status = blocked — an item with a journal is past the remit. res=%+v", res)
+	}
+	if !ran {
+		t.Errorf("the pending step did not run; res=%+v", res)
+	}
+}
+
 // TestRunOne_FinalizedItemWithUnmatchedTypeStaysDone (#10): the block is for
 // items with work still owed. An already-finalized item's run is over —
 // including one finalized by this very defect before it was fixed — and
@@ -1628,8 +1665,8 @@ func TestRunOne_BlocksWhenItemTypeIsEmpty(t *testing.T) {
 }
 
 // TestRunOne_UniversalFlowIsNotATypeMismatch (#10): the block keys off
-// AcceptsType, not off the declared type list, and a flow declaring no types
-// accepts everything. Such an app has an empty registered-types list, so a check
+// InRemit, not off the declared type list, and a flow declaring no types has
+// every type in its remit. Such an app has an empty registered-types list, so a check
 // written against that list instead would block every item it owns — turning the
 // guard on the very configuration it is meant to leave alone.
 func TestRunOne_UniversalFlowIsNotATypeMismatch(t *testing.T) {
@@ -1662,28 +1699,24 @@ func TestRunOne_UniversalFlowIsNotATypeMismatch(t *testing.T) {
 
 func TestRegisteredTypes(t *testing.T) {
 	cases := []struct {
-		name  string
-		flows []*flow.Flow
-		want  string
+		name string
+		flow *flow.Flow
+		want string
 	}{
-		{"no flows", nil, "none"},
 		{
 			"universal flow declares no types",
-			[]*flow.Flow{flow.NewFlow("any", nil)},
+			flow.NewFlow("any", nil),
 			"none",
 		},
 		{
-			"sorted and deduplicated across flows",
-			[]*flow.Flow{
-				flow.NewFlow("a", []flow.ItemType{"task", "bug"}),
-				flow.NewFlow("b", []flow.ItemType{"bug", "chore"}),
-			},
-			"bug, chore, task",
+			"sorted and deduplicated",
+			flow.NewFlow("a", []flow.ItemType{"task", "bug", "task"}),
+			"bug, task",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := registeredTypes(&App{Flows: tc.flows}); got != tc.want {
+			if got := registeredTypes(&App{Flow: tc.flow}); got != tc.want {
 				t.Errorf("registeredTypes = %q, want %q", got, tc.want)
 			}
 		})

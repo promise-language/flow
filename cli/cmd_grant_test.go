@@ -161,14 +161,21 @@ func TestCmdGrant_NoPark_RefusesWithRemedy(t *testing.T) {
 	}
 }
 
-// TestCmdGrant_UnmatchedTypeExitsOne (#25): an item whose type no flow accepts
-// must exit 1 (could not complete), not 2 (malformed invocation). The command
-// line was valid; the binary simply cannot act on this item type.
-func TestCmdGrant_UnmatchedTypeExitsOne(t *testing.T) {
+// TestCmdGrant_TypeOutsideTheRemitStillGrants: the remit gates listing and
+// selection, and nothing else (docs/flow-registration.md § Item types). A
+// claimed item passed that gate when it was claimed, and a type edited since
+// redirects nothing — so `grant` acts on the item's records rather than
+// refusing on the type, which would strand exactly the run a person is trying
+// to unstick.
+//
+// Replaces the #25 refusal, which read the remit through a per-type flow lookup
+// that no longer exists: with one flow per binary there is no "no flow handles
+// this type" state for a claimed item to be in.
+func TestCmdGrant_TypeOutsideTheRemitStillGrants(t *testing.T) {
 	a := &stubAgent{name: "stub"}
 	app, be, claim := testAppItem(t,
 		flow.Item{Ref: itemRefFor("1"), Type: "chore", Title: "chore#1"},
-		[]flow.ItemType{"task"}, // flow accepts only "task"
+		[]flow.ItemType{"task"}, // "chore" is outside the remit
 		func(f *flow.Flow) {
 			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 				return ctx.ResolveMarkdown("the plan")
@@ -176,22 +183,24 @@ func TestCmdGrant_UnmatchedTypeExitsOne(t *testing.T) {
 		}, a)
 
 	if err := be.SeedState(context.Background(), claim.ItemRef, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown},
+		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true},
 	}); err != nil {
 		t.Fatalf("SeedState: %v", err)
 	}
 
 	var errBuf bytes.Buffer
 	app.Err = &errBuf
+	app.Out = newDiscardWriter()
 
 	code := app.cmdGrant(context.Background(), []string{"--invocations", "1", "--all"})
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1; stderr=%q", code, errBuf.String())
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errBuf.String())
 	}
-	if !strings.Contains(errBuf.String(), `"chore"`) {
-		t.Errorf("expected stderr to name the unmatched type; got %q", errBuf.String())
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
 	}
-	if !strings.Contains(errBuf.String(), "no flow in this binary handles item type") {
-		t.Errorf("expected stderr to explain the mismatch; got %q", errBuf.String())
+	if got := state.Artifact("plan").GrantedInvocations; got == 0 {
+		t.Error("GrantedInvocations = 0 — the grant must land on the record of an item outside the remit")
 	}
 }

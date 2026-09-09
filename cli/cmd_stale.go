@@ -47,11 +47,10 @@ func (app *App) cmdStale(ctx context.Context, args []string) int {
 		fmt.Fprintln(app.Err, "stale:", err)
 		return 1
 	}
-	f := flowForType(app, state.Type)
-	if f == nil {
-		fmt.Fprintf(app.Err, "stale: no flow in this binary handles item type %q\n", state.Type)
-		return 1
-	}
+	// The binary's one flow, whatever the item's type says — the same reading
+	// `grant` takes, and for the same reason: the remit gates listing and
+	// selection and nothing else (docs/flow-registration.md § Item types).
+	f := app.Flow
 
 	stepID, ok := app.resolveStaleTarget(f, state, fs.Arg(0))
 	if !ok {

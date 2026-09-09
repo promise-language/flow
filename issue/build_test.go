@@ -77,11 +77,7 @@ func TestCarryThroughFlowComposition(t *testing.T) {
 		t.Fatalf("BuildApp: %v", err)
 	}
 
-	if len(app.Flows) != 1 {
-		t.Fatalf("expected 1 flow, got %d", len(app.Flows))
-	}
-
-	items := app.Flows[0].Items()
+	items := app.Flow.Items()
 	// contributor steps: plan, branch, implement, review, coverage, openPR
 	// integration steps: verifyMerge, merge, recordMerge
 	// closeBranch

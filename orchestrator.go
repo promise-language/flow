@@ -94,6 +94,13 @@ type Item struct {
 	// report it truthfully.
 	Manual bool
 
+	// Journal is the journal whole: every completed step execution, in order,
+	// each entry as AppendEntry recorded it (docs/orchestrator.md § `Item`).
+	// Load MUST return exactly what was appended, in order — the pending step is
+	// derived from the last entry (Flow.Position), and a journal read short or
+	// out of order re-routes the item.
+	Journal []JournalEntry
+
 	Artifacts map[ArtifactId]ArtifactRecord
 	Signals   map[SignalId]SignalState
 
