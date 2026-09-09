@@ -595,3 +595,31 @@ func TestAddStep_FullyPopulatedLegalConfigDoesNotPanic(t *testing.T) {
 		t.Fatalf("Steps len = %d, want 3", len(f.Steps()))
 	}
 }
+
+// All three registrars share prepareStep, and the one thing that is NOT shared
+// is the `registrar` argument naming the call that was made. Nothing else
+// asserts it is passed correctly, so a copy-paste that hard-coded "AddStep" in
+// all three would leave every other registration test green while sending a
+// reader chasing a panic to the wrong declaration.
+//
+// The second-entry defect is the vehicle because it is the one invariant that
+// needs a step already registered, which also proves prepareStep is reached
+// from each registrar at all — the signal-step path through it is otherwise
+// unexercised.
+func TestRegistration_PanicNamesTheRegistrarThatWasCalled(t *testing.T) {
+	cases := []struct {
+		registrar string
+		declare   func(*Flow, StepConfig)
+	}{
+		{"flow.AddStep:", func(f *Flow, cfg StepConfig) { f.AddStep("second", "two", noopHandler, cfg) }},
+		{"flow.AddSignalStep:", func(f *Flow, cfg StepConfig) { f.AddSignalStep("second", "two", noopHandler, cfg) }},
+		{"flow.AwaitSignal:", func(f *Flow, cfg StepConfig) { f.AwaitSignal("second", "two", cfg) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.registrar, func(t *testing.T) {
+			f := NewFlow("x", nil)
+			f.AddStep("first", "one", noopHandler, StepConfig{Entry: true})
+			mustPanic(t, tc.registrar, func() { tc.declare(f, StepConfig{Entry: true}) })
+		})
+	}
+}

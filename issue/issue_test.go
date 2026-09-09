@@ -512,10 +512,9 @@ func TestBuildApp_ContributorSliceWiresUp(t *testing.T) {
 	if app.VerifyCmd != "bin/verify --wasm" {
 		t.Errorf("VerifyCmd = %q, want the joined display form", app.VerifyCmd)
 	}
-	// The answer gate must be wired, or park-for-answer is inert.
-	if app.Preflight == nil {
-		t.Error("Preflight is nil — the answer gate was not wired")
-	}
+	// Whether the answer gate is wired is no longer readable off this field:
+	// Preflight is a ChainPreflight closure and is non-nil even when every
+	// check in it is. TestBuildApp_PreflightChain asserts what it refuses.
 	// Ids AND types. The type is what catches `implementation` reverting to a
 	// patch: the deliverable is the commit on the branch, and a copy of it can
 	// be empty, is read back by nothing, and can disagree with what it copies.
@@ -535,6 +534,76 @@ func TestBuildApp_ContributorSliceWiresUp(t *testing.T) {
 			t.Errorf("artifact[%d] = (%q, %v), want (%q, %v)",
 				i, app.Artifacts[i].Id, app.Artifacts[i].Type, want.Id, want.Type)
 		}
+	}
+}
+
+// Preflight is now a chain of two gates, and both halves fail SILENTLY when
+// they are dropped. Dropping the answer gate leaves a non-nil closure that
+// waves every question park through; installing the role gate on a role whose
+// steps exist would block every dispatch that binary ever makes; and the two
+// are ordered, because an item parked for an answer on a step set that does
+// not exist must be told the step set is missing, not asked to answer.
+//
+// Nothing else can see any of that: the field is non-nil in every case.
+func TestBuildApp_PreflightChain(t *testing.T) {
+	clean := &flow.Item{}
+	// A park the answer gate refuses: a question with nobody's answer behind
+	// it (stubBackend reads back no answers).
+	asked := &flow.Item{Park: &flow.ParkRequest{
+		Kind: flow.ParkQuestion, Step: "plan", Reason: "which database?",
+	}}
+
+	cases := []struct {
+		name    string
+		cfg     Config
+		item    *flow.Item
+		want    string // fragment the refusal must carry; "" means it must pass
+		notWant string // fragment the refusal must NOT carry
+	}{
+		{name: "contributor passes a clean item",
+			cfg: Config{Role: RoleContributor}, item: clean},
+		{name: "carry-through passes a clean item",
+			cfg: Config{Role: RoleMaintainer, CarryThrough: true}, item: clean},
+		{name: "the maintainer stand-in refuses every dispatch",
+			cfg: Config{Role: RoleMaintainer}, item: clean, want: missingMaintainerSteps},
+		{name: "the answer gate is still in the chain",
+			cfg: Config{Role: RoleContributor}, item: asked, want: "which database?"},
+		{name: "the role gate refuses ahead of the answer gate",
+			cfg: Config{Role: RoleMaintainer}, item: asked,
+			want: missingMaintainerSteps, notWant: "which database?"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.cfg
+			cfg.BinaryName, cfg.VerifyCmd, cfg.BaseBranch = "issue", []string{"bin/verify"}, "main"
+			app, err := BuildApp(context.Background(), cfg,
+				Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
+			if err != nil {
+				t.Fatalf("BuildApp: %v", err)
+			}
+			err = app.Preflight(context.Background(), tc.item)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("Preflight = %v, want nil — this build's steps exist", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Preflight = nil, want a refusal mentioning %q", tc.want)
+			}
+			// Blocked, not a bare error: a plain preflight error is a skip,
+			// which exits 0 and reads as "nothing to do" to whoever re-ran it.
+			if !errors.Is(err, flow.ErrBlocked) {
+				t.Errorf("err = %v, want it to wrap flow.ErrBlocked", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %q, want it to carry %q", err, tc.want)
+			}
+			if tc.notWant != "" && strings.Contains(err.Error(), tc.notWant) {
+				t.Errorf("err = %q, want it NOT to mention %q — the wrong gate answered first",
+					err, tc.notWant)
+			}
+		})
 	}
 }
 
