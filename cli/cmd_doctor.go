@@ -92,10 +92,16 @@ func (app *App) cmdDoctor(ctx context.Context, args []string, startupErr error) 
 	} else {
 		checks = append(checks, app.checkAgent(ctx))
 	}
+	// The arena's checkout is resolved ONCE, here, from the one place that
+	// holds it, and handed to the check that needs it. A nil Orchestrator —
+	// already its own failed check above — leaves it empty, and the docs row
+	// says it could not look rather than inventing a directory to look in.
+	var arenaRoot string
 	if app.Orchestrator != nil {
+		arenaRoot = app.Orchestrator.ArenaRoot()
 		checks = append(checks, app.checkCommands(), app.checkGates())
 	}
-	checks = append(checks, checkDocs())
+	checks = append(checks, checkDocs(arenaRoot))
 
 	// The whole report is one list, so it goes to one stream. docs/cli.md
 	// § "One-shot reports" puts doctor's report on stdout.
@@ -241,25 +247,34 @@ func (app *App) checkGates() check {
 }
 
 // checkDocs checks that the project's normative documentation is present: a
-// `docs/` directory, in the arena, holding at least one document.
+// `docs/` directory, in the arena's checkout, holding at least one document.
 //
-// The arena is the directory the process runs in — that is what an arena IS in
-// this contract, so no orchestrator has to report it and no claim is needed to
-// look.
+// The root is a PARAMETER, taken from Orchestrator.ArenaRoot() where the checks
+// are assembled — never from the process working directory. A location taken
+// from where a process happened to be started is not stable (docs/orchestrator.md
+// § Claim), and reading it here reported on whatever project the operator was
+// standing in: from a sibling checkout, on the neighbour's docs/; from a
+// directory with no docs/ at all, a failure about a project it never looked at.
+// The orchestrator holds the arena's path already — the SDK keeps no second
+// copy to disagree with it when a worktree is configured.
+//
+// An empty root is the orchestrator declaring no local checkout, so there is
+// nothing to look in and the row SKIPS: that is a fact about what doctor was
+// given, not about this machine. A root that exists but holds no docs/, or a
+// docs/ with no document in it, still fails.
 //
 // It is the one row of doctor's set that nothing else can answer. What an
 // orchestrator declares is what it can RUN; what a gate measures is the tree's
 // soundness. Neither notices that an agent is about to work on a project whose
 // definition of correct it cannot read — and that failure is invisible until
 // review, because what comes back is plausible rather than wrong.
-func checkDocs() check {
+func checkDocs(root string) check {
 	const name = "normative docs"
-	dir, err := os.Getwd()
-	if err != nil {
+	if root == "" {
 		return check{name: name, status: checkSkip,
-			detail: fmt.Sprintf("cannot read the arena's directory: %s", err)}
+			detail: "the arena's checkout is not known: the orchestrator declares no local checkout, or none is configured"}
 	}
-	docs := filepath.Join(dir, "docs")
+	docs := filepath.Join(root, "docs")
 	entries, err := os.ReadDir(docs)
 	if err != nil {
 		return check{name: name, status: checkFail, detail: fmt.Sprintf("cannot read %s: %s", docs, err)}
