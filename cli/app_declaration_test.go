@@ -255,6 +255,90 @@ func TestApp_Validate_RunsTheGraphCheckAfterReferenceChecks(t *testing.T) {
 	}
 }
 
+// A flow with no steps is its own named refusal in docs/cli.md § Startup, and
+// the graph check now shadows it: an empty flow has no entry either, so
+// ValidateGraph would refuse it too — with the wrong sentence. "declares no
+// entry step" tells the reader to add `Entry: true` to a step that does not
+// exist. Dropping the earlier check as redundant is the regression this guards.
+func TestApp_Validate_AFlowWithNoStepsIsRefusedAsEmptyNotAsEntryless(t *testing.T) {
+	app := graphApp(fake.New(), func(*flow.Flow) {}) // registers nothing
+	err := wantStartupRefusal(t, app, "zero lifecycle items")
+	if strings.Contains(err.Error(), "no entry step") {
+		t.Errorf("refusal %q sends a reader with an empty flow looking for the step to tag", err)
+	}
+}
+
+// Help is exempt from the environment check and NOT from this one, and the two
+// have to stay apart. `--help` on a clone whose tools are unbuilt prints usage
+// (TestRunWithArgs_HelpNeverNeedsAGate) because gate availability is a fact
+// about the machine; a graph that does not hang together is a fact about the
+// binary, so the same invocation is refused. `doctor` is the only exemption.
+func TestRunWithArgs_ABrokenGraphRefusesHelpToo(t *testing.T) {
+	for _, args := range [][]string{{"--help"}, {"help"}, {"resolve", "--help"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			app := graphApp(fake.New(), func(f *flow.Flow) {
+				f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+					Entry:       true,
+					Role:        "contributor",
+					Next:        []flow.StepId{"commit"},
+					MayFinalize: []flow.Disposition{flow.DispositionResolved},
+				})
+			})
+			out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+			app.Out, app.Err = out, errBuf
+			app.Name = "issue"
+
+			if code := RunWithArgs(app, args); code != 2 {
+				t.Errorf("exit code = %d, want 2 (out=%q err=%q)", code, out.String(), errBuf.String())
+			}
+			if !strings.HasPrefix(errBuf.String(), "startup error:") {
+				t.Errorf("stderr = %q, want the startup refusal", errBuf.String())
+			}
+			if strings.Contains(out.String(), "usage:") {
+				t.Errorf("stdout = %q, want no usage — the binary did not start", out.String())
+			}
+		})
+	}
+}
+
+// Both refusals at once: a binary whose graph is broken, on a clone whose tools
+// have not been built, running the command that would meet the gate boundary.
+// Startup wins — exit 2, not the boundary's 1 — because it is the earlier
+// question and the one that holds wherever the binary is deployed. The exit
+// code is what an external scheduler reads, and 1 would tell it to wait for a
+// machine that will never become fit enough.
+//
+// And it is decided without asking the machine anything: § Startup covers what
+// is checkable from configuration alone.
+func TestRunWithArgs_ABrokenGraphOutranksTheGateBoundary(t *testing.T) {
+	be := &declaringOrchestrator{Orchestrator: fake.New()} // declares no gate, no command
+	app := graphApp(be, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+			Entry:       true,
+			Role:        "contributor",
+			Next:        []flow.StepId{"commit"},
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+		})
+	})
+	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+	app.Out, app.Err = out, errBuf
+	app.Name = "issue"
+
+	if code := RunWithArgs(app, []string{"resolve"}); code != 2 {
+		t.Errorf("exit code = %d, want 2 (out=%q err=%q)", code, out.String(), errBuf.String())
+	}
+	got := errBuf.String()
+	if !strings.HasPrefix(got, "startup error:") || !strings.Contains(got, "commit") {
+		t.Errorf("stderr = %q, want the graph refusal naming the successor that names no step", got)
+	}
+	if strings.Contains(got, "cannot run gates") {
+		t.Errorf("stderr = %q, want the configuration refusal rather than the environment one", got)
+	}
+	if be.gateCalls != 0 {
+		t.Errorf("a graph refusal asked the orchestrator what it can run %d time(s), want 0", be.gateCalls)
+	}
+}
+
 // `integration` and `fit` are both required and MUST appear: nothing lands
 // without integration passing, and fit must run before a claim is taken. An
 // orchestrator declaring only one of them is refused, naming the missing one.
