@@ -20,6 +20,8 @@ Concrete implementations live in subpackages (the reference is `flow/claude`). T
 
 `ctx.Agent()` is the **only** route to spend on agent work. Every expense is metered here, and every expense is approved by the treasurer before it is incurred — allowed, blocked, or priced with an allowance ([resolution.md](resolution.md) § The treasurer). There is no second path. A step that needs agent work calls `ctx.Agent().Run(...)` and nothing else.
 
+The chokepoint also **stamps the request's `Worktree`** with the arena's checkout (`Orchestrator.ArenaRoot()`), overwriting whatever the step put there. Where the turn edits is not a step's choice: it is the tree the commit will be taken in and the gates will measure, and a request that names no directory inherits the directory the binary was started in.
+
 ## Nothing mechanical may spend
 
 A turn happens **only where somebody asked for work**: a step of resolving an item, against a budget, producing an artifact. Every other path answers by reading, or does not answer.
@@ -65,7 +67,7 @@ An agent with no `AgentDoctor` is reported as **skipped**, not failed. The SDK c
 | `Model` | `string` | Model identifier. |
 | `Effort` | `string` | `low`, `medium`, `high`, or `max`. |
 | `MaxCostUSD` | `float64` | Ceiling on what this turn may spend, in USD. Zero means unbounded. |
-| `Worktree` | `string` | Working directory for the agent process. |
+| `Worktree` | `string` | Working directory for the agent process. **Set by the SDK at the chokepoint, never by the step**: the arena's checkout (`Orchestrator.ArenaRoot()`), the same tree the commit is taken in and the gates measure. |
 | `ResumeSessionID` | `string` | Non-empty resumes that exact session. Empty means "don't actively resume a specific session." |
 | `FreshSession` | `bool` | Discard any inherited session state — spawn from a clean slate. |
 

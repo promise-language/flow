@@ -436,6 +436,10 @@ func TestConfigGuardIsTheOnlyWayToInstallOne(t *testing.T) {
 			BinaryName: "implement",
 			Token:      "fake-token",
 			Guard:      guard,
+			// An explicit absolute worktree, because a test binary lives in no
+			// checkout and New now refuses to guess one. Nothing here touches
+			// it: the subject is the guard.
+			WorktreeDir: t.TempDir(),
 		})
 		if err != nil {
 			t.Fatalf("NewBackend: %v", err)

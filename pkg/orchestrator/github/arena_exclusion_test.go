@@ -63,13 +63,13 @@ func (a *testArena) run(fn func()) {
 // twoArenas builds two Orchestrators over ONE ghMock: same repository, same
 // authenticated account ("alice"), different arenas.
 //
-// The harness is the part a naive version of this test gets wrong.
-// newMockedOrchestrator never sets cfg.WorktreeDir, so every orchestrator in
-// this package answers the same arena() and the same fingerprint; and it points
-// FLOW_DIR at one tempdir, so two of them share one lease file. Built that way,
-// "arena 2" is arena 1 and the assertions pass against the broken code. Hence
-// the distinct worktree paths, the distinct FLOW_DIRs, and the up-front check
-// that the two fingerprints actually differ.
+// The harness is the part a naive version of this test gets wrong. Built over
+// one worktree path and one lease file, "arena 2" is arena 1 and every
+// assertion here passes against the code #210 reports. newMockedOrchestrator
+// now gives each orchestrator its own absolute worktree and its own FLOW_DIR,
+// so each is genuinely its own arena; the named paths below make that explicit
+// per arena, and the up-front fingerprint-inequality check is what proves it
+// rather than assuming it.
 func twoArenas(t *testing.T) (*ghMock, *testArena, *testArena) {
 	t.Helper()
 	mock := newGHMock(t)
@@ -798,7 +798,7 @@ func TestBackend_Listing_AnUnreadableLeaseFileReadsTheItemAsHeld(t *testing.T) {
 	mock.mu.Unlock()
 
 	one.run(func() {
-		if err := os.WriteFile(clistate.ActiveJSONPath(), []byte("{truncated"), 0o644); err != nil {
+		if err := os.WriteFile(activeJSONPath(t), []byte("{truncated"), 0o644); err != nil {
 			t.Fatalf("write lease file: %v", err)
 		}
 		refs, err := one.b.ListAutoSelectable(t.Context(), nil)

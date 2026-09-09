@@ -1,6 +1,11 @@
 package flow
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 // The TagId floor is load-bearing rather than decorative: a tag is
 // interpolated into the orchestrator's own query, where a value containing a
@@ -188,4 +193,243 @@ func TestVocabularies_AreClosed(t *testing.T) {
 	if CommandName("deploy").Valid() {
 		t.Error("an invented command name passed Valid")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// The arena anchor.
+//
+// checkoutRoot is the walk DeriveArenaRoot performs over the directory the
+// running binary lives in, with the executable and the real home directory
+// factored out so the walk itself is testable. Every fixture below is a
+// t.TempDir tree: an absolute path written into a test would be one operator's
+// machine baked into the suite, which is the class of thing this file exists to
+// remove.
+// ---------------------------------------------------------------------------
+
+// mkTree creates dir and returns it.
+func mkTree(t *testing.T, parts ...string) string {
+	t.Helper()
+	p := filepath.Join(parts...)
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", p, err)
+	}
+	return p
+}
+
+// gitDir marks dir as an ordinary checkout.
+func gitDir(t *testing.T, dir string) string {
+	t.Helper()
+	mkTree(t, dir, ".git")
+	return dir
+}
+
+// gitFile marks dir as a LINKED worktree, whose `.git` is a file naming the
+// gitdir rather than a directory holding it.
+func gitFile(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: ../main/.git/worktrees/w\n"), 0o644); err != nil {
+		t.Fatalf("write .git file: %v", err)
+	}
+	return dir
+}
+
+func TestCheckoutRootFindsTheCheckoutTheBinaryLivesIn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// build lays out a tree under tmp and returns the directory the
+		// executable sits in, plus the checkout that must be found from it.
+		build func(t *testing.T, tmp string) (start, want string)
+	}{
+		{
+			"the executable's own directory is the checkout",
+			func(t *testing.T, tmp string) (string, string) {
+				root := gitDir(t, mkTree(t, tmp, "checkout"))
+				return root, root
+			},
+		},
+		{
+			"a binary in <root>/bin — where every flow binary is built",
+			func(t *testing.T, tmp string) (string, string) {
+				root := gitDir(t, mkTree(t, tmp, "checkout"))
+				return mkTree(t, root, "bin"), root
+			},
+		},
+		{
+			"nested three deep",
+			func(t *testing.T, tmp string) (string, string) {
+				root := gitDir(t, mkTree(t, tmp, "checkout"))
+				return mkTree(t, root, "tools", "build", "bin"), root
+			},
+		},
+		{
+			// A linked `git worktree` records its gitdir in a FILE. A linked
+			// worktree is exactly the arena this project is about, so accepting
+			// only the directory form would refuse the case.
+			"a linked worktree, whose .git is a file",
+			func(t *testing.T, tmp string) (string, string) {
+				root := gitFile(t, mkTree(t, tmp, "linked"))
+				return mkTree(t, root, "bin"), root
+			},
+		},
+		{
+			// The NEAREST ancestor wins: a checkout inside a checkout is where
+			// the binary lives, and the outer one is somebody else's arena.
+			"nested checkouts — the nearest ancestor wins",
+			func(t *testing.T, tmp string) (string, string) {
+				outer := gitDir(t, mkTree(t, tmp, "outer"))
+				inner := gitDir(t, mkTree(t, outer, "vendor", "inner"))
+				return mkTree(t, inner, "bin"), inner
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start, want := tc.build(t, t.TempDir())
+			got, err := checkoutRoot(start, "")
+			if err != nil {
+				t.Fatalf("checkoutRoot(%s) = %v, want %s", start, err, want)
+			}
+			if got != want {
+				t.Errorf("checkoutRoot(%s) = %s, want %s", start, got, want)
+			}
+		})
+	}
+}
+
+// A binary that is inside no checkout gets an ERROR, never a guess. The guess
+// is what the defect was: `"."` is always an answer, and always the wrong one.
+func TestCheckoutRootRefusesWhatIsNotACheckout(t *testing.T) {
+	t.Run("no .git anywhere above the binary", func(t *testing.T) {
+		start := mkTree(t, t.TempDir(), "not", "a", "checkout")
+		got, err := checkoutRoot(start, "")
+		if err == nil {
+			t.Fatalf("checkoutRoot(%s) = %s, want an error — nothing there is a checkout", start, got)
+		}
+		if !strings.Contains(err.Error(), start) {
+			t.Errorf("error = %v, want it to name %s, the directory the operator has to look at", err, start)
+		}
+	})
+
+	// The home directory is refused as a candidate rather than adopted: a home
+	// that happens to be a dotfiles repo is not the checkout a binary works on,
+	// and without this a binary installed at ~/go/bin would take $HOME as its
+	// arena — one ArenaId shared by every binary installed that way.
+	t.Run("the home directory is not a checkout, even when it is a repo", func(t *testing.T) {
+		home := gitDir(t, mkTree(t, t.TempDir(), "home"))
+		start := mkTree(t, home, "go", "bin")
+		if got, err := checkoutRoot(start, home); err == nil {
+			t.Fatalf("checkoutRoot(%s, home=%s) = %s, want a refusal", start, home, got)
+		}
+	})
+
+	// The walk STOPS at home rather than stepping over it. A checkout that
+	// happens to sit ABOVE the home directory is not this binary's arena
+	// either, and adopting it would hand every ~/go/bin install on the machine
+	// one shared ArenaId — the "two checkouts, one arena" half of the identity
+	// error, at the width of a whole account.
+	t.Run("the walk does not continue above the home directory", func(t *testing.T) {
+		above := gitDir(t, mkTree(t, t.TempDir(), "above"))
+		home := mkTree(t, above, "home")
+		start := mkTree(t, home, "go", "bin")
+		if got, err := checkoutRoot(start, home); err == nil {
+			t.Fatalf("checkoutRoot(%s, home=%s) = %s, want a refusal — the checkout above home is not this binary's",
+				start, home, got)
+		}
+	})
+
+	// The walk terminates rather than looping at the filesystem root.
+	t.Run("the walk reaches the filesystem root", func(t *testing.T) {
+		root := t.TempDir()
+		for parent := filepath.Dir(root); parent != root; parent = filepath.Dir(root) {
+			root = parent
+		}
+		if _, err := os.Stat(filepath.Join(root, ".git")); err == nil {
+			t.Skipf("%s is itself a checkout on this machine", root)
+		}
+		if got, err := checkoutRoot(root, ""); err == nil {
+			t.Fatalf("checkoutRoot(%s) = %s, want an error rather than a walk that never ends", root, got)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// CanonicalPath: one directory, one spelling.
+//
+// The ArenaId IS a path, compared by string equality and digested into
+// flow:arena:<fingerprint>. Two spellings of one worktree are two arenas, the
+// exclusion that keeps one item to one arena does not fire, and two runs
+// proceed on the same item — so the canonicalization both routes to a location
+// pass through is worth pinning on its own.
+// ---------------------------------------------------------------------------
+
+func TestCanonicalPathIsOneSpellingPerDirectory(t *testing.T) {
+	// A real directory reached through a symlinked parent answers the real
+	// path. This is the case the lexical table cannot reach and the one the
+	// defect lived in: on macOS every /var path is a /private/var path.
+	t.Run("a directory reached through a symlinked parent", func(t *testing.T) {
+		tmp := t.TempDir()
+		realDir := mkTree(t, tmp, "real", "w", "repo")
+		link := filepath.Join(tmp, "link")
+		if err := os.Symlink(filepath.Join(tmp, "real"), link); err != nil {
+			t.Skipf("symlinks are unavailable here: %v", err)
+		}
+		viaLink := filepath.Join(link, "w", "repo")
+
+		want := CanonicalPath(realDir)
+		if got := CanonicalPath(viaLink); got != want {
+			t.Errorf("CanonicalPath(%s) = %s, want %s — one directory reached two ways is one arena",
+				viaLink, got, want)
+		}
+	})
+
+	// A path that does not exist yet is accepted rather than refused — a caller
+	// may name a worktree it is about to create — and cleaned when nothing
+	// above it resolves to anything else.
+	t.Run("a path that does not exist is cleaned", func(t *testing.T) {
+		const want = "/w/repo"
+		for _, spelling := range []string{"/w/repo", "/w/repo/", "/w/./repo", "/w//repo", "/w/sibling/../repo"} {
+			if got := CanonicalPath(spelling); got != want {
+				t.Errorf("CanonicalPath(%q) = %q, want %q", spelling, got, want)
+			}
+		}
+	})
+
+	// But a path that does not exist yet UNDER A SYMLINKED ANCESTOR is resolved
+	// as far as it goes, so it answers the same string before and after it is
+	// created. A merely-lexical fallback would make the answer depend on WHEN
+	// it was asked: the same config would name /var/w/repo today and
+	// /private/var/w/repo once the directory is there — one worktree, two
+	// arenas, arriving by the clock. Nothing downstream re-canonicalizes it:
+	// with Owner and Repo configured, New never touches the filesystem.
+	t.Run("a path that does not exist yet under a symlinked ancestor", func(t *testing.T) {
+		tmp := t.TempDir()
+		mkTree(t, tmp, "real")
+		link := filepath.Join(tmp, "link")
+		if err := os.Symlink(filepath.Join(tmp, "real"), link); err != nil {
+			t.Skipf("symlinks are unavailable here: %v", err)
+		}
+		absent := filepath.Join(link, "w", "repo")
+
+		before := CanonicalPath(absent)
+		if _, err := os.Stat(before); err == nil {
+			t.Fatalf("%s was supposed to be a path that does not exist yet", before)
+		}
+		mkTree(t, tmp, "real", "w", "repo")
+		if after := CanonicalPath(absent); after != before {
+			t.Errorf("CanonicalPath(%s) = %q before the directory existed and %q after — one worktree, two arenas",
+				absent, before, after)
+		}
+		if want := CanonicalPath(filepath.Join(tmp, "real", "w", "repo")); before != want {
+			t.Errorf("CanonicalPath(%s) = %q, want %q — the symlinked ancestor is resolved even when the tail is not there",
+				absent, before, want)
+		}
+	})
+
+	// Empty stays empty. checkoutRoot reads an empty home as "no home to
+	// refuse", and filepath.Clean("") is "." — a path, and the one path an
+	// identity must never be: wherever the operator happened to be standing.
+	t.Run("empty is not a path", func(t *testing.T) {
+		if got := CanonicalPath(""); got != "" {
+			t.Errorf("CanonicalPath(\"\") = %q, want \"\" — %q would be the process working directory", got, got)
+		}
+	})
 }

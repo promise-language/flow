@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -3218,5 +3219,151 @@ func TestRunOne_PlainErrorNoWorktreeOnUnfitMachineStillFails(t *testing.T) {
 	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if rec := state.Artifact("plan"); rec.Invocations != 1 {
 		t.Errorf("Invocations = %d, want 1 (no catch-all → budget consumed)", rec.Invocations)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The agent turn runs in the arena (#303).
+//
+// The test process's working directory is the cli package directory, never the
+// temp arena, so "the binary was started outside the arena" holds by
+// construction — and each test asserts the request did not name it.
+// ---------------------------------------------------------------------------
+
+// The request the agent receives names the arena the orchestrator was
+// constructed against, not the directory the process was started in. Without
+// it the agent inherits the process cwd and edits a tree the commit is never
+// taken in.
+func TestAgentTurn_RunsInTheArenaNotTheProcessCwd(t *testing.T) {
+	agent := &stubAgent{name: "stub"}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("spend", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"})
+			return flow.StepResult{}, err
+		}, flow.StepConfig{})
+	}, agent)
+	root := t.TempDir()
+	be.SetArenaRoot(root)
+
+	if _, err := RunOne(context.Background(), app, claim); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if len(agent.reqs) != 1 {
+		t.Fatalf("agent saw %d requests, want 1", len(agent.reqs))
+	}
+	if agent.reqs[0].Worktree != root {
+		t.Errorf("Worktree = %q, want the arena %q", agent.reqs[0].Worktree, root)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if agent.reqs[0].Worktree == cwd {
+		t.Errorf("Worktree = %q, which is the process working directory — the arena is what the turn must run in", cwd)
+	}
+}
+
+// A handler may not redirect the turn away from the tree that will be
+// committed. Unlike MaxCostUSD — where a handler's own value is a TIGHTER
+// bound and is kept — a second directory is not a narrowing of the first, it
+// is a different tree.
+func TestAgentTurn_HandlerCannotRedirectTheWorktree(t *testing.T) {
+	agent := &stubAgent{name: "stub"}
+	elsewhere := t.TempDir()
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("spend", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work", Worktree: elsewhere})
+			return flow.StepResult{}, err
+		}, flow.StepConfig{})
+	}, agent)
+	root := t.TempDir()
+	be.SetArenaRoot(root)
+
+	if _, err := RunOne(context.Background(), app, claim); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if len(agent.reqs) != 1 {
+		t.Fatalf("agent saw %d requests, want 1", len(agent.reqs))
+	}
+	if agent.reqs[0].Worktree != root {
+		t.Errorf("Worktree = %q, want the arena %q — a handler's directory is not a narrowing of the arena, it is a different tree", agent.reqs[0].Worktree, root)
+	}
+}
+
+// No handler can forget it, including on the path that owns no artifact
+// budget: a signal step's turn passes through the metered wrapper unmetered
+// and is still stamped.
+func TestAgentTurn_SignalStepIsStampedToo(t *testing.T) {
+	agent := &stubAgent{name: "stub"}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddSignalStep("create pr", "pr-open", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"}); err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, agent)
+	root := t.TempDir()
+	be.SetArenaRoot(root)
+
+	if _, err := RunOne(context.Background(), app, claim); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if len(agent.reqs) != 1 {
+		t.Fatalf("agent saw %d requests, want 1", len(agent.reqs))
+	}
+	if agent.reqs[0].Worktree != root {
+		t.Errorf("Worktree = %q, want the arena %q on the unmetered signal path too", agent.reqs[0].Worktree, root)
+	}
+}
+
+// An orchestrator with no local checkout names no directory, and the SDK does
+// not invent one: an empty answer is an honest declaration, and a fabricated
+// path would be a second source of truth for the location the orchestrator
+// holds.
+func TestAgentTurn_NoArenaRootLeavesTheFieldEmpty(t *testing.T) {
+	agent := &stubAgent{name: "stub"}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("spend", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"})
+			return flow.StepResult{}, err
+		}, flow.StepConfig{})
+	}, agent)
+	be.SetArenaRoot("")
+
+	if _, err := RunOne(context.Background(), app, claim); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if len(agent.reqs) != 1 {
+		t.Fatalf("agent saw %d requests, want 1", len(agent.reqs))
+	}
+	if agent.reqs[0].Worktree != "" {
+		t.Errorf("Worktree = %q, want empty — the SDK stamps what the orchestrator holds, never a path of its own", agent.reqs[0].Worktree)
+	}
+}
+
+// The step is not the fallback for an orchestrator that named no directory.
+// "Never by the step" holds on this path too: an orchestrator with nothing to
+// say leaves the field empty rather than deferring to whatever the handler
+// wrote, which would be the step choosing the tree by the back door.
+func TestAgentTurn_NoArenaRootClearsAHandlersDirectory(t *testing.T) {
+	agent := &stubAgent{name: "stub"}
+	elsewhere := t.TempDir()
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("spend", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work", Worktree: elsewhere})
+			return flow.StepResult{}, err
+		}, flow.StepConfig{})
+	}, agent)
+	be.SetArenaRoot("")
+
+	if _, err := RunOne(context.Background(), app, claim); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if len(agent.reqs) != 1 {
+		t.Fatalf("agent saw %d requests, want 1", len(agent.reqs))
+	}
+	if agent.reqs[0].Worktree != "" {
+		t.Errorf("Worktree = %q, want empty — a handler's directory does not stand in for an arena the orchestrator does not have", agent.reqs[0].Worktree)
 	}
 }

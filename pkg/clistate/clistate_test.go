@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/promise-language/flow"
@@ -134,8 +135,8 @@ func TestWorkStaysUnderTheWorkDirectory(t *testing.T) {
 		if d.IsDir() {
 			return nil
 		}
-		if rel, rerr := filepath.Rel(clistate.WorkDir(), path); rerr != nil || !filepath.IsLocal(rel) {
-			t.Errorf("record landed at %s, outside %s", path, clistate.WorkDir())
+		if rel, rerr := filepath.Rel(workDir(t), path); rerr != nil || !filepath.IsLocal(rel) {
+			t.Errorf("record landed at %s, outside %s", path, workDir(t))
 		}
 		return nil
 	}); err != nil {
@@ -267,7 +268,7 @@ func TestClear_RemovesRunning(t *testing.T) {
 	if err := clistate.Clear(); err != nil {
 		t.Fatalf("Clear: %v", err)
 	}
-	if _, err := os.Stat(clistate.RunningJSONPath()); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(runningJSONPath(t)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("running.json should be gone after Clear, stat err = %v", err)
 	}
 	if got, err := clistate.LoadRunning(); got != nil || err != nil {
@@ -286,7 +287,7 @@ func TestLoadRunning_Corrupt(t *testing.T) {
 		t.Fatalf("SaveRunning: %v", err)
 	}
 	// Overwrite with truncated JSON.
-	if err := os.WriteFile(clistate.RunningJSONPath(), []byte(`{"item":"1","step":"pl`), 0o644); err != nil {
+	if err := os.WriteFile(runningJSONPath(t), []byte(`{"item":"1","step":"pl`), 0o644); err != nil {
 		t.Fatalf("write corrupt file: %v", err)
 	}
 	got, err := clistate.LoadRunning()
@@ -309,7 +310,7 @@ func TestLoadWorkRefusesACorruptRecord(t *testing.T) {
 	if err := clistate.SaveWork("42", "plan", "half a plan"); err != nil {
 		t.Fatalf("SaveWork: %v", err)
 	}
-	path := filepath.Join(clistate.WorkDir(), "42", "plan.json")
+	path := filepath.Join(workDir(t), "42", "plan.json")
 	if err := os.WriteFile(path, []byte(`{"item":"42","step":"pl`), 0o600); err != nil {
 		t.Fatalf("truncate the record: %v", err)
 	}
@@ -331,7 +332,7 @@ func TestLoadWorkTreatsARecordNamingNothingAsAbsent(t *testing.T) {
 	if err := clistate.SaveWork("42", "plan", "half a plan"); err != nil {
 		t.Fatalf("SaveWork: %v", err)
 	}
-	path := filepath.Join(clistate.WorkDir(), "42", "plan.json")
+	path := filepath.Join(workDir(t), "42", "plan.json")
 	if err := os.WriteFile(path, []byte(`{"body":"whose is this?"}`), 0o600); err != nil {
 		t.Fatalf("rewrite the record: %v", err)
 	}
@@ -361,8 +362,8 @@ func TestWorkKeepsDegenerateIdsInsideTheWorkTree(t *testing.T) {
 		if err != nil || d.IsDir() {
 			return err
 		}
-		if rel, rerr := filepath.Rel(clistate.WorkDir(), path); rerr != nil || !filepath.IsLocal(rel) {
-			t.Errorf("record landed at %s, outside %s", path, clistate.WorkDir())
+		if rel, rerr := filepath.Rel(workDir(t), path); rerr != nil || !filepath.IsLocal(rel) {
+			t.Errorf("record landed at %s, outside %s", path, workDir(t))
 		}
 		return nil
 	}); err != nil {
@@ -374,5 +375,94 @@ func TestWorkKeepsDegenerateIdsInsideTheWorkTree(t *testing.T) {
 	}
 	if _, err := os.Stat(flowDir); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("%s survived Clear, so a record escaped the work tree; stat err = %v", flowDir, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Where the state directory is.
+// ---------------------------------------------------------------------------
+
+// workDir and runningJSONPath are the package's path helpers with their error
+// turned into a test failure. Every test above sets FLOW_DIR, so locating the
+// directory is not what any of them is about.
+func workDir(t *testing.T) string {
+	t.Helper()
+	d, err := clistate.WorkDir()
+	if err != nil {
+		t.Fatalf("clistate.WorkDir: %v", err)
+	}
+	return d
+}
+
+func runningJSONPath(t *testing.T) string {
+	t.Helper()
+	p, err := clistate.RunningJSONPath()
+	if err != nil {
+		t.Fatalf("clistate.RunningJSONPath: %v", err)
+	}
+	return p
+}
+
+// A relative FLOW_DIR is refused rather than resolved. Resolving one against
+// the process working directory is the defect this override would otherwise
+// re-introduce by hand: the state would follow the operator around instead of
+// staying with the checkout.
+func TestDirRefusesARelativeOverride(t *testing.T) {
+	t.Setenv("FLOW_DIR", ".flow")
+	got, err := clistate.Dir()
+	if err == nil {
+		t.Fatalf("Dir() = %q, want a refusal — a relative state dir is the process working directory", got)
+	}
+	if !strings.Contains(err.Error(), "FLOW_DIR") {
+		t.Errorf("err = %v, want it to name FLOW_DIR, the thing the caller has to fix", err)
+	}
+	// And every operation refuses with it, rather than one of them inventing a
+	// location the others do not share.
+	if err := clistate.Save(flow.Claim{OrchestratorName: "fake"}); err == nil {
+		t.Error("Save wrote claim state under a relative FLOW_DIR")
+	}
+	if err := clistate.SaveWork("42", "plan", "reasoning"); err == nil {
+		t.Error("SaveWork wrote a record under a relative FLOW_DIR")
+	}
+	if err := clistate.SaveRunning(clistate.RunningRecord{Item: "1", Step: "plan"}); err == nil {
+		t.Error("SaveRunning wrote a record under a relative FLOW_DIR")
+	}
+}
+
+// FAIL CLOSED. With no override and no checkout to anchor to, every operation
+// reports that it does not know where the state directory is — and writes
+// nothing. The old Dir() could not say that: it answered `.flow`, resolved
+// against wherever the process stood, so a `resolve` started from a parent
+// directory wrote its claim state there and orphaned its own lease.
+func TestOperationsRefuseWhenTheStateDirCannotBeLocated(t *testing.T) {
+	if _, err := flow.DeriveArenaRoot(); err == nil {
+		t.Skip("this test binary lives inside a checkout, so the unanchored case cannot be exercised here")
+	}
+	t.Setenv("FLOW_DIR", "")
+
+	if _, err := clistate.Dir(); err == nil {
+		t.Fatal("Dir() answered with no checkout to anchor to")
+	}
+	for _, op := range []struct {
+		name string
+		run  func() error
+	}{
+		{"Save", func() error { return clistate.Save(flow.Claim{OrchestratorName: "fake"}) }},
+		{"Clear", clistate.Clear},
+		{"SaveWork", func() error { return clistate.SaveWork("42", "plan", "reasoning") }},
+		{"LoadWork", func() error { _, err := clistate.LoadWork("42", "plan"); return err }},
+		{"ClearWork", func() error { return clistate.ClearWork("42", "plan") }},
+		{"SaveRunning", func() error { return clistate.SaveRunning(clistate.RunningRecord{Item: "1"}) }},
+		{"LoadRunning", func() error { _, err := clistate.LoadRunning(); return err }},
+		{"ClearRunning", clistate.ClearRunning},
+		{"Load", func() error { _, err := clistate.Load(); return err }},
+	} {
+		if err := op.run(); err == nil {
+			t.Errorf("%s succeeded with no state directory to write to", op.name)
+		}
+	}
+	// And nothing was created where the old relative name would have put it.
+	if _, err := os.Stat(".flow"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf(".flow was created in the process working directory; stat err = %v", err)
 	}
 }

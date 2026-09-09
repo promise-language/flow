@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -28,12 +27,14 @@ import (
 //     flow:arena:<fingerprint>, DELETE flow:claim:<token>.
 //  5. POST or supersede the state comment.
 //
-// NEITHER THE ARENA NOR THE ACCOUNT IS A PARAMETER. Both are ambient, fixed by
-// where the call runs: the arena is the checkout this process sits in, and the
-// account is whoever its credentials act as, resolved through the one
-// derivation `list` also compares against. A caller-supplied account could only
-// agree or be wrong — and it was wrong, whenever $USER differed from the gh
-// login, which wrote a flow:owner label for a user GitHub may not recognise.
+// NEITHER THE ARENA NOR THE ACCOUNT IS A PARAMETER. Both are ambient in the
+// sense that neither is passed in: the arena is the checkout this binary
+// belongs to — fixed when the orchestrator is constructed, and never read off
+// the process working directory — and the account is whoever its credentials
+// act as, resolved through the one derivation `list` also compares against. A
+// caller-supplied account could only agree or be wrong — and it was wrong,
+// whenever $USER differed from the gh login, which wrote a flow:owner label for
+// a user GitHub may not recognise.
 func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []flow.ClaimOverride) (flow.Claim, error) {
 	issueNum, err := b.issueNumber(ref)
 	if err != nil {
@@ -399,12 +400,14 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 // The HostId is derived from the machine and normalized; the ArenaId is the
 // absolute worktree path, which is stable across restarts and unique within the
 // host — exactly what the contract asks of it.
+//
+// cfg.WorktreeDir is used AS IT STANDS: New has already made it absolute, by
+// deriving the checkout the binary lives in or refusing a relative value. A
+// filepath.Abs here would be a second place a location is decided, and the only
+// thing it could add is the process working directory — which is what it did
+// add, turning "." into the operator's cwd and calling that the arena (#286).
 func (b *Orchestrator) arena() flow.Arena {
-	id := b.cfg.WorktreeDir
-	if abs, err := filepath.Abs(id); err == nil {
-		id = abs
-	}
-	return flow.Arena{Host: flow.DeriveHostId(), Id: flow.ArenaId(id)}
+	return flow.Arena{Host: flow.DeriveHostId(), Id: flow.ArenaId(b.cfg.WorktreeDir)}
 }
 
 // fingerprintArena reduces an arena to the opaque, comparable value that goes

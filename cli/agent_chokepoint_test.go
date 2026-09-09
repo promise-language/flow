@@ -64,7 +64,9 @@ func TestAppAgent_StillAnswersName(t *testing.T) {
 }
 
 // A step handler still spends: the wrapper is a lock on the field, not on the
-// dispatch. The request reaches the agent the binary supplied, unchanged.
+// dispatch. The request reaches the agent the binary supplied, carrying what
+// the chokepoint sets on the way through — the grant's cost headroom, and the
+// arena the turn runs in.
 func TestStepHandler_StillReachesTheRealAgent(t *testing.T) {
 	agent := &stubAgent{name: "stub"}
 	app, _, claim := testApp(t, func(f *flow.Flow) {

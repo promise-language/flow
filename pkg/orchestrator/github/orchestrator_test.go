@@ -796,6 +796,19 @@ func ghCommentJSON(c ghMockComment) map[string]any {
 	}
 }
 
+// activeJSONPath is clistate.ActiveJSONPath with its error turned into a test
+// failure. The tests calling it are about what the lease file says; that the
+// state directory can be located at all is FLOW_DIR's business, and every one
+// of them sets it.
+func activeJSONPath(t *testing.T) string {
+	t.Helper()
+	p, err := clistate.ActiveJSONPath()
+	if err != nil {
+		t.Fatalf("clistate.ActiveJSONPath: %v", err)
+	}
+	return p
+}
+
 // newMockedOrchestrator wires a Orchestrator at the mock server. Uses Test mode (no
 // real network), no real gh CLI. Sets FLOW_DIR to a tempdir so Orchestrator.Claim
 // (which now writes .flow/active.json via pkg/clistate) doesn't pollute
@@ -803,9 +816,14 @@ func ghCommentJSON(c ghMockComment) map[string]any {
 func newMockedOrchestrator(t *testing.T, mock *ghMock, srv *httptest.Server) *Orchestrator {
 	t.Helper()
 	t.Setenv("FLOW_DIR", t.TempDir())
+	// An ABSOLUTE per-test worktree, which is what New produces for a real
+	// binary: the arena identity IS this path, so a harness leaving it empty
+	// would give every orchestrator in the package one empty ArenaId and the
+	// exclusion tests would be comparing an arena with itself.
+	worktree := t.TempDir()
 	// One gitOps, shared with the seam: a test that substitutes b.git.runner
 	// must also be substituting what `gh` and the push go through.
-	git := newGitOps(".")
+	git := newGitOps(worktree)
 	b := &Orchestrator{
 		cfg: Config{
 			Owner:           mock.owner,
@@ -814,6 +832,7 @@ func newMockedOrchestrator(t *testing.T, mock *ghMock, srv *httptest.Server) *Or
 			Token:           "fake-token",
 			LabelPrefix:     "flow:",
 			MaxCommentBytes: 60 * 1024,
+			WorktreeDir:     worktree,
 		},
 		// An allowing guard, because with none installed this backend
 		// publishes nothing and every test below would fail for that reason
@@ -2403,7 +2422,7 @@ func TestBackend_Claim_ForceTakesOverDespiteOwnStaleLease(t *testing.T) {
 func TestBackend_Claim_UnreadableLeaseFileRefusesWithoutClaiming(t *testing.T) {
 	b, mock, rec := newClaimPrecondBackend(t)
 	scriptCleanWorktree(rec)
-	if err := os.WriteFile(clistate.ActiveJSONPath(), []byte("{truncated"), 0o644); err != nil {
+	if err := os.WriteFile(activeJSONPath(t), []byte("{truncated"), 0o644); err != nil {
 		t.Fatalf("write lease file: %v", err)
 	}
 
@@ -2414,9 +2433,9 @@ func TestBackend_Claim_UnreadableLeaseFileRefusesWithoutClaiming(t *testing.T) {
 	if !strings.Contains(err.Error(), "read active claim") {
 		t.Errorf("error = %v, want it to name the unreadable claim state", err)
 	}
-	if !strings.Contains(err.Error(), clistate.ActiveJSONPath()) {
+	if !strings.Contains(err.Error(), activeJSONPath(t)) {
 		t.Errorf("error = %v, want it to name %s, the file the operator has to clear",
-			err, clistate.ActiveJSONPath())
+			err, activeJSONPath(t))
 	}
 	// Nothing was taken: the refusal precedes every write, so no token is
 	// minted and no ownership is asserted on an item we may not be free to hold.

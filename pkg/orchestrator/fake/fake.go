@@ -32,6 +32,11 @@ type Orchestrator struct {
 	arena   flow.Arena
 	account flow.AccountId
 
+	// arenaRoot is the checkout this arena is, reported by ArenaRoot. It is the
+	// path the arena id already spells, so the two do not contradict each other
+	// out of the box; SetArenaRoot points it at a real directory.
+	arenaRoot string
+
 	// active is the claim this arena holds, or nil. One arena holds at most
 	// one, which is why LookupActiveClaim needs no key.
 	active *flow.Claim
@@ -147,6 +152,7 @@ func New(signals ...flow.SignalDef) *Orchestrator {
 		gateOutcome:     flow.OutcomeMeasured,
 		supportsRequest: true,
 		arena:           flow.Arena{Host: "fakehost", Id: "/fake/arena"},
+		arenaRoot:       "/fake/arena",
 		account:         "fake-account",
 		// The ambient account holds everything by default. A fake exists to let
 		// a flow's own logic be exercised, and an ambient account that could
@@ -181,6 +187,22 @@ func (b *Orchestrator) SetArena(a flow.Arena) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.arena = a
+}
+
+// SetArenaRoot overrides the checkout ArenaRoot reports — a real temp directory
+// for a test that spawns something there, or "" to model an orchestrator with no
+// local checkout at all.
+func (b *Orchestrator) SetArenaRoot(dir string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.arenaRoot = dir
+}
+
+// ArenaRoot reports the checkout this arena is.
+func (b *Orchestrator) ArenaRoot() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.arenaRoot
 }
 
 // SetVerifyOK controls whether the `verify` command exits 0. Default true.

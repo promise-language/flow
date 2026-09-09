@@ -214,6 +214,7 @@ type buildTestBackend struct {
 }
 
 func (b *buildTestBackend) Name() flow.OrchestratorName { return "stub" }
+func (b *buildTestBackend) ArenaRoot() string           { return "" }
 
 // DetectCapabilities answers with exactly what the double's role requires, read
 // from the one roleDecls table. A double that invented its own mapping could

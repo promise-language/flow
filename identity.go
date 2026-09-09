@@ -1,7 +1,9 @@
 package flow
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -332,4 +334,137 @@ func DeriveHostId() HostId {
 		return ""
 	}
 	return NormalizeHostId(name)
+}
+
+// DeriveArenaRoot returns the checkout the running binary belongs to: the
+// nearest ancestor of its own executable holding a `.git` entry, as an absolute
+// path.
+//
+// It is the other half of the pair DeriveHostId gives the machine half of — an
+// arena is a worktree plus a stable identity — and it is derived for the same
+// reason: an identity an operator cannot supply is one they cannot get wrong.
+//
+// NOTHING HERE READS THE PROCESS WORKING DIRECTORY, and that is the whole
+// point. A directory a process happened to be started in is not a location: one
+// checkout invoked from two directories would be two arenas, two checkouts
+// invoked from a common parent would be one, and an ArenaId that changes when
+// the operator `cd`s is not the "stable across restarts" docs/orchestrator.md
+// requires of it. The binary knows where it lives; this is it saying so.
+//
+// Symlinks are resolved first, so a binary reached through a PATH symlink and
+// the same binary reached directly answer one value — and so the platforms
+// agree, since os.Executable resolves symlinks on some and not others and this
+// value must not depend on which.
+func DeriveArenaRoot() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locate the running binary: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return "", fmt.Errorf("resolve the running binary %s: %w", exe, err)
+	}
+	// An unknowable home is no home to refuse: the guard below is skipped
+	// rather than the derivation failing over a value it only ever excludes.
+	//
+	// CanonicalPath, because the guard is a string comparison and the walk it
+	// guards descends from EvalSymlinks(exe). os.UserHomeDir answers $HOME
+	// verbatim, so a home reached through a symlinked component — /home →
+	// /mnt/home, or any macOS home under /var → /private/var — is spelled one
+	// way on the walk's side and another on this one, `dir == home` never
+	// matches, and the guard silently does not fire.
+	home, _ := os.UserHomeDir()
+	return checkoutRoot(filepath.Dir(resolved), CanonicalPath(home))
+}
+
+// CanonicalPath returns the one spelling of p that identities are compared and
+// digested by: symlinks resolved, and lexically cleaned.
+//
+// ONE PATH IS ONE SPELLING. An ArenaId is a worktree path compared by string
+// equality and digested into flow:arena:<fingerprint>, so a checkout reached
+// through a symlink and the same checkout reached directly must not be two
+// arenas — the exclusion that keeps one item to one arena would not fire. This
+// is the counterpart of NormalizeHostId for the other half of the pair, and the
+// reason it exists is the same: docs/orchestrator.md requires the pair be
+// stable across restarts, and two spellings of one thing are two things.
+//
+// A path that does not exist yet is resolved AS FAR AS IT GOES rather than
+// refused — the deepest ancestor that does exist is symlink-resolved and the
+// missing tail is re-joined onto it. EvalSymlinks can only resolve what is
+// there, and a caller may name a worktree it is about to create; a plain
+// lexical clean for that case would leave the answer depending on WHEN it was
+// asked — /var/w/repo before the directory exists and /private/var/w/repo
+// after — which is one worktree spelled two ways again, arriving by the clock
+// instead of by the route. Nothing else in New re-checks it: with Owner and
+// Repo both configured, New never touches the filesystem, so a worktree that is
+// not there yet reaches arena() as the ArenaId it will be claimed under.
+// Lexical cleaning is the last resort, for a path with no resolvable ancestor
+// at all — a spelling this can improve on is better than none.
+//
+// Empty stays empty, and that is load-bearing: callers read "" as "no path",
+// and filepath.Clean("") is ".", which is a path — the process working
+// directory, the very thing an identity must not depend on.
+//
+// A RELATIVE p is resolved against the process working directory, because
+// EvalSymlinks is. This canonicalizes a location; it does not decide one, and
+// callers for whom the operator's cwd is not an answer — resolveWorktreeDir is
+// the one here — refuse a relative path BEFORE reaching this.
+func CanonicalPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	// Up to the deepest ancestor that resolves, carrying the unresolvable tail
+	// along to be re-joined onto it. The walk terminates at the root, whose
+	// parent is itself.
+	dir, tail := filepath.Clean(p), ""
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return filepath.Clean(p)
+		}
+		tail, dir = filepath.Join(filepath.Base(dir), tail), parent
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(resolved, tail)
+		}
+	}
+}
+
+// checkoutRoot walks start and its ancestors and returns the first that holds a
+// `.git` entry.
+//
+// FILE OR DIRECTORY: a linked `git worktree` records its gitdir in a `.git`
+// file rather than a directory, and a linked worktree is exactly the arena this
+// project is about — accepting only the directory would refuse the case.
+//
+// The home directory is refused as a candidate rather than adopted, and the
+// walk stops there. A home that happens to be a dotfiles repo is not the
+// checkout a binary works on, and without the guard a binary installed at
+// ~/go/bin would silently take $HOME as its arena — an ArenaId shared by every
+// binary installed that way. home is a parameter so the walk is testable
+// without touching the real one; empty means no home to refuse.
+//
+// The walk is a pure string comparison, so both arguments must arrive in one
+// spelling — CanonicalPath is applied at the call boundary, not here.
+func checkoutRoot(start, home string) (string, error) {
+	dir := start
+	for {
+		if home != "" && dir == home {
+			return "", fmt.Errorf(
+				"no git checkout between %s and the home directory: a flow binary lives inside "+
+					"the checkout it works on, or is handed an absolute worktree path", start)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf(
+				"no git checkout at or above %s: a flow binary lives inside the checkout it "+
+					"works on, or is handed an absolute worktree path", start)
+		}
+		dir = parent
+	}
 }

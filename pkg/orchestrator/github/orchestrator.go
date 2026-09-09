@@ -49,15 +49,27 @@ type Orchestrator struct {
 	gatesList    []flow.GateDef
 }
 
-// New constructs a github Orchestrator. If cfg.Owner/Repo are empty, they
-// are resolved from `git remote get-url origin` in cfg.WorktreeDir (or the
-// current directory if empty). If cfg.Token is empty, `gh auth token` is
-// tried, then GITHUB_TOKEN.
+// New constructs a github Orchestrator. cfg.WorktreeDir is resolved to an
+// absolute path — derived from the binary's own location when empty, refused
+// when relative. If cfg.Owner/Repo are empty, they are resolved from `git
+// remote get-url origin` in that worktree. If cfg.Token is empty, `gh auth
+// token` is tried, then GITHUB_TOKEN.
 func New(cfg Config) (*Orchestrator, error) {
 	cfg = cfg.withDefaults()
 	if cfg.BinaryName == "" {
 		cfg.BinaryName = deriveBinaryNameFromArgv()
 	}
+
+	// The anchor FIRST, before git is spawned or the network is touched. Every
+	// reader below and after inherits this one value — the git operations, the
+	// arena identity, gate discovery, the claim state — so a worktree that
+	// cannot be resolved is refused here, rather than each of them separately
+	// resolving it against wherever the operator happened to stand.
+	worktree, err := resolveWorktreeDir(cfg.WorktreeDir)
+	if err != nil {
+		return nil, err
+	}
+	cfg.WorktreeDir = worktree
 
 	git := newGitOps(cfg.WorktreeDir)
 	if cfg.Owner == "" || cfg.Repo == "" {
@@ -96,6 +108,12 @@ func New(cfg Config) (*Orchestrator, error) {
 }
 
 func (b *Orchestrator) Name() flow.OrchestratorName { return "github" }
+
+// ArenaRoot is the worktree this orchestrator was constructed against, resolved
+// once in New. Not a second derivation: DeriveArenaRoot ran there if it ran at
+// all, so a configured WorktreeDir is what every reader gets — the git
+// operations, the gates, and now the agent turn.
+func (b *Orchestrator) ArenaRoot() string { return b.cfg.WorktreeDir }
 
 func (b *Orchestrator) SupportedSignals() []flow.SignalDef {
 	return []flow.SignalDef{
