@@ -14,25 +14,36 @@ import (
 	"github.com/promise-language/flow/pkg/clistate"
 )
 
-// SelectFlow picks the first flow in app.Flows whose constraints match the
-// given state: types contains item.Type (or is empty/universal), every
-// RequireSignal is set, and at least one lifecycle item is pending. Returns
-// (nil, "") when no flow is eligible (terminal state).
+// SelectFlow returns the binary's one flow when it is eligible for the given
+// item — every RequireSignal is set, and at least one lifecycle item is
+// pending — and (nil, "") when it is not (terminal state).
+//
+// It does NOT consult the remit. The remit gates listing and selection and is
+// consulted before the journal's first entry, never after
+// (docs/flow-registration.md § Item types), so it is read once, ahead of this,
+// by inRemit — never per dispatch, where an item retyped mid-resolution would
+// be re-routed by the edit.
 func SelectFlow(app *App, item *flow.Item) (*flow.Flow, string) {
-	for _, f := range app.Flows {
-		if !f.AcceptsType(item.Type) {
-			continue
-		}
-		if !f.IsReady(item) {
-			continue
-		}
-		next, ok := f.DeriveNext(item)
-		if !ok {
-			continue
-		}
-		return f, next
+	f := app.Flow
+	if !f.IsReady(item) {
+		return nil, ""
 	}
-	return nil, ""
+	next, ok := f.DeriveNext(item)
+	if !ok {
+		return nil, ""
+	}
+	return f, next
+}
+
+// inRemit reports whether the item is this binary's work: its type is in the
+// flow's remit, asked once — before the journal's first entry, and never after
+// (docs/flow-registration.md § Item types). Once an item has a journal the
+// route is the authority, and retyping it mid-resolution redirects nothing.
+//
+// One definition, read by the advance and by the narration that precedes it,
+// so the two cannot disagree about what is about to happen.
+func inRemit(app *App, state *flow.Item) bool {
+	return len(state.Journal) > 0 || app.Flow.InRemit(state.Type)
 }
 
 // RunOne advances at most one lifecycle item on the given claim. Returns an
@@ -47,40 +58,46 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		return flow.InvocationResult{}, fmt.Errorf("load item: %w", err)
 	}
 
+	// The remit, ahead of selection and of everything it gates. An item outside
+	// it is not this binary's work, so no step of this flow is ever derived for
+	// it: the item's type is the whole question, and it is answered statically,
+	// before anything is dispatched.
+	//
+	// "blocked", not "failed" or "skipped": nothing failed and no next cycle
+	// will pass — a person has to register a flow for the type or correct the
+	// item's type, and the reason names both so the operator does not have to
+	// read the flow registration to find out what happened. Finalizing means
+	// the work was done, so an item this binary will not act on is not
+	// finalized on that basis — reporting success for work never attempted
+	// hides the misconfiguration, and finalizing makes it terminal
+	// (docs/resolution.md § Finalizing).
+	//
+	// An already-finalized item is exempt: its run really is over, and blocking
+	// one that this very defect finalized would strand it. It falls through
+	// with no flow selected, to the finalize-and-release path below.
+	acts := inRemit(app, state)
+	if !acts && !state.Finalized {
+		return flow.InvocationResult{
+			Item:   claim.ItemRef.Display,
+			Status: "blocked",
+			Reason: fmt.Sprintf(
+				"no flow accepts item type %q (registered: %s) — register a flow for this type, or correct the item's type",
+				state.Type, registeredTypes(app)),
+		}, nil
+	}
+
 	// Select the flow first; we need it for seeding too. The terminal-done
 	// short-circuit also has to beat Preflight so a completed item retires
 	// cleanly even when a generic preflight (e.g. "item still open on
 	// tracker") would otherwise refuse it.
-	f, nextName := SelectFlow(app, state)
+	var (
+		f        *flow.Flow
+		nextName string
+	)
+	if acts {
+		f, nextName = SelectFlow(app, state)
+	}
 	if f == nil {
-		// SelectFlow returns nil for two conditions that mean opposite things:
-		// the flow has no step left (the work is done), and no flow accepts the
-		// item's type (no work was ever attempted). Only the first is success.
-		// Finalizing means the work was done, so an item no flow will act on is
-		// not finalized on that basis — reporting success for work never
-		// attempted hides the misconfiguration, and finalizing makes it
-		// terminal. This is checked BEFORE the pending-artifact guard below so a
-		// seeded-then-unmatched item reports the root cause rather than a
-		// symptom of it; the guard itself is blind here anyway, because seeding
-		// happens after flow selection and an unmatched item has no records to
-		// iterate.
-		//
-		// "blocked", not "failed" or "skipped": nothing failed and no next cycle
-		// will pass — a person has to register a flow for the type or correct
-		// the item's type, and the reason names both so the operator does not
-		// have to read the flow registration to find out what happened.
-		//
-		// An already-finalized item is exempt: its run really is over, and
-		// blocking one that this very defect finalized would strand it.
-		if !state.Finalized && flowForType(app, state.Type) == nil {
-			return flow.InvocationResult{
-				Item:   claim.ItemRef.Display,
-				Status: "blocked",
-				Reason: fmt.Sprintf(
-					"no flow accepts item type %q (registered: %s) — register a flow for this type, or correct the item's type",
-					state.Type, registeredTypes(app)),
-			}, nil
-		}
 		// T0481: refuse to Finalize+release when any required artifact in the
 		// loaded state is still unresolved. status=done ≠ finalized — a missing
 		// summary/inspection means finalization work is owed on this arena, and

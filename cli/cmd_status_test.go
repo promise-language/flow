@@ -332,7 +332,7 @@ func TestCmdStatus_InspectsById(t *testing.T) {
 	f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 		return ctx.ResolveMarkdown("the plan")
 	}, flow.StepConfig{})
-	app.Flows = []*flow.Flow{f}
+	app.Flow = f
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations: 3, MaxPromptsPerInvocation: 1, MaxCostUSD: 10,
 		Timeout: 30 * time.Minute,

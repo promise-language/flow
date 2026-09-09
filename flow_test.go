@@ -25,20 +25,20 @@ func TestNewFlow_AddStepRegistersInOrder(t *testing.T) {
 	}
 }
 
-func TestNewFlow_AcceptsTypeUniversal(t *testing.T) {
+func TestInRemit_Universal(t *testing.T) {
 	f := NewFlow("any", nil)
-	if !f.AcceptsType("anything") {
-		t.Errorf("empty types should accept any type")
+	if !f.InRemit("anything") {
+		t.Errorf("empty types should put every type in the remit")
 	}
 }
 
-func TestNewFlow_AcceptsTypeFiltered(t *testing.T) {
+func TestInRemit_Filtered(t *testing.T) {
 	f := NewFlow("limited", []ItemType{"task", "bug"})
-	if !f.AcceptsType("task") {
-		t.Errorf("flow should accept declared type")
+	if !f.InRemit("task") {
+		t.Errorf("a declared type should be in the remit")
 	}
-	if f.AcceptsType("epic") {
-		t.Errorf("flow should reject undeclared type")
+	if f.InRemit("epic") {
+		t.Errorf("an undeclared type should be outside the remit")
 	}
 }
 

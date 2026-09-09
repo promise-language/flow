@@ -38,7 +38,7 @@ func TestCmdList_DefaultScope(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{makeTestFlow(t)},
+		Flow:         makeTestFlow(t),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -255,7 +255,7 @@ func TestCmdList_WithDiscoverer_ScopeOpen(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{makeTestFlow(t)},
+		Flow:         makeTestFlow(t),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -289,7 +289,7 @@ func TestCmdList_WithDiscoverer_ScopeProcessable(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{makeTestFlow(t)},
+		Flow:         makeTestFlow(t),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -326,7 +326,7 @@ func TestCmdList_TagFilter(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{makeTestFlow(t)},
+		Flow:         makeTestFlow(t),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -355,7 +355,7 @@ func TestCmdList_UnknownScope(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{makeTestFlow(t)},
+		Flow:         makeTestFlow(t),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -385,7 +385,7 @@ func TestCmdList_JSON_Availability(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{makeTestFlow(t)},
+		Flow:         makeTestFlow(t),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -428,7 +428,7 @@ func TestCmdList_EmptyDiscovery(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{makeTestFlow(t)},
+		Flow:         makeTestFlow(t),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)

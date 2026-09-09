@@ -17,7 +17,7 @@ func newArgparseApp(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{newDummyFlow("x")},
+		Flow:         newDummyFlow("x"),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)

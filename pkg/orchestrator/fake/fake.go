@@ -760,6 +760,11 @@ func (b *Orchestrator) loadLocked(rec *itemRecord) *flow.Item {
 	// The same reading Get and List report, so an editor never edits blind.
 	it.Priority = rec.item.Priority.OrNeutral()
 	it.Urgency = rec.item.Urgency.OrNeutral()
+	// The journal as it stands, cloned like every other slice here so a caller
+	// holding a loaded item cannot rewrite the store's record of the route.
+	// Nothing appends yet — AppendEntry is #239 — so what Load returns is what
+	// a test put on the item.
+	it.Journal = slices.Clone(rec.item.Journal)
 	it.BlockedBy = b.blockersOf(rec)
 	it.Blocked, it.BlockKind, it.BlockReason = b.blockednessOf(rec)
 	it.Artifacts = make(map[flow.ArtifactId]flow.ArtifactRecord, len(rec.artifacts))

@@ -86,7 +86,7 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 		b.base.Store(&cfg.BaseBranch)
 	}
 
-	// The maintainer step set lands with the second slice. Its steps refuse at
+	// The maintainer step set lands with the second variant. Its steps refuse at
 	// DISPATCH rather than BuildApp refusing outright: the step set is the only
 	// thing missing, and failing construction would take `status`, `list`,
 	// `grant` and `doctor` down with it — the commands a maintainer most needs
@@ -94,18 +94,24 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 	//
 	// Refusing beats silently running the contributor set, which would have a
 	// maintainer opening a pull request against their own review.
-	var flows []*flow.Flow
+	//
+	// One flow is built, not a list of them: a binary registers exactly one
+	// (docs/flow-registration.md § What a flow is). These three variants are a
+	// build-time choice of which graph this binary IS, made once before any item
+	// is seen — not a per-item selection — and #245 collapses them into the one
+	// graph with the route elected inside it.
+	var f *flow.Flow
 	// roleGate refuses every dispatch while the step set the role needs does
 	// not exist. Nil for the roles whose steps do.
 	var roleGate flow.PreflightFunc
 	switch {
 	case cfg.CarryThrough:
-		flows = []*flow.Flow{b.carryThroughFlow(cfg)}
+		f = b.carryThroughFlow(cfg)
 	case role == RoleMaintainer:
-		flows = []*flow.Flow{b.unimplementedMaintainerFlow(cfg)}
+		f = b.unimplementedMaintainerFlow(cfg)
 		roleGate = missingMaintainerStepsGate
 	default:
-		flows = []*flow.Flow{b.contributorFlow(cfg)}
+		f = b.contributorFlow(cfg)
 	}
 
 	app := cli.App{
@@ -115,7 +121,7 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 		Telemetry:    deps.Telemetry,
 		Artifacts:    artifactsFor(role, cfg.CarryThrough),
 		Signals:      signalsFor(role, cfg.CarryThrough),
-		Flows:        flows,
+		Flow:         f,
 		CarryThrough: cfg.CarryThrough,
 		// cli.App wants the display form (it reaches prompts and messages);
 		// cfg.VerifyCmd is argv because that is what a backend execs.

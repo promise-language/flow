@@ -191,7 +191,7 @@ func TestWorkInProgress_IsNotVisibleToAnotherStep(t *testing.T) {
 	}, &stubAgent{name: "stub"})
 	// A second step, added after the helper's own validate so the artifact it
 	// produces can be declared alongside it.
-	app.Flows[0].AddStep("review", "review", func(ctx flow.StepCtx) error {
+	app.Flow.AddStep("review", "review", func(ctx flow.StepCtx) error {
 		reviewSaw, _ = ctx.WorkInProgress()
 		return ctx.ResolveMarkdown("the review")
 	}, flow.StepConfig{})

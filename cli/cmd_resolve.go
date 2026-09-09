@@ -242,18 +242,29 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		// 1]") collides with the flow's own named steps (plan/implement/…) and
 		// misreads as "flow step 1" when it really means "resolve iteration 1".
 		if st, serr := app.Orchestrator.Load(ctx, claim.ItemRef); serr == nil {
-			if f, next := SelectFlow(app, st); f != nil {
+			// In RunOne's own order: the remit first, and only then the step,
+			// because that is the order the advance decides in and this line is
+			// a report of what it is about to do.
+			acts := inRemit(app, st)
+			var next string
+			if acts {
+				if f, n := SelectFlow(app, st); f != nil {
+					next = n
+				}
+			}
+			switch {
+			case next != "":
 				fmt.Fprintf(app.Err, "resolve: running %q…\n", next)
-			} else if !st.Finalized && flowForType(app, st.Type) == nil {
-				// No flow accepts the type, so RunOne will block rather than
-				// finalize. Announcing "finalizing…" here would tell the
+			case !acts && !st.Finalized:
+				// The item is outside the remit, so RunOne will block rather
+				// than finalize. Announcing "finalizing…" here would tell the
 				// operator the run is completing right before it reports that
 				// nothing ever started. The finalized exemption is RunOne's, and
 				// is repeated here for the same reason the branch exists: an
 				// already-finalized item DOES take the finalize path, so saying
 				// otherwise about it would be the same misreport inverted.
 				fmt.Fprintf(app.Err, "resolve: no flow accepts this item's type…\n")
-			} else {
+			default:
 				fmt.Fprintf(app.Err, "resolve: no step eligible — finalizing…\n")
 			}
 		}

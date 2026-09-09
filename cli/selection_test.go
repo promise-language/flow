@@ -21,7 +21,7 @@ func selectionApp(t *testing.T, be flow.Orchestrator) (*App, *bytes.Buffer) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{makeTestFlow(t)},
+		Flow:         makeTestFlow(t),
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)

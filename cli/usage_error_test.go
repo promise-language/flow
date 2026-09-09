@@ -214,14 +214,18 @@ func TestHelp_StillPrintsUsage(t *testing.T) {
 }
 
 func TestAbbreviateHome(t *testing.T) {
+	// The stand-in home lives under a synthetic root rather than /home/<name>:
+	// abbreviateHome is pure prefix logic, so the directory names carry no
+	// meaning, and a committed absolute home path would name a machine's user.
+	const home = "/base/acct"
 	cases := []struct {
 		name, path, home, want string
 	}{
-		{"under home", "/home/djabi/prog/flow/bin/issue", "/home/djabi", "~/prog/flow/bin/issue"},
-		{"home itself", "/home/djabi", "/home/djabi", "~"},
-		{"trailing separator on home", "/home/djabi/bin", "/home/djabi/", "~/bin"},
-		{"sibling sharing the prefix", "/home/djabiXtra/bin", "/home/djabi", "/home/djabiXtra/bin"},
-		{"outside home", "/usr/local/bin/issue", "/home/djabi", "/usr/local/bin/issue"},
+		{"under home", home + "/prog/flow/bin/issue", home, "~/prog/flow/bin/issue"},
+		{"home itself", home, home, "~"},
+		{"trailing separator on home", home + "/bin", home + "/", "~/bin"},
+		{"sibling sharing the prefix", home + "Xtra/bin", home, home + "Xtra/bin"},
+		{"outside home", "/usr/local/bin/issue", home, "/usr/local/bin/issue"},
 		{"no home known", "/usr/local/bin/issue", "", "/usr/local/bin/issue"},
 		{"home is the root", "/usr/local/bin/issue", "/", "/usr/local/bin/issue"},
 	}
@@ -316,7 +320,7 @@ func TestUnknownFlag_ClaimsNothing(t *testing.T) {
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flows:        []*flow.Flow{newDummyFlow("x")},
+		Flow:         newDummyFlow("x"),
 		Out:          &bytes.Buffer{},
 		Err:          &bytes.Buffer{},
 	}

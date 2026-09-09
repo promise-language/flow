@@ -53,7 +53,7 @@ func resolveTestAppStep(t *testing.T, be flow.Orchestrator, step func(flow.StepC
 	f := flow.NewFlow("implement", []flow.ItemType{"task"})
 	f.AddStep("write plan", "plan", step, flow.StepConfig{})
 
-	app.Flows = []*flow.Flow{f}
+	app.Flow = f
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}

@@ -11,7 +11,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/promise-language/flow"
@@ -80,10 +79,14 @@ type App struct {
 	// flow.ChainPreflight for composing multiple checks.
 	Preflight flow.PreflightFunc
 
-	// Flows is the ordered list of flow variants. cli.App picks the first
-	// flow whose Types() match item.Type AND RequireSignal preconditions
-	// are satisfied AND has at least one pending lifecycle item.
-	Flows []*flow.Flow
+	// Flow is the binary's one flow. A binary registers exactly one
+	// (docs/flow-registration.md § What a flow is): what differs by item is the
+	// route through the graph, never which graph — heterogeneous processing is
+	// the entry step electing routes, recorded in the journal with its reasons
+	// like every other decision, where a choice among graphs would be the same
+	// decision made invisibly, before the journal begins, with nothing
+	// recording why.
+	Flow *flow.Flow
 
 	// Quota reads the subscription windows `resolve` paces against. **Nil means
 	// no pacing**, and that is what makes pacing safe to have at all: it reaches
@@ -264,8 +267,8 @@ func (app *App) validate() error {
 	if len(app.Artifacts) == 0 {
 		return errors.New("App.Artifacts is empty")
 	}
-	if len(app.Flows) == 0 {
-		return errors.New("App.Flows is empty")
+	if app.Flow == nil {
+		return errors.New("App.Flow is required")
 	}
 
 	// Build the lookup maps and check for duplicate ids.
@@ -346,43 +349,27 @@ func (app *App) validate() error {
 		}
 	}
 
-	// Per-flow validation.
-	for _, f := range app.Flows {
-		if f == nil {
-			return errors.New("App.Flows contains a nil entry")
-		}
-		if len(f.Items()) == 0 {
-			return fmt.Errorf("flow %q has zero lifecycle items", f.Name())
-		}
-		for _, li := range f.Items() {
-			switch li.Kind {
-			case flow.LifecycleArtifact:
-				if _, ok := app.artifactById[li.ArtifactId]; !ok {
-					return fmt.Errorf("flow %q step %q references unknown artifact %q", f.Name(), li.Name, li.ArtifactId)
-				}
-			case flow.LifecycleSignal, flow.LifecycleAwait:
-				if _, ok := app.signalById[li.SignalId]; !ok {
-					return fmt.Errorf("flow %q step %q references unknown signal %q (declare it in App.Signals)", f.Name(), li.Name, li.SignalId)
-				}
+	// Flow validation. There is nothing here about flows shadowing one another:
+	// with one flow there is nothing to shadow.
+	f := app.Flow
+	if len(f.Items()) == 0 {
+		return fmt.Errorf("flow %q has zero lifecycle items", f.Name())
+	}
+	for _, li := range f.Items() {
+		switch li.Kind {
+		case flow.LifecycleArtifact:
+			if _, ok := app.artifactById[li.ArtifactId]; !ok {
+				return fmt.Errorf("flow %q step %q references unknown artifact %q", f.Name(), li.Name, li.ArtifactId)
 			}
-		}
-		for _, sig := range f.RequireSignals() {
-			if _, ok := app.signalById[sig]; !ok {
-				return fmt.Errorf("flow %q RequireSignal(%q) is not declared in App.Signals", f.Name(), sig)
+		case flow.LifecycleSignal, flow.LifecycleAwait:
+			if _, ok := app.signalById[li.SignalId]; !ok {
+				return fmt.Errorf("flow %q step %q references unknown signal %q (declare it in App.Signals)", f.Name(), li.Name, li.SignalId)
 			}
 		}
 	}
-
-	// Two flows shadowing each other (same Name + overlapping type sets) is
-	// a misconfiguration the SDK can detect at startup.
-	for i, a := range app.Flows {
-		for _, b := range app.Flows[i+1:] {
-			if a.Name() != b.Name() {
-				continue
-			}
-			if flowTypesOverlap(a, b) {
-				return fmt.Errorf("flows %q and %q share a name and overlapping types — ambiguous", a.Name(), b.Name())
-			}
+	for _, sig := range f.RequireSignals() {
+		if _, ok := app.signalById[sig]; !ok {
+			return fmt.Errorf("flow %q RequireSignal(%q) is not declared in App.Signals", f.Name(), sig)
 		}
 	}
 	return nil
@@ -555,20 +542,6 @@ func quoteNames[T ~string](names []T) string {
 	return strings.Join(s, ", ")
 }
 
-func flowTypesOverlap(a, b *flow.Flow) bool {
-	at, bt := a.Types(), b.Types()
-	if len(at) == 0 || len(bt) == 0 {
-		// Empty Types means "universal" — overlaps with any other set.
-		return true
-	}
-	for _, t := range at {
-		if slices.Contains(bt, t) {
-			return true
-		}
-	}
-	return false
-}
-
 func deriveBinaryName(argv []string) string {
 	if len(argv) == 0 {
 		return "flow"
@@ -659,7 +632,7 @@ func selfPath(fallback string) string {
 
 // abbreviateHome rewrites a path under home as "~/…". The match is at a
 // separator boundary, so a sibling directory whose name merely starts with the
-// home path — /home/djabiXtra next to /home/djabi — is left alone rather than
+// home path — /home/uXtra next to /home/u — is left alone rather than
 // mangled into "~Xtra".
 func abbreviateHome(path, home string) string {
 	sep := string(filepath.Separator)
