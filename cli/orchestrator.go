@@ -1316,6 +1316,18 @@ func (m *meteredAgent) Name() string { return m.inner.Name() }
 
 func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.AgentResponse, error) {
 	li := m.stepCtx.li
+	// Where the agent edits is not the handler's to choose: it is the arena the
+	// orchestrator was constructed against — the same tree the commit is taken
+	// in and the gates measure. Stamped here rather than at each construction
+	// site because every construction site forgot it (#303), and a request with
+	// no directory inherits the process working directory.
+	//
+	// Assigned unconditionally, the empty answer included. An orchestrator with
+	// no local checkout has no directory to offer, and a handler's own path is
+	// not a stand-in for one: keeping it would let a step choose the tree by the
+	// back door of the orchestrator having nothing to say, which is the one
+	// thing docs/agent.md says this field is never set by.
+	req.Worktree = m.orch.ArenaRoot()
 	// Signal/await steps don't own an artifact budget. Allow the call to
 	// pass through unmetered — those steps shouldn't normally call the
 	// agent, but if they do the spend is not gated here.

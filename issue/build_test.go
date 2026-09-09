@@ -213,6 +213,7 @@ type buildTestBackend struct {
 }
 
 func (b *buildTestBackend) Name() flow.OrchestratorName { return "stub" }
+func (b *buildTestBackend) ArenaRoot() string           { return "" }
 func (b *buildTestBackend) SupportedSignals() []flow.SignalDef {
 	return []flow.SignalDef{
 		flow.Signal("pr-open", "pull request is open"),

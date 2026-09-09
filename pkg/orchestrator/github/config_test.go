@@ -1,10 +1,12 @@
 package github
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -299,6 +301,118 @@ func TestResolveWorktreeDirAcceptsAnAbsoluteWorktreeThatDoesNotExistYet(t *testi
 			t.Errorf("ArenaId = %q, want the worktree %q", got, want)
 		}
 	})
+}
+
+// ONE ANCHOR, ONE ANSWER. ArenaRoot is what New already resolved, not a second
+// derivation of it: a configured absolute dir answers canonicalized, and an
+// empty one answers what DeriveArenaRoot found. A second DeriveArenaRoot call
+// behind this accessor would answer the binary's own checkout even where the
+// operator configured a different one — the arena the agent edits and the arena
+// the commit is taken in would then be two directories.
+func TestArenaRootIsTheOneResolvedWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not on PATH")
+	}
+	dir := t.TempDir()
+	want := flow.CanonicalPath(dir)
+	for _, args := range [][]string{
+		{"init"},
+		{"remote", "add", "origin", "https://github.com/acme/widget.git"},
+	} {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	b, err := New(Config{WorktreeDir: dir, BinaryName: "issue", Token: "fake-token"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := b.ArenaRoot(); got != want {
+		t.Errorf("ArenaRoot() = %q, want the configured worktree %q — the value New resolved, not a rederivation", got, want)
+	}
+	if got := b.ArenaRoot(); got != b.cfg.WorktreeDir {
+		t.Errorf("ArenaRoot() = %q but WorktreeDir = %q — the gates and the agent turn would run in two trees", got, b.cfg.WorktreeDir)
+	}
+}
+
+// The other half of "one anchor": an empty WorktreeDir derives, and ArenaRoot
+// reports what was derived rather than deriving again. Separate from the
+// configured case above because the derivation needs this test binary to live
+// inside a checkout, and a skip taken half-way through a test discards the
+// assertions that already ran.
+func TestArenaRootIsTheDerivedWorktree(t *testing.T) {
+	derived, err := flow.DeriveArenaRoot()
+	if err != nil {
+		t.Skipf("this test binary does not live inside a checkout: %v", err)
+	}
+	b, err := New(Config{Owner: "acme", Repo: "widget", BinaryName: "issue", Token: "fake-token"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := b.ArenaRoot(); got != derived {
+		t.Errorf("ArenaRoot() = %q, want the derived checkout %q", got, derived)
+	}
+}
+
+// THE DIRECTORY ArenaRoot NAMES IS THE ONE PROCESSES ACTUALLY RUN IN. The two
+// tests above pin ArenaRoot to cfg.WorktreeDir, which is the accessor's own
+// expression: they would still pass if a later change moved the gate or the git
+// operations off that field — cleaned it on one path, resolved symlinks on
+// another, re-derived on a third — and the tree the agent turn edits would then
+// not be the tree the gate measures or the commit is taken in, which is the
+// whole of #303 arriving from the other side.
+//
+// So this one asks the processes. The gate reports its working directory by
+// writing INTO it rather than by printing a path: a printed path can agree with
+// ArenaRoot while naming a different directory through a symlink, and a file
+// either turns up under ArenaRoot or it does not. Git is asked for the -C it
+// was handed, which is how it is told which tree to work on.
+//
+// The stubbed git runner reports an empty tree to both halves of the gate's
+// pre/post snapshot, as gateWorktree's does, so the file the gate drops is not
+// read back as a gate that modified the worktree — a different rule, with its
+// own tests.
+func TestArenaRootIsWhereTheGateAndGitActuallyRun(t *testing.T) {
+	requireRealProcesses(t)
+
+	dir := filepath.Join(t.TempDir(), "work tree")
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeScript(t, dir, "gate", "echo ran > gate-ran-here\necho '{\"gate\":\"integration\"}'", 0o755)
+
+	var mu sync.Mutex
+	var gitDirs []string
+	b := &Orchestrator{cfg: Config{WorktreeDir: dir, GateTimeout: 30 * time.Second}}
+	b.git = &gitOps{dir: dir, runner: func(_ context.Context, _, _ string, args ...string) ([]byte, []byte, error) {
+		if len(args) >= 2 && args[0] == "-C" {
+			mu.Lock()
+			gitDirs = append(gitDirs, args[1])
+			mu.Unlock()
+		}
+		return nil, nil, nil
+	}}
+
+	run, err := (&worktree{b: b}).RunGate(context.Background(), flow.GateIntegration)
+	if err != nil {
+		t.Fatalf("RunGate: %v", err)
+	}
+	if run.Outcome != flow.OutcomeMeasured {
+		t.Fatalf("outcome = %q (%s), want measured — the gate never ran, so it observed no directory", run.Outcome, run.Detail)
+	}
+
+	if _, err := os.Stat(filepath.Join(b.ArenaRoot(), "gate-ran-here")); err != nil {
+		t.Errorf("the gate ran somewhere other than ArenaRoot() = %q (%v) — it would measure a tree the agent never edited", b.ArenaRoot(), err)
+	}
+	if len(gitDirs) == 0 {
+		t.Fatal("no git command carried -C: this test can no longer see which tree git was pointed at")
+	}
+	for _, got := range gitDirs {
+		if got != b.ArenaRoot() {
+			t.Errorf("git ran against -C %q, ArenaRoot() = %q — the commit would be taken in a tree the agent never edited", got, b.ArenaRoot())
+		}
+	}
 }
 
 func mustResolveWorktree(t *testing.T, dir string) string {
