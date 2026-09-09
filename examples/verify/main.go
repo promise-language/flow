@@ -1,5 +1,5 @@
 // verify is a minimal flow binary: one step that runs `go test ./...` in
-// the worktree and resolves a markdown artifact with the output.
+// the worktree and completes with a markdown artifact carrying the output.
 //
 // Build:   go build -o verify ./examples/verify
 // Use:     ./verify doctor
@@ -40,7 +40,13 @@ func main() {
 	}
 
 	verifyFlow := flow.NewFlow("verify", []flow.ItemType{"task"})
-	verifyFlow.AddStep("run go test", "test-output", stepRunTests, flow.StepConfig{})
+	// One step, so it is the entry and the only way the item can end: it
+	// finalizes. A handler elects its route, and a graph with no election that
+	// ends it is a graph that never finishes.
+	verifyFlow.AddStep("run go test", "test-output", stepRunTests, flow.StepConfig{
+		Entry:       true,
+		MayFinalize: []flow.Disposition{flow.DispositionResolved},
+	})
 
 	os.Exit(cli.Run(cli.App{
 		Name:         "verify",
@@ -58,14 +64,16 @@ func main() {
 	}))
 }
 
-func stepRunTests(ctx flow.StepCtx) error {
+func stepRunTests(ctx flow.StepCtx) (flow.StepResult, error) {
 	out, err := exec.CommandContext(ctx.Context(), "go", "test", "./...").CombinedOutput()
 	body := "```\n" + strings.TrimRight(string(out), "\n") + "\n```"
 	if err != nil {
-		// Resolve with the failure output so the issue gets the evidence,
-		// then return an error to mark the step failed for this invocation.
-		_ = ctx.ResolveMarkdown(body + "\n\n_go test exited with error: " + err.Error() + "_")
-		return fmt.Errorf("go test failed: %w", err)
+		// A step completes with its result and its route TOGETHER, so there is
+		// no "record the artifact, then fail": a run that failed has no result
+		// to record. The evidence travels in the failure instead, which is
+		// where a reader looks for it.
+		return flow.StepResult{}, fmt.Errorf("go test failed: %w\n%s", err, body)
 	}
-	return ctx.ResolveMarkdown(body)
+	return ctx.Finalize(flow.DispositionResolved, "go test passes on the item's branch").
+		Markdown(body), nil
 }

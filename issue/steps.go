@@ -30,14 +30,14 @@ type builder struct {
 // ---------------------------------------------------------------------------
 
 // stepPlan drafts the implementation plan.
-func (b *builder) stepPlan(ctx flow.StepCtx) error {
+func (b *builder) stepPlan(ctx flow.StepCtx) (flow.StepResult, error) {
 	pc, err := b.promptContext(ctx)
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	body, err := renderPrompt(b.cfg, PromptPlan, pc)
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	resp, err := b.runAgent(ctx, flow.AgentRequest{
 		Prompt: body,
@@ -67,7 +67,7 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 				ctx.Notify("", "could not persist plan as work in progress: "+wipErr.Error())
 			}
 		}
-		return err
+		return flow.StepResult{}, err
 	}
 	// The work is real and waits on other items. Read before the refusal: a
 	// turn that both declares blockers and refuses has said two things, and
@@ -88,20 +88,20 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 				// reasoning are kept so the retry resumes from them rather than
 				// re-deriving a plan that was already paid for.
 				keepPlanReasoning(ctx, resp, "unresolvable wait")
-				return fmt.Errorf(
+				return flow.StepResult{}, fmt.Errorf(
 					"plan waits on %q, which does not resolve to an item: %w — the block was:\n%s",
 					tok, err, block)
 			}
 			refs = append(refs, ref)
 		}
 		keepPlanReasoning(ctx, resp, "waits-on")
-		return ctx.WaitOnItems(refs...)
+		return flow.StepResult{}, ctx.WaitOnItems(refs...)
 	}
 	// A refusal is the step's work — the agent read enough to conclude the
 	// item should not be done. It blocks rather than resolves.
 	if kind, summary, _, ok := detectRefusal(resp.LastText); ok {
 		keepPlanReasoning(ctx, resp, "refusal")
-		return ctx.Park(flow.ParkRequest{
+		return flow.StepResult{}, ctx.Park(flow.ParkRequest{
 			Kind:    flow.ParkBlocked,
 			Reason:  fmt.Sprintf("plan refused (%s): %s", kind, summary),
 			Details: fmt.Sprintf("refusal=%s", kind),
@@ -125,13 +125,13 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 	// we lost it" is a defect in this program, and publishing narration under
 	// the plan's name buries it where the next three steps pay for it.
 	if resp.PlanSubmitted && strings.TrimSpace(resp.PlanText) == "" {
-		return fmt.Errorf(
+		return flow.StepResult{}, fmt.Errorf(
 			"agent submitted a plan and none was captured — refusing to resolve "+
 				"the plan artifact from the turn's narration instead (tools used: %v)",
 			resp.ToolsUsed)
 	}
 	if strings.TrimSpace(plan) == "" {
-		return fmt.Errorf("agent returned an empty plan")
+		return flow.StepResult{}, fmt.Errorf("agent returned an empty plan")
 	}
 	// Emptiness is the wrong property to test, and this is the case that proves
 	// THAT: a turn that delegates its planning to a subagent leaves the parent's
@@ -152,14 +152,15 @@ func (b *builder) stepPlan(ctx flow.StepCtx) error {
 	// plan, since whether the agent delegates is its own choice each turn. The
 	// artifact never resolves, so nothing downstream reads narration.
 	if !looksLikePlan(plan) {
-		return fmt.Errorf(
+		return flow.StepResult{}, fmt.Errorf(
 			"plan artifact is %d bytes with no headings — refusing to resolve what "+
 				"looks like the turn's narration rather than a plan (plan submitted: %t, "+
 				"tools used: %v): %q",
 			len(strings.TrimSpace(plan)), resp.PlanSubmitted, resp.ToolsUsed,
 			firstLine(plan))
 	}
-	return b.resolveMarkdown(ctx, pc, resp.SessionID, plan)
+	return ctx.Next(flow.StepId(StepBranch),
+		"the plan is written; open the branch the change will be implemented on").Markdown(plan), nil
 }
 
 // planWorkInProgress is what the plan step keeps when it stops short: the
@@ -233,21 +234,23 @@ func firstLine(s string) string {
 // Reading the base branch today would record a commit the branch was never cut
 // from — and that record is exactly what makes "what is this change relative to"
 // answerable later against a base that has since moved.
-func (b *builder) stepOpenBranch(ctx flow.StepCtx) error {
+func (b *builder) stepOpenBranch(ctx flow.StepCtx) (flow.StepResult, error) {
 	wt, err := ctx.Worktree()
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	if _, _, err := b.ensureBranch(ctx, wt); err != nil {
 		// Named, so the message stands on its own wherever it is read: what
 		// could not be opened, and why. That is the whole of "fails as itself".
-		return fmt.Errorf("could not open branch %q: %w", b.branchName(ctx), err)
+		return flow.StepResult{}, fmt.Errorf("could not open branch %q: %w", b.branchName(ctx), err)
 	}
 	head, err := wt.RevParse(ctx.Context(), "HEAD")
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
-	return ctx.ResolveCommitHash(string(head))
+	return ctx.Next(flow.StepId(StepImplement), fmt.Sprintf(
+		"branch %q is open at %s, the commit it was cut from; implement the plan on it",
+		b.branchName(ctx), head)).CommitHash(string(head)), nil
 }
 
 // stepImplement makes the change and drives it to a passing gate.
@@ -261,17 +264,17 @@ func (b *builder) stepOpenBranch(ctx flow.StepCtx) error {
 //
 // The artifact resolves ONLY on a green gate. A commit recorded after a failing
 // verify would name work that does not build.
-func (b *builder) stepImplement(ctx flow.StepCtx) error {
+func (b *builder) stepImplement(ctx flow.StepCtx) (flow.StepResult, error) {
 	pc, err := b.promptContext(ctx)
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	// Emptiness, not just absence: a resolved artifact whose body did not load
 	// reads as present, and implementing against a blank plan is worse than
 	// refusing — the agent writes something plausible and nothing reports why.
 	plan, ok := pc.PriorMarkdown(StepPlan)
 	if !ok || strings.TrimSpace(plan) == "" {
-		return fmt.Errorf("plan artifact missing, unresolved, or empty — refusing to implement without a plan")
+		return flow.StepResult{}, fmt.Errorf("plan artifact missing, unresolved, or empty — refusing to implement without a plan")
 	}
 	// And structure, not just emptiness, by the same reasoning one step further:
 	// a single sentence of narration is not empty either, and dispatching
@@ -285,7 +288,7 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 	// that failed, while this one is a plan step that resolved something that
 	// was never a plan — and the operator cannot tell which without seeing it.
 	if !looksLikePlan(plan) {
-		return fmt.Errorf(
+		return flow.StepResult{}, fmt.Errorf(
 			"plan artifact is %d bytes with no headings — refusing to implement against "+
 				"what looks like the planning turn's narration rather than a plan: %q",
 			len(strings.TrimSpace(plan)), firstLine(plan))
@@ -295,23 +298,23 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 	// empty-branch check below has nothing to compare against.
 	baseSHA, ok := ctx.CommitHash(flow.ArtifactId(StepBranch))
 	if !ok || strings.TrimSpace(baseSHA) == "" {
-		return fmt.Errorf("branch artifact missing, unresolved, or empty — " +
+		return flow.StepResult{}, fmt.Errorf("branch artifact missing, unresolved, or empty — " +
 			"refusing to implement without the commit the branch was cut from")
 	}
 
 	wt, err := ctx.Worktree()
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	// The branch must already exist. Cutting one here is the failure the open
 	// branch step exists to report as itself.
 	if err := b.onClaimBranch(ctx); err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 
 	prompt, err := renderPrompt(b.cfg, PromptImplement, pc)
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 
 	rounds := b.cfg.MaxFixRounds
@@ -333,17 +336,17 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 			ResumeSessionID: session,
 		})
 		if err != nil {
-			return err
+			return flow.StepResult{}, err
 		}
 		session = resp.SessionID
 
 		ctx.Notify("", "running the verify command")
 		run, rerr := wt.Run(ctx.Context(), flow.CommandVerify)
 		if rerr != nil {
-			return rerr // no command ran and no outcome exists
+			return flow.StepResult{}, rerr // no command ran and no outcome exists
 		}
 		if err := verifyOutcomeError(run); err != nil {
-			return err
+			return flow.StepResult{}, err
 		}
 		if run.ExitCode == 0 {
 			break
@@ -353,7 +356,7 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 		// condition no edit can change. The orchestrator's ErrUnfit branch
 		// reports blocked.
 		if fitErr := flow.CheckFit(ctx.Context(), wt); fitErr != nil {
-			return fitErr
+			return flow.StepResult{}, fitErr
 		}
 		if attempt >= rounds {
 			// An error, not a park. A park here gated nothing — no preflight
@@ -362,7 +365,7 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 			// every cycle. Failing stops the run with the reason attached; the
 			// work stays in the worktree either way, so a human who fixes the
 			// blocker or raises MaxFixRounds resumes from where it stopped.
-			return fmt.Errorf("verify still failing after %d fix attempts: %s",
+			return flow.StepResult{}, fmt.Errorf("verify still failing after %d fix attempts: %s",
 				attempt, verifyTail(run))
 		}
 		// Re-prompt with the failing tail. Rebuilt each round so the context
@@ -370,7 +373,7 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 		pc.VerifyOutput = verifyTail(run)
 		prompt, err = renderPrompt(b.cfg, PromptImplementFix, pc)
 		if err != nil {
-			return err
+			return flow.StepResult{}, err
 		}
 	}
 
@@ -385,7 +388,7 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 	// and one copy of it is what keeps the two from drifting.
 	ctx.Notify("", "staging and committing")
 	if err := b.recordStepWork(ctx, wt, "implement", b.commitMessage(ctx)); err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	// Commit is a deliberate no-op when nothing is staged, so a nil return is
 	// not evidence that anything was recorded. Ask the question that actually
@@ -406,10 +409,10 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 	// would read an empty branch as work.
 	head, err := wt.RevParse(ctx.Context(), "HEAD")
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	if string(head) == baseSHA {
-		return fmt.Errorf("branch %q carries no commits beyond %s, the commit it was cut from — "+
+		return flow.StepResult{}, fmt.Errorf("branch %q carries no commits beyond %s, the commit it was cut from — "+
 			"the agent changed nothing, so there is nothing to open a pull request from",
 			b.branchName(ctx), baseSHA)
 	}
@@ -419,7 +422,9 @@ func (b *builder) stepImplement(ctx flow.StepCtx) error {
 	// legitimately empty — a record that may be empty, that nothing reads back,
 	// and that can disagree with what it copies. A commit names exactly one
 	// state and is never ambiguous.
-	return ctx.ResolveCommitHash(string(head))
+	return ctx.Next(flow.StepId(StepReview), fmt.Sprintf(
+		"the change is committed at %s and the verify command passes on it; review it",
+		head)).CommitHash(string(head)), nil
 }
 
 // recordStepWork commits whatever the calling step changed and refuses to
@@ -581,59 +586,74 @@ func (b *builder) itemLabel(ctx flow.StepCtx) string {
 }
 
 // producingMarkdownStep runs a producing step whose artifact is prose: the
-// agent works, its changes are recorded, and only then does the artifact
-// resolve. That order is deliberate — resolving first would mark the step done
-// with its work still uncommitted, which is the state that loses it.
-func (b *builder) producingMarkdownStep(ctx flow.StepCtx, id PromptID, label string) error {
+// agent works, its changes are recorded, and only then does the step complete
+// with the prose as its payload. That order is deliberate — completing first
+// would mark the step done with its work still uncommitted, which is the state
+// that loses it.
+//
+// It is a handler TAIL: next and message are the election the caller is making,
+// so the whole of "what this step decided" stays with the step that decided it
+// rather than being buried in a shared helper.
+func (b *builder) producingMarkdownStep(ctx flow.StepCtx, id PromptID, label string, next flow.StepId, message string) (flow.StepResult, error) {
 	wt, err := ctx.Worktree()
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	pc, err := b.promptContext(ctx)
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	body, err := renderPrompt(b.cfg, id, pc)
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	resp, err := b.runAgent(ctx, flow.AgentRequest{Prompt: body})
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	if strings.TrimSpace(resp.LastText) == "" {
-		return fmt.Errorf("agent returned nothing for %q", id)
+		return flow.StepResult{}, fmt.Errorf("agent returned nothing for %q", id)
 	}
 	if err := b.recordStepWork(ctx, wt, label,
 		fmt.Sprintf("%s: %s", label, b.itemLabel(ctx))); err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
-	return b.resolveMarkdown(ctx, pc, resp.SessionID, resp.LastText)
+	return ctx.Next(next, message).Markdown(resp.LastText), nil
 }
 
 // stepReview asks for a critique of the change.
-func (b *builder) stepReview(ctx flow.StepCtx) error {
+func (b *builder) stepReview(ctx flow.StepCtx) (flow.StepResult, error) {
 	if err := b.onClaimBranch(ctx); err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
-	return b.producingMarkdownStep(ctx, PromptReview, "review")
+	return b.producingMarkdownStep(ctx, PromptReview, "review",
+		flow.StepId(StepCoverage),
+		"the change has been reviewed and the review recorded; analyze the coverage of the change")
 }
 
 // stepCoverage analyses test coverage of the change.
-func (b *builder) stepCoverage(ctx flow.StepCtx) error {
+func (b *builder) stepCoverage(ctx flow.StepCtx) (flow.StepResult, error) {
 	if err := b.onClaimBranch(ctx); err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
-	return b.producingMarkdownStep(ctx, PromptCoverage, "coverage")
+	return b.producingMarkdownStep(ctx, PromptCoverage, "coverage",
+		flow.StepId(StepOpenPR),
+		"the coverage of the change has been analysed and recorded; propose the change")
 }
 
 // stepOpenPR measures the branch and, if the measurement is acceptable, opens
 // the pull request. The pr-open signal is set by the backend as a side effect of
 // Open succeeding, not by this handler.
-func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
+//
+// afterRequest is the successor the flow declares for this step — close branch
+// when the binary proposes, verify merge result when it carries through. It is
+// passed in rather than decided here because the declaration and the election
+// must be the same edge, and the registration is where that edge is written
+// (issue/build.go addContributorSteps).
+func (b *builder) stepOpenPR(ctx flow.StepCtx, afterRequest flow.StepId) (flow.StepResult, error) {
 	wt, err := ctx.Worktree()
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	item := ctx.Item()
 	title := item.Title
@@ -645,11 +665,11 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 	// into a deterministic failure on every retry, rather than something the
 	// step simply corrects.
 	if err := b.onClaimBranch(ctx); err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	base, err := b.baseBranch(ctx.Context())
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	// flow.Open, not wt.Request() directly: a plain `rq == nil` misses the
 	// typed-nil interface a backend can hand back, and would panic on the call
@@ -672,7 +692,7 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 	// "implement" then "what review changed", because that is what happened.
 	ctx.Notify("", "recording post-implement changes")
 	if err := b.recordOutstanding(ctx, wt); err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 
 	// The gate, after recording and before the push. After, because it must
@@ -683,24 +703,24 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 	// spends a reviewer's attention on a change that was never going to land.
 	verdict, err := b.runIntegrationGate(ctx, wt, "the branch as it will be proposed")
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 
 	body, err := b.pullRequestBody(ctx, verdict)
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	ctx.Notify("", "pushing and opening pull request")
 	_, err = flow.Open(ctx.Context(), wt, flow.BranchName(base), title, body)
 	if err == nil {
-		return nil
+		return b.requestOpened(ctx, afterRequest), nil
 	}
 
 	// Only recover ActPush refusals. An ActPullRequest refusal (PR body/title)
 	// is a different surface — return it as-is.
 	var refused flow.ErrDisclosureRefused
 	if !errors.As(err, &refused) || refused.Act != flow.ActPush {
-		return err
+		return flow.StepResult{}, err
 	}
 
 	// Stash before anything else can fail.
@@ -713,21 +733,21 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 	pc := PromptContext{PushRefusal: refused.Error()}
 	prompt, rerr := renderPrompt(b.cfg, PromptPushRepair, pc)
 	if rerr != nil {
-		return rerr
+		return flow.StepResult{}, rerr
 	}
 	_, rerr = b.runAgent(ctx, flow.AgentRequest{
 		Prompt:         prompt,
 		PermissionMode: "acceptEdits",
 	})
 	if rerr != nil {
-		return rerr
+		return flow.StepResult{}, rerr
 	}
 
 	// One retry.
 	ctx.Notify("", "retrying push after history rewrite")
 	_, err = flow.Open(ctx.Context(), wt, flow.BranchName(base), title, body)
 	if err == nil {
-		return nil
+		return b.requestOpened(ctx, afterRequest), nil
 	}
 
 	// Second failure: park, don't fail.
@@ -741,11 +761,20 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) error {
 			refused2.Error()))
 	}
 
-	return ctx.Park(flow.ParkRequest{
+	return flow.StepResult{}, ctx.Park(flow.ParkRequest{
 		Kind: flow.ParkBlocked,
 		Reason: "the disclosure guard refused this step's push twice; " +
 			"what it refused and why are kept with the step for the next run",
 	})
+}
+
+// requestOpened is the election the pull request step makes once the request is
+// open, whichever way it got there: one wording for the two call sites, so the
+// successor cannot be told two different things about the same fact.
+func (b *builder) requestOpened(ctx flow.StepCtx, afterRequest flow.StepId) flow.StepResult {
+	return ctx.Next(afterRequest, fmt.Sprintf(
+		"the pull request for branch %q is open and the integration gate passed on the branch as proposed",
+		b.branchName(ctx)))
 }
 
 // runIntegrationGate measures subject and asks the project whether the
@@ -867,14 +896,14 @@ func (b *builder) followUpCommitMessage(ctx flow.StepCtx) string {
 //
 // It does NOT delete the item's branch. The branch carries the request, and the
 // request outlives the resolution that opened it.
-func (b *builder) stepCloseBranch(ctx flow.StepCtx) error {
+func (b *builder) stepCloseBranch(ctx flow.StepCtx) (flow.StepResult, error) {
 	wt, err := ctx.Worktree()
 	if err != nil {
-		return fmt.Errorf("close branch: worktree unavailable: %v: %w", err, flow.ErrTransient)
+		return flow.StepResult{}, fmt.Errorf("close branch: worktree unavailable: %v: %w", err, flow.ErrTransient)
 	}
 	base, err := b.baseBranch(ctx.Context())
 	if err != nil {
-		return fmt.Errorf("close branch: base branch lookup failed: %v: %w", err, flow.ErrTransient)
+		return flow.StepResult{}, fmt.Errorf("close branch: base branch lookup failed: %v: %w", err, flow.ErrTransient)
 	}
 	// Branch CREATES when the name is absent, so the created flag is the check
 	// rather than decoration: without it, a worktree missing the base branch
@@ -882,14 +911,18 @@ func (b *builder) stepCloseBranch(ctx flow.StepCtx) error {
 	// every later item would be cut from the wrong place.
 	created, err := wt.Branch(ctx.Context(), flow.BranchName(base), "")
 	if err != nil {
-		return fmt.Errorf("close branch: checkout %s: %v: %w", base, err, flow.ErrTransient)
+		return flow.StepResult{}, fmt.Errorf("close branch: checkout %s: %v: %w", base, err, flow.ErrTransient)
 	}
 	if created {
-		return fmt.Errorf("base branch %q is not in this worktree, so the worktree cannot be "+
+		return flow.StepResult{}, fmt.Errorf("base branch %q is not in this worktree, so the worktree cannot be "+
 			"returned to it — a branch of that name now points at this item's work and has "+
 			"to be resolved by hand: %w", base, flow.ErrRefused)
 	}
-	return ctx.ResolveFlag()
+	// The one election that ends the item. Finalizing is what completes a flow
+	// — there is no checklist that decides it (docs/resolution.md § Finalizing)
+	// — and this is the step both compositions end at.
+	return ctx.Finalize(flow.DispositionResolved, fmt.Sprintf(
+		"the resolution is complete and the worktree is back on %s", base)).Flag(), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -922,9 +955,14 @@ func (b *builder) runAgent(ctx flow.StepCtx, req flow.AgentRequest) (*flow.Agent
 }
 
 // resolveQuestion handles a question detected in the agent's response, routing
-// it through a disclosure-revision loop that mirrors resolveMarkdown. On a
-// refusal the agent is asked to reframe the question in the session it already
-// holds; on exhaustion the step parks instead of failing.
+// it through a disclosure-revision loop. On a refusal the agent is asked to
+// reframe the question in the session it already holds; on exhaustion the step
+// parks instead of failing.
+//
+// The loop lives HERE and not on the step's own result: a question is offered
+// from inside the invocation, so a refusal can still be revised inside it. A
+// step's result is offered by the SDK after the handler has returned, and a
+// refusal there is stashed and parked (cli's capture path) rather than revised.
 func (b *builder) resolveQuestion(ctx flow.StepCtx, resp *flow.AgentResponse, header, body string) (*flow.AgentResponse, error) {
 	// The turn that found the ambiguity is the turn that produced the
 	// reasoning behind it: stashing the whole final message is what makes the
@@ -956,7 +994,7 @@ func (b *builder) resolveQuestion(ctx flow.StepCtx, resp *flow.AgentResponse, he
 		}
 
 		// Stash the refused text before anything else can go wrong.
-		if werr := ctx.RecordWorkInProgress(refusedRecord(refused, questionText)); werr != nil {
+		if werr := ctx.RecordWorkInProgress(flow.RefusedRecord(refused, questionText)); werr != nil {
 			ctx.Notify("", "could not record refused text: "+werr.Error())
 		}
 		if round >= maxDisclosureRevisions {
@@ -1016,119 +1054,23 @@ func (b *builder) resolveQuestion(ctx flow.StepCtx, resp *flow.AgentResponse, he
 
 // agentMarkdownStep is the shape shared by the read-only analysis steps: render
 // a prompt, run the agent, record what it said.
-func (b *builder) agentMarkdownStep(ctx flow.StepCtx, id PromptID) error {
+func (b *builder) agentMarkdownStep(ctx flow.StepCtx, id PromptID, next flow.StepId, message string) (flow.StepResult, error) {
 	pc, err := b.promptContext(ctx)
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	body, err := renderPrompt(b.cfg, id, pc)
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	resp, err := b.runAgent(ctx, flow.AgentRequest{Prompt: body})
 	if err != nil {
-		return err
+		return flow.StepResult{}, err
 	}
 	if strings.TrimSpace(resp.LastText) == "" {
-		return fmt.Errorf("agent returned nothing for %q", id)
+		return flow.StepResult{}, fmt.Errorf("agent returned nothing for %q", id)
 	}
-	return b.resolveMarkdown(ctx, pc, resp.SessionID, resp.LastText)
-}
-
-// resolveMarkdown records prose as this step's artifact, re-prompting the agent
-// to revise when the disclosure guard refuses to publish it.
-//
-// docs/disclosure.md: "A refusal is not a failure of the step. The text is
-// revised and re-offered." What was refused is an expression of work already
-// done and paid for, so the agent is asked to fix the SENTENCE in the session
-// it is already holding — not re-run to re-derive the plan. A revision costs a
-// prompt, not an invocation, which is what stops three refused sentences from
-// exhausting a three-invocation grant and then reporting a budget cap — naming
-// the wrong problem entirely.
-//
-// Every step that publishes prose goes through this one copy. A step that
-// called ctx.ResolveMarkdown directly would fail on a refusal instead, and lose
-// the work that produced the text.
-func (b *builder) resolveMarkdown(ctx flow.StepCtx, pc PromptContext, session, body string) error {
-	for round := 0; ; round++ {
-		err := ctx.ResolveMarkdown(body)
-		if err == nil {
-			return nil
-		}
-		var refused flow.ErrDisclosureRefused
-		if !errors.As(err, &refused) {
-			// Anything else is a real failure of the write. Returning it
-			// unchanged keeps a broken backend from being reported as a
-			// disclosure problem.
-			return err
-		}
-		// Stash BEFORE anything else can go wrong. This is the case the store
-		// earns itself on: the text was refused, so an issue comment is the one
-		// place it cannot go, and losing it here would spend the whole step's
-		// cost again to reach the same sentence.
-		if werr := ctx.RecordWorkInProgress(refusedRecord(refused, body)); werr != nil {
-			ctx.Notify("", "could not record refused text: "+werr.Error())
-		}
-		if round >= maxDisclosureRevisions {
-			// A park, not a failure: the work is sound and a person has to
-			// decide. And a re-run after this park is not the identical retry —
-			// it starts from the stashed draft and the refusal, which is exactly
-			// what the previous attempt did not have.
-			//
-			// The reason carries NOTHING the guard said. A park is published:
-			// Backend.Park posts the whole request as an issue comment, through
-			// the same guard. A refusal names what it found and quotes it
-			// (docs/disclosure.md), so a reason repeating the guard's answer
-			// carries the refused fragment itself — the guard refuses the park
-			// record too, Backend.Park errors, and the item never parks at all:
-			// the run dies with an error and no person is told anything. The
-			// act is the SDK's own closed vocabulary and is safe to publish;
-			// the guard's answer stays in the stashed record, which is local
-			// and never published.
-			return ctx.Park(flow.ParkRequest{
-				Kind: flow.ParkBlocked,
-				Reason: fmt.Sprintf(
-					"the disclosure guard refused this step's text %d times (%s); "+
-						"what it refused and why are kept with the step for the next run",
-					round+1, refused.Act),
-			})
-		}
-		ctx.Notify("", fmt.Sprintf("disclosure refused — revising (round %d)", round+1))
-		rpc := pc
-		rpc.Refusal = refused.Error()
-		rpc.RefusedText = body
-		prompt, rerr := renderPrompt(b.cfg, PromptRevise, rpc)
-		if rerr != nil {
-			return rerr
-		}
-		resp, rerr := b.runAgent(ctx, flow.AgentRequest{
-			Prompt: prompt,
-			// The wording is what is wrong, not the tree — and by this point a
-			// producing step has already committed. A revision that edited
-			// files would put work into the branch after the commit that was
-			// supposed to carry it.
-			PermissionMode:  "plan",
-			ResumeSessionID: session,
-		})
-		if rerr != nil {
-			return rerr
-		}
-		if strings.TrimSpace(resp.LastText) == "" {
-			return fmt.Errorf("agent returned nothing when asked to revise refused text")
-		}
-		session = resp.SessionID
-		body = resp.LastText
-	}
-}
-
-// refusedRecord is what a refused offer leaves behind for the next invocation:
-// the text, and the guard's answer about it. Both, because the text alone would
-// be re-offered unchanged and refused identically.
-func refusedRecord(refused flow.ErrDisclosureRefused, body string) string {
-	return fmt.Sprintf(
-		"An earlier run produced this text and the disclosure guard refused to publish it.\n\n"+
-			"The refusal:\n\n%s\n\nThe text that was refused:\n\n%s",
-		refused.Error(), body)
+	return ctx.Next(next, message).Markdown(resp.LastText), nil
 }
 
 // promptContext builds the render context, exposing every upstream contributor

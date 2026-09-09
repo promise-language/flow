@@ -126,5 +126,5 @@ func (f *Flow) validateFinalizationReachable() error {
 // describe renders one step for an error message: its description, which is
 // what a reader recognises, and its result id, which is what they can act on.
 func (s *step) describe() string {
-	return fmt.Sprintf("%q (%s)", s.name, s.resultName())
+	return fmt.Sprintf("%q (%s)", s.description, s.resultName())
 }

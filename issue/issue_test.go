@@ -490,9 +490,12 @@ func TestBuildApp_MaintainerBuildsButRefusesOnDispatch(t *testing.T) {
 	if !ok {
 		t.Fatal("stand-in flow has no maintainer step")
 	}
-	err = li.Handler(nil)
+	res, err := li.Handler(nil)
 	if err == nil || !strings.Contains(err.Error(), "not implemented yet") {
 		t.Errorf("handler err = %v, want an explicit not-yet-implemented refusal", err)
+	}
+	if res != (flow.StepResult{}) {
+		t.Errorf("handler elected %+v, want nothing — a refusal completes nothing", res)
 	}
 }
 
@@ -645,15 +648,15 @@ func TestContributorStepSetMatchesTheDocument(t *testing.T) {
 		if got.Kind == flow.LifecycleSignal {
 			result = string(got.SignalId)
 		}
-		if got.Name != w.name || result != w.result || got.Kind != w.kind {
+		if got.Description != w.name || result != w.result || got.Kind != w.kind {
 			t.Errorf("step[%d] = (%q, %q, %v), want (%q, %q, %v)",
-				i, got.Name, result, got.Kind, w.name, w.result, w.kind)
+				i, got.Description, result, got.Kind, w.name, w.result, w.kind)
 		}
 	}
 	// Closing the branch has no "did the resolution complete" test of its own:
 	// DeriveNext returns the first PENDING step in registration order, so a run
 	// that stopped never reaches a step registered after the request.
-	if items[len(items)-1].Name != "close branch" {
+	if items[len(items)-1].Description != "close branch" {
 		t.Error("close branch is not last, so a parked or failed run would still restore the worktree")
 	}
 }

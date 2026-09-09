@@ -6,17 +6,60 @@ import (
 )
 
 // StepCtx is the per-invocation handle a step handler receives. The same
-// concrete type backs all kinds of steps; calling the wrong Resolve* for a
-// step's declared result returns ErrTypeMismatch or ErrSignalNotWritable.
+// concrete type backs all kinds of steps; an election that does not fit the
+// step it was made from is refused at capture (StepResult.Elect).
 type StepCtx interface {
 	Context() context.Context
 	Flow() string
-	StepName() string
+	// Description is the lifecycle item's human description. Display only, and
+	// deliberately not called a name: it is never an identity, nothing accepts
+	// it where a StepId belongs, and granting, parking and the journal all key
+	// on Result() (docs/step-handler.md § Identity).
+	Description() string
 	Result() ArtifactId // result id (artifact OR signal as string); see kind via Item
 	Item() Item
 
+	// Who is here — docs/step-handler.md § Who is here.
+
+	// Runner is the account this resolution acts as.
+	Runner() AccountId
+	// Role is the declared role this dispatch runs under — always the step's
+	// own role tag.
+	Role() RoleName
+	// RoleAccount is the account of record for a role on this item, derived
+	// from the journal — empty when the role has not yet acted.
+	//
+	// The role must be one the flow declares: an undeclared name is refused
+	// with ErrUnknownRole, never answered empty. Empty means "declared and not
+	// yet acted", and a typo read as that would wait forever.
+	RoleAccount(role RoleName) (AccountId, error)
+
+	// Reading the journal — docs/step-handler.md § Reading the journal.
+
+	// Journal returns the item's journal whole: every completed step execution,
+	// in order. A copy — a handler reads the route, it does not edit it.
+	Journal() []JournalEntry
+	// Transfer is the entry that routed here: the predecessor and its message,
+	// which is why this step is being run. Nil on an empty journal.
+	Transfer() *JournalEntry
+	// Notes returns every entry carrying a standing note, in journal order —
+	// the notes addressed past their authors.
+	Notes() []JournalEntry
+	// RunNumber is which dispatch of the pending step this is — 1 on the first,
+	// counting each resume and retry since the route named it. Several
+	// dispatches may serve the one execution that eventually completes.
+	RunNumber() int
+
 	// Artifact read surface — full record + typed accessors. ok=false if
 	// missing, unresolved, or wrong type.
+	//
+	// These read the ArtifactRecord, not the artifact's latest JOURNAL ENTRY as
+	// docs/step-handler.md § Typed accessors has them. They cannot read the
+	// journal until something appends to it: completion appends (#239) and the
+	// entries persist (#240), and until then every accessor would answer
+	// "absent" for an artifact that is recorded. The record is the same value
+	// by a different route in the meantime, so this is one derivation early,
+	// not two derivations at once.
 	Artifact(id ArtifactId) (ArtifactRecord, bool)
 	Flag(id ArtifactId) (set bool, ok bool)
 	CommitHash(id ArtifactId) (sha string, ok bool)
@@ -51,22 +94,26 @@ type StepCtx interface {
 	// RecordWorkInProgress stashes work this step wants its next invocation to
 	// start from. It does NOT resolve the step — it is scaffolding, not a
 	// result — is read by no other step, is never published, and is cleared
-	// automatically when the step resolves.
+	// automatically when the step completes.
 	//
 	// Returns ErrWorkInProgressUnsupported when the backend has no store.
 	RecordWorkInProgress(body string) error
 
-	// Artifact write surface — one Resolve* per ArtifactType.
-	ResolveFlag() error
-	ResolveCommitHash(sha string) error
-	ResolveMarkdown(body string) error
-	ResolveJSON(body json.RawMessage) error
-	ResolveFile(name string, content []byte) error
-	ResolvePatch(body PatchBody) error
+	// Electing the route — docs/step-handler.md § Electing the route. The two
+	// constructors are the only way a handler completes: it returns one, and
+	// the SDK captures the result and records the route together.
+	//
+	// Either may be extended with .WithNote and, on an artifact step, with the
+	// payload constructor matching the declared type — see StepResult.
+
+	// Next elects a declared successor, with the message telling it why it is
+	// being run.
+	Next(step StepId, message string) StepResult
+	// Finalize ends the item with a disposition the step declares in
+	// StepConfig.MayFinalize, with the closing reasons as the message.
+	Finalize(d Disposition, message string) StepResult
 
 	// Sentinel returns — wrap typed errors the SDK translates to InvocationResult.
-	Skip(reason string) error
-	MarkStale(id ArtifactId) error
 
 	// Park stops the item on the given request. Never ParkQuestion: a question
 	// park is answerable only through a question the orchestrator registered,

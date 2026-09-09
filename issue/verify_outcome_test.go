@@ -91,7 +91,7 @@ func TestStepImplement_ATimedOutVerifyDoesNotSpendAFixRound(t *testing.T) {
 	agent := &scriptedAgent{}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepImplement(ctx)
+	_, err := testBuilder(t).stepImplement(ctx)
 	if !errors.Is(err, flow.ErrTransient) {
 		t.Fatalf("stepImplement = %v, want ErrTransient — the wait is not the change failing", err)
 	}
@@ -109,7 +109,7 @@ func TestStepImplement_AVerifyThatNeverRanIsRefusedNotFixed(t *testing.T) {
 	agent := &scriptedAgent{}
 	ctx := ctxWithPlan(wt, agent)
 
-	err := testBuilder(t).stepImplement(ctx)
+	_, err := testBuilder(t).stepImplement(ctx)
 	if !errors.Is(err, flow.ErrRefused) {
 		t.Fatalf("stepImplement = %v, want ErrRefused", err)
 	}
@@ -126,7 +126,7 @@ func TestStepImplement_ARunThatCouldNotBeAttemptedPropagates(t *testing.T) {
 	wt.runErr = errors.New("this orchestrator declares no verify command")
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
-	err := testBuilder(t).stepImplement(ctx)
+	_, err := testBuilder(t).stepImplement(ctx)
 	if err == nil || !strings.Contains(err.Error(), "declares no verify command") {
 		t.Fatalf("stepImplement = %v, want the runner's own error unchanged", err)
 	}

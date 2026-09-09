@@ -23,8 +23,8 @@ import (
 // advances and then finalizes.
 func resolveTestApp(t *testing.T, be flow.Orchestrator) (*App, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
-	return resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
-		return ctx.ResolveMarkdown("the plan")
+	return resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
 	})
 }
 
@@ -32,7 +32,7 @@ func resolveTestApp(t *testing.T, be flow.Orchestrator) (*App, *bytes.Buffer, *b
 // single "write plan" step — the lever for driving the loop to an outcome
 // other than done (return nil without resolving to park it, return an error to
 // fail it).
-func resolveTestAppStep(t *testing.T, be flow.Orchestrator, step func(flow.StepCtx) error) (*App, *bytes.Buffer, *bytes.Buffer) {
+func resolveTestAppStep(t *testing.T, be flow.Orchestrator, step func(flow.StepCtx) (flow.StepResult, error)) (*App, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	// Isolate from real credential discovery (Keychain, claude binary) so
 	// reportQuota's exec calls don't hang or hit the network, and from the
@@ -51,7 +51,7 @@ func resolveTestAppStep(t *testing.T, be flow.Orchestrator, step func(flow.StepC
 		Err:          errBuf,
 	}
 	f := flow.NewFlow("implement", []flow.ItemType{"task"})
-	f.AddStep("write plan", "plan", step, flow.StepConfig{})
+	f.AddStep("write plan", "plan", step, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	app.Flow = f
 	if err := app.validate(); err != nil {
@@ -752,7 +752,7 @@ func TestCmdResolve_ByIdClaimsThenResumesTheHeldClaim(t *testing.T) {
 	// A step that returns without resolving its artifact parks the run, so the
 	// first `resolve` leaves the item mid-flight and still held — which is the
 	// state the second `resolve <id>` has to be able to resume.
-	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error { return nil })
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil })
 
 	if code := app.cmdClaim(context.Background(), []string{"1"}); code != 0 {
 		t.Fatalf("claim 1: exit code = %d, want 0; err=%q", code, errBuf.String())
@@ -801,13 +801,13 @@ func (b *failingLoadStateBackend) Load(ctx context.Context, ref flow.ItemRef) (*
 func TestCmdResolve_ModeSplitHoldsOnEveryTerminalOutcome(t *testing.T) {
 	cases := []struct {
 		name       string
-		step       func(flow.StepCtx) error
+		step       func(flow.StepCtx) (flow.StepResult, error)
 		wantCode   int
 		wantStatus string
 	}{
 		// Returning without resolving the artifact parks the step.
-		{"parked", func(ctx flow.StepCtx) error { return nil }, 0, "parked"},
-		{"failed", func(ctx flow.StepCtx) error { return errors.New("handler boom") }, 1, "failed"},
+		{"parked", func(ctx flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, 0, "parked"},
+		{"failed", func(ctx flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, errors.New("handler boom") }, 1, "failed"},
 	}
 	for _, c := range cases {
 		t.Run(c.name+"/json", func(t *testing.T) {
@@ -1185,8 +1185,8 @@ func TestFinalTotalSuffix_UnresolvedZeroDurationNotLowerBound(t *testing.T) {
 func TestCmdResolve_BudgetParkNarratesAxes(t *testing.T) {
 	// Use testApp (which pre-claims) to burn the only invocation, then run
 	// cmdResolve which resumes the claim and immediately parks on budget.
-	handler := func(ctx flow.StepCtx) error {
-		return errors.New("boom")
+	handler := func(ctx flow.StepCtx) (flow.StepResult, error) {
+		return flow.StepResult{}, errors.New("boom")
 	}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", handler, flow.StepConfig{})
@@ -1232,8 +1232,8 @@ func TestCmdResolve_BudgetParkNarratesAxes(t *testing.T) {
 func TestCmdResolve_NonBudgetParkOmitsAxes(t *testing.T) {
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
-	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
-		return nil // returns without resolving → did-not-resolve park
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+		return flow.StepResult{}, nil // returns without resolving → did-not-resolve park
 	})
 
 	code := app.cmdResolve(context.Background(), nil)
@@ -1472,12 +1472,12 @@ func TestResolve_FitnessWaitRetriesOnRecovery(t *testing.T) {
 	// After the step returns ErrUnfit, the mid-step CheckFit also returns fit,
 	// so cmdResolve retries immediately.
 	be := &fitGateBackend{Orchestrator: inner, rounds: unfitFor(0)}
-	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
 		stepCalls++
 		if stepCalls == 1 {
-			return fmt.Errorf("12 MB free, floor 2 GB: %w", flow.ErrUnfit)
+			return flow.StepResult{}, fmt.Errorf("12 MB free, floor 2 GB: %w", flow.ErrUnfit)
 		}
-		return ctx.ResolveMarkdown("the plan")
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
 	})
 
 	code := app.cmdResolve(context.Background(), []string{"1"})
@@ -1508,14 +1508,14 @@ func TestResolve_FitnessWaitHoldsWhileUnfit(t *testing.T) {
 	// stage). Then the step returns ErrUnfit. The mid-step re-check (calls
 	// 2..4) returns unfit for 3 rounds, then fit on call 5.
 	be := &fitGateBackend{Orchestrator: inner, rounds: unfitFor(0)}
-	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
 		stepCalls++
 		if stepCalls == 1 {
 			// After the step fails, the next three fit measurements are unfit.
 			be.setRounds(unfitFor(3))
-			return fmt.Errorf("12 MB free, floor 2 GB: %w", flow.ErrUnfit)
+			return flow.StepResult{}, fmt.Errorf("12 MB free, floor 2 GB: %w", flow.ErrUnfit)
 		}
-		return ctx.ResolveMarkdown("the plan")
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
 	})
 
 	code := app.cmdResolve(context.Background(), []string{"1"})
@@ -1542,9 +1542,9 @@ func TestResolve_FitnessWaitExhaustedExits(t *testing.T) {
 
 	// Pre-claim: fit. Mid-step: permanently unfit.
 	be := &fitGateBackend{Orchestrator: inner, rounds: unfitFor(0)}
-	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
 		be.setRounds(unfitFor(maxFitnessWaits + 10))
-		return fmt.Errorf("disk full: %w", flow.ErrUnfit)
+		return flow.StepResult{}, fmt.Errorf("disk full: %w", flow.ErrUnfit)
 	})
 
 	code := app.cmdResolve(context.Background(), []string{"1"})
@@ -1568,9 +1568,9 @@ func TestResolve_FitnessWaitInterruptedExits(t *testing.T) {
 
 	// Pre-claim: fit. Mid-step: permanently unfit.
 	be := &fitGateBackend{Orchestrator: inner, rounds: unfitFor(0)}
-	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
 		be.setRounds(unfitFor(999))
-		return fmt.Errorf("disk full: %w", flow.ErrUnfit)
+		return flow.StepResult{}, fmt.Errorf("disk full: %w", flow.ErrUnfit)
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1597,8 +1597,8 @@ func TestResolve_NonFitnessBlockExitsImmediately(t *testing.T) {
 	inner := fake.New()
 	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	be := &fitGateBackend{Orchestrator: inner}
-	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
-		return ctx.ResolveMarkdown("the plan")
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
 	})
 
 	// A preflight that always returns ErrBlocked — produces StatusBlocked
@@ -1668,9 +1668,9 @@ func blockedResolveApp(t *testing.T) (*App, *fake.Orchestrator, *bytes.Buffer, *
 	blockOn(t, be, be.Ref("1"), be.Ref("2"))
 	blockOn(t, be, be.Ref("1"), be.Ref("3"))
 	ran := false
-	app, out, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+	app, out, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
 		ran = true
-		return ctx.ResolveMarkdown("the plan")
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
 	})
 	return app, be, out, errBuf, &ran
 }
@@ -1775,8 +1775,8 @@ func TestCmdResolve_QuotaPrintedOnFailedStep(t *testing.T) {
 	t.Setenv(dispatchedByRunnerEnv, "")
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
-	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
-		return errors.New("boom")
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+		return flow.StepResult{}, errors.New("boom")
 	})
 
 	code := app.cmdResolve(context.Background(), nil)
@@ -1799,9 +1799,9 @@ func TestCmdResolve_QuotaPrintedOnParked(t *testing.T) {
 	t.Setenv(dispatchedByRunnerEnv, "")
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
-	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
 		// Return nil without resolving → parks the step.
-		return nil
+		return flow.StepResult{}, nil
 	})
 
 	code := app.cmdResolve(context.Background(), nil)
@@ -1851,8 +1851,8 @@ func TestCmdResolve_QuotaPrintedOnBlocked(t *testing.T) {
 	inner := fake.New()
 	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	be := &fitGateBackend{Orchestrator: inner}
-	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
-		return ctx.ResolveMarkdown("the plan")
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
 	})
 	// A preflight that always returns ErrBlocked — produces StatusBlocked.
 	app.Preflight = func(_ context.Context, _ *flow.Item) error {
@@ -1933,9 +1933,9 @@ func TestCmdResolve_HeldClaimSurvivesTheItemBecomingBlocked(t *testing.T) {
 	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	be.AddItem("3", flow.Item{Type: "task", Title: "still open"})
 	ran := false
-	app, out, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) error {
+	app, out, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
 		ran = true
-		return ctx.ResolveMarkdown("the plan")
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
 	})
 	// Claimed UNBLOCKED. The dependency is declared only afterwards.
 	if _, err := be.Claim(ctx, be.Ref("1"), nil); err != nil {

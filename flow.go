@@ -11,11 +11,11 @@ import (
 // a flow is). `types` is its remit: which item types are this binary's work,
 // gating listing and selection and nothing else.
 type Flow struct {
-	name         string
-	types        []ItemType
-	steps        []*step
-	stepByName   map[string]*step
-	stepByResult map[StepId]*step // keyed by the step's result id — ArtifactId or SignalId
+	name              string
+	types             []ItemType
+	steps             []*step
+	stepByDescription map[string]*step
+	stepByResult      map[StepId]*step // keyed by the step's result id — ArtifactId or SignalId
 	// entry is the one step carrying StepConfig{Entry: true}, recorded as it
 	// is registered. Derived from the declarations rather than a second copy
 	// of them: it is what makes a second entry refusable at the moment it is
@@ -31,22 +31,22 @@ type Flow struct {
 // visually-confusing variadic form.
 func NewFlow(name string, types []ItemType) *Flow {
 	return &Flow{
-		name:         name,
-		types:        types,
-		stepByName:   map[string]*step{},
-		stepByResult: map[StepId]*step{},
+		name:              name,
+		types:             types,
+		stepByDescription: map[string]*step{},
+		stepByResult:      map[StepId]*step{},
 	}
 }
 
 func (f *Flow) Name() string      { return f.name }
 func (f *Flow) Types() []ItemType { return f.types }
 
-// Steps returns the ordered registration list (state-independent), keyed by
-// step name.
+// Steps returns the ordered registration list (state-independent), as the
+// steps' descriptions.
 func (f *Flow) Steps() []string {
 	out := make([]string, len(f.steps))
 	for i, s := range f.steps {
-		out[i] = s.name
+		out[i] = s.description
 	}
 	return out
 }
@@ -59,51 +59,53 @@ func (f *Flow) RequireSignals() []SignalId {
 	return out
 }
 
-// AddStep registers a handler-produced artifact step. The handler MUST call
-// the matching ctx.Resolve* (per the artifact's ArtifactType in App.Artifacts)
-// before returning nil. Duplicate name or duplicate result panics.
-func (f *Flow) AddStep(name string, result ArtifactId, do StepHandler, cfg StepConfig) {
-	if name == "" {
-		panic("flow.AddStep: empty step name")
+// AddStep registers a handler-produced artifact step. The handler completes by
+// returning a StepResult whose payload matches the artifact's ArtifactType in
+// App.Artifacts. The first argument is a DESCRIPTION — display text, never an
+// identity; the step's identity is `result`. Duplicate description or duplicate
+// result panics.
+func (f *Flow) AddStep(description string, result ArtifactId, do StepHandler, cfg StepConfig) {
+	if description == "" {
+		panic("flow.AddStep: empty step description")
 	}
 	if result == "" {
 		panic("flow.AddStep: empty artifact id")
 	}
 	if do == nil {
-		panic(fmt.Sprintf("flow.AddStep: step %q has nil handler; use AwaitSignal for handlerless steps", name))
+		panic(fmt.Sprintf("flow.AddStep: step %q has nil handler; use AwaitSignal for handlerless steps", description))
 	}
-	if _, dup := f.stepByName[name]; dup {
-		panic(fmt.Sprintf("flow.AddStep: duplicate step name %q in flow %q", name, f.name))
+	if _, dup := f.stepByDescription[description]; dup {
+		panic(fmt.Sprintf("flow.AddStep: duplicate step description %q in flow %q", description, f.name))
 	}
 	if _, dup := f.stepByResult[StepId(result)]; dup {
 		panic(fmt.Sprintf("flow.AddStep: duplicate result %q in flow %q", result, f.name))
 	}
-	s := f.prepareStep("AddStep", stepArtifact, name, cfg)
+	s := f.prepareStep("AddStep", stepArtifact, description, cfg)
 	s.artifact = result
 	s.handler = do
 	f.appendStep(s, StepId(result))
 }
 
 // AddSignalStep registers a side-effect step that completes when `signal` is
-// set on the item. The handler MUST NOT call any ctx.Resolve* — signals are
-// never handler-writable. Duplicate name or duplicate signal panics.
-func (f *Flow) AddSignalStep(name string, signal SignalId, do StepHandler, cfg StepConfig) {
-	if name == "" {
-		panic("flow.AddSignalStep: empty step name")
+// set on the item. Its StepResult carries no payload — signals are never
+// handler-writable. Duplicate description or duplicate signal panics.
+func (f *Flow) AddSignalStep(description string, signal SignalId, do StepHandler, cfg StepConfig) {
+	if description == "" {
+		panic("flow.AddSignalStep: empty step description")
 	}
 	if signal == "" {
 		panic("flow.AddSignalStep: empty signal id")
 	}
 	if do == nil {
-		panic(fmt.Sprintf("flow.AddSignalStep: step %q has nil handler; use AwaitSignal for pure waits", name))
+		panic(fmt.Sprintf("flow.AddSignalStep: step %q has nil handler; use AwaitSignal for pure waits", description))
 	}
-	if _, dup := f.stepByName[name]; dup {
-		panic(fmt.Sprintf("flow.AddSignalStep: duplicate step name %q in flow %q", name, f.name))
+	if _, dup := f.stepByDescription[description]; dup {
+		panic(fmt.Sprintf("flow.AddSignalStep: duplicate step description %q in flow %q", description, f.name))
 	}
 	if _, dup := f.stepByResult[StepId(signal)]; dup {
 		panic(fmt.Sprintf("flow.AddSignalStep: duplicate result %q in flow %q", signal, f.name))
 	}
-	s := f.prepareStep("AddSignalStep", stepSignal, name, cfg)
+	s := f.prepareStep("AddSignalStep", stepSignal, description, cfg)
 	s.signal = signal
 	s.handler = do
 	f.appendStep(s, StepId(signal))
@@ -112,15 +114,15 @@ func (f *Flow) AddSignalStep(name string, signal SignalId, do StepHandler, cfg S
 // AwaitSignal registers a pure wait — no handler. The lifecycle item
 // completes when `signal` is set on the item by any means (another flow's
 // AddSignalStep, or an external event the orchestrator observes).
-func (f *Flow) AwaitSignal(name string, signal SignalId, cfg StepConfig) {
-	if name == "" {
-		panic("flow.AwaitSignal: empty step name")
+func (f *Flow) AwaitSignal(description string, signal SignalId, cfg StepConfig) {
+	if description == "" {
+		panic("flow.AwaitSignal: empty step description")
 	}
 	if signal == "" {
 		panic("flow.AwaitSignal: empty signal id")
 	}
-	if _, dup := f.stepByName[name]; dup {
-		panic(fmt.Sprintf("flow.AwaitSignal: duplicate step name %q in flow %q", name, f.name))
+	if _, dup := f.stepByDescription[description]; dup {
+		panic(fmt.Sprintf("flow.AwaitSignal: duplicate step description %q in flow %q", description, f.name))
 	}
 	if _, dup := f.stepByResult[StepId(signal)]; dup {
 		panic(fmt.Sprintf("flow.AwaitSignal: duplicate result %q in flow %q", signal, f.name))
@@ -131,7 +133,7 @@ func (f *Flow) AwaitSignal(name string, signal SignalId, cfg StepConfig) {
 	// written rather than left to mean nothing at runtime.
 	if cfg.Role != "" {
 		panic(fmt.Sprintf("flow.AwaitSignal: signal wait %q in flow %q declares Role %q; signal waits belong to no role",
-			name, f.name, cfg.Role))
+			description, f.name, cfg.Role))
 	}
 	// Nor may a wait finalize, for the same reason and with a sharper
 	// consequence. Only a step finalizes, by electing it as its route
@@ -144,9 +146,9 @@ func (f *Flow) AwaitSignal(name string, signal SignalId, cfg StepConfig) {
 	// catch.
 	if len(cfg.MayFinalize) > 0 {
 		panic(fmt.Sprintf("flow.AwaitSignal: signal wait %q in flow %q declares MayFinalize %v; a wait elects nothing, so it cannot finalize",
-			name, f.name, cfg.MayFinalize))
+			description, f.name, cfg.MayFinalize))
 	}
-	s := f.prepareStep("AwaitSignal", stepAwait, name, cfg)
+	s := f.prepareStep("AwaitSignal", stepAwait, description, cfg)
 	s.signal = signal
 	f.appendStep(s, StepId(signal))
 }
@@ -161,7 +163,7 @@ func (f *Flow) AwaitSignal(name string, signal SignalId, cfg StepConfig) {
 // (docs/flow-registration.md § Uniqueness invariants). `registrar` names the
 // call that was made, because a registration panic is read without a stack that
 // says which of the three it came from.
-func (f *Flow) prepareStep(registrar string, kind stepKind, name string, cfg StepConfig) *step {
+func (f *Flow) prepareStep(registrar string, kind stepKind, description string, cfg StepConfig) *step {
 	cfg = cfg.normalized()
 
 	// The second entry is refusable here — the first one is already recorded.
@@ -169,29 +171,29 @@ func (f *Flow) prepareStep(registrar string, kind stepKind, name string, cfg Ste
 	// ValidateGraph refuses that one.
 	if cfg.Entry && f.entry != nil {
 		panic(fmt.Sprintf("flow.%s: step %q in flow %q declares Entry, but step %q already does; exactly one entry",
-			registrar, name, f.name, f.entry.name))
+			registrar, description, f.name, f.entry.description))
 	}
 	if !cfg.Capture.Valid() {
 		panic(fmt.Sprintf("flow.%s: step %q in flow %q has Capture %q, which is not one of %v",
-			registrar, name, f.name, cfg.Capture, AllCaptureSources()))
+			registrar, description, f.name, cfg.Capture, AllCaptureSources()))
 	}
 	if !cfg.Needs.Valid() {
 		panic(fmt.Sprintf("flow.%s: step %q in flow %q has Needs %q, which is not one of %v",
-			registrar, name, f.name, cfg.Needs, AllNeedsStates()))
+			registrar, description, f.name, cfg.Needs, AllNeedsStates()))
 	}
 	if !cfg.Leaves.Valid() {
 		panic(fmt.Sprintf("flow.%s: step %q in flow %q has Leaves %q, which is not one of %v",
-			registrar, name, f.name, cfg.Leaves, AllLeavesStates()))
+			registrar, description, f.name, cfg.Leaves, AllLeavesStates()))
 	}
 	seenDisposition := map[Disposition]bool{}
 	for _, d := range cfg.MayFinalize {
 		if !d.Valid() {
 			panic(fmt.Sprintf("flow.%s: step %q in flow %q may finalize as %q, which is not one of %v",
-				registrar, name, f.name, d, AllDispositions()))
+				registrar, description, f.name, d, AllDispositions()))
 		}
 		if seenDisposition[d] {
 			panic(fmt.Sprintf("flow.%s: step %q in flow %q lists disposition %q twice in MayFinalize",
-				registrar, name, f.name, d))
+				registrar, description, f.name, d))
 		}
 		seenDisposition[d] = true
 	}
@@ -202,11 +204,11 @@ func (f *Flow) prepareStep(registrar string, kind stepKind, name string, cfg Ste
 	for _, id := range cfg.Next {
 		if id == "" {
 			panic(fmt.Sprintf("flow.%s: step %q in flow %q declares an empty successor id in Next",
-				registrar, name, f.name))
+				registrar, description, f.name))
 		}
 		if seenNext[id] {
 			panic(fmt.Sprintf("flow.%s: step %q in flow %q lists successor %q twice in Next",
-				registrar, name, f.name, id))
+				registrar, description, f.name, id))
 		}
 		seenNext[id] = true
 	}
@@ -218,7 +220,7 @@ func (f *Flow) prepareStep(registrar string, kind stepKind, name string, cfg Ste
 	// Flow.RequireSignals already copies on the way out for the same reason.
 	return &step{
 		kind:        kind,
-		name:        name,
+		description: description,
 		role:        cfg.Role,
 		entry:       cfg.Entry,
 		next:        slices.Clone(cfg.Next),
@@ -234,11 +236,34 @@ func (f *Flow) prepareStep(registrar string, kind stepKind, name string, cfg Ste
 // by name and result. Shared tail of AddStep / AddSignalStep / AwaitSignal.
 func (f *Flow) appendStep(s *step, resultKey StepId) {
 	f.steps = append(f.steps, s)
-	f.stepByName[s.name] = s
+	f.stepByDescription[s.description] = s
 	f.stepByResult[resultKey] = s
 	if s.entry {
 		f.entry = s
 	}
+}
+
+// DeclaresRole reports whether this flow declares the given role — true when
+// some registered step carries the tag.
+//
+// That is the whole of "the roles a flow declares" today, and it is one
+// predicate rather than a set every caller re-derives: a role reference that
+// names no declaration must be refused loudly wherever it is read
+// (docs/resolution.md § Whose move it is), and a second answer to what is
+// declared is a second place that judgement can differ.
+//
+// The empty name is never declared: a step with no role tag declares nothing,
+// so a lookup on "" is a lookup on nothing.
+func (f *Flow) DeclaresRole(role RoleName) bool {
+	if role == "" {
+		return false
+	}
+	for _, s := range f.steps {
+		if s.role == role {
+			return true
+		}
+	}
+	return false
 }
 
 // RequireSignal adds an eligibility precondition. An item is only begun once
@@ -330,10 +355,10 @@ func (f *Flow) Position(it *Item) (Position, error) {
 // until something appends an entry, Position would report "no entry declared"
 // for every item, which the advance reads as "nothing left to do".
 
-// Pending returns true iff the named lifecycle item is unresolved on the
-// given Item.
-func (f *Flow) Pending(it *Item, name string) bool {
-	st := f.stepByName[name]
+// Pending returns true iff the lifecycle item with this description is
+// unresolved on the given Item.
+func (f *Flow) Pending(it *Item, description string) bool {
+	st := f.stepByDescription[description]
 	if st == nil {
 		return false
 	}
@@ -381,7 +406,7 @@ func (f *Flow) stepPending(state *Item, st *step) bool {
 func (f *Flow) DeriveNext(it *Item) (string, bool) {
 	for _, st := range f.steps {
 		if f.stepPending(it, st) {
-			return st.name, true
+			return st.description, true
 		}
 	}
 	return "", false
@@ -400,10 +425,12 @@ const (
 // LifecycleItem is the orchestrator-facing view of one entry in the flow's
 // ordered list. Returned by Flow.Item / Flow.Items.
 type LifecycleItem struct {
-	Name       string
-	Kind       LifecycleKind
-	ArtifactId ArtifactId // set when Kind==LifecycleArtifact
-	SignalId   SignalId   // set when Kind==LifecycleSignal or LifecycleAwait
+	// Description is the human label the registration gave this item. Display
+	// only: nothing is keyed on it, and the step's identity is Result().
+	Description string
+	Kind        LifecycleKind
+	ArtifactId  ArtifactId // set when Kind==LifecycleArtifact
+	SignalId    SignalId   // set when Kind==LifecycleSignal or LifecycleAwait
 	// Required is hard-set to true for every lifecycle item. Step optionality
 	// is gone — routing subsumes it — but the checklist that reads this has
 	// not been retired yet (cli/cmd_status.go still renders it), so the field
@@ -433,10 +460,10 @@ func (li LifecycleItem) Result() StepId {
 	return StepId(li.SignalId)
 }
 
-// Item returns the LifecycleItem for the named step. ok==false if the name is
-// unknown to this flow.
-func (f *Flow) Item(name string) (LifecycleItem, bool) {
-	st, ok := f.stepByName[name]
+// Item returns the LifecycleItem with this description. ok==false if the
+// description is unknown to this flow.
+func (f *Flow) Item(description string) (LifecycleItem, bool) {
+	st, ok := f.stepByDescription[description]
 	if !ok {
 		return LifecycleItem{}, false
 	}
@@ -449,7 +476,7 @@ func (f *Flow) Item(name string) (LifecycleItem, bool) {
 // The result id is a step's identity — it keys the budget record and it is the
 // only name `grant` accepts — so callers resolving an operator-supplied or
 // park-recorded id look it up here rather than through Item (which is keyed by
-// the human label).
+// the human description).
 func (f *Flow) ItemByResult(key StepId) (LifecycleItem, bool) {
 	st, ok := f.stepByResult[key]
 	if !ok {
@@ -469,7 +496,7 @@ func (f *Flow) Items() []LifecycleItem {
 
 func toLifecycleItem(st *step) LifecycleItem {
 	li := LifecycleItem{
-		Name: st.name,
+		Description: st.description,
 		// Every lifecycle item is required: there is no step optionality to
 		// report. See LifecycleItem.Required.
 		Required: true,

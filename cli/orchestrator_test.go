@@ -27,17 +27,17 @@ func itemRefFor(id string) flow.ItemRef {
 
 func TestWriteContract_BranchViolation(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			wt, err := ctx.Worktree()
 			if err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			// Switch branch — violates MayBranch=false.
 			if _, err := wt.Branch(ctx.Context(), "rogue-branch", ""); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("done")
-		}, flow.StepConfig{Writes: flow.WriteContract{}}) // zero = writes nothing
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}}) // zero = writes nothing
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -57,17 +57,17 @@ func TestWriteContract_BranchViolation(t *testing.T) {
 
 func TestWriteContract_CommitViolation(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			wt, err := ctx.Worktree()
 			if err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			// Commit — violates MayCommit=false.
 			if err := wt.Commit(ctx.Context(), "rogue commit"); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("done")
-		}, flow.StepConfig{Writes: flow.WriteContract{}})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -87,13 +87,13 @@ func TestWriteContract_CommitViolation(t *testing.T) {
 
 func TestWriteContract_DirtyTreeViolation(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			// Acquire the worktree to trigger snapshot capture.
 			if _, err := ctx.Worktree(); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("done")
-		}, flow.StepConfig{Writes: flow.WriteContract{}})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
 	}, &stubAgent{name: "stub"})
 
 	// Dirty the worktree BEFORE dispatch so IsDirty returns true after the
@@ -121,16 +121,16 @@ func TestWriteContract_DirtyTreeViolation(t *testing.T) {
 
 func TestWriteContract_AllowedCommit(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("impl", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("impl", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			wt, err := ctx.Worktree()
 			if err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			if err := wt.Commit(ctx.Context(), "allowed commit"); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("done")
-		}, flow.StepConfig{Writes: flow.WriteContract{MayCommit: true}})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayCommit: true}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -144,10 +144,10 @@ func TestWriteContract_AllowedCommit(t *testing.T) {
 
 func TestWriteContract_NoWorktreeAcquired(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			// Handler never calls ctx.Worktree() — no check should run.
-			return ctx.ResolveMarkdown("done")
-		}, flow.StepConfig{Writes: flow.WriteContract{}})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -161,17 +161,17 @@ func TestWriteContract_NoWorktreeAcquired(t *testing.T) {
 
 func TestWriteContract_TransientSkipsCheck(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			wt, err := ctx.Worktree()
 			if err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			// Switch branch — would be a violation, but handler returns
 			// ErrTransient, which returns early before the check.
 			if _, err := wt.Branch(ctx.Context(), "rogue", ""); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return flow.ErrTransient
+			return flow.StepResult{}, flow.ErrTransient
 		}, flow.StepConfig{Writes: flow.WriteContract{}})
 	}, &stubAgent{name: "stub"})
 
@@ -190,16 +190,16 @@ func TestWriteContract_TransientSkipsCheck(t *testing.T) {
 
 func TestWriteContract_ViolationChargesInvocation(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			wt, err := ctx.Worktree()
 			if err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			if _, err := wt.Branch(ctx.Context(), "rogue", ""); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("done")
-		}, flow.StepConfig{Writes: flow.WriteContract{}})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -220,16 +220,16 @@ func TestWriteContract_ViolationChargesInvocation(t *testing.T) {
 
 func TestWriteContract_AllowedBranch(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("branch", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("branch", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			wt, err := ctx.Worktree()
 			if err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			if _, err := wt.Branch(ctx.Context(), "feature-x", ""); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("done")
-		}, flow.StepConfig{Writes: flow.WriteContract{MayBranch: true}})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayBranch: true}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -243,18 +243,18 @@ func TestWriteContract_AllowedBranch(t *testing.T) {
 
 func TestWriteContract_MayBranch_HeadChanges(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("close-branch", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("close-branch", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			wt, err := ctx.Worktree()
 			if err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			// Switch to main — what close-branch does when leaving the claim
 			// branch.
 			if _, err := wt.Branch(ctx.Context(), "main", ""); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("done")
-		}, flow.StepConfig{Writes: flow.WriteContract{MayBranch: true}})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayBranch: true}})
 	}, &stubAgent{name: "stub"})
 
 	// Start on the claim branch with a different SHA than main, so the
@@ -276,18 +276,18 @@ func TestWriteContract_MayBranch_HeadChanges(t *testing.T) {
 
 func TestWriteContract_MayBranch_NoBranchChange_CommitCaught(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("sneaky", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("sneaky", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			wt, err := ctx.Worktree()
 			if err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			// Do NOT switch branch, but do commit — MayBranch alone should
 			// not exempt this.
 			if err := wt.Commit(ctx.Context(), "sneaky commit"); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("done")
-		}, flow.StepConfig{Writes: flow.WriteContract{MayBranch: true}})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayBranch: true}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -307,12 +307,12 @@ func TestWriteContract_MayBranch_NoBranchChange_CommitCaught(t *testing.T) {
 
 func TestWriteContract_AllowedDirtyTree(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("edit", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("edit", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			if _, err := ctx.Worktree(); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("done")
-		}, flow.StepConfig{Writes: flow.WriteContract{MayEditTree: true}})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayEditTree: true}})
 	}, &stubAgent{name: "stub"})
 
 	wt, _ := be.Worktree(context.Background(), claim.ItemRef)
@@ -330,17 +330,17 @@ func TestWriteContract_AllowedDirtyTree(t *testing.T) {
 
 func TestWriteContract_RefusedSkipsCheck(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			wt, err := ctx.Worktree()
 			if err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			// Switch branch — would be a violation, but handler returns
 			// ErrRefused, which returns early before the check.
 			if _, err := wt.Branch(ctx.Context(), "rogue", ""); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return flow.ErrRefused
+			return flow.StepResult{}, flow.ErrRefused
 		}, flow.StepConfig{Writes: flow.WriteContract{}})
 	}, &stubAgent{name: "stub"})
 
@@ -359,20 +359,20 @@ func TestWriteContract_RefusedSkipsCheck(t *testing.T) {
 
 func TestWriteContract_PartialContract_CommitAllowedBranchNot(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("impl", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("impl", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			wt, err := ctx.Worktree()
 			if err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			// Commit is allowed, but branch switch is not.
 			if err := wt.Commit(ctx.Context(), "ok commit"); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			if _, err := wt.Branch(ctx.Context(), "rogue", ""); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("done")
-		}, flow.StepConfig{Writes: flow.WriteContract{MayCommit: true}}) // MayBranch defaults false
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayCommit: true}}) // MayBranch defaults false
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -480,9 +480,9 @@ func newDiscardWriter() *discardWriter { return &discardWriter{} }
 func TestRunOne_SeedsAndDispatchesFirstStep(t *testing.T) {
 	a := &stubAgent{name: "stub"}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, a)
 
@@ -521,11 +521,11 @@ func (r *recordingTelemetry) StepProgress(ctx context.Context, claim flow.Claim,
 func TestRunOne_AutoEmitsStepEntry(t *testing.T) {
 	tel := &recordingTelemetry{}
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 
 			ctx.Notify("write plan", "writing")
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, &stubAgent{name: "stub"})
 	app.Telemetry = tel
@@ -547,9 +547,9 @@ func TestRunOne_AutoEmitsStepEntry(t *testing.T) {
 func TestRunOne_AutoEmitSkipsWhenTelemetryNil(t *testing.T) {
 	// Sanity: with no telemetry installed RunOne still completes successfully.
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("noop", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("ok")
-		}, flow.StepConfig{})
+		f.AddStep("noop", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("ok"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, &stubAgent{name: "stub"})
 	if app.Telemetry != nil {
@@ -575,17 +575,17 @@ func TestRunOne_WritesAndClearsRunningRecord(t *testing.T) {
 	var midFlightRec *clistate.RunningRecord
 
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			// Read the running record from inside the handler.
 			rec, err := clistate.LoadRunning()
 			mu.Lock()
 			midFlightRec = rec
 			mu.Unlock()
 			if err != nil {
-				return fmt.Errorf("LoadRunning inside handler: %w", err)
+				return flow.StepResult{}, fmt.Errorf("LoadRunning inside handler: %w", err)
 			}
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	if _, err := RunOne(context.Background(), app, claim); err != nil {
@@ -637,9 +637,9 @@ func (b noopSeedBackend) SeedState(ctx context.Context, ref flow.ItemRef, specs 
 func TestRunOne_SeedFailureErrorsOutNoStep(t *testing.T) {
 	a := &stubAgent{name: "stub"}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("step handler ran despite seeding failure — must not happen")
-			return nil
+			return flow.StepResult{}, nil
 		}, flow.StepConfig{})
 
 	}, a)
@@ -660,9 +660,9 @@ func TestRunOne_SeedFailureErrorsOutNoStep(t *testing.T) {
 func TestRunOne_UnseededAfterNoopSeedErrorsOut(t *testing.T) {
 	a := &stubAgent{name: "stub"}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("step handler ran against an unseeded item — must not happen")
-			return nil
+			return flow.StepResult{}, nil
 		}, flow.StepConfig{})
 
 	}, a)
@@ -680,10 +680,10 @@ func TestRunOne_UnseededAfterNoopSeedErrorsOut(t *testing.T) {
 func TestRunOne_PreflightSkipsBeforeFlowSelection(t *testing.T) {
 	handlerCalled := false
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			handlerCalled = true
-			return ctx.ResolveMarkdown("should not run")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("should not run"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, &stubAgent{name: "stub"})
 
@@ -716,9 +716,9 @@ func TestRunOne_PreflightSkipsBeforeFlowSelection(t *testing.T) {
 
 func TestRunOne_PreflightPassThrough(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, &stubAgent{name: "stub"})
 
@@ -770,8 +770,8 @@ func TestChainPreflight(t *testing.T) {
 func TestRunOne_ParksOnInvocationsExhaustion(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		// max 1 invocation, but handler returns error each time
-		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) error {
-			return errors.New("boom")
+		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, errors.New("boom")
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxInvocations: 1}}
@@ -810,13 +810,13 @@ func TestRunOne_RespectsPromptsBudget(t *testing.T) {
 		},
 	}
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("loopy", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("loopy", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1"}); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 
 			_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p2"})
-			return err
+			return flow.StepResult{}, err
 		}, flow.StepConfig{})
 
 	}, a)
@@ -851,15 +851,15 @@ func TestRunOne_AgentRequestCarriesRemainingCostHeadroom(t *testing.T) {
 		},
 	}
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("two prompts", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("two prompts", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1"}); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p2"}); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxCostUSD: 5}}
 
@@ -894,17 +894,17 @@ func TestRunOne_HandlerCostCeilingIsNarrowedNotWidened(t *testing.T) {
 		},
 	}
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("two prompts", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("two prompts", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			// Tighter than the grant: must survive.
 			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1", MaxCostUSD: 1}); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			// Looser than the grant: must be cut down to it.
 			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p2", MaxCostUSD: 9}); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxCostUSD: 5}}
 
@@ -939,12 +939,12 @@ func TestRunOne_CostCapFailureParksOnCost(t *testing.T) {
 		}},
 	}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("spendy", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("spendy", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1"}); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("never reached")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("never reached"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxCostUSD: 20}}
 
@@ -1007,12 +1007,12 @@ func TestRunOne_CostCapWithoutAGrantIsAPlainFailure(t *testing.T) {
 		}},
 	}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("spendy", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("spendy", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1"}); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("never reached")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("never reached"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 	app.Orchestrator = zeroCostGrantBackend{Orchestrator: be}
 
@@ -1046,15 +1046,15 @@ func TestRunOne_NoCostGrantLeavesTheHandlerCeilingAlone(t *testing.T) {
 		},
 	}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("two prompts", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("two prompts", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1", MaxCostUSD: 3}); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p2", MaxCostUSD: 3}); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 	app.Orchestrator = zeroCostGrantBackend{Orchestrator: be}
 
@@ -1089,15 +1089,15 @@ func TestRunOne_SpentGrantParksInsteadOfDispatchingAnUncappedTurn(t *testing.T) 
 		},
 	}
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("two prompts", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("two prompts", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1"}); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p2"}); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.ResolveMarkdown("never reached")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("never reached"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxCostUSD: 5}}
 
@@ -1121,9 +1121,9 @@ func TestRunOne_SpentGrantParksInsteadOfDispatchingAnUncappedTurn(t *testing.T) 
 
 func TestRunOne_ParksOnTimeout(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("slow", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("slow", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			<-ctx.Context().Done()
-			return ctx.Context().Err()
+			return flow.StepResult{}, ctx.Context().Err()
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {Timeout: 50 * time.Millisecond}}
@@ -1170,18 +1170,18 @@ func (w *countingPatchWorktree) CapturePatch(ctx context.Context) ([]byte, error
 // axis, and invocation accounting.
 func TestRunOne_TimeoutParkDoesNotCapturePatch(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("slow", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("slow", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			// Commit first, so the worktree is clean when the deadline fires
 			// — exactly the merged-land shape from the bug report.
 			wt, err := ctx.Worktree()
 			if err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			if err := wt.Commit(ctx.Context(), "work"); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			<-ctx.Context().Done()
-			return ctx.Context().Err()
+			return flow.StepResult{}, ctx.Context().Err()
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {Timeout: 50 * time.Millisecond}}
@@ -1207,14 +1207,16 @@ func TestRunOne_TimeoutParkDoesNotCapturePatch(t *testing.T) {
 
 func TestRunOne_SignalStepAwaitsSignal(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddSignalStep("create pr", "pr-open", func(ctx flow.StepCtx) error {
-
-			return nil
-		}, flow.StepConfig{})
+		// A signal step completes by electing its route and carries no
+		// payload: the signal is the orchestrator's observation, never the
+		// handler's to write.
+		f.AddSignalStep("create pr", "pr-open", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, &stubAgent{name: "stub"})
 
-	// First run dispatches the handler (returns nil). The signal isn't
+	// First run dispatches the handler, which completes. The signal isn't
 	// set, so the step stays pending — but RunOne returns done for this
 	// invocation because the handler didn't error.
 	res, err := RunOne(context.Background(), app, claim)
@@ -1262,8 +1264,8 @@ func TestRunOne_AwaitSignalSkipsHandlerless(t *testing.T) {
 
 func TestRunOne_QuestionsPersistedAndPark(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("ask", "plan", func(ctx flow.StepCtx) error {
-			return ctx.AskQuestions(
+		f.AddStep("ask", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, ctx.AskQuestions(
 				flow.AskYesNo("ship", "Ship it?"),
 				flow.AskChoice("lib", "Which?", "a", "b"),
 			)
@@ -1287,9 +1289,9 @@ func TestRunOne_QuestionsPersistedAndPark(t *testing.T) {
 func TestRunOne_WrongResolveReturnsTypeMismatch(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
 		// Declared markdown, handler calls ResolveCommitHash.
-		f.AddStep("wrong", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveCommitHash("deadbeef")
-		}, flow.StepConfig{})
+		f.AddStep("wrong", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("deadbeef"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, &stubAgent{name: "stub"})
 
@@ -1304,8 +1306,8 @@ func TestRunOne_WrongResolveReturnsTypeMismatch(t *testing.T) {
 
 func TestRunOne_NilReturnWithoutResolveParks(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("forgetful", "plan", func(ctx flow.StepCtx) error {
-			return nil
+		f.AddStep("forgetful", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, nil
 		}, flow.StepConfig{})
 
 	}, &stubAgent{name: "stub"})
@@ -1322,7 +1324,7 @@ func TestRunOne_NilReturnWithoutResolveParks(t *testing.T) {
 func TestApp_Validate_RejectsUnknownArtifact(t *testing.T) {
 	be := fake.New()
 	f := flow.NewFlow("x", nil)
-	f.AddStep("step", "missing-artifact", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
+	f.AddStep("step", "missing-artifact", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{})
 	app := App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
@@ -1339,8 +1341,8 @@ func TestApp_Validate_RejectsUnsupportedArtifact(t *testing.T) {
 	// Restrict the fake to only "plan" — "report" is then unrecordable.
 	be.SetSupportedArtifacts(flow.Artifact("plan", flow.ArtifactMarkdown))
 	f := flow.NewFlow("x", []flow.ItemType{"task"})
-	f.AddStep("plan", "plan", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
-	f.AddStep("report", "report", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
+	f.AddStep("plan", "plan", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{})
+	f.AddStep("report", "report", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{})
 	app := App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
@@ -1362,7 +1364,7 @@ func TestApp_Validate_RejectsArtifactTypeMismatch(t *testing.T) {
 	// resolve-time.
 	be.SetSupportedArtifacts(flow.Artifact("plan", flow.ArtifactMarkdown))
 	f := flow.NewFlow("x", []flow.ItemType{"task"})
-	f.AddStep("plan", "plan", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
+	f.AddStep("plan", "plan", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{})
 	app := App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
@@ -1377,7 +1379,7 @@ func TestApp_Validate_RejectsArtifactTypeMismatch(t *testing.T) {
 func TestApp_Validate_RejectsUnsupportedSignal(t *testing.T) {
 	be := fake.New() // no signals supported
 	f := flow.NewFlow("x", nil)
-	f.AddSignalStep("sig", "pr-open", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
+	f.AddSignalStep("sig", "pr-open", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{})
 	app := App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
@@ -1399,7 +1401,7 @@ func TestSelectFlow_RequireSignalGate(t *testing.T) {
 	be := fake.New(flow.Signal("pr-open", "x"))
 	f := flow.NewFlow("maintainer", []flow.ItemType{"task"})
 	f.RequireSignal("pr-open")
-	f.AddStep("merge", "commit", func(flow.StepCtx) error { return nil }, flow.StepConfig{})
+	f.AddStep("merge", "commit", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{})
 
 	app := &App{
 		Orchestrator: be,
@@ -1479,9 +1481,9 @@ func TestRunOne_RefusesFinalizeWhenRequiredArtifactPending(t *testing.T) {
 		// RequireSignal "pr-open" never set, so IsReady → false →
 		// SelectFlow returns nil. The flow's compiled-in step is unreachable.
 		f.RequireSignal("pr-open")
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("step handler ran despite gated flow — must not happen")
-			return nil
+			return flow.StepResult{}, nil
 		}, flow.StepConfig{})
 
 	}, a)
@@ -1515,9 +1517,9 @@ func TestRunOne_RefusesFinalizeWhenRequiredArtifactPending(t *testing.T) {
 func unmatchedTypeApp(t *testing.T, item flow.Item) (*App, *fake.Orchestrator, flow.Claim) {
 	t.Helper()
 	return testAppItem(t, item, []flow.ItemType{"task", "bug"}, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("step handler ran for an item outside the remit — must not happen")
-			return nil
+			return flow.StepResult{}, nil
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 }
@@ -1598,10 +1600,10 @@ func TestRunOne_RemitIsNotConsultedOnceTheJournalHasEntries(t *testing.T) {
 		},
 		[]flow.ItemType{"task", "bug"},
 		func(f *flow.Flow) {
-			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 				ran = true
-				return ctx.ResolveMarkdown("the plan")
-			}, flow.StepConfig{})
+				return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+			}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 		}, &stubAgent{name: "stub"})
 	wrapped := &finalizingBackend{Orchestrator: be}
 	app.Orchestrator = wrapped
@@ -1678,9 +1680,9 @@ func TestRunOne_UniversalFlowIsNotATypeMismatch(t *testing.T) {
 			// reaches the pre-dispatch region with the flow still accepting
 			// the item's type.
 			f.RequireSignal("pr-open")
-			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-				return ctx.ResolveMarkdown("ignored")
-			}, flow.StepConfig{})
+			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+				return ctx.Finalize(flow.DispositionResolved, "done").Markdown("ignored"), nil
+			}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 		}, &stubAgent{name: "stub"})
 	wrapped := &finalizingBackend{Orchestrator: be}
 	app.Orchestrator = wrapped
@@ -1734,9 +1736,9 @@ func TestRunOne_FinalizesWhenAllRequiredArtifactsResolved(t *testing.T) {
 		// Same shape as the refusal test: RequireSignal never set, so
 		// SelectFlow returns nil unconditionally.
 		f.RequireSignal("pr-open")
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("ignored")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("ignored"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, a)
 	// Backend with Finalize implemented, no pending artifacts injected.
@@ -1813,21 +1815,21 @@ func TestAppStepBudget_NilPolicyIsAllDefaults(t *testing.T) {
 func TestRunOne_GrantedTimeoutOverridesStepBudget(t *testing.T) {
 	var deadlines []time.Duration
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("slow", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("slow", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			dl, ok := ctx.Context().Deadline()
 			if !ok {
 				t.Error("handler context has no deadline")
-				return nil
+				return flow.StepResult{}, nil
 			}
 			deadlines = append(deadlines, time.Until(dl))
 			// Outruns the 50ms step budget, fits inside the granted second.
 			select {
 			case <-ctx.Context().Done():
-				return ctx.Context().Err()
+				return flow.StepResult{}, ctx.Context().Err()
 			case <-time.After(150 * time.Millisecond):
 			}
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {Timeout: 50 * time.Millisecond}}
 
@@ -1867,15 +1869,15 @@ func TestRunOne_GrantedTimeoutOverridesStepBudget(t *testing.T) {
 func TestRunOne_BareGrantRecoversAStepOutOfTimeAndInvocations(t *testing.T) {
 	var runs int
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("slow", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("slow", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			runs++
 			select {
 			case <-ctx.Context().Done():
-				return ctx.Context().Err()
+				return flow.StepResult{}, ctx.Context().Err()
 			case <-time.After(150 * time.Millisecond):
 			}
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations: 1,
@@ -1948,39 +1950,34 @@ type nilCapturingWorktree struct{ flow.Worktree }
 func (w *nilCapturingWorktree) CapturePatch(ctx context.Context) ([]byte, error) { return nil, nil }
 
 // An EMPTY PatchBody is legal. A backend that attaches the diff out-of-band
-// has nothing to put in the body: the handler resolves with a zero body to say
-// "I'm done — verify the side effect", and the backend confirms it. cli must
-// pass that through rather than rejecting it one step before the check that
-// actually knows where the evidence lives.
+// has nothing to put in the body: the handler completes with a zero body to say
+// "I'm done — verify the side effect", and the backend confirms it. The capture
+// path must pass that through rather than rejecting it one step before the
+// check that actually knows where the evidence lives.
 func TestResolvePatch_EmptyBodyResolvesForOutOfBandBackend(t *testing.T) {
-	var resolveErr error
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("attach", "implementation", func(ctx flow.StepCtx) error {
+		f.AddStep("attach", "implementation", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			// Same shape as an out-of-band handler: capture yields no bytes,
-			// resolve with an empty body anyway.
+			// complete with an empty body anyway.
 			wt, err := ctx.Worktree()
 			if err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			patch, err := wt.CapturePatch(ctx.Context())
 			if err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
 			if len(patch) != 0 {
 				t.Errorf("CapturePatch returned %d bytes, want 0 for an out-of-band backend", len(patch))
 			}
-			resolveErr = ctx.ResolvePatch(flow.PatchBody{})
-			return resolveErr
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Patch(flow.PatchBody{}), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Orchestrator = &outOfBandPatchBackend{Orchestrator: be, evidence: true}
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
 		t.Fatalf("RunOne: %v", err)
-	}
-	if resolveErr != nil {
-		t.Fatalf("ResolvePatch(empty body) = %v, want nil (out-of-band attachment is legal)", resolveErr)
 	}
 	if res.Status != "done" {
 		t.Fatalf("res = %+v, want done", res)
@@ -1992,22 +1989,21 @@ func TestResolvePatch_EmptyBodyResolvesForOutOfBandBackend(t *testing.T) {
 }
 
 // The backend — not cli — decides an empty body is wrong, and its message is
-// the one the handler sees.
+// the one the invocation reports.
 func TestResolvePatch_BackendRejectsMissingEvidence(t *testing.T) {
-	var resolveErr error
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("attach", "implementation", func(ctx flow.StepCtx) error {
-			resolveErr = ctx.ResolvePatch(flow.PatchBody{})
-			return resolveErr
-		}, flow.StepConfig{})
+		f.AddStep("attach", "implementation", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Patch(flow.PatchBody{}), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Orchestrator = &outOfBandPatchBackend{Orchestrator: be, evidence: false}
 
-	if _, err := RunOne(context.Background(), app, claim); err != nil {
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
-	if resolveErr == nil || !strings.Contains(resolveErr.Error(), "no implementation evidence") {
-		t.Fatalf("ResolvePatch error = %v, want the backend's own evidence message", resolveErr)
+	if res.Status != "failed" || !strings.Contains(res.Reason, "no implementation evidence") {
+		t.Fatalf("res = %+v, want failed carrying the backend's own evidence message", res)
 	}
 	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if rec := state.Artifact("implementation"); rec.Resolved {
@@ -2015,12 +2011,12 @@ func TestResolvePatch_BackendRejectsMissingEvidence(t *testing.T) {
 	}
 }
 
-// A non-empty diff still resolves normally.
+// A non-empty diff still captures normally.
 func TestResolvePatch_AcceptsNonEmptyDiff(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("attach", "implementation", func(ctx flow.StepCtx) error {
-			return ctx.ResolvePatch(flow.PatchBody{Diff: []byte("diff --git a/x b/x\n"), BaseBranch: "main"})
-		}, flow.StepConfig{})
+		f.AddStep("attach", "implementation", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Patch(flow.PatchBody{Diff: []byte("diff --git a/x b/x\n"), BaseBranch: "main"}), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -2042,9 +2038,9 @@ func TestResolvePatch_AcceptsNonEmptyDiff(t *testing.T) {
 // re-runs forever against a gate only a human can clear.
 func TestRunOne_PreflightErrBlockedReportsBlocked(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("never runs", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("never runs", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("handler must not run when preflight refuses")
-			return nil
+			return flow.StepResult{}, nil
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	app.Preflight = func(context.Context, *flow.Item) error {
@@ -2067,7 +2063,7 @@ func TestRunOne_PreflightErrBlockedReportsBlocked(t *testing.T) {
 // verdict must not reclassify every gate.
 func TestRunOne_PlainPreflightErrorStillSkips(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("never runs", "plan", func(ctx flow.StepCtx) error { return nil }, flow.StepConfig{})
+		f.AddStep("never runs", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	app.Preflight = func(context.Context, *flow.Item) error {
 		return errors.New("operator set the manual flag")
@@ -2129,9 +2125,9 @@ func (b *emptyAskBackend) Park(ctx context.Context, ref flow.ItemRef, req flow.P
 func TestRunOne_AskQuestionWithoutAnIdFailsInsteadOfParking(t *testing.T) {
 	var handlerErr error
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("asks", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("asks", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			handlerErr = ctx.AskQuestions(flow.AskText("base", "which base branch?"))
-			return handlerErr
+			return flow.StepResult{}, handlerErr
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	backend := &emptyAskBackend{Orchestrator: be}
@@ -2168,8 +2164,8 @@ func TestRunOne_AskQuestionWithoutAnIdFailsInsteadOfParking(t *testing.T) {
 // naming the route that works.
 func TestRunOne_HandlerQuestionParkFailsTheStep(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("asks", "plan", func(ctx flow.StepCtx) error {
-			return ctx.Park(flow.ParkRequest{
+		f.AddStep("asks", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, ctx.Park(flow.ParkRequest{
 				Kind:   flow.ParkQuestion,
 				Reason: "which database?",
 			})
@@ -2188,8 +2184,8 @@ func TestRunOne_HandlerQuestionParkFailsTheStep(t *testing.T) {
 // catches this door too; this test fails if it is ever moved into stepCtx.Park.
 func TestRunOne_HandBuiltQuestionParkSentinelFailsTheStep(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("asks", "plan", func(ctx flow.StepCtx) error {
-			return flow.ErrPark{Req: flow.ParkRequest{
+		f.AddStep("asks", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, flow.ErrPark{Req: flow.ParkRequest{
 				Kind:   flow.ParkQuestion,
 				Reason: "which database?",
 			}}
@@ -2209,8 +2205,8 @@ func TestRunOne_HandBuiltQuestionParkSentinelFailsTheStep(t *testing.T) {
 // no question, so admitting it writes exactly the park `answer` cannot clear.
 func TestRunOne_QuestionParkStampedByTheHandlerIsStillRefused(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("asks", "plan", func(ctx flow.StepCtx) error {
-			return ctx.Park(flow.ParkRequest{
+		f.AddStep("asks", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, ctx.Park(flow.ParkRequest{
 				Kind:    flow.ParkQuestion,
 				Step:    "plan",
 				Reason:  "which database?",
@@ -2261,8 +2257,8 @@ func assertQuestionParkRefused(t *testing.T, be *fake.Orchestrator, claim flow.C
 // guard that had refused the park outright.
 func TestRunOne_NonQuestionParkStillParks(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("blocks", "plan", func(ctx flow.StepCtx) error {
-			return ctx.Park(flow.ParkRequest{Kind: flow.ParkBlocked, Reason: "waiting on infra"})
+		f.AddStep("blocks", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, ctx.Park(flow.ParkRequest{Kind: flow.ParkBlocked, Reason: "waiting on infra"})
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 
@@ -2307,8 +2303,8 @@ func (b *askedAtBackend) AskQuestion(ctx context.Context, ref flow.ItemRef, q fl
 func TestRunOne_AskRouteParkCarriesTheBackendsAskTime(t *testing.T) {
 	askedAt := time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("asks", "plan", func(ctx flow.StepCtx) error {
-			return ctx.AskQuestions(flow.AskText("base", "which base branch?"))
+		f.AddStep("asks", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, ctx.AskQuestions(flow.AskText("base", "which base branch?"))
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	app.Orchestrator = &askedAtBackend{Orchestrator: be, askedAt: askedAt}
@@ -2336,8 +2332,8 @@ func TestRunOne_AskRouteParkCarriesTheBackendsAskTime(t *testing.T) {
 // discards the answer permanently.
 func TestRunOne_AskRouteWithoutABackendAskTimeStampsTheLocalClock(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("asks", "plan", func(ctx flow.StepCtx) error {
-			return ctx.AskQuestions(flow.AskText("base", "which base branch?"))
+		f.AddStep("asks", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, ctx.AskQuestions(flow.AskText("base", "which base branch?"))
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	app.Orchestrator = &askedAtBackend{Orchestrator: be}
@@ -2363,8 +2359,8 @@ func TestRunOne_AskRouteWithoutABackendAskTimeStampsTheLocalClock(t *testing.T) 
 // refusal's own message so the operator sees what was refused.
 func TestRunOne_ErrRefusedParksWithoutBurningBudget(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("guarded", "plan", func(ctx flow.StepCtx) error {
-			return fmt.Errorf("guard refused staged file main.go: %w", flow.ErrRefused)
+		f.AddStep("guarded", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, fmt.Errorf("guard refused staged file main.go: %w", flow.ErrRefused)
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxInvocations: 1}}
@@ -2404,8 +2400,8 @@ func TestRunOne_ErrRefusedParksWithoutBurningBudget(t *testing.T) {
 // accidentally skip the bump for all errors.
 func TestRunOne_PlainErrorStillBumpsInvocations(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("broken", "plan", func(ctx flow.StepCtx) error {
-			return errors.New("something went wrong")
+		f.AddStep("broken", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, errors.New("something went wrong")
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 
@@ -2426,8 +2422,8 @@ func TestRunOne_PlainErrorStillBumpsInvocations(t *testing.T) {
 // does not bump. Regression guard for the ErrRefused addition.
 func TestRunOne_ErrTransientStillParksInfraTransient(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) error {
-			return fmt.Errorf("runner offline: %w", flow.ErrTransient)
+		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, fmt.Errorf("runner offline: %w", flow.ErrTransient)
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 
@@ -2470,14 +2466,14 @@ func (b *clearMarkerBackend) wasCleared() bool {
 func TestRunOne_BudgetParkDoesNotClearQuestionMarker(t *testing.T) {
 	invocations := 0
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			invocations++
 			if invocations == 1 {
 				// First dispatch: exhaust budget so the item parks.
-				return flow.ErrBudgetExhausted{Axis: flow.AxisInvocations}
+				return flow.StepResult{}, flow.ErrBudgetExhausted{Axis: flow.AxisInvocations}
 			}
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	// First dispatch seeds the artifact and parks on budget.
@@ -2517,10 +2513,10 @@ func TestRunOne_NotifyDefaultUsesResultID(t *testing.T) {
 	tel := &recordingTelemetry{}
 	app, _, claim := testApp(t, func(f *flow.Flow) {
 		// Label "write plan" differs from artifact id "plan".
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			ctx.Notify("", "drafting") // empty step → default
-			return ctx.ResolveMarkdown("done")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Telemetry = tel
 
@@ -2547,9 +2543,9 @@ func TestRunOne_NotifyDefaultUsesResultID(t *testing.T) {
 func TestRunOne_TimeoutParkReasonUsesResultID(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
 		// Label "write plan" differs from artifact id "plan".
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			<-ctx.Context().Done()
-			return ctx.Context().Err()
+			return flow.StepResult{}, ctx.Context().Err()
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {Timeout: 50 * time.Millisecond}}
@@ -2575,8 +2571,8 @@ func TestRunOne_TimeoutParkReasonUsesResultID(t *testing.T) {
 // invocation budget.
 func TestRunOne_ErrUnfitBlocksWithoutParkOrBudget(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("broken", "plan", func(ctx flow.StepCtx) error {
-			return fmt.Errorf("12 MB free, floor 2 GB: %w", flow.ErrUnfit)
+		f.AddStep("broken", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, fmt.Errorf("12 MB free, floor 2 GB: %w", flow.ErrUnfit)
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 
@@ -2604,9 +2600,9 @@ func TestRunOne_ErrUnfitBlocksWithoutParkOrBudget(t *testing.T) {
 // consumed. The handler acquires a worktree so the catch-all fires.
 func TestRunOne_PlainErrorOnUnfitMachineReportsBlocked(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("broken", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("broken", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			ctx.Worktree() // acquire worktree so post-handler fitness check runs
-			return errors.New("no space left on device")
+			return flow.StepResult{}, errors.New("no space left on device")
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 
@@ -2659,10 +2655,10 @@ func TestRunOne_BlockedOnItemsStopsBeforeDispatch(t *testing.T) {
 	t.Setenv("FLOW_DIR", filepath.Join(t.TempDir(), ".flow"))
 	handlerRan := false
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			handlerRan = true
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
 	blockOn(t, be, claim.ItemRef, be.Ref("2"))
@@ -2720,13 +2716,13 @@ func TestRunOne_BlockedOnItemsStopsBeforeDispatch(t *testing.T) {
 func TestRunOne_BlockerLandingAndReopeningIsSymmetric(t *testing.T) {
 	planRuns := 0
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			planRuns++
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
-		f.AddStep("record commit", "commit", func(ctx flow.StepCtx) error {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		f.AddStep("record commit", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("the commit step must not run while the item is blocked")
-			return nil
+			return flow.StepResult{}, nil
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
@@ -2771,9 +2767,9 @@ func TestRunOne_BlockerLandingAndReopeningIsSymmetric(t *testing.T) {
 // The preflight never runs.
 func TestRunOne_BlockedOnItemsOutranksAnUnansweredQuestion(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("handler must not run")
-			return nil
+			return flow.StepResult{}, nil
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	preflightRan := false
@@ -2804,9 +2800,9 @@ func TestRunOne_BlockedOnItemsOutranksAnUnansweredQuestion(t *testing.T) {
 func TestRunOne_BlockedItemWithNoPendingStepStillFinalizes(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.RequireSignal("pr-open") // never set, so no step is ever pending
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("ignored")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("ignored"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
 	blockOn(t, be, claim.ItemRef, be.Ref("2"))
@@ -2829,17 +2825,17 @@ func TestRunOne_BlockedItemWithNoPendingStepStillFinalizes(t *testing.T) {
 func TestRunOne_HandlerWaitsOnItemsRecordsTheBlockerAndStopsClean(t *testing.T) {
 	handlerRuns := 0
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			handlerRuns++
 			if handlerRuns > 1 {
 				// The resume: the blocker has landed, and the step finishes.
-				return ctx.ResolveMarkdown("the plan")
+				return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
 			}
 			if err := ctx.RecordWorkInProgress("half a plan"); err != nil {
-				return err
+				return flow.StepResult{}, err
 			}
-			return ctx.WaitOnItems(itemRefFor("2"))
-		}, flow.StepConfig{})
+			return flow.StepResult{}, ctx.WaitOnItems(itemRefFor("2"))
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
 
@@ -2898,13 +2894,13 @@ func TestRunOne_HandlerWaitsOnItemsRecordsTheBlockerAndStopsClean(t *testing.T) 
 func TestRunOne_HandlerWaitsOnFinishedItemsFailsAndTheNextAdvanceRuns(t *testing.T) {
 	handlerRuns := 0
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			handlerRuns++
 			if handlerRuns == 1 {
-				return ctx.WaitOnItems(itemRefFor("2"))
+				return flow.StepResult{}, ctx.WaitOnItems(itemRefFor("2"))
 			}
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "already landed"})
 	be.SetStatus("2", flow.StatusTerminal, "done")
@@ -2944,8 +2940,8 @@ func TestRunOne_HandlerWaitsOnFinishedItemsFailsAndTheNextAdvanceRuns(t *testing
 // Nothing else is recorded: no blocker, no park.
 func TestRunOne_WaitOnItemsUnresolvableRefFailsNamingIt(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.WaitOnItems(itemRefFor("nope"))
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, ctx.WaitOnItems(itemRefFor("nope"))
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 
@@ -2972,8 +2968,8 @@ func TestRunOne_WaitOnItemsUnresolvableRefFailsNamingIt(t *testing.T) {
 // retracting them would be a second write that could fail the same way.
 func TestRunOne_WaitOnItemsKeepsBlockersRecordedBeforeARefusedOne(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.WaitOnItems(itemRefFor("2"), itemRefFor("nope"))
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, ctx.WaitOnItems(itemRefFor("2"), itemRefFor("nope"))
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
@@ -3025,8 +3021,8 @@ func (e *blockerEditsEditor) Commit(ctx context.Context) error {
 
 func TestRunOne_WaitOnItemsCommitsOneEditPerRef(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.WaitOnItems(itemRefFor("2"), itemRefFor("3"))
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, ctx.WaitOnItems(itemRefFor("2"), itemRefFor("3"))
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "first"})
@@ -3057,8 +3053,8 @@ func TestRunOne_WaitOnItemsCommitsOneEditPerRef(t *testing.T) {
 // Waiting on nothing is not a state an item can be in.
 func TestRunOne_WaitOnItemsWithNoRefsIsAnError(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.WaitOnItems()
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, ctx.WaitOnItems()
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 
@@ -3084,13 +3080,13 @@ func TestRunOne_WaitOnItemsWithNoRefsIsAnError(t *testing.T) {
 func TestRunOne_PersonKindBlockIsNotStoppedBeforeDispatch(t *testing.T) {
 	handlerRuns := 0
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			handlerRuns++
 			if handlerRuns == 1 {
-				return ctx.AskQuestions(flow.AskYesNo("ship", "Ship it?"))
+				return flow.StepResult{}, ctx.AskQuestions(flow.AskYesNo("ship", "Ship it?"))
 			}
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "parked" {
@@ -3143,10 +3139,10 @@ func TestRunOne_ReloadFailureAfterDeclaringBlockersIsAnError(t *testing.T) {
 	var wrapped *armedLoadFailureBackend
 	handlerRuns := 0
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			handlerRuns++
 			wrapped.armed = true
-			return ctx.WaitOnItems(itemRefFor("2"))
+			return flow.StepResult{}, ctx.WaitOnItems(itemRefFor("2"))
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
@@ -3180,9 +3176,9 @@ func TestRunOne_ReloadFailureAfterDeclaringBlockersIsAnError(t *testing.T) {
 // the normal failure path — status failed, budget consumed.
 func TestRunOne_PlainErrorOnFitMachineStillFails(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("broken", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("broken", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			ctx.Worktree() // acquire worktree so post-handler fitness check runs
-			return errors.New("something went wrong")
+			return flow.StepResult{}, errors.New("something went wrong")
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 
@@ -3204,9 +3200,9 @@ func TestRunOne_PlainErrorOnFitMachineStillFails(t *testing.T) {
 // consumed) because there is nowhere to run the fit gate.
 func TestRunOne_PlainErrorNoWorktreeOnUnfitMachineStillFails(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("broken", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("broken", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			// Do NOT call ctx.Worktree() — the catch-all checks sctx.worktree != nil.
-			return errors.New("no space left on device")
+			return flow.StepResult{}, errors.New("no space left on device")
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 

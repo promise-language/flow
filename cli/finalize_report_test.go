@@ -17,9 +17,9 @@ func nothingLeftToDo(t *testing.T) (*App, *fake.Orchestrator, flow.Claim) {
 	t.Helper()
 	return testApp(t, func(f *flow.Flow) {
 		f.RequireSignal("pr-open")
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("no step should dispatch: the flow's precondition is never met")
-			return nil
+			return flow.StepResult{}, nil
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 }
@@ -124,9 +124,9 @@ func TestRunOne_AFinalizeFaultIsStillAFailure(t *testing.T) {
 // only account of what actually failed and blame the machine for it.
 func TestRunOne_AFailureOnAnUnfitMachineReportsBoth(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("broken", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("broken", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			ctx.Worktree() // acquire a worktree so the post-handler fitness check runs
-			return errors.New("no space left on device")
+			return flow.StepResult{}, errors.New("no space left on device")
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 	be.SetGateVerdict(false)

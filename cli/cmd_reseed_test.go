@@ -17,9 +17,9 @@ func reseedTestSetup(t *testing.T) (*App, *fake.Orchestrator, *bytes.Buffer, *by
 	t.Helper()
 	a := &stubAgent{name: "stub"}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
-			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{})
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 
 	if err := be.SeedState(context.Background(), claim.ItemRef, []flow.ArtifactSpec{

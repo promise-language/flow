@@ -68,9 +68,9 @@ func TestAppAgent_StillAnswersName(t *testing.T) {
 func TestStepHandler_StillReachesTheRealAgent(t *testing.T) {
 	agent := &stubAgent{name: "stub"}
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("spend", "plan", func(ctx flow.StepCtx) error {
+		f.AddStep("spend", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "real work"})
-			return err
+			return flow.StepResult{}, err
 		}, flow.StepConfig{})
 	}, agent)
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{

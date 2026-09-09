@@ -85,7 +85,7 @@ func TestCarryThroughFlowComposition(t *testing.T) {
 	if len(items) != wantCount {
 		names := make([]string, len(items))
 		for i, li := range items {
-			names[i] = li.Name
+			names[i] = li.Description
 		}
 		t.Fatalf("flow has %d steps %v, want %d", len(items), names, wantCount)
 	}
@@ -105,8 +105,8 @@ func TestCarryThroughFlowComposition(t *testing.T) {
 		"close branch",
 	}
 	for i, want := range wantOrder {
-		if items[i].Name != want {
-			t.Errorf("step %d = %q, want %q", i, items[i].Name, want)
+		if items[i].Description != want {
+			t.Errorf("step %d = %q, want %q", i, items[i].Description, want)
 		}
 	}
 }
@@ -318,3 +318,80 @@ func (b *buildTestBackend) ResolveRef(_ context.Context, input string) (flow.Ite
 }
 
 var _ flow.Orchestrator = (*buildTestBackend)(nil)
+
+// ---------------------------------------------------------------------------
+// The graph the shipped compositions declare.
+// ---------------------------------------------------------------------------
+
+// wantGraph asserts the edges a composition writes down: one entry, one
+// successor per step, and the one step that may finalize. A handler cannot
+// elect a successor the flow does not declare, so these ARE the routes the
+// shipped handlers take.
+func wantGraph(t *testing.T, f *flow.Flow, edges map[flow.StepId]flow.StepId, entry, finalizer flow.StepId) {
+	t.Helper()
+	for _, li := range f.Items() {
+		if li.Entry != (li.Result() == entry) {
+			t.Errorf("step %q Entry = %t, want %t — exactly one step is where an empty journal starts",
+				li.Result(), li.Entry, li.Result() == entry)
+		}
+		want, isFinalizer := edges[li.Result()], li.Result() == finalizer
+		switch {
+		case isFinalizer:
+			if len(li.Next) != 0 {
+				t.Errorf("finalizing step %q declares successors %v", li.Result(), li.Next)
+			}
+			if len(li.MayFinalize) != 1 || li.MayFinalize[0] != flow.DispositionResolved {
+				t.Errorf("step %q MayFinalize = %v, want [resolved]", li.Result(), li.MayFinalize)
+			}
+		default:
+			if len(li.Next) != 1 || li.Next[0] != want {
+				t.Errorf("step %q declares Next %v, want [%s]", li.Result(), li.Next, want)
+			}
+			if len(li.MayFinalize) != 0 {
+				t.Errorf("step %q may finalize as %v — only the last step ends the item",
+					li.Result(), li.MayFinalize)
+			}
+		}
+	}
+	if err := f.ValidateGraph(); err != nil {
+		t.Errorf("ValidateGraph() = %v, want nil", err)
+	}
+}
+
+func TestContributorFlow_DeclaresItsRoutes(t *testing.T) {
+	b := &builder{cfg: Config{}, role: RoleContributor}
+	wantGraph(t, b.contributorFlow(Config{}), map[flow.StepId]flow.StepId{
+		flow.StepId(StepPlan):      flow.StepId(StepBranch),
+		flow.StepId(StepBranch):    flow.StepId(StepImplement),
+		flow.StepId(StepImplement): flow.StepId(StepReview),
+		flow.StepId(StepReview):    flow.StepId(StepCoverage),
+		flow.StepId(StepCoverage):  flow.StepId(StepOpenPR),
+		// The one edge that differs between the compositions.
+		flow.StepId(StepOpenPR): flow.StepId(StepCloseBranch),
+	}, flow.StepId(StepPlan), flow.StepId(StepCloseBranch))
+}
+
+func TestCarryThroughFlow_DeclaresItsRoutes(t *testing.T) {
+	b := &builder{cfg: Config{}, role: RoleMaintainer}
+	wantGraph(t, b.carryThroughFlow(Config{}), map[flow.StepId]flow.StepId{
+		flow.StepId(StepPlan):      flow.StepId(StepBranch),
+		flow.StepId(StepBranch):    flow.StepId(StepImplement),
+		flow.StepId(StepImplement): flow.StepId(StepReview),
+		flow.StepId(StepReview):    flow.StepId(StepCoverage),
+		flow.StepId(StepCoverage):  flow.StepId(StepOpenPR),
+		// Carrying through, the request hands to the integration phase.
+		flow.StepId(StepOpenPR):      flow.StepId(StepVerifyMerge),
+		flow.StepId(StepVerifyMerge): flow.StepId(StepMerge),
+		flow.StepId(StepMerge):       flow.StepId(StepRecordMerge),
+		flow.StepId(StepRecordMerge): flow.StepId(StepCloseBranch),
+	}, flow.StepId(StepPlan), flow.StepId(StepCloseBranch))
+}
+
+// A graph of one: the stub is the entry and the only way out, so what it may
+// do is finalize. A stub that could not end the flow is not a stub — it is a
+// graph an item never leaves.
+func TestMaintainerStubFlow_IsAValidGraph(t *testing.T) {
+	b := &builder{cfg: Config{}, role: RoleMaintainer}
+	f := b.unimplementedMaintainerFlow(Config{})
+	wantGraph(t, f, nil, flow.StepId(StepReviewMaint), flow.StepId(StepReviewMaint))
+}

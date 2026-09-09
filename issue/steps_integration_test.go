@@ -141,14 +141,15 @@ func TestStepVerifyMerge_GatePassesMergeResultAccepted(t *testing.T) {
 	wt.thresholds = []byte(`{"coverage": 80}`)
 	ctx := newIntegrationCtx(wt)
 
-	if err := testBuilder(t).stepVerifyMerge(ctx); err != nil {
+	res, err := testBuilder(t).stepVerifyMerge(ctx)
+	if err != nil {
 		t.Fatalf("stepVerifyMerge: %v", err)
 	}
-	if !ctx.didResolve {
+	if res.Payload == nil {
 		t.Fatal("step did not resolve")
 	}
-	if ctx.resolved.Type != flow.ArtifactMarkdown {
-		t.Errorf("resolved a %v, want markdown", ctx.resolved.Type)
+	if res.Payload.Type != flow.ArtifactMarkdown {
+		t.Errorf("resolved a %v, want markdown", res.Payload.Type)
 	}
 	// The merge simulation should have been prepared, tools rebuilt, and reverted.
 	if !wt.mergePrepped {
@@ -191,14 +192,14 @@ func TestStepVerifyMerge_GateRefuses(t *testing.T) {
 	wt.thresholds = []byte(`{"coverage": 80}`)
 	ctx := newIntegrationCtx(wt)
 
-	err := testBuilder(t).stepVerifyMerge(ctx)
+	res, err := testBuilder(t).stepVerifyMerge(ctx)
 	if err == nil {
 		t.Fatal("expected error when gate refuses")
 	}
 	if errors.Is(err, flow.ErrTransient) {
 		t.Errorf("err = %v, must NOT wrap flow.ErrTransient — a refusal is a real verdict about the change, not infrastructure", err)
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("step resolved despite gate refusal")
 	}
 }
@@ -208,14 +209,14 @@ func TestStepVerifyMerge_GateError(t *testing.T) {
 	wt.gateErr = errors.New("gate binary not found")
 	ctx := newIntegrationCtx(wt)
 
-	err := testBuilder(t).stepVerifyMerge(ctx)
+	res, err := testBuilder(t).stepVerifyMerge(ctx)
 	if err == nil {
 		t.Fatal("expected error when gate cannot run")
 	}
 	if !errors.Is(err, flow.ErrTransient) {
 		t.Errorf("err = %v, want it to wrap flow.ErrTransient — a gate that could not run is infrastructure", err)
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("step resolved despite gate error")
 	}
 }
@@ -227,14 +228,14 @@ func TestStepVerifyMerge_GateNotMeasured(t *testing.T) {
 	}
 	ctx := newIntegrationCtx(wt)
 
-	err := testBuilder(t).stepVerifyMerge(ctx)
+	res, err := testBuilder(t).stepVerifyMerge(ctx)
 	if err == nil {
 		t.Fatal("expected error when gate outcome is not measured")
 	}
 	if !errors.Is(err, flow.ErrTransient) {
 		t.Errorf("err = %v, want it to wrap flow.ErrTransient — a non-measured outcome is infrastructure", err)
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("step resolved despite non-measured outcome")
 	}
 }
@@ -244,14 +245,14 @@ func TestStepVerifyMerge_JudgeError(t *testing.T) {
 	wt.judgeErr = errors.New("judge binary broken")
 	ctx := newIntegrationCtx(wt)
 
-	err := testBuilder(t).stepVerifyMerge(ctx)
+	res, err := testBuilder(t).stepVerifyMerge(ctx)
 	if err == nil {
 		t.Fatal("expected error when judge cannot answer")
 	}
 	if !errors.Is(err, flow.ErrTransient) {
 		t.Errorf("err = %v, want it to wrap flow.ErrTransient — a broken judge is infrastructure", err)
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("step resolved despite judge error")
 	}
 }
@@ -261,11 +262,11 @@ func TestStepVerifyMerge_MergeConflicts(t *testing.T) {
 	wt.mergePrepErr = errors.New("CONFLICT (content): merge conflict in main.go")
 	ctx := newIntegrationCtx(wt)
 
-	err := testBuilder(t).stepVerifyMerge(ctx)
+	res, err := testBuilder(t).stepVerifyMerge(ctx)
 	if err == nil {
 		t.Fatal("expected error when merge simulation has conflicts")
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("step resolved despite merge conflicts")
 	}
 }
@@ -275,7 +276,7 @@ func TestStepVerifyMerge_RevertCalledEvenOnGateFailure(t *testing.T) {
 	wt.gateErr = errors.New("gate failed")
 	ctx := newIntegrationCtx(wt)
 
-	_ = testBuilder(t).stepVerifyMerge(ctx)
+	_, _ = testBuilder(t).stepVerifyMerge(ctx)
 	// RevertMergePrep should still be called (via defer) even when the gate errors.
 	if wt.revertPrepCalls != 1 {
 		t.Errorf("RevertMergePrep called %d times, want 1 (should be called on error path too)", wt.revertPrepCalls)
@@ -302,10 +303,11 @@ func TestStepVerifyMerge_WithoutMergeResultPreparer(t *testing.T) {
 		},
 	}
 
-	if err := testBuilder(t).stepVerifyMerge(ctx); err != nil {
+	res, err := testBuilder(t).stepVerifyMerge(ctx)
+	if err != nil {
 		t.Fatalf("stepVerifyMerge: %v", err)
 	}
-	if !ctx.didResolve {
+	if res.Payload == nil {
 		t.Fatal("step did not resolve")
 	}
 	// No merge prep or rebuild calls should have happened — fakeWorktree is
@@ -327,14 +329,14 @@ func TestStepVerifyMerge_RebuildToolsFails(t *testing.T) {
 	wt.thresholds = []byte(`{"coverage": 80}`)
 	ctx := newIntegrationCtx(wt)
 
-	err := testBuilder(t).stepVerifyMerge(ctx)
+	res, err := testBuilder(t).stepVerifyMerge(ctx)
 	if err == nil {
 		t.Fatal("expected error when tools rebuild fails")
 	}
 	if errors.Is(err, flow.ErrTransient) {
 		t.Error("a rebuild failure should not be transient — it signals a broken build environment")
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("step resolved despite rebuild failure")
 	}
 	// The gate must not have been called — a stale-tools rebuild that failed
@@ -357,7 +359,7 @@ func TestStepVerifyMerge_RebuildToolsCallOrder(t *testing.T) {
 	wt.thresholds = []byte(`{"coverage": 80}`)
 	ctx := newIntegrationCtx(wt)
 
-	if err := testBuilder(t).stepVerifyMerge(ctx); err != nil {
+	if _, err := testBuilder(t).stepVerifyMerge(ctx); err != nil {
 		t.Fatalf("stepVerifyMerge: %v", err)
 	}
 	want := []string{"merge-prep", "rebuild-tools", "gate:integration"}
@@ -380,7 +382,7 @@ func TestStepMerge_HappyPath(t *testing.T) {
 	wt := newIntegrationWorktree()
 	ctx := newIntegrationCtx(wt)
 
-	if err := testBuilder(t).stepMerge(ctx); err != nil {
+	if _, err := testBuilder(t).stepMerge(ctx); err != nil {
 		t.Fatalf("stepMerge: %v", err)
 	}
 	if !wt.merged {
@@ -393,7 +395,7 @@ func TestStepMerge_PRNotFound(t *testing.T) {
 	wt.findPRErr = errors.New("no pull request found")
 	ctx := newIntegrationCtx(wt)
 
-	err := testBuilder(t).stepMerge(ctx)
+	_, err := testBuilder(t).stepMerge(ctx)
 	if err == nil {
 		t.Fatal("expected error when PR not found")
 	}
@@ -404,7 +406,7 @@ func TestStepMerge_MergeFails(t *testing.T) {
 	wt.mergeErr = errors.New("merge failed: required status check is failing")
 	ctx := newIntegrationCtx(wt)
 
-	err := testBuilder(t).stepMerge(ctx)
+	_, err := testBuilder(t).stepMerge(ctx)
 	if err == nil {
 		t.Fatal("expected error when merge fails")
 	}
@@ -422,17 +424,18 @@ func TestStepRecordMerge_PRMerged(t *testing.T) {
 	wt.prMergeCommitSHA = "abc123"
 	ctx := newIntegrationCtx(wt)
 
-	if err := testBuilder(t).stepRecordMerge(ctx); err != nil {
+	res, err := testBuilder(t).stepRecordMerge(ctx)
+	if err != nil {
 		t.Fatalf("stepRecordMerge: %v", err)
 	}
-	if !ctx.didResolve {
+	if res.Payload == nil {
 		t.Fatal("step did not resolve")
 	}
-	if ctx.resolved.Type != flow.ArtifactCommitHash {
-		t.Errorf("resolved a %v, want a commit hash", ctx.resolved.Type)
+	if res.Payload.Type != flow.ArtifactCommitHash {
+		t.Errorf("resolved a %v, want a commit hash", res.Payload.Type)
 	}
-	if ctx.resolved.CommitHash != "abc123" {
-		t.Errorf("resolved commit %q, want %q", ctx.resolved.CommitHash, "abc123")
+	if res.Payload.CommitHash != "abc123" {
+		t.Errorf("resolved commit %q, want %q", res.Payload.CommitHash, "abc123")
 	}
 }
 
@@ -441,11 +444,11 @@ func TestStepRecordMerge_PRNotYetMerged(t *testing.T) {
 	wt.prMergeCommitSHA = "" // not merged yet
 	ctx := newIntegrationCtx(wt)
 
-	err := testBuilder(t).stepRecordMerge(ctx)
+	res, err := testBuilder(t).stepRecordMerge(ctx)
 	if err == nil {
 		t.Fatal("expected error when PR has not merged yet")
 	}
-	if ctx.didResolve {
+	if res.Payload != nil {
 		t.Error("step resolved despite PR not being merged")
 	}
 }
@@ -455,7 +458,7 @@ func TestStepRecordMerge_PRNotFound(t *testing.T) {
 	wt.findPRErr = errors.New("no pull request found")
 	ctx := newIntegrationCtx(wt)
 
-	err := testBuilder(t).stepRecordMerge(ctx)
+	_, err := testBuilder(t).stepRecordMerge(ctx)
 	if err == nil {
 		t.Fatal("expected error when PR not found")
 	}

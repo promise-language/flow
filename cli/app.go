@@ -359,11 +359,11 @@ func (app *App) validate() error {
 		switch li.Kind {
 		case flow.LifecycleArtifact:
 			if _, ok := app.artifactById[li.ArtifactId]; !ok {
-				return fmt.Errorf("flow %q step %q references unknown artifact %q", f.Name(), li.Name, li.ArtifactId)
+				return fmt.Errorf("flow %q step %q references unknown artifact %q", f.Name(), li.Description, li.ArtifactId)
 			}
 		case flow.LifecycleSignal, flow.LifecycleAwait:
 			if _, ok := app.signalById[li.SignalId]; !ok {
-				return fmt.Errorf("flow %q step %q references unknown signal %q (declare it in App.Signals)", f.Name(), li.Name, li.SignalId)
+				return fmt.Errorf("flow %q step %q references unknown signal %q (declare it in App.Signals)", f.Name(), li.Description, li.SignalId)
 			}
 		}
 	}

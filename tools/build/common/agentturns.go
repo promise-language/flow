@@ -51,7 +51,6 @@ var approvedAgentTurns = map[string]int{
 	"issue/steps.go (*builder).runAgent":              1,
 	"issue/steps.go (*builder).resolveQuestion":       1,
 	"issue/steps.go (*builder).agentMarkdownStep":     1,
-	"issue/steps.go (*builder).resolveMarkdown":       1,
 }
 
 // checkApprovedAgentTurns refuses a commit that asks for an agent turn anywhere
