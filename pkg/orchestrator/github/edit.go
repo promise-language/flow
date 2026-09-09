@@ -217,8 +217,9 @@ func (e *editor) commitFields(ctx context.Context) error {
 		return err
 	}
 
-	// Setting manual RESOLVES ANY UNRESOLVED PARK — the operator's `run-step`
-	// IS the resume — and clearing it returns the item to automatic dispatch.
+	// Setting manual RESOLVES ANY UNRESOLVED PARK — taking hand control IS the
+	// decision to continue — and clearing it returns the item to automatic
+	// dispatch.
 	// This follows the PATCH: the marker is the record, and a park cleared
 	// against a marker that failed to land would leave the item dispatchable
 	// with nobody driving it.

@@ -879,10 +879,14 @@ type ItemEditor interface {
 	// SetManual sets or clears manual control of the item.
 	//
 	// Setting it stops anything dispatching the item underneath the person now
-	// driving it, and RESOLVES ANY UNRESOLVED PARK — the operator's `run-step`
-	// IS the resume. Clearing it returns the item to automatic dispatch; an item
-	// that could be taken over and never handed back would be stranded by the
-	// act of helping it.
+	// driving it, and RESOLVES ANY UNRESOLVED PARK — taking hand control IS the
+	// decision to continue, and the park would otherwise advertise a condition
+	// the person taking over is the one clearing. No command asserts it: the
+	// CLI's `run-step` is a primitive a scheduler drives in a loop, and marking
+	// the item there would flag it for a person who is not there (docs/cli.md
+	// § Advancing one step). Clearing it returns the item to automatic
+	// dispatch; an item that could be taken over and never handed back would be
+	// stranded by the act of helping it.
 	SetManual(manual bool)
 
 	// Commit applies every change made on this editor, OR NONE OF THEM.
