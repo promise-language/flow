@@ -4,19 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/promise-language/flow"
 )
-
-// dispatchedByRunnerEnv is the env-var the runner's spawnFlow sets to "1" when
-// it spawns this binary on behalf of the orchestrator. Its ABSENCE in the
-// child env is the cli's signal that a run-step was invoked directly by the
-// operator (manual takeover). Hardcoded here rather than imported from the
-// flow-sdk to keep the OSS cli free of tracker-specific dependencies — the
-// tracker-side constant (flowsdk.EnvDispatchedByRunner) and this string MUST
-// stay in sync (T0481).
-const dispatchedByRunnerEnv = "FLOW_DISPATCHED_BY_RUNNER"
 
 func (app *App) cmdRun(ctx context.Context, args []string) int {
 	fs := app.newFlagSet("run-step")
@@ -34,42 +24,24 @@ func (app *App) cmdRun(ctx context.Context, args []string) int {
 	}
 	claim, err := app.Orchestrator.LookupActiveClaim(ctx)
 	if err != nil {
-		fmt.Fprintln(app.Err, "run-step:", err)
-		return 1
+		return app.refuseArena(mode, "", err.Error())
 	}
+	// The one check this command owes: does this arena hold a claim at all?
+	// Without one it does not even know which item to run against. Detecting
+	// that the claim has since been LOST is the dispatcher's read, before it
+	// dispatches — not this command's, and never mid-run.
 	if claim == nil {
-		fmt.Fprintln(app.Err, "run-step: no active claim (run `claim <id>` first)")
-		return 1
-	}
-
-	// Operator-driven run-step asserts manual control over the item. The
-	// runner's spawnFlow sets FLOW_DISPATCHED_BY_RUNNER=1; its absence means the
-	// operator typed this command, so set the manual flag — which stops anything
-	// dispatching the item underneath the person now driving it, and resolves
-	// any unresolved park, because the operator's run-step IS the resume.
-	//
-	// Through ItemEditor, which is where every item-field change goes. There is
-	// no separate takeover method: the flag is a field, and a second write path
-	// to one field is a second rule for it.
-	//
-	// Best-effort: a takeover failure surfaces a warning but does not block the
-	// step — the user's intent is the step itself, the takeover is bookkeeping.
-	if os.Getenv(dispatchedByRunnerEnv) != "1" {
-		if terr := app.setManual(ctx, claim.ItemRef, true); terr != nil {
-			fmt.Fprintln(app.Err, "run-step: manual takeover (continuing):", terr)
-		}
+		return app.refuseArena(mode, "", "no active claim (run `claim <id>` first)")
 	}
 
 	res, err := RunOne(ctx, app, *claim)
 	if err != nil {
-		fmt.Fprintln(app.Err, "run-step:", err)
-		return 1
+		return app.refuseArena(mode, claim.ItemRef.Display, err.Error())
 	}
 
 	switch mode {
 	case OutputJSON:
-		enc := json.NewEncoder(app.Out)
-		if err := enc.Encode(res); err != nil {
+		if err := app.writeStepJSON(res); err != nil {
 			fmt.Fprintln(app.Err, "run-step: encode result:", err)
 			return 1
 		}
@@ -100,13 +72,33 @@ func (app *App) cmdRun(ctx context.Context, args []string) int {
 	}
 }
 
-// setManual opens an edit, stages the manual flag, and commits it. One
-// statement, one transaction.
-func (app *App) setManual(ctx context.Context, ref flow.ItemRef, manual bool) error {
-	ed, err := app.Orchestrator.Edit(ctx, ref)
-	if err != nil {
-		return err
+// writeStepJSON is the one encoder for run-step's machine channel: compact,
+// one object per line — the shape resolve's stream carries, so a caller
+// driving one step at a time parses what a caller reading resolve parses.
+func (app *App) writeStepJSON(res flow.InvocationResult) error {
+	return json.NewEncoder(app.Out).Encode(res)
+}
+
+// refuseArena reports a run-step that never reached a step. Same object, same
+// stream, every outcome (docs/cli.md § One-shot reports). The scope is always
+// the arena: run-step's refusals are about this checkout, and a lost claim is
+// not among them — that check belongs to whoever dispatches, before it
+// dispatches, and is not re-read mid-run.
+func (app *App) refuseArena(mode OutputMode, item, reason string) int {
+	fmt.Fprintln(app.Err, "run-step: "+reason)
+	if mode == OutputJSON {
+		arena := false
+		// "failed", not "skipped": docs/cli.md § Exit codes gives 1 to a
+		// command that could not complete, while `skipped` exits 0 and would
+		// invite a caller to loop on it forever.
+		if err := app.writeStepJSON(flow.InvocationResult{
+			Item:       item,
+			Status:     string(flow.StatusFailed),
+			Reason:     reason,
+			ItemScoped: &arena,
+		}); err != nil {
+			fmt.Fprintln(app.Err, "run-step: encode result:", err)
+		}
 	}
-	ed.SetManual(manual)
-	return ed.Commit(ctx)
+	return 1
 }

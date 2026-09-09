@@ -55,6 +55,12 @@ Commands fall into two shapes, and the shape determines the streams.
 
 The report *is* the output. It goes to **stdout**, rendered in the selected mode.
 
+`run-step`'s report is an `InvocationResult` — the same object `resolve` streams — and it is emitted for **every** outcome, including the ones where no step ran. A caller driving one step at a time reads exactly what a caller reading `resolve`'s stream reads, rather than having to parse prose for the outcomes that never reached a step.
+
+A result that reports a stop may carry **`item_scoped`**: `true` when this item is the problem and a different one might succeed, `false` when this arena is and every item would meet the same answer. It is optional and absent means unclassified, which a caller reads as `false` — stopping on a refusal nobody classified is the safe direction. It is the same distinction, and the same name, that a refused claim carries.
+
+In human mode a refusal that never reached a step is prose on stderr and the exit code is the signal; stdout carries nothing. A step that ran and stopped is still a report, and renders on stdout like every other one.
+
 ### Streaming — `resolve`
 
 `resolve` runs for minutes to hours and produces a result per step. The streams split by role:
@@ -263,6 +269,14 @@ They are two values because they are two parties. **Urgency is not a fifth prior
 An item nothing has said anything about is `medium` and `default`. That is the ordinary case and it carries no marker of any kind — an unassessed item is not thereby demoted below one deliberately marked `low`, because silence is not an assessment.
 
 Where the two decide what runs, and in what order, is `resolve`.
+
+## Advancing one step
+
+`run-step` advances the claim this arena holds by at most one step. It is the primitive an external scheduler drives — `claim`, then `run-step` repeatedly — when it wants to hold a slot for one step rather than for a whole resolution, so that a critical item is not waiting out a low one that merely started first.
+
+**Before starting it checks that this arena holds a claim at all**, and refuses through its report when it does not: without one it does not know which item to run against. That is the whole of what it checks. Detecting that the claim has since been **lost** belongs to whoever dispatches the step, before it dispatches — that party already knows the item and can read its holder, and pushing the read in here pays for it once per step for a condition the dispatcher had in hand. Nothing re-reads the lease while a step is running, and nothing should: a step that lost its claim halfway through has already done whatever it did.
+
+**`run-step` does not mark the item under manual control.** Running a single step is not an act of takeover, and marking it here is what would make an unattended caller flag every item it touches for a person who is not there — and silently clear the parks that exist to stop the item advancing. A second party advancing the same worktree is refused by the run registration § Resolving requires, which is arena-local and answerable directly, rather than recorded on the item.
 
 ## Resolving
 

@@ -1010,8 +1010,8 @@ func (e *editor) Commit(ctx context.Context) error {
 	}
 	if e.manual != nil {
 		rec.item.Manual = *e.manual
-		// Setting manual resolves any unresolved park: the operator's run-step
-		// IS the resume.
+		// Setting manual resolves any unresolved park: taking hand control IS
+		// the decision to continue (docs/orchestrator.md § Editing).
 		if *e.manual {
 			rec.parkRequest = nil
 		}

@@ -178,6 +178,45 @@ func TestInvocationResult_CostZeroVsAbsent(t *testing.T) {
 	}
 }
 
+// ItemScoped is a pointer for the reason CostUSD is: a present false is a
+// classification — "this arena is the problem", which is what every run-step
+// refusal carries — while absent means nothing classified the stop. A plain
+// bool with omitempty would put those two on the wire identically, and the
+// arena scope the field exists to deliver would arrive as no scope at all.
+func TestInvocationResult_ScopeArenaVsUnclassified(t *testing.T) {
+	arena := false
+	scoped := InvocationResult{
+		Flow: "f", Item: "i", Step: "s", Status: "failed",
+		ItemScoped: &arena,
+	}
+	unclassified := InvocationResult{
+		Flow: "f", Item: "i", Step: "s", Status: "failed",
+	}
+	bScoped, err := json.Marshal(scoped)
+	if err != nil {
+		t.Fatalf("Marshal scoped: %v", err)
+	}
+	bUnclassified, err := json.Marshal(unclassified)
+	if err != nil {
+		t.Fatalf("Marshal unclassified: %v", err)
+	}
+	if !strings.Contains(string(bScoped), `"item_scoped":false`) {
+		t.Errorf("ItemScoped=&false must serialise as item_scoped:false; got %s", bScoped)
+	}
+	// Absent stays absent: a result that classifies nothing is byte-for-byte
+	// what it was before the field existed.
+	if strings.Contains(string(bUnclassified), `"item_scoped"`) {
+		t.Errorf("ItemScoped=nil must omit item_scoped; got %s", bUnclassified)
+	}
+	var out InvocationResult
+	if err := json.Unmarshal(bScoped, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.ItemScoped == nil || *out.ItemScoped {
+		t.Errorf("ItemScoped round-tripped to %v, want a present false", out.ItemScoped)
+	}
+}
+
 func TestInvocationResult_WithDurationAndCost(t *testing.T) {
 	in := InvocationResult{
 		Flow:            "implement",

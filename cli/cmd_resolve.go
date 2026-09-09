@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
-	"os"
 	"strings"
 	"time"
 
@@ -206,12 +205,9 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	// to a named step) and report the outcome after.
 	fmt.Fprintf(app.Err, "resolve: driving %s to completion (until finalized or parked)…\n", claim.ItemRef.Display)
 
-	isRunner := os.Getenv(dispatchedByRunnerEnv) == "1"
 	targets := paceTargets{FiveHour: *paceFiveHour / 100, SevenDay: *paceSevenDay / 100}
 
-	if !isRunner {
-		reportQuota(app.Err)
-	}
+	reportQuota(app.Err)
 
 	enc := json.NewEncoder(app.Out)
 	quotaWarned := false
@@ -313,9 +309,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		switch flow.InvocationStatus(res.Status) {
 		case flow.StatusFailed:
 			fmt.Fprintf(app.Err, "resolve: %s stopped on a failed step\n", claim.ItemRef.Display)
-			if !isRunner {
-				reportQuota(app.Err)
-			}
+			reportQuota(app.Err)
 			return 1
 		case flow.StatusBlocked:
 			// An environment condition is re-measured, never assumed to persist
@@ -341,17 +335,13 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			}
 			// A gate only a human can clear, or the fitness wait exhausted.
 			fmt.Fprintf(app.Err, "resolve: %s is blocked — %s\n", claim.ItemRef.Display, res.Reason)
-			if !isRunner {
-				reportQuota(app.Err)
-			}
+			reportQuota(app.Err)
 			return 1
 		case flow.StatusParked, flow.StatusSkipped:
 			// Parked (question/budget/timeout) or skipped (preflight refusal,
 			// e.g. an already-finalized item). Stop and let the operator act.
 			fmt.Fprintf(app.Err, "resolve: %s %s — run `status %s` to inspect\n", claim.ItemRef.Display, res.Status, claim.ItemRef.Display)
-			if !isRunner {
-				reportQuota(app.Err)
-			}
+			reportQuota(app.Err)
 			return 0
 		case flow.StatusDone:
 			// Finalize case: RunOne ran no step (empty Step) because no eligible
@@ -359,18 +349,14 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			if res.Step == "" {
 				suffix := finalTotalSuffix(ctx, app, *claim)
 				fmt.Fprintf(app.Err, "resolve: %s finalized ✓%s\n", claim.ItemRef.Display, suffix)
-				if !isRunner {
-					reportQuota(app.Err)
-				}
+				reportQuota(app.Err)
 				return 0
 			}
 			// Otherwise a step advanced; loop to run the next one.
 		}
 	}
 	fmt.Fprintf(app.Err, "resolve: stopped after %d step attempts without finalizing (runaway guard); run `status` to inspect\n", maxResolveSteps)
-	if !isRunner {
-		reportQuota(app.Err)
-	}
+	reportQuota(app.Err)
 	return 1
 }
 

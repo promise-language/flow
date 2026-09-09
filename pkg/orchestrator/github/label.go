@@ -76,17 +76,18 @@ type structuralLabel struct {
 // The three rows one switch had and the other did not, decided:
 //
 //   - manual: structural, maintained (SetManual owns it), and it REFUSES NO
-//     CLAIM. The lease is not dispatch. The person driving the item holds the
-//     lease — run-step requires an active claim and sets manual on that
-//     claimed item — and their later `claim` or `resolve` is the holder's
-//     idempotent re-claim (docs/resolution.md § Claiming), which the
-//     other-binary preflight sits above: the driver's own next claim was the
-//     one refused. Another arena is kept off by the already-held refusal while
-//     the driver holds the lease; a manual item nobody holds is claimable, and
-//     what keeps it from being DISPATCHED is the manual hold at dispatch
-//     (docs/resolution.md § skipped; #170). Neither docs/github-schema.md
-//     § Claim protocol nor docs/orchestrator.md § What an orchestrator may
-//     refuse lists manual among the refusals.
+//     CLAIM. The lease is not dispatch. No command asserts manual control
+//     (docs/cli.md § Advancing one step), so the flag arrives through the
+//     editor while the person driving the item holds the lease — and their
+//     later `claim` or `resolve` is the holder's idempotent re-claim
+//     (docs/resolution.md § Claiming), which the other-binary preflight sits
+//     above: the driver's own next claim was the one refused. Another arena is
+//     kept off by the already-held refusal while the driver holds the lease; a
+//     manual item nobody holds is claimable, and what keeps it from being
+//     DISPATCHED is the manual hold at dispatch (docs/resolution.md § skipped;
+//     #170). Neither docs/github-schema.md § Claim protocol nor
+//     docs/orchestrator.md § What an orchestrator may refuse lists manual among
+//     the refusals.
 //   - disabled: structural, NOT maintained. No operation writes it — it is
 //     the operator's stop switch — and RemoveTag is the contract's only route
 //     to "re-enable it", which is waits-on-person's own wording. Its absence

@@ -418,4 +418,16 @@ type InvocationResult struct {
 	// pointer-to-zero means the step ran but spent nothing. With omitempty a
 	// nil pointer is omitted while &0.0 serialises as "cost_usd":0.
 	CostUSD *float64 `json:"cost_usd,omitempty"`
+
+	// ItemScoped is the scope a caller branches on when a result reports a
+	// stop: true → this ITEM is the problem and a different one might succeed;
+	// false → this ARENA is, and every item would meet the same answer. nil
+	// means the result carries no scope classification, and a caller reads nil
+	// as false — the fail-closed direction ErrClaimRefused.ItemScoped already
+	// fixes, where stopping on an unclassified refusal is the safe one.
+	//
+	// A pointer for the reason CostUSD is one: absent means unknown, not zero
+	// (docs/org/cli-guide.md § 6). With omitempty every result that classifies
+	// nothing serialises byte-for-byte as it did.
+	ItemScoped *bool `json:"item_scoped,omitempty"`
 }
