@@ -227,6 +227,39 @@ func TestCmdResolve_UnmatchedTypeBlocks(t *testing.T) {
 	}
 }
 
+// TestCmdResolve_ItemWithAJournalIsNarratedPastTheRemit: the peek and the
+// advance read the remit through the same inRemit, which stops being consulted
+// at the journal's first entry (docs/flow-registration.md § Item types). An
+// item outside the remit that already carries a journal is past that point, so
+// the peek must name the step RunOne is about to run — announcing the block
+// here while the run goes on to run a step is the misreport the branch order
+// exists to prevent, inverted.
+func TestCmdResolve_ItemWithAJournalIsNarratedPastTheRemit(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "chore", Title: "1", Journal: []flow.JournalEntry{
+		// One completed execution, as #239's AppendEntry will record it. Only
+		// its presence is read here — the checklist still picks the step (#245).
+		{Step: "plan", Execution: 1, Route: flow.Route{Next: "plan"}},
+	}})
+	app, _, errBuf := resolveTestApp(t, be) // remit: "task" only
+
+	code := app.cmdResolve(context.Background(), nil)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "no flow accepts this item's type") {
+		t.Errorf("peek announced a block the run never takes; got %q", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), `running "write plan"…`) {
+		t.Errorf("peek did not name the step about to run; got %q", errBuf.String())
+	}
+	// And the run agreed with the narration: it ran the step through to the
+	// finalize rather than stopping on the type.
+	if !strings.Contains(errBuf.String(), "finalized ✓") {
+		t.Errorf("expected the run to reach the finalize; got %q", errBuf.String())
+	}
+}
+
 // TestCmdResolve_FinalizedUnmatchedTypeNarratesFinalize (#10): the peek's
 // unmatched-type branch carries RunOne's already-finalized exemption. An item
 // that IS finalized takes the finalize path, so announcing "no flow accepts

@@ -166,6 +166,30 @@ func TestPosition_SignalWaitEntryRoutesToItsDeclaredSuccessor(t *testing.T) {
 	wantPending(t, f, it, "implement")
 }
 
+// A wait is routed TO like any other lifecycle item, and the position comes
+// back whole rather than as a name: the caller dispatches on Kind and waits on
+// the step's result, so a position that reported only the label would hand a
+// handlerless wait to the agent as though it were a step to run.
+func TestPosition_RouteToASignalWaitPendsTheWaitWhole(t *testing.T) {
+	f := journalFlow(t)
+	it := &Item{Journal: []JournalEntry{
+		entryFor("pr-open", Route{Next: "pr-merged"}),
+	}}
+	pos, err := f.Position(it)
+	if err != nil {
+		t.Fatalf("Position: %v", err)
+	}
+	if pos.Step.Name != "wait for the merge" {
+		t.Errorf("pending step = %q, want %q", pos.Step.Name, "wait for the merge")
+	}
+	if pos.Step.Kind != LifecycleAwait {
+		t.Errorf("pending kind = %v, want LifecycleAwait (%v)", pos.Step.Kind, LifecycleAwait)
+	}
+	if pos.Step.Result() != "pr-merged" {
+		t.Errorf("pending result = %q, want %q", pos.Step.Result(), "pr-merged")
+	}
+}
+
 func TestPosition_RefusesAnEmptyJournalWhenNoEntryIsDeclared(t *testing.T) {
 	f := NewFlow("implement", nil)
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{})

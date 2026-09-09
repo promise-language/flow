@@ -822,6 +822,42 @@ func TestCmdStatus_ItemOutsideTheRemitReportsNoMatchingFlow(t *testing.T) {
 	}
 }
 
+// The other half of the same rule: the remit is consulted before the journal's
+// first entry and never after, so an item outside the remit that already has a
+// journal is one `resolve` advances (TestRunOne_RemitIsNotConsultedOnceTheJournalHasEntries).
+// `status` must report its flow and its checklist — reporting "no matching
+// flow" for an item the very next `resolve` will run a step on is the same
+// disagreement as the test above, inverted, and would read to an operator as a
+// binary that has stopped owning an item mid-resolution.
+func TestCmdStatus_ItemWithAJournalReportsTheFlow(t *testing.T) {
+	app, _, _ := unmatchedTypeApp(t, flow.Item{
+		Ref: itemRefFor("1"), Type: "chore", Title: "chore#1",
+		Journal: []flow.JournalEntry{{
+			Step: "plan", Execution: 1, Route: flow.Route{Next: "plan"},
+		}},
+	})
+	out := &bytes.Buffer{}
+	errBuf := &bytes.Buffer{}
+	app.Out, app.Err = out, errBuf
+
+	if code := app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus --json = %d; stderr=%q", code, errBuf.String())
+	}
+	var payload statusPayload
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if payload.FlowState == flowStateNoMatchingFlow {
+		t.Errorf("flow_state = %q — an item with a journal is past the remit", payload.FlowState)
+	}
+	if payload.Flow == "" {
+		t.Error("flow = \"\", want the binary's flow named for an item with a journal")
+	}
+	if len(payload.Steps) == 0 {
+		t.Error("steps = none, want the flow's checklist for an item with a journal")
+	}
+}
+
 // blockStatusEnv is the park/grant scaffolding with one landed blocker and one
 // still open declared on the claimed item.
 func blockStatusEnv(t *testing.T) *parkGrantEnv {
