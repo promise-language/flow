@@ -452,6 +452,6 @@ func makeTestFlow(t *testing.T) *flow.Flow {
 	f := flow.NewFlow("implement", []flow.ItemType{"task"})
 	f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 		return ctx.ResolveMarkdown("the plan")
-	}, flow.StepConfig{Budget: flow.DefaultStepBudget()})
+	}, flow.StepConfig{})
 	return f
 }

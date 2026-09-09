@@ -2,6 +2,7 @@ package flow
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -56,6 +57,38 @@ func AllParkKinds() []ParkKind {
 		ParkRemoteUnreachable, ParkRefused, ParkWriteContract,
 	}
 }
+
+// Disposition is how a step ENDS THE FLOW when it elects finalization —
+// docs/resolution.md § Finalizing. Closed at two.
+//
+// Not to be confused with Item.Disposition (orchestrator.go), which is the
+// ORCHESTRATOR's own display name for its own status ("done", "won't fix",
+// "duplicate"), carried for a person to read and interpreted by nothing. This
+// one is a decision the flow makes, declared per step in StepConfig.MayFinalize
+// and elected at runtime; that one is a label the orchestrator already had.
+type Disposition string
+
+const (
+	// DispositionResolved — the work was done.
+	DispositionResolved Disposition = "resolved"
+	// DispositionRejected — the item was reviewed and declined, with the
+	// reasons in the finalizing entry's message. Terminal in a way a handback
+	// is not: a route that returns work for rework expects the resolution to
+	// continue, and this ends it.
+	DispositionRejected Disposition = "rejected"
+)
+
+// AllDispositions returns every declared disposition, in declaration order.
+// Consumers enumerate it rather than mirroring the set, which is how two copies
+// of one vocabulary drift.
+func AllDispositions() []Disposition {
+	return []Disposition{DispositionResolved, DispositionRejected}
+}
+
+// Valid reports whether d is one of the two. The empty disposition is not one:
+// a step that finalizes says how, and a step that does not declares no
+// disposition at all.
+func (d Disposition) Valid() bool { return slices.Contains(AllDispositions(), d) }
 
 // BudgetAxis identifies which budget axis was exhausted (when
 // ParkKind==ParkBudgetExhausted).

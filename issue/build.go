@@ -95,11 +95,15 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 	// Refusing beats silently running the contributor set, which would have a
 	// maintainer opening a pull request against their own review.
 	var flows []*flow.Flow
+	// roleGate refuses every dispatch while the step set the role needs does
+	// not exist. Nil for the roles whose steps do.
+	var roleGate flow.PreflightFunc
 	switch {
 	case cfg.CarryThrough:
 		flows = []*flow.Flow{b.carryThroughFlow(cfg)}
 	case role == RoleMaintainer:
 		flows = []*flow.Flow{b.unimplementedMaintainerFlow(cfg)}
+		roleGate = missingMaintainerStepsGate
 	default:
 		flows = []*flow.Flow{b.contributorFlow(cfg)}
 	}
@@ -116,7 +120,20 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 		// cli.App wants the display form (it reaches prompts and messages);
 		// cfg.VerifyCmd is argv because that is what a backend execs.
 		VerifyCmd: strings.Join(cfg.VerifyCmd, " "),
-		Preflight: answerGate(deps.Orchestrator, b.principal),
+		// The role gate runs AHEAD of the answer gate: what it refuses, it
+		// refuses whatever the item's questions say.
+		Preflight: flow.ChainPreflight(roleGate, answerGate(deps.Orchestrator, b.principal)),
+	}
+	// Budgets are the project's policy, not a step declaration
+	// (docs/flow-registration.md § Step configuration). Config.Budgets is
+	// already where the project writes them; this is the one place they are
+	// handed to the SDK. A step the project says nothing about is funded at the
+	// package defaults.
+	if len(cfg.Budgets) > 0 {
+		app.StepBudgets = make(map[flow.StepId]flow.StepBudget, len(cfg.Budgets))
+		for id, budget := range cfg.Budgets {
+			app.StepBudgets[flow.StepId(id)] = budget
+		}
 	}
 	return app, nil
 }
@@ -124,94 +141,99 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 // contributorFlow is the canonical contributor step set, in order.
 func (b *builder) contributorFlow(cfg Config) *flow.Flow {
 	f := flow.NewFlow("resolve", itemTypes(cfg))
-	b.addContributorSteps(f, cfg)
+	b.addContributorSteps(f)
 	// Closing the branch needs no "did the resolution complete" test of its
 	// own: DeriveNext returns the first PENDING step in registration order, so
 	// a run that parked, was blocked or failed never reaches a step registered
 	// after the request. The ordering is the condition.
 	f.AddStep("close branch", flow.ArtifactId(StepCloseBranch), b.stepCloseBranch,
-		flow.StepConfig{Budget: cfg.budgetFor(StepCloseBranch),
-			Writes: flow.WriteContract{MayBranch: true}})
+		flow.StepConfig{Writes: flow.WriteContract{MayBranch: true}})
 	return f
 }
 
 // addContributorSteps registers the plan-through-openPR steps that every
 // contributor-capable flow uses. Factored out so the carry-through flow
 // composes it with the integration steps without duplicating the list.
-func (b *builder) addContributorSteps(f *flow.Flow, cfg Config) {
+func (b *builder) addContributorSteps(f *flow.Flow) {
 	f.AddStep("write plan", flow.ArtifactId(StepPlan), b.stepPlan,
-		flow.StepConfig{Budget: cfg.budgetFor(StepPlan)})
+		flow.StepConfig{})
 	f.AddStep("open branch", flow.ArtifactId(StepBranch), b.stepOpenBranch,
-		flow.StepConfig{Budget: cfg.budgetFor(StepBranch),
-			Writes: flow.WriteContract{MayBranch: true, MayCommit: true}})
+		flow.StepConfig{Writes: flow.WriteContract{MayBranch: true, MayCommit: true}})
 	f.AddStep("implement the change", flow.ArtifactId(StepImplement), b.stepImplement,
-		flow.StepConfig{Budget: cfg.budgetFor(StepImplement),
-			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true}})
+		flow.StepConfig{Writes: flow.WriteContract{MayCommit: true, MayEditTree: true}})
 	f.AddStep("review the work", flow.ArtifactId(StepReview), b.stepReview,
-		flow.StepConfig{Budget: cfg.budgetFor(StepReview),
-			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true}})
+		flow.StepConfig{Writes: flow.WriteContract{MayCommit: true, MayEditTree: true}})
 	f.AddStep("analyze coverage", flow.ArtifactId(StepCoverage), b.stepCoverage,
-		flow.StepConfig{Budget: cfg.budgetFor(StepCoverage),
-			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true}})
+		flow.StepConfig{Writes: flow.WriteContract{MayCommit: true, MayEditTree: true}})
 	f.AddSignalStep("create pull request", flow.SignalId(StepOpenPR), b.stepOpenPR,
-		flow.StepConfig{Budget: cfg.budgetFor(StepOpenPR),
-			Writes: flow.WriteContract{MayBranch: true, MayCommit: true}})
+		flow.StepConfig{Writes: flow.WriteContract{MayBranch: true, MayCommit: true}})
 }
 
 // addIntegrationSteps registers the three integration steps: verify the merge
 // result, merge, record the merge commit.
-func (b *builder) addIntegrationSteps(f *flow.Flow, cfg Config) {
+func (b *builder) addIntegrationSteps(f *flow.Flow) {
 	f.AddStep("verify merge result", flow.ArtifactId(StepVerifyMerge), b.stepVerifyMerge,
-		flow.StepConfig{Budget: cfg.budgetFor(StepVerifyMerge),
-			Writes: flow.WriteContract{MayBranch: true, MayCommit: true}})
+		flow.StepConfig{Writes: flow.WriteContract{MayBranch: true, MayCommit: true}})
 	f.AddSignalStep("merge pull request", flow.SignalId(StepMerge), b.stepMerge,
-		flow.StepConfig{Budget: cfg.budgetFor(StepMerge)})
+		flow.StepConfig{})
 	f.AddStep("record merge commit", flow.ArtifactId(StepRecordMerge), b.stepRecordMerge,
-		flow.StepConfig{Budget: cfg.budgetFor(StepRecordMerge)})
+		flow.StepConfig{})
 }
 
 // carryThroughFlow composes the contributor steps and the integration steps
 // into one flow that ends at a merged change rather than a proposed one.
 func (b *builder) carryThroughFlow(cfg Config) *flow.Flow {
 	f := flow.NewFlow("resolve", itemTypes(cfg))
-	b.addContributorSteps(f, cfg)
-	b.addIntegrationSteps(f, cfg)
+	b.addContributorSteps(f)
+	b.addIntegrationSteps(f)
 	f.AddStep("close branch", flow.ArtifactId(StepCloseBranch), b.stepCloseBranch,
-		flow.StepConfig{Budget: cfg.budgetFor(StepCloseBranch),
-			Writes: flow.WriteContract{MayBranch: true}})
+		flow.StepConfig{Writes: flow.WriteContract{MayBranch: true}})
 	return f
+}
+
+// missingMaintainerSteps is the one wording for "this binary has maintainer
+// capability and the maintainer step set does not exist yet". Shared by the
+// preflight gate that refuses before anything runs and by the stub handler
+// behind it, so an operator reads one sentence whichever path they reach.
+var missingMaintainerSteps = fmt.Sprintf(
+	"the maintainer step set is not implemented yet — "+
+		"set Config.Role to %q to run the contributor steps deliberately",
+	RoleContributor)
+
+// missingMaintainerStepsGate refuses every dispatch of the maintainer flow,
+// BEFORE the mandatory seed gate runs.
+//
+// Refusing here rather than in the stub handler is load-bearing, not
+// politeness. Every lifecycle item is required, so reaching the seed gate
+// would checklist the item with the `review-maint` artifact — and seeding is
+// ONE-SHOT. An admin who ran this once and then set Config.Role to contributor
+// would find an item seeded with none of the contributor artifacts, and every
+// step would die on "artifact not seeded" with no way back short of
+// hand-editing the state comment.
+//
+// It wraps flow.ErrBlocked, so the invocation reports `blocked` rather than
+// `failed`. That is the accurate verdict: nothing failed, and no later cycle
+// will pass until a person sets Config.Role.
+func missingMaintainerStepsGate(context.Context, *flow.Item) error {
+	return fmt.Errorf("issue: %s: %w", missingMaintainerSteps, flow.ErrBlocked)
 }
 
 // unimplementedMaintainerFlow stands in for the maintainer step set until it
 // lands: one step that refuses when dispatched, so every read-only command
 // still works while `run-step` says plainly what is missing.
+//
+// The handler is the backstop, not the gate — missingMaintainerStepsGate stops
+// the dispatch before this can run. It stays because AddStep panics on a nil
+// handler, and because a step that could somehow be reached must still refuse
+// rather than resolve.
 func (b *builder) unimplementedMaintainerFlow(cfg Config) *flow.Flow {
 	f := flow.NewFlow("review", itemTypes(cfg))
 	f.AddStep("review the implementation", flow.ArtifactId(StepReviewMaint),
 		func(ctx flow.StepCtx) error {
-			return fmt.Errorf(
-				"issue: the maintainer step set is not implemented yet — "+
-					"set Config.Role to %q to run the contributor steps deliberately",
-				RoleContributor)
+			return fmt.Errorf("issue: %s", missingMaintainerSteps)
 		},
-		// Optional, and that is load-bearing rather than cosmetic. A REQUIRED
-		// artifact makes the item seed on first dispatch, and seeding is
-		// one-shot: an admin who ran this once would have the issue
-		// permanently checklisted with a maintainer artifact, and switching to
-		// the contributor role afterwards would never re-seed — every step
-		// would then die on "artifact not seeded" with no way back short of
-		// hand-editing the state comment.
-		flow.StepConfig{Optional: true, Budget: cfg.budgetFor(StepReviewMaint)})
+		flow.StepConfig{})
 	return f
-}
-
-// budgetFor returns the project's override for a step, or the zero budget —
-// which flow resolves to its package defaults, axis by axis.
-func (c Config) budgetFor(id StepID) flow.StepBudget {
-	if c.Budgets == nil {
-		return flow.StepBudget{}
-	}
-	return c.Budgets[id]
 }
 
 // itemTypes is the set of item types the flow handles.

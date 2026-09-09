@@ -50,6 +50,22 @@ type App struct {
 	// is claimed.
 	Gates []flow.GateName
 
+	// StepBudgets is the per-step cap policy: what a resolution may spend on
+	// the step with that result id. Optional — a step with no entry here is
+	// funded at the package defaults, and so is every zero-valued axis of a
+	// step that has one (flow.ResolveStepBudget).
+	//
+	// It lives here rather than in the step declarations it constrains because
+	// a budget is not a property of the work: it is what whoever funds the run
+	// is willing to spend on it, and the same step is worth different amounts
+	// to different binaries. See docs/flow-registration.md § Step configuration
+	// ("There is no budget field").
+	//
+	// Interim, and deliberately thin — a map the binary fills in from its own
+	// configuration. Where budgets finally live is the treasurer's ledger, and
+	// the treasurer takes this field over when it lands.
+	StepBudgets map[flow.StepId]flow.StepBudget
+
 	// Telemetry is the optional sink for StepCtx.Notify calls. When nil,
 	// Notify is a no-op. NOT a liveness signal — see flow.Telemetry's
 	// docstring.
@@ -113,6 +129,17 @@ type App struct {
 	// resolved at startup
 	artifactById map[flow.ArtifactId]flow.ArtifactDef
 	signalById   map[flow.SignalId]flow.SignalDef
+}
+
+// stepBudget resolves the cap policy for one step: the binary's entry for it,
+// with every axis it leaves zero taken from the package defaults.
+//
+// A step with NO entry resolves to the defaults whole, which is what makes the
+// missing-step case inherent rather than hand-written: a step seeded on an item
+// but no longer in the flow reads as unfunded here, and reading that as a zero
+// budget would silently give it zero cost and zero timeout headroom.
+func (app *App) stepBudget(id flow.StepId) flow.StepBudget {
+	return flow.ResolveStepBudget(app.StepBudgets[id])
 }
 
 // Run is the binary's entry point. Parses argv, dispatches the matching

@@ -27,12 +27,7 @@ func newParkGrantEnv(t *testing.T) *parkGrantEnv {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{Budget: flow.StepBudget{
-			MaxInvocations:          3,
-			MaxPromptsPerInvocation: 1,
-			MaxCostUSD:              10,
-			Timeout:                 30 * time.Minute,
-		}})
+		}, flow.StepConfig{})
 		f.AddStep("record the commit", "commit", func(ctx flow.StepCtx) error {
 			return ctx.ResolveCommitHash("abc")
 		}, flow.StepConfig{})
@@ -40,6 +35,15 @@ func newParkGrantEnv(t *testing.T) *parkGrantEnv {
 			return nil
 		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
+
+	// The cap the sweep and the increment are computed against — the binary's
+	// policy, which is what `grant` reads for a step's headroom.
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
+		MaxInvocations:          3,
+		MaxPromptsPerInvocation: 1,
+		MaxCostUSD:              10,
+		Timeout:                 30 * time.Minute,
+	}}
 
 	env := &parkGrantEnv{app: app, be: be, claim: claim, out: &bytes.Buffer{}, err: &bytes.Buffer{}}
 	app.Out, app.Err = env.out, env.err

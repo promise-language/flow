@@ -772,8 +772,9 @@ func TestRunOne_ParksOnInvocationsExhaustion(t *testing.T) {
 		// max 1 invocation, but handler returns error each time
 		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) error {
 			return errors.New("boom")
-		}, flow.StepConfig{Budget: flow.StepBudget{MaxInvocations: 1}})
+		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxInvocations: 1}}
 
 	// First run consumes the only invocation and returns "failed".
 	res, err := RunOne(context.Background(), app, claim)
@@ -816,11 +817,12 @@ func TestRunOne_RespectsPromptsBudget(t *testing.T) {
 
 			_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p2"})
 			return err
-			// Explicit cap: this test is about the gate firing, not about
-			// whatever the package default happens to be.
-		}, flow.StepConfig{Budget: flow.StepBudget{MaxPromptsPerInvocation: 1}})
+		}, flow.StepConfig{})
 
 	}, a)
+	// Explicit cap: this test is about the gate firing, not about whatever the
+	// package default happens to be.
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxPromptsPerInvocation: 1}}
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -857,8 +859,9 @@ func TestRunOne_AgentRequestCarriesRemainingCostHeadroom(t *testing.T) {
 				return err
 			}
 			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{Budget: flow.StepBudget{MaxCostUSD: 5}})
+		}, flow.StepConfig{})
 	}, a)
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxCostUSD: 5}}
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -901,8 +904,9 @@ func TestRunOne_HandlerCostCeilingIsNarrowedNotWidened(t *testing.T) {
 				return err
 			}
 			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{Budget: flow.StepBudget{MaxCostUSD: 5}})
+		}, flow.StepConfig{})
 	}, a)
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxCostUSD: 5}}
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -940,8 +944,9 @@ func TestRunOne_CostCapFailureParksOnCost(t *testing.T) {
 				return err
 			}
 			return ctx.ResolveMarkdown("never reached")
-		}, flow.StepConfig{Budget: flow.StepBudget{MaxCostUSD: 20}})
+		}, flow.StepConfig{})
 	}, a)
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxCostUSD: 20}}
 
 	ctx := context.Background()
 	res, err := RunOne(ctx, app, claim)
@@ -1092,8 +1097,9 @@ func TestRunOne_SpentGrantParksInsteadOfDispatchingAnUncappedTurn(t *testing.T) 
 				return err
 			}
 			return ctx.ResolveMarkdown("never reached")
-		}, flow.StepConfig{Budget: flow.StepBudget{MaxCostUSD: 5}})
+		}, flow.StepConfig{})
 	}, a)
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxCostUSD: 5}}
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -1118,8 +1124,9 @@ func TestRunOne_ParksOnTimeout(t *testing.T) {
 		f.AddStep("slow", "plan", func(ctx flow.StepCtx) error {
 			<-ctx.Context().Done()
 			return ctx.Context().Err()
-		}, flow.StepConfig{Budget: flow.StepBudget{Timeout: 50 * time.Millisecond}})
+		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {Timeout: 50 * time.Millisecond}}
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -1175,8 +1182,9 @@ func TestRunOne_TimeoutParkDoesNotCapturePatch(t *testing.T) {
 			}
 			<-ctx.Context().Done()
 			return ctx.Context().Err()
-		}, flow.StepConfig{Budget: flow.StepBudget{Timeout: 50 * time.Millisecond}})
+		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {Timeout: 50 * time.Millisecond}}
 
 	counting := &countingPatchBackend{Orchestrator: be, wt: &countingPatchWorktree{}}
 	app.Orchestrator = counting
@@ -1717,6 +1725,58 @@ func TestRunOne_FinalizesWhenAllRequiredArtifactsResolved(t *testing.T) {
 // A granted timeout on the artifact record must win over the step's
 // compiled-in budget — otherwise `grant --timeout` is write-only and a
 // timeout-parked step re-parks forever at the same deadline.
+// The three tiers effectiveTimeout resolves through, one test because the
+// point is the ORDER: a granted timeout beats the policy, the policy beats the
+// package default, and a step the policy says nothing about lands on the
+// default rather than on zero.
+func TestEffectiveTimeout_GrantedThenPolicyThenDefault(t *testing.T) {
+	app := &App{StepBudgets: map[flow.StepId]flow.StepBudget{
+		"plan": {Timeout: 5 * time.Minute},
+	}}
+	planned := flow.LifecycleItem{Kind: flow.LifecycleArtifact, ArtifactId: "plan"}
+	unplanned := flow.LifecycleItem{Kind: flow.LifecycleArtifact, ArtifactId: "commit"}
+
+	if got := app.effectiveTimeout(planned, flow.ArtifactRecord{GrantedTimeout: time.Hour}); got != time.Hour {
+		t.Errorf("with a granted timeout: %v, want 1h — the grant wins over the policy", got)
+	}
+	if got := app.effectiveTimeout(planned, flow.ArtifactRecord{}); got != 5*time.Minute {
+		t.Errorf("with no grant: %v, want 5m — the policy wins over the default", got)
+	}
+	if got := app.effectiveTimeout(unplanned, flow.ArtifactRecord{}); got != flow.DefaultStepBudget().Timeout {
+		t.Errorf("step absent from the policy: %v, want the package default %v",
+			got, flow.DefaultStepBudget().Timeout)
+	}
+}
+
+// A step with no policy entry is funded at the package defaults WHOLE, and a
+// step with a partial entry inherits the defaults axis by axis. This is what
+// makes the "seeded on the item but no longer in the flow" case inherent:
+// there is no lookup to miss, so nothing can silently read as a zero cap.
+func TestAppStepBudget_MissingAndPartialEntries(t *testing.T) {
+	app := &App{StepBudgets: map[flow.StepId]flow.StepBudget{
+		"plan": {MaxCostUSD: 42},
+	}}
+	if got := app.stepBudget("retired-step"); got != flow.DefaultStepBudget() {
+		t.Errorf("absent step budget = %+v, want the package defaults %+v", got, flow.DefaultStepBudget())
+	}
+	got := app.stepBudget("plan")
+	if got.MaxCostUSD != 42 {
+		t.Errorf("MaxCostUSD = %v, want 42 from the policy", got.MaxCostUSD)
+	}
+	if got.MaxInvocations != flow.DefaultStepBudget().MaxInvocations || got.Timeout != flow.DefaultStepBudget().Timeout {
+		t.Errorf("unset axes = %+v, want the package defaults on each", got)
+	}
+}
+
+// A nil policy is the ordinary case for a binary that configures no budgets at
+// all, and it must not be a zero cap.
+func TestAppStepBudget_NilPolicyIsAllDefaults(t *testing.T) {
+	app := &App{}
+	if got := app.stepBudget("plan"); got != flow.DefaultStepBudget() {
+		t.Errorf("budget = %+v, want the package defaults %+v", got, flow.DefaultStepBudget())
+	}
+}
+
 func TestRunOne_GrantedTimeoutOverridesStepBudget(t *testing.T) {
 	var deadlines []time.Duration
 	app, be, claim := testApp(t, func(f *flow.Flow) {
@@ -1734,8 +1794,9 @@ func TestRunOne_GrantedTimeoutOverridesStepBudget(t *testing.T) {
 			case <-time.After(150 * time.Millisecond):
 			}
 			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{Budget: flow.StepBudget{Timeout: 50 * time.Millisecond}})
+		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {Timeout: 50 * time.Millisecond}}
 
 	ctx := context.Background()
 	res, err := RunOne(ctx, app, claim)
@@ -1781,11 +1842,12 @@ func TestRunOne_BareGrantRecoversAStepOutOfTimeAndInvocations(t *testing.T) {
 			case <-time.After(150 * time.Millisecond):
 			}
 			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{Budget: flow.StepBudget{
-			MaxInvocations: 1,
-			Timeout:        50 * time.Millisecond,
-		}})
+		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
+		MaxInvocations: 1,
+		Timeout:        50 * time.Millisecond,
+	}}
 
 	ctx := context.Background()
 	res, err := RunOne(ctx, app, claim)
@@ -2270,8 +2332,9 @@ func TestRunOne_ErrRefusedParksWithoutBurningBudget(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("guarded", "plan", func(ctx flow.StepCtx) error {
 			return fmt.Errorf("guard refused staged file main.go: %w", flow.ErrRefused)
-		}, flow.StepConfig{Budget: flow.StepBudget{MaxInvocations: 1}})
+		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxInvocations: 1}}
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -2381,7 +2444,7 @@ func TestRunOne_BudgetParkDoesNotClearQuestionMarker(t *testing.T) {
 				return flow.ErrBudgetExhausted{Axis: flow.AxisInvocations}
 			}
 			return ctx.ResolveMarkdown("the plan")
-		}, flow.StepConfig{Budget: flow.DefaultStepBudget()})
+		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
 
 	// First dispatch seeds the artifact and parks on budget.
@@ -2454,8 +2517,9 @@ func TestRunOne_TimeoutParkReasonUsesResultID(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) error {
 			<-ctx.Context().Done()
 			return ctx.Context().Err()
-		}, flow.StepConfig{Budget: flow.StepBudget{Timeout: 50 * time.Millisecond}})
+		}, flow.StepConfig{})
 	}, &stubAgent{name: "stub"})
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {Timeout: 50 * time.Millisecond}}
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {

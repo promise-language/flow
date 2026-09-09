@@ -314,7 +314,7 @@ func (app *App) planPark(f *flow.Flow, state *flow.Item, display string, a grant
 		return refuse()
 	}
 
-	g := parkIncrement(axes, rec, stepBudgetFor(f, id), a)
+	g := parkIncrement(axes, rec, app.stepBudget(flow.StepId(id)), a)
 	if g == (flow.Grant{}) {
 		return nothingToDo(fmt.Sprintf("%q already has headroom on the %s axis — park is stale; nothing to grant", id, park.Axis))
 	}
@@ -402,17 +402,6 @@ func parkIncrement(axes []flow.BudgetAxis, rec flow.ArtifactRecord, budget flow.
 	return g
 }
 
-// stepBudgetFor returns the step's configured budget, falling back to the
-// package defaults for a step that is seeded on the item but no longer in the
-// flow — its ItemByResult lookup misses, and a zero budget would silently make
-// the cost and timeout headroom zero.
-func stepBudgetFor(f *flow.Flow, id flow.ArtifactId) flow.StepBudget {
-	if li, ok := f.ItemByResult(flow.StepId(id)); ok {
-		return li.Budget
-	}
-	return flow.DefaultStepBudget()
-}
-
 // planAll sweeps every pending step, raising each axis to at least
 // consumption + headroom. The max() shape means a step that already has room
 // yields a zero delta and no write at all.
@@ -435,7 +424,7 @@ func (app *App) planAll(f *flow.Flow, state *flow.Item, a grantAmounts) planOutc
 		}
 		plans = append(plans, plannedGrant{
 			id:     li.ArtifactId,
-			grant:  sweepIncrement(rec, li.Budget, a),
+			grant:  sweepIncrement(rec, app.stepBudget(li.Result()), a),
 			before: rec,
 		})
 	}

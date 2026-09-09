@@ -9,11 +9,16 @@ import (
 // is selected by cli.App for a given item if its Types() match item.Type and
 // all RequireSignal preconditions are satisfied.
 type Flow struct {
-	name           string
-	types          []ItemType
-	steps          []*step
-	stepByName     map[string]*step
-	stepByResult   map[StepId]*step // keyed by the step's result id — ArtifactId or SignalId
+	name         string
+	types        []ItemType
+	steps        []*step
+	stepByName   map[string]*step
+	stepByResult map[StepId]*step // keyed by the step's result id — ArtifactId or SignalId
+	// entry is the one step carrying StepConfig{Entry: true}, recorded as it
+	// is registered. Derived from the declarations rather than a second copy
+	// of them: it is what makes a second entry refusable at the moment it is
+	// declared, and it is what ValidateGraph walks from.
+	entry          *step
 	requireSignals []SignalId
 }
 
@@ -71,15 +76,10 @@ func (f *Flow) AddStep(name string, result ArtifactId, do StepHandler, cfg StepC
 	if _, dup := f.stepByResult[StepId(result)]; dup {
 		panic(fmt.Sprintf("flow.AddStep: duplicate result %q in flow %q", result, f.name))
 	}
-	f.appendStep(&step{
-		kind:     stepArtifact,
-		name:     name,
-		artifact: result,
-		handler:  do,
-		required: !cfg.Optional, // Required by default; StepConfig.Optional opts out
-		budget:   cfg.Budget,
-		writes:   cfg.Writes,
-	}, StepId(result))
+	s := f.prepareStep("AddStep", stepArtifact, name, cfg)
+	s.artifact = result
+	s.handler = do
+	f.appendStep(s, StepId(result))
 }
 
 // AddSignalStep registers a side-effect step that completes when `signal` is
@@ -101,15 +101,10 @@ func (f *Flow) AddSignalStep(name string, signal SignalId, do StepHandler, cfg S
 	if _, dup := f.stepByResult[StepId(signal)]; dup {
 		panic(fmt.Sprintf("flow.AddSignalStep: duplicate result %q in flow %q", signal, f.name))
 	}
-	f.appendStep(&step{
-		kind:     stepSignal,
-		name:     name,
-		signal:   signal,
-		handler:  do,
-		required: !cfg.Optional,
-		budget:   cfg.Budget,
-		writes:   cfg.Writes,
-	}, StepId(signal))
+	s := f.prepareStep("AddSignalStep", stepSignal, name, cfg)
+	s.signal = signal
+	s.handler = do
+	f.appendStep(s, StepId(signal))
 }
 
 // AwaitSignal registers a pure wait — no handler. The lifecycle item
@@ -128,12 +123,109 @@ func (f *Flow) AwaitSignal(name string, signal SignalId, cfg StepConfig) {
 	if _, dup := f.stepByResult[StepId(signal)]; dup {
 		panic(fmt.Sprintf("flow.AwaitSignal: duplicate result %q in flow %q", signal, f.name))
 	}
-	f.appendStep(&step{
-		kind:     stepAwait,
-		name:     name,
-		signal:   signal,
-		required: !cfg.Optional,
-	}, StepId(signal))
+	// A signal wait belongs to no role: it has no handler, performs nothing,
+	// and elects nothing, so there is no standing it could require. A tag here
+	// is a declaration nothing would ever match, so it is refused where it is
+	// written rather than left to mean nothing at runtime.
+	if cfg.Role != "" {
+		panic(fmt.Sprintf("flow.AwaitSignal: signal wait %q in flow %q declares Role %q; signal waits belong to no role",
+			name, f.name, cfg.Role))
+	}
+	// Nor may a wait finalize, for the same reason and with a sharper
+	// consequence. Only a step finalizes, by electing it as its route
+	// (docs/resolution.md § Finalizing); a wait's route is static — when the
+	// signal is observed its entry is appended carrying the one declared
+	// successor. Left declarable, the declaration would also be BELIEVED:
+	// ValidateGraph counts anything carrying a MayFinalize as a finalizer, so a
+	// wait with one would satisfy finalize-reachability for a graph in which
+	// nothing can ever end the flow — the exact defect that check exists to
+	// catch.
+	if len(cfg.MayFinalize) > 0 {
+		panic(fmt.Sprintf("flow.AwaitSignal: signal wait %q in flow %q declares MayFinalize %v; a wait elects nothing, so it cannot finalize",
+			name, f.name, cfg.MayFinalize))
+	}
+	s := f.prepareStep("AwaitSignal", stepAwait, name, cfg)
+	s.signal = signal
+	f.appendStep(s, StepId(signal))
+}
+
+// prepareStep normalizes the config, refuses every declaration a flow cannot
+// hold, and builds the part of the step record that does not depend on the
+// kind. Shared by the three registrars so one rule cannot become three that
+// disagree.
+//
+// Everything here panics rather than returning an error: these are programming
+// errors caught while the program is being assembled, not runtime conditions
+// (docs/flow-registration.md § Uniqueness invariants). `registrar` names the
+// call that was made, because a registration panic is read without a stack that
+// says which of the three it came from.
+func (f *Flow) prepareStep(registrar string, kind stepKind, name string, cfg StepConfig) *step {
+	cfg = cfg.normalized()
+
+	// The second entry is refusable here — the first one is already recorded.
+	// Zero entries is not: it is unknowable until registration has ended, so
+	// ValidateGraph refuses that one.
+	if cfg.Entry && f.entry != nil {
+		panic(fmt.Sprintf("flow.%s: step %q in flow %q declares Entry, but step %q already does; exactly one entry",
+			registrar, name, f.name, f.entry.name))
+	}
+	if !cfg.Capture.Valid() {
+		panic(fmt.Sprintf("flow.%s: step %q in flow %q has Capture %q, which is not one of %v",
+			registrar, name, f.name, cfg.Capture, AllCaptureSources()))
+	}
+	if !cfg.Needs.Valid() {
+		panic(fmt.Sprintf("flow.%s: step %q in flow %q has Needs %q, which is not one of %v",
+			registrar, name, f.name, cfg.Needs, AllNeedsStates()))
+	}
+	if !cfg.Leaves.Valid() {
+		panic(fmt.Sprintf("flow.%s: step %q in flow %q has Leaves %q, which is not one of %v",
+			registrar, name, f.name, cfg.Leaves, AllLeavesStates()))
+	}
+	seenDisposition := map[Disposition]bool{}
+	for _, d := range cfg.MayFinalize {
+		if !d.Valid() {
+			panic(fmt.Sprintf("flow.%s: step %q in flow %q may finalize as %q, which is not one of %v",
+				registrar, name, f.name, d, AllDispositions()))
+		}
+		if seenDisposition[d] {
+			panic(fmt.Sprintf("flow.%s: step %q in flow %q lists disposition %q twice in MayFinalize",
+				registrar, name, f.name, d))
+		}
+		seenDisposition[d] = true
+	}
+	// Next is checked for shape only. Whether an id names a registered item
+	// cannot be known while registering — a route forward names a step not
+	// declared yet — so ValidateGraph resolves them once the whole graph is in.
+	seenNext := map[StepId]bool{}
+	for _, id := range cfg.Next {
+		if id == "" {
+			panic(fmt.Sprintf("flow.%s: step %q in flow %q declares an empty successor id in Next",
+				registrar, name, f.name))
+		}
+		if seenNext[id] {
+			panic(fmt.Sprintf("flow.%s: step %q in flow %q lists successor %q twice in Next",
+				registrar, name, f.name, id))
+		}
+		seenNext[id] = true
+	}
+
+	// The two slices are COPIED in. A registration hands the flow a slice the
+	// caller still holds, and the graph is the thing startup validation
+	// certifies: keeping the caller's backing array would let a declaration be
+	// rewritten after it was checked, silently and from outside the package.
+	// Flow.RequireSignals already copies on the way out for the same reason.
+	return &step{
+		kind:        kind,
+		name:        name,
+		role:        cfg.Role,
+		entry:       cfg.Entry,
+		next:        slices.Clone(cfg.Next),
+		mayFinalize: slices.Clone(cfg.MayFinalize),
+		capture:     cfg.Capture,
+		writes:      cfg.Writes,
+		needs:       cfg.Needs,
+		leaves:      cfg.Leaves,
+	}
 }
 
 // appendStep records a fully-built step in registration order and indexes it
@@ -142,6 +234,9 @@ func (f *Flow) appendStep(s *step, resultKey StepId) {
 	f.steps = append(f.steps, s)
 	f.stepByName[s.name] = s
 	f.stepByResult[resultKey] = s
+	if s.entry {
+		f.entry = s
+	}
 }
 
 // RequireSignal adds an eligibility precondition. The flow is only selected
@@ -236,10 +331,22 @@ type LifecycleItem struct {
 	Kind       LifecycleKind
 	ArtifactId ArtifactId // set when Kind==LifecycleArtifact
 	SignalId   SignalId   // set when Kind==LifecycleSignal or LifecycleAwait
-	Required   bool
-	Handler    StepHandler   // nil when Kind==LifecycleAwait
-	Budget     StepBudget    // resolved (merged with defaults)
-	Writes     WriteContract // what the step may change in the worktree
+	// Required is hard-set to true for every lifecycle item. Step optionality
+	// is gone — routing subsumes it — but the checklist that reads this has
+	// not been retired yet (cli/cmd_status.go still renders it), so the field
+	// stays and reports the one value there now is. It goes with the checklist
+	// itself, in #232 (routing/journal) and #240.
+	Required bool
+	Handler  StepHandler // nil when Kind==LifecycleAwait
+
+	Role        RoleName      // the declared role that performs this step
+	Entry       bool          // true on the one step an empty journal starts at
+	Next        []StepId      // the successors the step's handler may elect
+	MayFinalize []Disposition // the dispositions the step may end the flow with
+	Capture     CaptureSource // where an artifact step's result comes from
+	Needs       NeedsState    // the worktree state established before dispatch
+	Writes      WriteContract // what the step may change in the worktree
+	Leaves      LeavesState   // the worktree state the step must end in
 }
 
 // Result returns the step's identity: its ArtifactId when it produces an
@@ -289,11 +396,23 @@ func (f *Flow) Items() []LifecycleItem {
 
 func toLifecycleItem(st *step) LifecycleItem {
 	li := LifecycleItem{
-		Name:     st.name,
-		Required: st.required,
+		Name: st.name,
+		// Every lifecycle item is required: there is no step optionality to
+		// report. See LifecycleItem.Required.
+		Required: true,
 		Handler:  st.handler,
-		Budget:   resolveBudget(st.budget),
-		Writes:   st.writes,
+		Role:     st.role,
+		Entry:    st.entry,
+		// Copied out, symmetrically with prepareStep's copy in: a
+		// LifecycleItem is a READ of the declaration, and a caller ranging
+		// Items() must not be able to rewrite the graph through the view it
+		// was handed.
+		Next:        slices.Clone(st.next),
+		MayFinalize: slices.Clone(st.mayFinalize),
+		Capture:     st.capture,
+		Needs:       st.needs,
+		Writes:      st.writes,
+		Leaves:      st.leaves,
 	}
 	switch st.kind {
 	case stepArtifact:
@@ -320,12 +439,12 @@ func (f *Flow) IsReady(it *Item) bool {
 	return true
 }
 
-// IsDone returns true iff every required lifecycle item is resolved.
+// IsDone returns true iff every lifecycle item is resolved. There is no
+// per-step opt-out to skip: what an operator can still strike off is the
+// artifact RECORD (stepPending's Required=false branch), which lives on the
+// item and not in the declaration.
 func (f *Flow) IsDone(it *Item) bool {
 	for _, st := range f.steps {
-		if !st.required {
-			continue
-		}
 		if f.stepPending(it, st) {
 			return false
 		}
@@ -348,9 +467,16 @@ func (f *Flow) TerminalReason(it *Item) string {
 	return ""
 }
 
-// SeedSpec returns the ArtifactSpec slice the orchestrator should pre-load at seed
-// time. Reads the per-step StepConfig values (merged with defaults).
-func (f *Flow) SeedSpec(artifactDefs map[ArtifactId]ArtifactDef) []ArtifactSpec {
+// SeedSpec returns the ArtifactSpec slice the orchestrator should pre-load at
+// seed time.
+//
+// `budgets` is the caller's cap POLICY, keyed by step id — a step with no
+// entry, and every zero axis of one that has an entry, takes the package
+// default (ResolveStepBudget). It is a parameter rather than something read
+// off the steps because budgets are not a step declaration: what a resolution
+// may spend belongs to whoever funds it (docs/flow-registration.md § Step
+// configuration).
+func (f *Flow) SeedSpec(artifactDefs map[ArtifactId]ArtifactDef, budgets map[StepId]StepBudget) []ArtifactSpec {
 	out := make([]ArtifactSpec, 0, len(f.steps))
 	for _, st := range f.steps {
 		if st.kind != stepArtifact {
@@ -364,19 +490,9 @@ func (f *Flow) SeedSpec(artifactDefs map[ArtifactId]ArtifactDef) []ArtifactSpec 
 		out = append(out, ArtifactSpec{
 			Id:       st.artifact,
 			Type:     def.Type,
-			Required: st.required,
-			Budget:   resolveBudget(st.budget),
+			Required: true,
+			Budget:   ResolveStepBudget(budgets[st.result()]),
 		})
 	}
 	return out
-}
-
-// StepBudget returns the resolved budget for the named step, merging
-// StepConfig values with package defaults.
-func (f *Flow) StepBudget(name string) (StepBudget, bool) {
-	st, ok := f.stepByName[name]
-	if !ok {
-		return StepBudget{}, false
-	}
-	return resolveBudget(st.budget), true
 }

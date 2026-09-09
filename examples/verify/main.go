@@ -40,9 +40,7 @@ func main() {
 	}
 
 	verifyFlow := flow.NewFlow("verify", []flow.ItemType{"task"})
-	verifyFlow.AddStep("run go test", "test-output", stepRunTests, flow.StepConfig{
-		Budget: flow.StepBudget{Timeout: 5 * time.Minute},
-	})
+	verifyFlow.AddStep("run go test", "test-output", stepRunTests, flow.StepConfig{})
 
 	os.Exit(cli.Run(cli.App{
 		Name:         "verify",
@@ -52,6 +50,11 @@ func main() {
 			flow.Artifact("test-output", flow.ArtifactMarkdown),
 		},
 		Flows: []*flow.Flow{verifyFlow},
+		// What the run may spend is the binary's policy, keyed by step id —
+		// never a step declaration. Everything unnamed takes the defaults.
+		StepBudgets: map[flow.StepId]flow.StepBudget{
+			"test-output": {Timeout: 5 * time.Minute},
+		},
 	}))
 }
 
