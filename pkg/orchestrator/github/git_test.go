@@ -49,7 +49,14 @@ func TestParseGitHubRemote(t *testing.T) {
 // returning a gitOps pointed at it.
 func initTestRepo(t *testing.T) *gitOps {
 	t.Helper()
-	dir := t.TempDir()
+	return initTestRepoIn(t, t.TempDir())
+}
+
+// initTestRepoIn is the same over a caller-chosen directory — for the tests
+// that must point FLOW_DIR at a path INSIDE the worktree, which they cannot do
+// until they know what the worktree is.
+func initTestRepoIn(t *testing.T, dir string) *gitOps {
+	t.Helper()
 	g := newGitOps(dir)
 	ctx := t.Context()
 
@@ -64,11 +71,15 @@ func initTestRepo(t *testing.T) *gitOps {
 	}
 
 	// Ignore the SDK state dir, which is what every real project does and what
-	// StageAll now requires: an unignored state dir inside the worktree is
-	// refused, not silently excluded. An absolute FLOW_DIR is outside the
-	// worktree, so there is nothing to ignore.
-	if d := clistate.Dir(); !filepath.IsAbs(d) {
-		if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(d+"/\n"), 0644); err != nil {
+	// StageAll requires: an unignored state dir inside the worktree is refused,
+	// not silently excluded. A state dir outside the worktree is somewhere git
+	// cannot see, so there is nothing to ignore.
+	d, err := clistate.Dir()
+	if err != nil {
+		t.Fatalf("clistate.Dir: %v", err)
+	}
+	if rel, rerr := filepath.Rel(dir, d); rerr == nil && filepath.IsLocal(rel) {
+		if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(rel+"/\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -147,8 +158,9 @@ func TestDefaultGitRunner_StderrOnlyOnError(t *testing.T) {
 }
 
 func TestStageAll_ExcludesFlowDir(t *testing.T) {
-	t.Setenv("FLOW_DIR", ".flow")
-	g := initTestRepo(t)
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+	g := initTestRepoIn(t, dir)
 	ctx := t.Context()
 
 	// Modify the tracked file.
@@ -185,8 +197,9 @@ func TestStageAll_ExcludesFlowDir(t *testing.T) {
 }
 
 func TestStageAll_ExcludesCustomFlowDir(t *testing.T) {
-	t.Setenv("FLOW_DIR", ".custom-state")
-	g := initTestRepo(t)
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".custom-state"))
+	g := initTestRepoIn(t, dir)
 	ctx := t.Context()
 
 	// Modify the tracked file.
@@ -222,8 +235,9 @@ func TestStageAll_ExcludesCustomFlowDir(t *testing.T) {
 }
 
 func TestStageAll_ExcludesNestedFlowSubtree(t *testing.T) {
-	t.Setenv("FLOW_DIR", ".flow")
-	g := initTestRepo(t)
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+	g := initTestRepoIn(t, dir)
 	ctx := t.Context()
 
 	if err := os.WriteFile(filepath.Join(g.dir, "README"), []byte("changed"), 0644); err != nil {
@@ -258,8 +272,9 @@ func TestStageAll_ExcludesNestedFlowSubtree(t *testing.T) {
 }
 
 func TestStageAll_DoesNotOverExclude(t *testing.T) {
-	t.Setenv("FLOW_DIR", ".flow")
-	g := initTestRepo(t)
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+	g := initTestRepoIn(t, dir)
 	ctx := t.Context()
 
 	// A file whose name starts with ".flow" but is not inside .flow/ must
@@ -296,7 +311,11 @@ func TestStageAll_AbsoluteFlowDir(t *testing.T) {
 	}
 
 	// Write a state file in the external FLOW_DIR — it must not appear in the index.
-	if err := os.WriteFile(filepath.Join(clistate.Dir(), "active.json"), []byte(`{"token":"t"}`), 0644); err != nil {
+	stateDir, err := clistate.Dir()
+	if err != nil {
+		t.Fatalf("clistate.Dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "active.json"), []byte(`{"token":"t"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -332,7 +351,11 @@ func TestCommit_AbsoluteFlowDir(t *testing.T) {
 	}
 
 	// Write state in the external FLOW_DIR — must not leak into the commit.
-	if err := os.WriteFile(filepath.Join(clistate.Dir(), "active.json"), []byte(`{"token":"t"}`), 0644); err != nil {
+	stateDir, err := clistate.Dir()
+	if err != nil {
+		t.Fatalf("clistate.Dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "active.json"), []byte(`{"token":"t"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -355,8 +378,9 @@ func TestCommit_AbsoluteFlowDir(t *testing.T) {
 }
 
 func TestCommit_ExcludesFlowDir(t *testing.T) {
-	t.Setenv("FLOW_DIR", ".flow")
-	g := initTestRepo(t)
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+	g := initTestRepoIn(t, dir)
 	ctx := t.Context()
 
 	if err := os.WriteFile(filepath.Join(g.dir, "README"), []byte("changed"), 0644); err != nil {
@@ -390,8 +414,9 @@ func TestCommit_ExcludesFlowDir(t *testing.T) {
 }
 
 func TestCommit_OnlyFlowDirChange_NoCommit(t *testing.T) {
-	t.Setenv("FLOW_DIR", ".flow")
-	g := initTestRepo(t)
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+	g := initTestRepoIn(t, dir)
 	ctx := t.Context()
 
 	headBefore, err := g.HeadSHA(ctx)
@@ -424,9 +449,17 @@ func TestCommit_OnlyFlowDirChange_NoCommit(t *testing.T) {
 // An unignored state dir inside the worktree is refused, not worked around.
 // Excluding it with a pathspec would leave it present-but-never-committed, and
 // naming an already-ignored path makes git reject the whole add.
+//
+// The state dir here is ABSOLUTE and inside the worktree, which is the ordinary
+// case now that `.flow` resolves against the checkout rather than against the
+// process working directory. The guard used to ask "is it relative?" and read
+// absolute as "outside the worktree, where git cannot see it" — so this exact
+// configuration, every real project's, would have staged claim state into a
+// commit with nothing refused.
 func TestStageAll_RefusesUnignoredStateDir(t *testing.T) {
-	t.Setenv("FLOW_DIR", ".flow")
 	dir := t.TempDir()
+	stateDir := filepath.Join(dir, ".flow")
+	t.Setenv("FLOW_DIR", stateDir)
 	g := newGitOps(dir)
 	ctx := t.Context()
 
@@ -443,15 +476,75 @@ func TestStageAll_RefusesUnignoredStateDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "README"), []byte("hi"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "active.json"), []byte(`{"token":"t"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	err := g.StageAll(ctx)
 	if err == nil {
-		t.Fatal("StageAll succeeded with an unignored state dir, want a refusal")
+		t.Fatal("StageAll succeeded with an unignored state dir inside the worktree, want a refusal")
 	}
 	if !strings.Contains(err.Error(), ".gitignore") {
 		t.Errorf("err = %v, want it to name the remedy (.gitignore)", err)
 	}
 	if !strings.Contains(err.Error(), ".flow") {
 		t.Errorf("err = %v, want it to name the state dir", err)
+	}
+
+	// The remedy the refusal names is the whole of the fix: with the rule in
+	// place, the same absolute state dir stages the tree and none of itself.
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".flow/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.StageAll(ctx); err != nil {
+		t.Fatalf("StageAll once .flow/ is ignored: %v", err)
+	}
+	stdout, _, err := g.run(ctx, "diff", "--cached", "--name-only")
+	if err != nil {
+		t.Fatalf("git diff --cached: %v", err)
+	}
+	staged := strings.TrimSpace(string(stdout))
+	if !strings.Contains(staged, "README") {
+		t.Errorf("README should be staged, got: %q", staged)
+	}
+	if strings.Contains(staged, ".flow/") {
+		t.Errorf("claim state should NOT be staged, got: %q", staged)
+	}
+}
+
+// The guard is the only thing standing between claim state and a commit, so a
+// state dir that cannot be located at all stops the add rather than letting
+// `git add -A` run with the check skipped. Nothing is staged: an index built
+// while "is the state dir inside this worktree?" went unanswered is exactly the
+// commit the guard exists to prevent.
+func TestStageAll_RefusesWhenTheStateDirCannotBeLocated(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+	g := initTestRepoIn(t, dir)
+	ctx := t.Context()
+
+	if err := os.WriteFile(filepath.Join(dir, "README"), []byte("changed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// A relative FLOW_DIR is refused by clistate.Dir, which is how the lookup
+	// is made to fail from outside that package.
+	t.Setenv("FLOW_DIR", "relative/state")
+
+	err := g.StageAll(ctx)
+	if err == nil {
+		t.Fatal("StageAll staged the tree without knowing where the state dir is")
+	}
+	if !strings.Contains(err.Error(), "state dir") {
+		t.Errorf("err = %v, want it to name what could not be located", err)
+	}
+	stdout, _, runErr := g.run(ctx, "diff", "--cached", "--name-only")
+	if runErr != nil {
+		t.Fatalf("git diff --cached: %v", runErr)
+	}
+	if staged := strings.TrimSpace(string(stdout)); staged != "" {
+		t.Errorf("the index was modified despite the refusal: %q", staged)
 	}
 }

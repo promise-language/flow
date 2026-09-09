@@ -8,6 +8,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,7 +25,7 @@ type Config struct {
 
 	// Owner / Repo are the GitHub repository coordinates. When either is
 	// empty, NewBackend resolves them from `git remote get-url origin` in
-	// the current working directory.
+	// WorktreeDir.
 	Owner string
 	Repo  string
 
@@ -60,7 +61,15 @@ type Config struct {
 	// the flow-artifacts orphan branch. Default 60 KiB.
 	MaxCommentBytes int
 
-	// WorktreeDir is the local git worktree path. Default ".".
+	// WorktreeDir is the ABSOLUTE path of the local git worktree. When empty,
+	// New derives it from the binary's own location — the checkout the binary
+	// lives in (flow.DeriveArenaRoot).
+	//
+	// A relative value is REFUSED rather than resolved, and there is no default
+	// to fill it in with. Every consumer of this field inherits whatever it
+	// holds — the arena identity, the claim state, gate and command discovery,
+	// the verify command — so a relative value stored here is the process
+	// working directory silently becoming four things at once, which is #286.
 	WorktreeDir string
 
 	// GateTimeout bounds one gate's work, clock starting at the spawn. A gate
@@ -87,9 +96,10 @@ func (c Config) withDefaults() Config {
 	if c.MaxCommentBytes == 0 {
 		c.MaxCommentBytes = 60 * 1024
 	}
-	if c.WorktreeDir == "" {
-		c.WorktreeDir = "."
-	}
+	// WorktreeDir is deliberately NOT filled in here. A default of "." is not a
+	// location, and this is the moment it would become one stored in a config
+	// field for every reader to inherit. New resolves it instead, through
+	// resolveWorktreeDir, which derives or refuses.
 	if len(c.VerifyCmd) == 0 {
 		c.VerifyCmd = []string{"bin/verify"}
 	}
@@ -97,6 +107,38 @@ func (c Config) withDefaults() Config {
 		c.GateTimeout = 10 * time.Minute
 	}
 	return c
+}
+
+// resolveWorktreeDir turns the configured worktree into the absolute path every
+// consumer of the field inherits: empty derives it from the binary's own
+// location, absolute is cleaned and kept, relative is refused.
+//
+// filepath.Abs is deliberately NOT applied to an explicit relative value.
+// Resolving one would re-import the process working directory through the back
+// door — the caller would have configured a path and got wherever the operator
+// stood — which is the ambient dependency this whole field exists to be free
+// of. A caller that means a directory says which one.
+//
+// CLEANED, because this value IS the ArenaId: "/w/repo/" and "/w/repo" are one
+// worktree, and an identity compared by string equality would make them two
+// arenas with two flow:arena:<fingerprint> labels — the same "one checkout, two
+// arenas" error #286 reports, arriving through a spelling instead of a cwd.
+// filepath.Abs used to normalize incidentally, down in arena(); the one place a
+// location is decided is where that has to happen now.
+func resolveWorktreeDir(dir string) (string, error) {
+	if dir == "" {
+		root, err := flow.DeriveArenaRoot()
+		if err != nil {
+			return "", fmt.Errorf("github orchestrator: locate the worktree: %w", err)
+		}
+		return root, nil
+	}
+	if !filepath.IsAbs(dir) {
+		return "", fmt.Errorf(
+			"github orchestrator: Config.WorktreeDir %q is relative — it must be an absolute "+
+				"path, or empty to derive the checkout this binary lives in", dir)
+	}
+	return filepath.Clean(dir), nil
 }
 
 // validate returns an error if Config is missing fields NewBackend couldn't

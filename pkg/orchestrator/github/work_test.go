@@ -133,7 +133,11 @@ func TestWorkInProgress_RefusesARefThatNamesNoIssue(t *testing.T) {
 	if err := b.ClearWorkInProgress(ctx, ref, "plan"); err == nil {
 		t.Error("ClearWorkInProgress reported success for a ref that names no issue")
 	}
-	if _, err := os.Stat(clistate.WorkDir()); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("something was written under %s; stat err = %v", clistate.WorkDir(), err)
+	workDir, derr := clistate.WorkDir()
+	if derr != nil {
+		t.Fatalf("clistate.WorkDir: %v", derr)
+	}
+	if _, err := os.Stat(workDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("something was written under %s; stat err = %v", workDir, err)
 	}
 }
