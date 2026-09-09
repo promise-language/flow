@@ -109,6 +109,12 @@ func New(cfg Config) (*Orchestrator, error) {
 
 func (b *Orchestrator) Name() flow.OrchestratorName { return "github" }
 
+// ArenaRoot is the worktree this orchestrator was constructed against, resolved
+// once in New. Not a second derivation: DeriveArenaRoot ran there if it ran at
+// all, so a configured WorktreeDir is what every reader gets — the git
+// operations, the gates, and now the agent turn.
+func (b *Orchestrator) ArenaRoot() string { return b.cfg.WorktreeDir }
+
 func (b *Orchestrator) SupportedSignals() []flow.SignalDef {
 	return []flow.SignalDef{
 		flow.Signal("pr-open", "a PR for the claim branch has been opened (latched — not unset by merge or close)"),

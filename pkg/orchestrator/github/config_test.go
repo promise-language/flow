@@ -301,6 +301,58 @@ func TestResolveWorktreeDirAcceptsAnAbsoluteWorktreeThatDoesNotExistYet(t *testi
 	})
 }
 
+// ONE ANCHOR, ONE ANSWER. ArenaRoot is what New already resolved, not a second
+// derivation of it: a configured absolute dir answers canonicalized, and an
+// empty one answers what DeriveArenaRoot found. A second DeriveArenaRoot call
+// behind this accessor would answer the binary's own checkout even where the
+// operator configured a different one — the arena the agent edits and the arena
+// the commit is taken in would then be two directories.
+func TestArenaRootIsTheOneResolvedWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not on PATH")
+	}
+	dir := t.TempDir()
+	want := flow.CanonicalPath(dir)
+	for _, args := range [][]string{
+		{"init"},
+		{"remote", "add", "origin", "https://github.com/acme/widget.git"},
+	} {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	b, err := New(Config{WorktreeDir: dir, BinaryName: "issue", Token: "fake-token"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := b.ArenaRoot(); got != want {
+		t.Errorf("ArenaRoot() = %q, want the configured worktree %q — the value New resolved, not a rederivation", got, want)
+	}
+	if got := b.ArenaRoot(); got != b.cfg.WorktreeDir {
+		t.Errorf("ArenaRoot() = %q but WorktreeDir = %q — the gates and the agent turn would run in two trees", got, b.cfg.WorktreeDir)
+	}
+}
+
+// The other half of "one anchor": an empty WorktreeDir derives, and ArenaRoot
+// reports what was derived rather than deriving again. Separate from the
+// configured case above because the derivation needs this test binary to live
+// inside a checkout, and a skip taken half-way through a test discards the
+// assertions that already ran.
+func TestArenaRootIsTheDerivedWorktree(t *testing.T) {
+	derived, err := flow.DeriveArenaRoot()
+	if err != nil {
+		t.Skipf("this test binary does not live inside a checkout: %v", err)
+	}
+	b, err := New(Config{Owner: "acme", Repo: "widget", BinaryName: "issue", Token: "fake-token"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := b.ArenaRoot(); got != derived {
+		t.Errorf("ArenaRoot() = %q, want the derived checkout %q", got, derived)
+	}
+}
+
 func mustResolveWorktree(t *testing.T, dir string) string {
 	t.Helper()
 	got, err := resolveWorktreeDir(dir)

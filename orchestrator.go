@@ -534,6 +534,19 @@ type Orchestrator interface {
 	// Name returns the orchestrator's name, carried on every ItemRef it mints.
 	Name() OrchestratorName
 
+	// ArenaRoot is the ABSOLUTE path of the arena's checkout: the directory
+	// every process the SDK spawns for this arena runs in — gates, commands
+	// and the agent turn alike.
+	//
+	// It is the same value the orchestrator's own git operations use, read off
+	// the one place it is held, so the tree the agent edits and the tree the
+	// commit is taken in cannot diverge. Fixed when the orchestrator is
+	// constructed, and NEVER the process working directory — see Claim.
+	//
+	// Empty only where the orchestrator has no local checkout at all. Like
+	// SupportedGates, an empty answer is an honest declaration, not a refusal.
+	ArenaRoot() string
+
 	// SupportedSignals returns the set of SignalDefs this orchestrator knows
 	// how to observe. cli.Run validates every signal reference against this
 	// list at startup.
