@@ -499,8 +499,77 @@ func TestCmdDoctor_NormativeDocsSkipWithoutACheckout(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0 — an unavailable check is not an unfit machine; output:\n%s",
 			code, out.String())
 	}
-	if line := doctorLine(t, out.String(), "normative docs"); !strings.HasPrefix(line, glyphSkip) {
+	line := doctorLine(t, out.String(), "normative docs")
+	if !strings.HasPrefix(line, glyphSkip) {
 		t.Errorf("docs line should skip when the orchestrator declares no checkout; got %q", line)
+	}
+	// And it says why. A skip an operator cannot account for reads as a check
+	// that quietly stopped working, which is how a row nobody trusts turns into
+	// a row nobody looks at.
+	if !strings.Contains(line, "checkout") {
+		t.Errorf("the skip should say what was missing; got %q", line)
+	}
+}
+
+// A checkout doctor WAS given and cannot find is a failure, not a skip. The two
+// are one glyph apart in the report and worlds apart to an operator: the skip
+// says the SDK had nowhere to look and leaves the machine fit, while this is an
+// orchestrator naming a directory that is not on this machine — a moved
+// worktree, a configuration pointing at a clone that was deleted — and every
+// step that followed would work on a project whose definition of correct
+// nothing can read.
+//
+// The distinction is exactly what a later "be forgiving about roots that are
+// not there" would erase, and erasing it costs nothing visible: the row turns
+// from a failure into a skip, doctor exits 0, and the failure comes back at
+// review time as work that is plausible rather than right. The line names the
+// path, because which checkout it looked in is the whole diagnosis.
+func TestCmdDoctor_NormativeDocsCheckoutThatIsNotThere(t *testing.T) {
+	be := fake.New()
+	app, out := doctorApp(t, be, &stubAgent{name: "stub"})
+	gone := filepath.Join(t.TempDir(), "moved-away")
+	be.SetArenaRoot(gone)
+
+	if code := app.cmdDoctor(context.Background(), nil, nil); code != 1 {
+		t.Fatalf("exit code = %d, want 1 — a checkout that is not on this machine is an unfit "+
+			"machine, not an unavailable check; output:\n%s", code, out.String())
+	}
+	line := doctorLine(t, out.String(), "normative docs")
+	if !strings.HasPrefix(line, glyphFail) {
+		t.Errorf("docs line should fail for a checkout that is not there; got %q", line)
+	}
+	if !strings.Contains(line, gone) {
+		t.Errorf("docs line should name the checkout it could not read (%s); got %q", gone, line)
+	}
+}
+
+// The docs row is answered because there IS an orchestrator, not because its
+// probe passed. ArenaRoot is a path the orchestrator already holds — asking for
+// it reaches nothing — so an orchestrator that cannot be reached still says
+// which checkout this is, and the row reports on it.
+//
+// This is the coupling the root parameter introduced: the docs row now takes an
+// input from the subject of another row. Resolving it inside the reachable
+// branch would be the natural-looking refactor, and it would silently turn the
+// docs row into a skip on every machine whose orchestrator is down — the
+// operator who most needs the whole list in one pass losing a row of it,
+// reported as "could not look" when doctor could look perfectly well.
+func TestCmdDoctor_NormativeDocsSurviveAnUnreachableOrchestrator(t *testing.T) {
+	be := &failingBackend{Orchestrator: fake.New(), err: errors.New("simulated")}
+	app, out := doctorApp(t, be, &stubAgent{name: "stub"})
+
+	if code := app.cmdDoctor(context.Background(), nil, nil); code != 1 {
+		t.Fatalf("exit code = %d, want 1 — the orchestrator row fails; output:\n%s", code, out.String())
+	}
+	if line := doctorLine(t, out.String(), "orchestrator"); !strings.HasPrefix(line, glyphFail) {
+		t.Fatalf("this test needs an orchestrator that cannot be reached; got %q", line)
+	}
+	line := doctorLine(t, out.String(), "normative docs")
+	if !strings.HasPrefix(line, glyphOK) {
+		t.Errorf("the docs row should still be answered when the orchestrator is unreachable; got %q", line)
+	}
+	if docs := filepath.Join(be.ArenaRoot(), "docs"); !strings.Contains(line, docs) {
+		t.Errorf("docs line should report on the unreachable orchestrator's checkout %s; got %q", docs, line)
 	}
 }
 
