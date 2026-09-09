@@ -388,15 +388,27 @@ func DeriveArenaRoot() (string, error) {
 // reason it exists is the same: docs/orchestrator.md requires the pair be
 // stable across restarts, and two spellings of one thing are two things.
 //
-// A path that does not exist yet is cleaned rather than refused: EvalSymlinks
-// can only resolve what is there, and a caller may name a worktree it is about
-// to create. EvalSymlinks already returns a cleaned result, so the two branches
-// agree lexically. Any other resolution failure falls back the same way — a
-// spelling this can improve on is better than none.
+// A path that does not exist yet is resolved AS FAR AS IT GOES rather than
+// refused — the deepest ancestor that does exist is symlink-resolved and the
+// missing tail is re-joined onto it. EvalSymlinks can only resolve what is
+// there, and a caller may name a worktree it is about to create; a plain
+// lexical clean for that case would leave the answer depending on WHEN it was
+// asked — /var/w/repo before the directory exists and /private/var/w/repo
+// after — which is one worktree spelled two ways again, arriving by the clock
+// instead of by the route. Nothing else in New re-checks it: with Owner and
+// Repo both configured, New never touches the filesystem, so a worktree that is
+// not there yet reaches arena() as the ArenaId it will be claimed under.
+// Lexical cleaning is the last resort, for a path with no resolvable ancestor
+// at all — a spelling this can improve on is better than none.
 //
 // Empty stays empty, and that is load-bearing: callers read "" as "no path",
 // and filepath.Clean("") is ".", which is a path — the process working
 // directory, the very thing an identity must not depend on.
+//
+// A RELATIVE p is resolved against the process working directory, because
+// EvalSymlinks is. This canonicalizes a location; it does not decide one, and
+// callers for whom the operator's cwd is not an answer — resolveWorktreeDir is
+// the one here — refuse a relative path BEFORE reaching this.
 func CanonicalPath(p string) string {
 	if p == "" {
 		return ""
@@ -404,7 +416,20 @@ func CanonicalPath(p string) string {
 	if resolved, err := filepath.EvalSymlinks(p); err == nil {
 		return resolved
 	}
-	return filepath.Clean(p)
+	// Up to the deepest ancestor that resolves, carrying the unresolvable tail
+	// along to be re-joined onto it. The walk terminates at the root, whose
+	// parent is itself.
+	dir, tail := filepath.Clean(p), ""
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return filepath.Clean(p)
+		}
+		tail, dir = filepath.Join(filepath.Base(dir), tail), parent
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(resolved, tail)
+		}
+	}
 }
 
 // checkoutRoot walks start and its ancestors and returns the first that holds a

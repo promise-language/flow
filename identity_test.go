@@ -381,16 +381,46 @@ func TestCanonicalPathIsOneSpellingPerDirectory(t *testing.T) {
 		}
 	})
 
-	// A path that does not exist yet cannot be symlink-resolved, and is cleaned
-	// rather than refused — the EvalSymlinks error path. A caller may name a
-	// worktree it is about to create, and New fails on `origin` moments later
-	// with a better message than a path refusal would give.
+	// A path that does not exist yet is accepted rather than refused — a caller
+	// may name a worktree it is about to create — and cleaned when nothing
+	// above it resolves to anything else.
 	t.Run("a path that does not exist is cleaned", func(t *testing.T) {
 		const want = "/w/repo"
 		for _, spelling := range []string{"/w/repo", "/w/repo/", "/w/./repo", "/w//repo", "/w/sibling/../repo"} {
 			if got := CanonicalPath(spelling); got != want {
 				t.Errorf("CanonicalPath(%q) = %q, want %q", spelling, got, want)
 			}
+		}
+	})
+
+	// But a path that does not exist yet UNDER A SYMLINKED ANCESTOR is resolved
+	// as far as it goes, so it answers the same string before and after it is
+	// created. A merely-lexical fallback would make the answer depend on WHEN
+	// it was asked: the same config would name /var/w/repo today and
+	// /private/var/w/repo once the directory is there — one worktree, two
+	// arenas, arriving by the clock. Nothing downstream re-canonicalizes it:
+	// with Owner and Repo configured, New never touches the filesystem.
+	t.Run("a path that does not exist yet under a symlinked ancestor", func(t *testing.T) {
+		tmp := t.TempDir()
+		mkTree(t, tmp, "real")
+		link := filepath.Join(tmp, "link")
+		if err := os.Symlink(filepath.Join(tmp, "real"), link); err != nil {
+			t.Skipf("symlinks are unavailable here: %v", err)
+		}
+		absent := filepath.Join(link, "w", "repo")
+
+		before := CanonicalPath(absent)
+		if _, err := os.Stat(before); err == nil {
+			t.Fatalf("%s was supposed to be a path that does not exist yet", before)
+		}
+		mkTree(t, tmp, "real", "w", "repo")
+		if after := CanonicalPath(absent); after != before {
+			t.Errorf("CanonicalPath(%s) = %q before the directory existed and %q after — one worktree, two arenas",
+				absent, before, after)
+		}
+		if want := CanonicalPath(filepath.Join(tmp, "real", "w", "repo")); before != want {
+			t.Errorf("CanonicalPath(%s) = %q, want %q — the symlinked ancestor is resolved even when the tail is not there",
+				absent, before, want)
 		}
 	})
 

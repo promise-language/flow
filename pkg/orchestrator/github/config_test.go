@@ -168,8 +168,8 @@ func TestNewKeepsAnAbsoluteWorktreeDir(t *testing.T) {
 func TestResolveWorktreeDirCanonicalizesOneWorktreeToOneArena(t *testing.T) {
 	const want = "/w/repo"
 	// None of these exists, so this half also pins the fallback: a worktree
-	// that cannot be symlink-resolved is CLEANED, not refused — New resolves
-	// `origin` in it moments later and fails there with a better message.
+	// with nothing resolvable above it is CLEANED, not refused — a caller may
+	// name one it is about to create.
 	for _, spelling := range []string{"/w/repo", "/w/repo/", "/w/./repo", "/w/sibling/../repo", "/w//repo"} {
 		got, err := resolveWorktreeDir(spelling)
 		if err != nil {
@@ -218,20 +218,40 @@ func TestResolveWorktreeDirCanonicalizesOneWorktreeToOneArena(t *testing.T) {
 	})
 }
 
-// An absolute worktree that DOES NOT EXIST YET is accepted and cleaned, not
-// refused. Refusing it is defensible — nothing can be resolved through a
-// directory that is not there, so the canonicalization falls back to a lexical
-// clean — but it would change New's failure surface for a caller pointing at a
-// worktree it is about to create, and New resolves `origin` in that directory
-// moments later and fails with a message naming the actual problem.
+// An absolute worktree that DOES NOT EXIST YET is accepted, not refused — a
+// caller may name one it is about to create — and it answers THE SAME STRING
+// once it does exist.
+//
+// That second half is the load-bearing one, and nothing downstream supplies it:
+// with Owner and Repo both configured New never touches the filesystem, so this
+// path reaches arena() as the ArenaId the item is claimed under, and Claim
+// publishes flow:arena:<fingerprint> without going near the worktree either. An
+// answer that changed when the directory appeared would be one worktree and two
+// arenas — the whole error — arriving by the clock instead of by the route.
 func TestResolveWorktreeDirAcceptsAnAbsoluteWorktreeThatDoesNotExistYet(t *testing.T) {
-	absent := filepath.Join(t.TempDir(), "not", "created", "yet")
-	got, err := resolveWorktreeDir(absent + string(filepath.Separator))
+	// Under a symlinked ancestor, which is where the difference shows: on macOS
+	// a t.TempDir sits under /var, a symlink to /private/var.
+	tmp := t.TempDir()
+	absent := filepath.Join(tmp, "not", "created", "yet")
+	before, err := resolveWorktreeDir(absent + string(filepath.Separator))
 	if err != nil {
 		t.Fatalf("resolveWorktreeDir(%q): %v — a worktree the caller is about to create is not a bad path", absent, err)
 	}
-	if got != filepath.Clean(absent) {
-		t.Errorf("resolveWorktreeDir(%q) = %q, want the cleaned %q", absent, got, filepath.Clean(absent))
+	if !filepath.IsAbs(before) || filepath.Clean(before) != before {
+		t.Errorf("resolveWorktreeDir(%q) = %q, want an absolute, cleaned path", absent, before)
+	}
+
+	if err := os.MkdirAll(absent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	after := mustResolveWorktree(t, absent)
+	if after != before {
+		t.Errorf("resolveWorktreeDir(%q) = %q before the worktree existed and %q after — one worktree, two arenas",
+			absent, before, after)
+	}
+	if pre, post := (&Orchestrator{cfg: Config{WorktreeDir: before}}).arenaFingerprint(),
+		(&Orchestrator{cfg: Config{WorktreeDir: after}}).arenaFingerprint(); pre != post {
+		t.Errorf("flow:arena fingerprints differ (%s vs %s) for one worktree before and after it was created", pre, post)
 	}
 }
 

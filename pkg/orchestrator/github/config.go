@@ -126,11 +126,13 @@ func (c Config) withDefaults() Config {
 // two arenas" error #286 reports, arriving through a spelling instead of a cwd.
 // flow.CanonicalPath is the one canonicalization, shared with the derived route
 // above, so a checkout reached by either answers one string; a worktree that
-// does not exist yet cannot be symlink-resolved and is cleaned instead, since
-// New resolves `origin` in it moments later and fails there with a better
-// message than a path refusal would give. filepath.Abs used to normalize
-// incidentally, down in arena(); the one place a location is decided is where
-// that has to happen now.
+// does not exist yet is accepted rather than refused — a caller may name one it
+// is about to create — and answers the same string before and after it exists,
+// which it has to, because New does not re-check it: with Owner and Repo both
+// configured nothing here touches the filesystem, so that path goes straight to
+// arena() as the ArenaId the item is claimed under. filepath.Abs used to
+// normalize incidentally, down in arena(); the one place a location is decided
+// is where that has to happen now.
 //
 // The relative refusal stays AHEAD of it: EvalSymlinks resolves a relative path
 // against the process working directory, which is the exact dependency the
