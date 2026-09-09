@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -53,7 +54,7 @@ func TestBackend_LoadAgreesWithGetOnBlockedness(t *testing.T) {
 
 	agree := func(when string, wantBlocked bool, wantKind flow.BlockKind) {
 		t.Helper()
-		info, err := b.Get(ctx, ref, "binary", nil)
+		info, err := b.Get(ctx, ref, "binary", nil, nil)
 		if err != nil {
 			t.Fatalf("%s: Get: %v", when, err)
 		}
@@ -195,135 +196,519 @@ func TestBackend_LoadReturnsTheJournalInOrderAndUnaliased(t *testing.T) {
 	}
 }
 
-func TestBackend_SeedRefusesSecondSeed(t *testing.T) {
-	ctx := context.Background()
-	b := fake.New()
-	ref := addItem(b, "1")
-	if _, err := b.Claim(ctx, ref, nil); err != nil {
+// claimed registers an item and takes the claim every write below needs.
+func claimed(t *testing.T, b *fake.Orchestrator, id string) flow.ItemRef {
+	t.Helper()
+	ref := addItem(b, id)
+	if _, err := b.Claim(context.Background(), ref, nil); err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
+	return ref
+}
 
-	specs := []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
-	}
-	if err := b.SeedState(ctx, ref, specs); err != nil {
-		t.Fatalf("first SeedState: %v", err)
-	}
-	if err := b.SeedState(ctx, ref, specs); err == nil {
-		t.Errorf("second SeedState should refuse; got nil")
+// entry is one completed execution of `step` producing markdown and routing on
+// to `next`. The shape most tests below need, spelled once.
+func entry(step flow.StepId, exec int, markdown string, next flow.StepId) flow.JournalEntry {
+	return flow.JournalEntry{
+		Step:      step,
+		Execution: exec,
+		Result:    flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: markdown},
+		Route:     flow.Route{Next: next},
+		Awaits:    flow.Awaits{Role: "contributor"},
+		By:        "ann",
+		Role:      "contributor",
 	}
 }
 
-func TestBackend_ResolveArtifactRoundTrip(t *testing.T) {
+// --- AppendEntry ---
+
+// The journal is append-only and ordered: Load returns exactly what was
+// appended, in the order it was appended, because the pending step is derived
+// from the last entry and a journal read short or reordered re-routes the item.
+func TestBackend_AppendEntry_AppendsInOrder(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
-	ref := addItem(b, "1")
-	if _, err := b.Claim(ctx, ref, nil); err != nil {
-		t.Fatalf("Claim: %v", err)
-	}
-	_ = b.SeedState(ctx, ref, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
-	})
+	ref := claimed(t, b, "1")
 
-	body := flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"}
-	if err := b.ResolveArtifact(ctx, ref, "plan", body); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
+	want := []flow.JournalEntry{
+		entry("plan", 1, "the plan", "impl"),
+		entry("impl", 1, "the diff", "review"),
+		entry("plan", 2, "the revised plan", "impl"),
+	}
+	for i, e := range want {
+		if err := b.AppendEntry(ctx, ref, e); err != nil {
+			t.Fatalf("AppendEntry %d: %v", i, err)
+		}
 	}
 
 	state, err := b.Load(ctx, ref)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	rec := state.Artifact("plan")
-	if !rec.Resolved {
-		t.Errorf("artifact not marked resolved")
+	if len(state.Journal) != len(want) {
+		t.Fatalf("Journal has %d entries, want %d", len(state.Journal), len(want))
 	}
-	if rec.Markdown != "the plan" {
-		t.Errorf("Markdown = %q, want %q", rec.Markdown, "the plan")
-	}
-	if rec.Version != 1 {
-		t.Errorf("Version = %d, want 1", rec.Version)
+	for i := range want {
+		if !reflect.DeepEqual(state.Journal[i], want[i]) {
+			t.Errorf("entry %d = %+v, want %+v", i, state.Journal[i], want[i])
+		}
 	}
 }
 
-func TestBackend_ResolveArtifactRejectsTypeMismatch(t *testing.T) {
+// A second execution of a step appends; it never rewrites the first. The
+// earlier entry is the record of what was decided then.
+func TestBackend_AppendEntry_NeverRewritesAnExistingEntry(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
-	ref := addItem(b, "1")
-	if _, err := b.Claim(ctx, ref, nil); err != nil {
-		t.Fatalf("Claim: %v", err)
-	}
-	_ = b.SeedState(ctx, ref, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
-	})
+	ref := claimed(t, b, "1")
 
-	err := b.ResolveArtifact(ctx, ref, "plan", flow.ArtifactBody{Type: flow.ArtifactPatch})
-	if err == nil {
-		t.Fatalf("expected type-mismatch error")
+	if err := b.AppendEntry(ctx, ref, entry("plan", 1, "first", "impl")); err != nil {
+		t.Fatalf("first AppendEntry: %v", err)
+	}
+	if err := b.AppendEntry(ctx, ref, entry("plan", 2, "second", "impl")); err != nil {
+		t.Fatalf("second AppendEntry: %v", err)
+	}
+
+	state, _ := b.Load(ctx, ref)
+	if len(state.Journal) != 2 {
+		t.Fatalf("Journal has %d entries, want 2 — the second execution appends", len(state.Journal))
+	}
+	if got := state.Journal[0].Result.Markdown; got != "first" {
+		t.Errorf("the first entry now reads %q, want %q — an appended journal never rewrites", got, "first")
+	}
+	// The later entry's result is what the step's projection stands at.
+	if got := state.Artifact("plan").Markdown; got != "second" {
+		t.Errorf("projection = %q, want %q — the latest entry's result stands", got, "second")
+	}
+	if got := state.Artifact("plan").Version; got != 2 {
+		t.Errorf("projection Version = %d, want 2 (the execution number)", got)
 	}
 }
 
-func TestBackend_BudgetCountersAndGrant(t *testing.T) {
+// The projection and the awaited marker move in the SAME call: AppendEntry is
+// one write, and a caller that saw the result without the route (or the reverse)
+// would be reading a state that never existed.
+func TestBackend_AppendEntry_ProjectionAndAwaitsMoveTogether(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
-	ref := addItem(b, "1")
-	if _, err := b.Claim(ctx, ref, nil); err != nil {
-		t.Fatalf("Claim: %v", err)
+	ref := claimed(t, b, "1")
+
+	before, _ := b.Load(ctx, ref)
+	if before.Artifact("plan").Resolved {
+		t.Fatal("artifact resolved before anything was appended")
 	}
-	_ = b.SeedState(ctx, ref, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Budget: flow.DefaultStepBudget()},
-	})
+	if !before.Awaits.Empty() {
+		t.Errorf("Awaits = %+v before the first entry, want the zero value", before.Awaits)
+	}
+
+	e := entry("plan", 1, "the plan", "impl")
+	e.Awaits = flow.Awaits{Role: "maintainer"}
+	if err := b.AppendEntry(ctx, ref, e); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+
+	after, _ := b.Load(ctx, ref)
+	rec := after.Artifact("plan")
+	if !rec.Resolved || rec.Markdown != "the plan" {
+		t.Errorf("projection = %+v, want the entry's result", rec)
+	}
+	if rec.ResolvedBy != "ann" {
+		t.Errorf("ResolvedBy = %q, want ann — the provenance comes off the entry", rec.ResolvedBy)
+	}
+	if after.Awaits.Role != "maintainer" {
+		t.Errorf("Awaits.Role = %q, want maintainer", after.Awaits.Role)
+	}
+	// The account of record is filled in from the journal, never from the entry:
+	// the entry records a decision, not who holds the role next.
+	if after.Awaits.Account != "" {
+		t.Errorf("Awaits.Account = %q, want empty — maintainer has not acted", after.Awaits.Account)
+	}
+}
+
+// The account of record is the By of the last entry appended in that role.
+func TestBackend_AppendEntry_AwaitsCarriesTheAccountOfRecord(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := claimed(t, b, "1")
+
+	first := entry("plan", 1, "the plan", "impl")
+	first.By = "ann"
+	first.Role = "contributor"
+	first.Awaits = flow.Awaits{Role: "reviewer"}
+	if err := b.AppendEntry(ctx, ref, first); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	second := entry("impl", 1, "the diff", "review")
+	second.By = "bo"
+	second.Role = "reviewer"
+	second.Awaits = flow.Awaits{Role: "contributor"}
+	if err := b.AppendEntry(ctx, ref, second); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+
+	state, _ := b.Load(ctx, ref)
+	if state.Awaits.Role != "contributor" || state.Awaits.Account != "ann" {
+		t.Errorf("Awaits = %+v, want contributor held by ann", state.Awaits)
+	}
+}
+
+// The FIRST entry binds the flow: an item with an empty journal is bound to
+// nothing, and the binding is a consequence of work having been recorded.
+func TestBackend_AppendEntry_FirstEntryBindsTheFlow(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	b.SetBoundFlow("implement")
+	ref := claimed(t, b, "1")
+
+	before, _ := b.Load(ctx, ref)
+	if before.Flow != "" {
+		t.Errorf("Flow = %q before the first entry, want empty", before.Flow)
+	}
+	if err := b.AppendEntry(ctx, ref, entry("plan", 1, "the plan", "impl")); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	after, _ := b.Load(ctx, ref)
+	if after.Flow != "implement" {
+		t.Errorf("Flow = %q after the first entry, want implement", after.Flow)
+	}
+}
+
+func TestBackend_AppendEntry_RefusesAnUnclaimedItem(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := addItem(b, "1") // never claimed
+
+	err := b.AppendEntry(ctx, ref, entry("plan", 1, "the plan", "impl"))
+	if !errors.Is(err, flow.ErrUnavailable) {
+		t.Fatalf("AppendEntry on an unclaimed item = %v, want ErrUnavailable", err)
+	}
+	state, _ := b.Load(ctx, ref)
+	if len(state.Journal) != 0 {
+		t.Errorf("Journal has %d entries after a refused append, want 0", len(state.Journal))
+	}
+}
+
+func TestBackend_AppendEntry_RefusesAnotherArenasClaim(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := claimed(t, b, "1")
+
+	b.SetArena(flow.Arena{Host: "elsewhere", Id: "other"})
+	err := b.AppendEntry(ctx, ref, entry("plan", 1, "the plan", "impl"))
+	if !errors.Is(err, flow.ErrUnavailable) {
+		t.Fatalf("AppendEntry from another arena = %v, want ErrUnavailable", err)
+	}
+}
+
+// The fake stores the bytes, so it is the party that must verify them: an empty
+// body on an artifact step stands for nothing it could look up.
+func TestBackend_AppendEntry_RefusesAnEmptyArtifactBody(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := claimed(t, b, "1")
+
+	empty := []flow.ArtifactBody{
+		{Type: flow.ArtifactMarkdown},
+		{Type: flow.ArtifactMarkdown, Markdown: "   \n"},
+		{Type: flow.ArtifactCommitHash},
+		{Type: flow.ArtifactJSON},
+		{Type: flow.ArtifactFile, File: flow.FileBody{Name: "x.txt"}},
+		{Type: flow.ArtifactPatch},
+	}
+	for _, body := range empty {
+		e := entry("plan", 1, "", "impl")
+		e.Result = body
+		if err := b.AppendEntry(ctx, ref, e); err == nil {
+			t.Errorf("AppendEntry with an empty %s body = nil, want a refusal", body.Type)
+		}
+	}
+
+	// A FLAG has no payload at all, so it is never empty: the fact of the write
+	// is the record. And a signal step's result is the observation itself.
+	e := entry("flagged", 1, "", "impl")
+	e.Result = flow.ArtifactBody{Type: flow.ArtifactFlag}
+	if err := b.AppendEntry(ctx, ref, e); err != nil {
+		t.Errorf("AppendEntry with a flag body = %v, want nil", err)
+	}
+	e = entry("pr-open", 1, "", "impl")
+	e.Result = flow.ArtifactBody{}
+	if err := b.AppendEntry(ctx, ref, e); err != nil {
+		t.Errorf("AppendEntry with no body (a signal step) = %v, want nil", err)
+	}
+}
+
+func TestBackend_AppendEntry_RefusesAnEntryNamingNoStep(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := claimed(t, b, "1")
+
+	e := entry("", 1, "the plan", "impl")
+	if err := b.AppendEntry(ctx, ref, e); err == nil {
+		t.Fatal("AppendEntry with no step = nil, want a refusal")
+	}
+}
+
+// Completion ends the step's scaffolding: the result and the end of the draft
+// are one write, so no caller can observe one without the other.
+func TestBackend_AppendEntry_ClearsTheStepsDraft(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := claimed(t, b, "1")
+
+	if err := b.SaveWorkInProgress(ctx, ref, "plan", "half a plan"); err != nil {
+		t.Fatalf("SaveWorkInProgress: %v", err)
+	}
+	if err := b.AppendEntry(ctx, ref, entry("plan", 1, "the plan", "impl")); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	got, err := b.LoadWorkInProgress(ctx, ref, "plan")
+	if err != nil {
+		t.Fatalf("LoadWorkInProgress: %v", err)
+	}
+	if got != "" {
+		t.Errorf("draft = %q after the step completed, want empty", got)
+	}
+}
+
+// --- Reset ---
+
+func TestBackend_Reset_ClearsTheFlowsWholeRecord(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	b.SetBoundFlow("implement")
+	ref := claimed(t, b, "1")
+
+	if err := b.AppendEntry(ctx, ref, entry("plan", 1, "the plan", "impl")); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	_ = b.RecordDispatch(ctx, ref, "plan")
+	_ = b.AddCost(ctx, ref, "plan", 4.25)
+	_ = b.AddDuration(ctx, ref, "plan", time.Minute)
+	_ = b.SaveWorkInProgress(ctx, ref, "impl", "half a diff")
+	if err := b.Park(ctx, ref, flow.ParkRequest{Kind: flow.ParkRefused, Step: "impl", Reason: "no"}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+
+	if err := b.Reset(ctx, ref); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+
+	state, _ := b.Load(ctx, ref)
+	if len(state.Journal) != 0 {
+		t.Errorf("Journal has %d entries after Reset, want 0", len(state.Journal))
+	}
+	if len(state.Ledger.Steps) != 0 || state.Ledger.TotalCostUSD != 0 || state.Ledger.TotalActive != 0 {
+		t.Errorf("Ledger = %+v after Reset, want empty", state.Ledger)
+	}
+	if state.Park != nil {
+		t.Errorf("Park = %+v after Reset, want nil", state.Park)
+	}
+	if state.Artifact("plan").Resolved {
+		t.Errorf("artifact still resolved after Reset")
+	}
+	if !state.Awaits.Empty() {
+		t.Errorf("Awaits = %+v after Reset, want the zero value", state.Awaits)
+	}
+	if state.Flow != "" {
+		t.Errorf("Flow = %q after Reset, want empty — an empty journal is bound to nothing", state.Flow)
+	}
+	if draft, _ := b.LoadWorkInProgress(ctx, ref, "impl"); draft != "" {
+		t.Errorf("draft = %q after Reset, want empty", draft)
+	}
+}
+
+// A reset item is at the start again: the entry step pends, which is what makes
+// `reseed` a re-run rather than a deletion.
+func TestBackend_Reset_LeavesTheItemPendingItsEntryStep(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := claimed(t, b, "1")
+
+	f := flow.NewFlow("implement", []flow.ItemType{"task"})
+	f.Role("contributor", flow.CapPush)
+	noop := func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }
+	f.AddStep("write plan", "plan", noop, flow.StepConfig{
+		Role: "contributor", Entry: true, Next: []flow.StepId{"impl"}})
+	f.AddStep("implement", "impl", noop, flow.StepConfig{
+		Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	if err := f.ValidateGraph(); err != nil {
+		t.Fatalf("ValidateGraph: %v", err)
+	}
+
+	if err := b.AppendEntry(ctx, ref, entry("plan", 1, "the plan", "impl")); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	state, _ := b.Load(ctx, ref)
+	if pos, err := f.Position(state); err != nil || pos.Step.Description != "implement" {
+		t.Fatalf("before Reset: Position = %+v, %v; want the implement step", pos, err)
+	}
+
+	if err := b.Reset(ctx, ref); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	state, _ = b.Load(ctx, ref)
+	pos, err := f.Position(state)
+	if err != nil {
+		t.Fatalf("after Reset: Position: %v", err)
+	}
+	if pos.Step.Description != "write plan" {
+		t.Errorf("after Reset the pending step is %q, want the entry step", pos.Step.Description)
+	}
+}
+
+// The questions themselves survive a reset — one leaves the pending set by
+// being answered, not by being deleted — but the outstanding-question marker
+// goes with the park.
+func TestBackend_Reset_KeepsTheQuestionsAndClearsTheirMarker(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := claimed(t, b, "1")
+
+	q, err := b.AskQuestion(ctx, ref, flow.AgentQuestion{Header: "which", Text: "which base?"})
+	if err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+	if err := b.Park(ctx, ref, flow.ParkRequest{Kind: flow.ParkQuestion, Step: "plan"}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+	if err := b.Reset(ctx, ref); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+
+	state, _ := b.Load(ctx, ref)
+	if state.Park != nil {
+		t.Errorf("Park = %+v after Reset, want nil — the marker goes", state.Park)
+	}
+	if len(state.Questions) != 1 || state.Questions[0].ID != q.ID {
+		t.Errorf("Questions = %+v after Reset, want the unanswered ask still reachable by id", state.Questions)
+	}
+}
+
+// --- The ledger ---
+
+func TestBackend_LedgerArithmeticAccumulates(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := claimed(t, b, "1")
 
 	for range 2 {
-		if err := b.BumpInvocations(ctx, ref, "plan"); err != nil {
-			t.Fatalf("BumpInvocations: %v", err)
+		if err := b.RecordDispatch(ctx, ref, "plan"); err != nil {
+			t.Fatalf("RecordDispatch: %v", err)
 		}
+	}
+	if err := b.RecordResumption(ctx, ref, "plan"); err != nil {
+		t.Fatalf("RecordResumption: %v", err)
 	}
 	_ = b.AddCost(ctx, ref, "plan", 3.5)
 	_ = b.AddCost(ctx, ref, "plan", 1.5)
+	_ = b.AddDuration(ctx, ref, "plan", 5*time.Minute)
+	_ = b.AddDuration(ctx, ref, "plan", 3*time.Minute+30*time.Second)
+	// A different step keeps its own row; the totals cover both.
+	_ = b.RecordDispatch(ctx, ref, "impl")
+	_ = b.AddCost(ctx, ref, "impl", 2.0)
 
 	state, _ := b.Load(ctx, ref)
-	rec := state.Artifact("plan")
-	if rec.Invocations != 2 {
-		t.Errorf("Invocations = %d, want 2", rec.Invocations)
+	row := state.Ledger.Row("plan")
+	if row.Step != "plan" {
+		t.Errorf("Row.Step = %q, want plan", row.Step)
 	}
-	if rec.CostUSDSpent != 5.0 {
-		t.Errorf("CostUSDSpent = %v, want 5.0", rec.CostUSDSpent)
+	if row.Dispatches != 2 {
+		t.Errorf("Dispatches = %d, want 2", row.Dispatches)
 	}
+	if row.Resumptions != 1 {
+		t.Errorf("Resumptions = %d, want 1", row.Resumptions)
+	}
+	if row.CostUSD != 5.0 {
+		t.Errorf("CostUSD = %v, want 5.0", row.CostUSD)
+	}
+	if want := 8*time.Minute + 30*time.Second; row.Active != want {
+		t.Errorf("Active = %v, want %v", row.Active, want)
+	}
+	if row.LastRunAt.IsZero() {
+		t.Error("LastRunAt is zero after a dispatch")
+	}
+	if state.Ledger.TotalCostUSD != 7.0 {
+		t.Errorf("TotalCostUSD = %v, want 7.0 (5.0 + 2.0)", state.Ledger.TotalCostUSD)
+	}
+	if want := 8*time.Minute + 30*time.Second; state.Ledger.TotalActive != want {
+		t.Errorf("TotalActive = %v, want %v", state.Ledger.TotalActive, want)
+	}
+}
+
+// Waiting is evidence about contention, not about the work: it never lands in
+// Active, and the two totals are kept apart for the same reason.
+func TestBackend_AddWaitingNeverLandsInActive(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := claimed(t, b, "1")
+
+	_ = b.AddDuration(ctx, ref, "plan", 2*time.Minute)
+	_ = b.AddWaiting(ctx, ref, "plan", 9*time.Minute)
+	_ = b.AddWaiting(ctx, ref, "plan", time.Minute)
+
+	state, _ := b.Load(ctx, ref)
+	row := state.Ledger.Row("plan")
+	if row.Active != 2*time.Minute {
+		t.Errorf("Active = %v, want 2m — waiting must not land here", row.Active)
+	}
+	if row.Waiting != 10*time.Minute {
+		t.Errorf("Waiting = %v, want 10m", row.Waiting)
+	}
+	if state.Ledger.TotalActive != 2*time.Minute || state.Ledger.TotalWaiting != 10*time.Minute {
+		t.Errorf("totals = active %v / waiting %v, want 2m / 10m",
+			state.Ledger.TotalActive, state.Ledger.TotalWaiting)
+	}
+}
+
+// A ledger row is keyed by StepId, not by an artifact, which is what gives a
+// signal step — producing no artifact at all — a row of its own.
+func TestBackend_LedgerRecordsASignalStep(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New(flow.Signal("pr-open", "test"))
+	ref := claimed(t, b, "1")
+
+	_ = b.RecordDispatch(ctx, ref, "pr-open")
+	state, _ := b.Load(ctx, ref)
+	if got := state.Ledger.Row("pr-open").Dispatches; got != 1 {
+		t.Errorf("Row(pr-open).Dispatches = %d, want 1", got)
+	}
+}
+
+func TestBackend_Grant_RecordsTheExtension(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := claimed(t, b, "1")
 
 	if err := b.Grant(ctx, ref, "plan", flow.Grant{Invocations: 5, CostUSD: 20}); err != nil {
 		t.Fatalf("Grant: %v", err)
 	}
-	state, _ = b.Load(ctx, ref)
-	rec = state.Artifact("plan")
-	want := flow.DefaultStepBudget().MaxInvocations + 5
-	if rec.GrantedInvocations != want {
-		t.Errorf("GrantedInvocations = %d, want %d", rec.GrantedInvocations, want)
+	if err := b.Grant(ctx, ref, "plan", flow.Grant{CostUSD: 2.50}); err != nil {
+		t.Fatalf("second Grant: %v", err)
 	}
-	if rec.GrantedCostUSD != flow.DefaultStepBudget().MaxCostUSD+20 {
-		t.Errorf("GrantedCostUSD = %v, want %v", rec.GrantedCostUSD, flow.DefaultStepBudget().MaxCostUSD+20)
-	}
-}
-
-func TestBackend_AddDuration(t *testing.T) {
-	ctx := context.Background()
-	b := fake.New()
-	ref := addItem(b, "1")
-	if _, err := b.Claim(ctx, ref, nil); err != nil {
-		t.Fatalf("Claim: %v", err)
-	}
-	_ = b.SeedState(ctx, ref, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Budget: flow.DefaultStepBudget()},
-	})
-
-	_ = b.AddDuration(ctx, ref, "plan", 5*time.Minute)
-	_ = b.AddDuration(ctx, ref, "plan", 3*time.Minute+30*time.Second)
 
 	state, _ := b.Load(ctx, ref)
-	rec := state.Artifact("plan")
-	want := 8*time.Minute + 30*time.Second
-	if rec.DurationWorked != want {
-		t.Errorf("DurationWorked = %v, want %v", rec.DurationWorked, want)
+	row := state.Ledger.Row("plan")
+	if got := row.GrantedOn(flow.AxisInvocations); got != 5 {
+		t.Errorf("GrantedOn(invocations) = %v, want 5", got)
+	}
+	if got := row.GrantedOn(flow.AxisCost); got != 22.50 {
+		t.Errorf("GrantedOn(cost) = %v, want 22.50 (20 + 2.50)", got)
+	}
+	// Zero on an axis is "no change", so nothing is recorded there: a row of
+	// zero-amount entries would be a history of grants that granted nothing.
+	if got := row.GrantedOn(flow.AxisTimeout); got != 0 {
+		t.Errorf("GrantedOn(timeout) = %v, want 0 — the grant named no timeout", got)
+	}
+	if len(row.Granted) != 3 {
+		t.Errorf("Granted has %d records, want 3", len(row.Granted))
+	}
+	// The cap the binary will read is its policy plus these.
+	eff := flow.EffectiveBudget(flow.StepBudget{}, row)
+	if want := flow.DefaultStepBudget().MaxInvocations + 5; eff.MaxInvocations != want {
+		t.Errorf("EffectiveBudget.MaxInvocations = %d, want %d", eff.MaxInvocations, want)
+	}
+	if want := flow.DefaultStepBudget().MaxCostUSD + 22.50; eff.MaxCostUSD != want {
+		t.Errorf("EffectiveBudget.MaxCostUSD = %v, want %v", eff.MaxCostUSD, want)
 	}
 }
 
@@ -536,7 +921,7 @@ func TestBackend_AnsweringUnblocksTheItemWhileTheParkStands(t *testing.T) {
 	if state.BlockReason == "" {
 		t.Error("an item with an unanswered question reports no block reason")
 	}
-	selectable, err := b.ListAutoSelectable(ctx, nil)
+	selectable, err := b.ListAutoSelectable(ctx, nil, nil)
 	if err != nil {
 		t.Fatalf("ListAutoSelectable: %v", err)
 	}
@@ -555,7 +940,7 @@ func TestBackend_AnsweringUnblocksTheItemWhileTheParkStands(t *testing.T) {
 	if state.BlockReason != "" {
 		t.Errorf("BlockReason = %q after the answer, want none — the human has acted", state.BlockReason)
 	}
-	selectable, err = b.ListAutoSelectable(ctx, nil)
+	selectable, err = b.ListAutoSelectable(ctx, nil, nil)
 	if err != nil {
 		t.Fatalf("ListAutoSelectable: %v", err)
 	}
@@ -590,7 +975,7 @@ func TestBackend_AQuestionParkWithNoQuestionStaysBlocked(t *testing.T) {
 	if state.BlockReason == "" {
 		t.Error("a question park with no registered question reports no block reason")
 	}
-	selectable, err := b.ListAutoSelectable(ctx, nil)
+	selectable, err := b.ListAutoSelectable(ctx, nil, nil)
 	if err != nil {
 		t.Fatalf("ListAutoSelectable: %v", err)
 	}
@@ -639,7 +1024,7 @@ func TestBackend_AnsweringOneOfTwoLeavesTheItemBlocked(t *testing.T) {
 	if state.BlockReason == "" {
 		t.Error("BlockReason cleared with one question still unanswered")
 	}
-	selectable, err := b.ListAutoSelectable(ctx, nil)
+	selectable, err := b.ListAutoSelectable(ctx, nil, nil)
 	if err != nil {
 		t.Fatalf("ListAutoSelectable: %v", err)
 	}
@@ -669,7 +1054,7 @@ func TestBackend_ParkRecordsRequest(t *testing.T) {
 	}
 
 	req := flow.ParkRequest{
-		Kind:   flow.ParkBudgetExhausted,
+		Kind:   flow.ParkTreasurerRefused,
 		Step:   "plan",
 		Axis:   flow.AxisInvocations,
 		Reason: "exhausted",
@@ -678,34 +1063,30 @@ func TestBackend_ParkRecordsRequest(t *testing.T) {
 		t.Fatalf("Park: %v", err)
 	}
 	got := b.ParkRequest("1")
-	if got == nil || got.Kind != flow.ParkBudgetExhausted || got.Axis != flow.AxisInvocations {
-		t.Errorf("ParkRequest = %+v, want budget-exhausted/invocations", got)
+	if got == nil || got.Kind != flow.ParkTreasurerRefused || got.Axis != flow.AxisInvocations {
+		t.Errorf("ParkRequest = %+v, want treasurer-refused/invocations", got)
 	}
 }
 
-// parkedItem seeds an item whose "plan" step has burned its 3 invocations and
-// parked on the invocations axis — the state a `grant` acts on.
+// parkedItem is an item whose "plan" step has burned its 3 invocations and
+// parked on the invocations axis — the state a `grant` acts on. The park
+// carries the run's own snapshot of every axis, which is what GrantClearsPark
+// reads the refused cap from.
 func parkedItem(t *testing.T, b *fake.Orchestrator) flow.ItemRef {
 	t.Helper()
 	ctx := context.Background()
-	ref := addItem(b, "1")
-	_, err := b.Claim(ctx, ref, nil)
-	if err != nil {
-		t.Fatalf("Claim: %v", err)
-	}
-	if err := b.SeedState(ctx, ref, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true,
-			Budget: flow.StepBudget{MaxInvocations: 3, MaxCostUSD: 10}},
-	}); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
+	ref := claimed(t, b, "1")
 	for range 3 {
-		if err := b.BumpInvocations(ctx, ref, "plan"); err != nil {
-			t.Fatalf("BumpInvocations: %v", err)
+		if err := b.RecordDispatch(ctx, ref, "plan"); err != nil {
+			t.Fatalf("RecordDispatch: %v", err)
 		}
 	}
 	if err := b.Park(ctx, ref, flow.ParkRequest{
-		Kind: flow.ParkBudgetExhausted, Step: "plan", Axis: flow.AxisInvocations,
+		Kind: flow.ParkTreasurerRefused, Step: "plan", Axis: flow.AxisInvocations,
+		Axes: []flow.AxisReport{
+			flow.NewAxisReport(flow.AxisInvocations, 3, 3),
+			flow.NewAxisReport(flow.AxisCost, 1.25, 10),
+		},
 	}); err != nil {
 		t.Fatalf("Park: %v", err)
 	}
@@ -760,19 +1141,51 @@ func TestBackend_GrantClearsParkOnlyWhenSatisfied(t *testing.T) {
 	}
 }
 
-// Resolving the parked step makes its park obsolete; keeping it would make
+// Completing the parked step makes its park obsolete; keeping it would make
 // Load report a reason that no longer holds.
-func TestBackend_ResolveClearsParkForThatStep(t *testing.T) {
+func TestBackend_AppendEntryClearsParkForThatStep(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()
 	ref := parkedItem(t, b)
 
-	if err := b.ResolveArtifact(ctx, ref, "plan",
-		flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "done"}); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
+	if err := b.AppendEntry(ctx, ref, entry("plan", 1, "done", "impl")); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
 	}
 	if p := b.ParkRequest("1"); p != nil {
-		t.Errorf("park = %+v, want cleared by the resolve", p)
+		t.Errorf("park = %+v, want cleared by the completion", p)
+	}
+}
+
+// A park on a DIFFERENT step survives a completion: the reason it records still
+// holds, and clearing it would report the item resumable when it is not.
+func TestBackend_AppendEntryLeavesAParkOnAnotherStep(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := parkedItem(t, b)
+
+	if err := b.AppendEntry(ctx, ref, entry("impl", 1, "the diff", "review")); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	if p := b.ParkRequest("1"); p == nil || p.Step != "plan" {
+		t.Errorf("park = %+v, want the plan park still standing", p)
+	}
+}
+
+// A question park is not a treasurer's park: no grant clears it, because
+// nothing about a budget answers the question.
+func TestBackend_GrantLeavesAQuestionPark(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := claimed(t, b, "1")
+
+	if err := b.Park(ctx, ref, flow.ParkRequest{Kind: flow.ParkQuestion, Step: "plan"}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+	if err := b.Grant(ctx, ref, "plan", flow.Grant{Invocations: 99, CostUSD: 999}); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	if p := b.ParkRequest("1"); p == nil || p.Kind != flow.ParkQuestion {
+		t.Errorf("park = %+v, want the question park still standing", p)
 	}
 }
 
@@ -1063,5 +1476,208 @@ func TestBackend_DetectCapabilities_AnswerIsACopy(t *testing.T) {
 	got[0] = "rewritten"
 	if again, _ := b.DetectCapabilities(context.Background(), ""); !slices.Equal(again, flow.AllCapabilities()) {
 		t.Errorf("the stored set followed the caller's slice: %v", again)
+	}
+}
+
+// --- Finalize ---
+
+// Finalize records the disposition the finalizing election carried, beside the
+// flag. The read is required with the write: an orchestrator that accepted the
+// disposition and could not report it back would be accepting a value nobody
+// can observe.
+func TestBackend_Finalize_RecordsTheDisposition(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := claimed(t, b, "1")
+	b.SetStatus("1", flow.StatusTerminal, "done")
+
+	if err := b.Finalize(ctx, ref, flow.DispositionRejected); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	state, _ := b.Load(ctx, ref)
+	if !state.Finalized {
+		t.Error("Finalized = false after Finalize")
+	}
+	if state.FinalizedAs != flow.DispositionRejected {
+		t.Errorf("FinalizedAs = %q, want rejected", state.FinalizedAs)
+	}
+	// A finished flow awaits nobody.
+	if !state.Awaits.Empty() {
+		t.Errorf("Awaits = %+v after Finalize, want the zero value", state.Awaits)
+	}
+}
+
+// The non-terminal refusal survives the new argument: a disposition is what the
+// flow decided, not permission to record a run complete on an open item.
+func TestBackend_Finalize_StillRefusesANonTerminalItem(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := claimed(t, b, "1")
+
+	err := b.Finalize(ctx, ref, flow.DispositionResolved)
+	if !errors.Is(err, flow.ErrUnavailable) {
+		t.Fatalf("Finalize on an open item = %v, want ErrUnavailable", err)
+	}
+	state, _ := b.Load(ctx, ref)
+	if state.Finalized || state.FinalizedAs != "" {
+		t.Errorf("a refused Finalize recorded finalized=%v as=%q", state.Finalized, state.FinalizedAs)
+	}
+}
+
+// --- The role predicate ---
+
+// awaitingRole is an item whose journal leaves it awaiting `role`.
+func awaitingRole(t *testing.T, b *fake.Orchestrator, id string, role flow.RoleName) flow.ItemRef {
+	t.Helper()
+	ref := claimed(t, b, id)
+	e := entry("plan", 1, "the plan", "impl")
+	e.Awaits = flow.Awaits{Role: role}
+	if err := b.AppendEntry(context.Background(), ref, e); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	return ref
+}
+
+// An item awaiting a role this account cannot assume sits at `awaits`: somebody
+// else's move. It is above `outside-remit` — the item IS this binary's work —
+// and below `blocked`, which is an item this account would act on if it could.
+func TestBackend_Availability_AwaitsWhenTheRoleIsNotAssumable(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := awaitingRole(t, b, "1", "maintainer")
+
+	onlyContributor := func(r flow.RoleName) bool { return r == "contributor" }
+	info, err := b.Get(ctx, ref, "binary", nil, onlyContributor)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if info.Availability != flow.AvailAwaits {
+		t.Errorf("Availability = %q, want awaits", info.Availability)
+	}
+	if info.Awaits.Role != "maintainer" {
+		t.Errorf("Awaits.Role = %q, want maintainer", info.Awaits.Role)
+	}
+	// It is still in `processable` — this binary's work — and out of
+	// `actionable`, which is the boundary the rung names.
+	if !info.Availability.InScope(flow.ScopeProcessable) {
+		t.Error("an awaits item should still be processable")
+	}
+	if info.Availability.InScope(flow.ScopeActionable) {
+		t.Error("an awaits item must not be actionable")
+	}
+}
+
+func TestBackend_Availability_AssumableRoleIsUnaffected(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := awaitingRole(t, b, "1", "contributor")
+
+	onlyContributor := func(r flow.RoleName) bool { return r == "contributor" }
+	info, err := b.Get(ctx, ref, "binary", nil, onlyContributor)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if info.Availability == flow.AvailAwaits {
+		t.Errorf("Availability = %q, want a rung above awaits — the role is assumable", info.Availability)
+	}
+}
+
+// A nil predicate filters nothing, matching the acceptsType convention.
+func TestBackend_Availability_NilPredicateFiltersNothing(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := awaitingRole(t, b, "1", "maintainer")
+
+	info, err := b.Get(ctx, ref, "binary", nil, nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if info.Availability == flow.AvailAwaits {
+		t.Error("a nil predicate reported awaits; it must filter nothing")
+	}
+}
+
+// An awaited SIGNAL is nobody's move, not somebody else's: it reports blocked
+// (waits-on-condition), never awaits, whatever the role predicate says.
+func TestBackend_Availability_AnAwaitedSignalIsNotAwaits(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New(flow.Signal("pr-merged", "test"))
+	ref := claimed(t, b, "1")
+	e := entry("pr-open", 1, "", "pr-merged")
+	e.Result = flow.ArtifactBody{}
+	e.Awaits = flow.Awaits{Signal: "pr-merged"}
+	if err := b.AppendEntry(ctx, ref, e); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+
+	nobody := func(flow.RoleName) bool { return false }
+	info, err := b.Get(ctx, ref, "binary", nil, nobody)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if info.Availability == flow.AvailAwaits {
+		t.Errorf("Availability = awaits for a signal wait; nobody's move is not somebody else's")
+	}
+	if info.Awaits.Signal != "pr-merged" {
+		t.Errorf("Awaits.Signal = %q, want pr-merged", info.Awaits.Signal)
+	}
+}
+
+// Eligibility, not a sort key: an item whose awaited role this account cannot
+// assume is OMITTED from the auto-selectable set rather than ranked last.
+func TestBackend_ListAutoSelectable_OmitsAnUnassumableRole(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	mine := awaitingRole(t, b, "mine", "contributor")
+	_ = awaitingRole(t, b, "theirs", "maintainer")
+
+	onlyContributor := func(r flow.RoleName) bool { return r == "contributor" }
+	refs, err := b.ListAutoSelectable(ctx, nil, onlyContributor)
+	if err != nil {
+		t.Fatalf("ListAutoSelectable: %v", err)
+	}
+	if len(refs) != 1 || refs[0].Display != mine.Display {
+		t.Errorf("ListAutoSelectable = %+v, want only the contributor item", refs)
+	}
+
+	// With no predicate both come back: nil filters nothing.
+	refs, err = b.ListAutoSelectable(ctx, nil, nil)
+	if err != nil {
+		t.Fatalf("ListAutoSelectable: %v", err)
+	}
+	if len(refs) != 2 {
+		t.Errorf("ListAutoSelectable with a nil predicate = %+v, want both items", refs)
+	}
+}
+
+// --- Drift ---
+
+// The fake reports the pair a test recorded: a reading is evidence for a route
+// election, so a test exercising the behind-the-mainline route says how far
+// behind.
+func TestBackend_WorktreeDriftReportsTheRecordedPair(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := claimed(t, b, "1")
+
+	wt, err := b.Worktree(ctx, ref)
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	if d, err := wt.Drift(ctx); err != nil || !d.Level() {
+		t.Errorf("Drift on a fresh worktree = (%+v, %v), want level", d, err)
+	}
+
+	want := flow.Drift{Ahead: 3, Behind: 12, At: time.Date(2025, 5, 1, 0, 0, 0, 0, time.UTC)}
+	b.SetDrift(want)
+	got, err := wt.Drift(ctx)
+	if err != nil {
+		t.Fatalf("Drift: %v", err)
+	}
+	if got != want {
+		t.Errorf("Drift = %+v, want %+v", got, want)
+	}
+	if got.Level() {
+		t.Error("Level() = true on a drifted pair")
 	}
 }

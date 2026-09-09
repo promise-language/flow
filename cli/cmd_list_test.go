@@ -19,7 +19,7 @@ type discovererBackend struct {
 	items []flow.ItemInfo
 }
 
-func (d *discovererBackend) List(ctx context.Context, scope flow.ItemScope, binaryName flow.BinaryName, acceptsType func(flow.ItemType) bool) ([]flow.ItemInfo, error) {
+func (d *discovererBackend) List(ctx context.Context, scope flow.ItemScope, binaryName flow.BinaryName, acceptsType func(flow.ItemType) bool, assumesRole func(flow.RoleName) bool) ([]flow.ItemInfo, error) {
 	var out []flow.ItemInfo
 	for _, item := range d.items {
 		if item.Availability.InScope(scope) {
@@ -248,7 +248,7 @@ func TestCmdList_WithDiscoverer_ScopeOpen(t *testing.T) {
 		Orchestrator: fake.New(),
 		items: []flow.ItemInfo{
 			{Ref: flow.ItemRef{OrchestratorName: "fake", Display: "o/r#1", Ref: json.RawMessage(`"1"`)}, Title: "task one", Availability: flow.AvailAuto, Tags: []flow.TagId{"type:task"}},
-			{Ref: flow.ItemRef{OrchestratorName: "fake", Display: "o/r#2", Ref: json.RawMessage(`"2"`)}, Title: "task two", Availability: flow.AvailUnhandled, Tags: []flow.TagId{"bug"}},
+			{Ref: flow.ItemRef{OrchestratorName: "fake", Display: "o/r#2", Ref: json.RawMessage(`"2"`)}, Title: "task two", Availability: flow.AvailOutsideRemit, Tags: []flow.TagId{"bug"}},
 		},
 	}
 
@@ -282,7 +282,7 @@ func TestCmdList_WithDiscoverer_ScopeProcessable(t *testing.T) {
 		Orchestrator: fake.New(),
 		items: []flow.ItemInfo{
 			{Ref: flow.ItemRef{OrchestratorName: "fake", Display: "o/r#1", Ref: json.RawMessage(`"1"`)}, Title: "task one", Availability: flow.AvailAuto, Tags: []flow.TagId{"type:task"}},
-			{Ref: flow.ItemRef{OrchestratorName: "fake", Display: "o/r#2", Ref: json.RawMessage(`"2"`)}, Title: "task two", Availability: flow.AvailUnhandled, Tags: []flow.TagId{"bug"}},
+			{Ref: flow.ItemRef{OrchestratorName: "fake", Display: "o/r#2", Ref: json.RawMessage(`"2"`)}, Title: "task two", Availability: flow.AvailOutsideRemit, Tags: []flow.TagId{"bug"}},
 		},
 	}
 
@@ -309,7 +309,7 @@ func TestCmdList_WithDiscoverer_ScopeProcessable(t *testing.T) {
 		t.Errorf("expected o/r#1; got:\n%s", out.String())
 	}
 	if strings.Contains(out.String(), "o/r#2") {
-		t.Errorf("o/r#2 (unhandled) should not appear at scope=processable; got:\n%s", out.String())
+		t.Errorf("o/r#2 (outside the remit) should not appear at scope=processable; got:\n%s", out.String())
 	}
 }
 
@@ -428,7 +428,7 @@ func TestCmdList_JSON_Availability(t *testing.T) {
 //
 // Both directions in one reading, at `open` scope, which is the widest scope
 // that still ranks by availability: the item in the remit is auto, the one
-// outside it is unhandled — and unhandled is exactly the rung `processable`
+// outside it is outside-remit — and that is exactly the rung `processable`
 // (the default scope) drops.
 func TestCmdList_RemitGatesTheListing(t *testing.T) {
 	be := fake.New()
@@ -458,7 +458,7 @@ func TestCmdList_RemitGatesTheListing(t *testing.T) {
 	for _, it := range payload.Items {
 		got[it.Display] = it.Availability
 	}
-	if want := map[string]string{"1": "auto", "2": "unhandled"}; !maps.Equal(got, want) {
+	if want := map[string]string{"1": "auto", "2": "outside-remit"}; !maps.Equal(got, want) {
 		t.Errorf("availability by item = %v, want %v", got, want)
 	}
 

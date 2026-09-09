@@ -249,7 +249,7 @@ func TestCmdClaim_LandedBlockersWarnNothing(t *testing.T) {
 // them, and no stop.
 func TestCmdClaim_ParkDerivedBlockWarnsNothing(t *testing.T) {
 	env := newClaimEnv(t)
-	if err := env.be.Park(context.Background(), env.be.Ref("1"), budgetExhausted("plan", flow.AxisInvocations)); err != nil {
+	if err := env.be.Park(context.Background(), env.be.Ref("1"), treasurerRefused("plan", flow.AxisInvocations)); err != nil {
 		t.Fatalf("Park: %v", err)
 	}
 

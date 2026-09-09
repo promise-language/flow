@@ -67,6 +67,7 @@ func (stubWorktreeBase) CurrentBranch(context.Context) (BranchName, error) { ret
 func (stubWorktreeBase) Commit(context.Context, string) error              { return nil }
 func (stubWorktreeBase) Stage(context.Context) error                       { return nil }
 func (stubWorktreeBase) Push(context.Context) error                        { return nil }
+func (stubWorktreeBase) Drift(context.Context) (Drift, error)              { return Drift{}, nil }
 func (stubWorktreeBase) RevParse(context.Context, Revision) (CommitSha, error) {
 	return "", nil
 }

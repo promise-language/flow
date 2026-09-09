@@ -159,7 +159,7 @@ var githubSupportedArtifacts = []flow.ArtifactDef{
 // githubSupportedArtifacts). A flow declaring an artifact outside this set —
 // unknown id or mismatched type — is refused at cli.App startup. The
 // declared-vs-resolved type consistency for a recorded body stays a
-// resolve-time check in ResolveArtifact.
+// completion-time check in AppendEntry.
 func (b *Orchestrator) SupportedArtifacts() []flow.ArtifactDef { return githubSupportedArtifacts }
 
 // ResolveRef turns a user-supplied issue number (e.g. "42") into an ItemRef.
@@ -289,7 +289,11 @@ func (b *Orchestrator) loadItem(ctx context.Context, issueNum int, cachedComment
 		Urgency:  b.labels.UrgencyOf(lbls),
 		// Manual is read from the label the editor maintains, so Load reports
 		// it truthfully — a write nothing can observe is not a record.
-		Manual:    hasLabel(lbls, b.labels.Manual()),
+		Manual: hasLabel(lbls, b.labels.Manual()),
+		// The account that filed the item. What a step routes on when the
+		// source's standing matters; its capabilities are asked for through
+		// DetectCapabilities, never taken from the body's claims about itself.
+		Creator:   flow.AccountId(issue.GetUser().GetLogin()),
 		Artifacts: map[flow.ArtifactId]flow.ArtifactRecord{},
 		Signals:   map[flow.SignalId]flow.SignalState{},
 	}
@@ -319,7 +323,18 @@ func (b *Orchestrator) loadItem(ctx context.Context, issueNum int, cachedComment
 			return nil, fmt.Errorf("parse state comment: %w", err)
 		}
 		if found && doc != nil {
+			// The flow bound at the journal's first entry.
 			state.Flow = doc.Flow
+			// EXACTLY WHAT WAS APPENDED, IN ORDER: the pending step is derived
+			// from the last entry, so a journal read short or reordered
+			// re-routes the item.
+			for _, jd := range doc.Journal {
+				state.Journal = append(state.Journal, journalEntryFromDoc(jd))
+			}
+			state.Ledger = ledgerFromDoc(doc.Ledger)
+			// One derivation with the listing's, so Load and `list` cannot
+			// disagree about whose move it is.
+			state.Awaits = awaitsFromDoc(doc)
 			for _, ad := range doc.Artifacts {
 				rec := recordFromArtifactDoc(ad)
 				state.Artifacts[rec.Id] = rec
@@ -334,7 +349,10 @@ func (b *Orchestrator) loadItem(ctx context.Context, issueNum int, cachedComment
 			// PostAnswer clear the marker only when no pending question
 			// remains, and what makes a second ask add rather than replace.
 			state.Questions = questionsFromDocs(doc.Questions)
+			// The read is required with the write: a Finalize nothing can
+			// observe is not a record, and the disposition is half of it.
 			state.Finalized = doc.Finalized
+			state.FinalizedAs = flow.Disposition(doc.Disposition)
 		}
 	}
 	b.mu.Lock()

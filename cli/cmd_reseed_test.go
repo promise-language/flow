@@ -11,8 +11,8 @@ import (
 	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
 
-// reseedTestSetup builds an App with an active claim and a seeded artifact,
-// following the grantTestSetup pattern.
+// reseedTestSetup builds an App with an active claim and one recorded entry —
+// the record `reseed` exists to discard — following the grantTestSetup pattern.
 func reseedTestSetup(t *testing.T) (*App, *fake.Orchestrator, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	a := &stubAgent{name: "stub"}
@@ -22,11 +22,7 @@ func reseedTestSetup(t *testing.T) (*App, *fake.Orchestrator, *bytes.Buffer, *by
 		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 
-	if err := be.SeedState(context.Background(), claim.ItemRef, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown},
-	}); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
+	appendMarkdown(t, be, claim.ItemRef, "plan", "the plan")
 
 	var out, errBuf bytes.Buffer
 	app.Out = &out
@@ -41,7 +37,7 @@ func TestCmdReseed_NoForce_RefusesWithPreview(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
-	for _, want := range []string{"would discard", "--force"} {
+	for _, want := range []string{"would discard", "journal", "ledger", "--force"} {
 		if !strings.Contains(errBuf.String(), want) {
 			t.Errorf("stderr = %q, want %q", errBuf.String(), want)
 		}
@@ -59,15 +55,24 @@ func TestCmdReseed_Force_ClearsState(t *testing.T) {
 		t.Errorf("stdout = %q, want 'reseeded'", out.String())
 	}
 
-	// Prove the seed was cleared: SeedState should succeed again.
+	// Prove the record was cleared: the journal, the projection and the ledger
+	// are all gone, which is what the command's own message claims.
 	claim, err := be.LookupActiveClaim(context.Background())
 	if err != nil {
 		t.Fatalf("LookupActiveClaim: %v", err)
 	}
-	if err := be.SeedState(context.Background(), claim.ItemRef, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown},
-	}); err != nil {
-		t.Fatalf("SeedState after reseed should succeed, got: %v", err)
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.Journal) != 0 {
+		t.Errorf("journal = %+v after reseed, want empty", state.Journal)
+	}
+	if state.Artifact("plan").Resolved {
+		t.Error("the plan projection survived the reseed")
+	}
+	if len(state.Ledger.Steps) != 0 {
+		t.Errorf("ledger = %+v after reseed, want empty", state.Ledger)
 	}
 }
 
@@ -91,13 +96,13 @@ func TestCmdReseed_NoClaim(t *testing.T) {
 	}
 }
 
-// unsupportedReseedBackend wraps a real backend but overrides ResetSeed to
-// return ErrResetSeedUnsupported.
+// unsupportedReseedBackend wraps a real backend but overrides Reset to report
+// the operation unsupported.
 type unsupportedReseedBackend struct {
 	*fake.Orchestrator
 }
 
-func (b *unsupportedReseedBackend) ResetSeed(ctx context.Context, ref flow.ItemRef) error {
+func (b *unsupportedReseedBackend) Reset(ctx context.Context, ref flow.ItemRef) error {
 	return flow.ErrUnsupported
 }
 
@@ -114,13 +119,13 @@ func TestCmdReseed_UnsupportedBackend(t *testing.T) {
 	}
 }
 
-// errorReseedBackend wraps a real backend but overrides ResetSeed to return a
+// errorReseedBackend wraps a real backend but overrides Reset to return a
 // generic error.
 type errorReseedBackend struct {
 	*fake.Orchestrator
 }
 
-func (b *errorReseedBackend) ResetSeed(ctx context.Context, ref flow.ItemRef) error {
+func (b *errorReseedBackend) Reset(ctx context.Context, ref flow.ItemRef) error {
 	return errors.New("kaboom: storage unavailable")
 }
 

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/promise-language/flow/pkg/clistate"
@@ -321,6 +322,47 @@ func (g *gitOps) Fetch(ctx context.Context, remote string) error {
 		return fmt.Errorf("git fetch %s: %w (%s)", remote, err, string(stderr))
 	}
 	return nil
+}
+
+// FetchBranch fetches one branch from a remote, so the remote-tracking ref a
+// distance is measured against is current. Narrower than Fetch on purpose: a
+// measurement needs one branch, and fetching everything to read one number
+// makes the reading cost grow with the repository.
+func (g *gitOps) FetchBranch(ctx context.Context, remote, branch string) error {
+	_, stderr, err := g.run(ctx, "fetch", remote, branch)
+	if err != nil {
+		return fmt.Errorf("git fetch %s %s: %w (%s)", remote, branch, err, string(stderr))
+	}
+	return nil
+}
+
+// RevListLeftRight counts the two sides of a symmetric difference:
+// `git rev-list --left-right --count <left>...<right>` reports how many commits
+// each side carries that the other does not.
+//
+// It ERRORS on a revision that will not resolve rather than reporting zeroes:
+// (0, 0) is a real answer — the two are level — and a caller handed it for a
+// base that does not exist would conclude the branch is level with a mainline it
+// never compared against. Same reason RevParse's contract gives.
+func (g *gitOps) RevListLeftRight(ctx context.Context, left, right string) (int, int, error) {
+	stdout, stderr, err := g.run(ctx, "rev-list", "--left-right", "--count", left+"..."+right)
+	if err != nil {
+		return 0, 0, fmt.Errorf("git rev-list --left-right --count %s...%s: %w (%s)", left, right, err, string(stderr))
+	}
+	fields := strings.Fields(string(stdout))
+	if len(fields) != 2 {
+		return 0, 0, fmt.Errorf("git rev-list --left-right --count %s...%s: expected two counts, got %q",
+			left, right, strings.TrimSpace(string(stdout)))
+	}
+	l, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return 0, 0, fmt.Errorf("git rev-list --left-right --count %s...%s: left count %q: %w", left, right, fields[0], err)
+	}
+	r, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0, 0, fmt.Errorf("git rev-list --left-right --count %s...%s: right count %q: %w", left, right, fields[1], err)
+	}
+	return l, r, nil
 }
 
 // MergeLocal merges the given ref into the current branch without opening an

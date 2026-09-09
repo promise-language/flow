@@ -123,9 +123,7 @@ const (
 // Step states, as reported in JSON.
 const (
 	stateResolved = "resolved"
-	stateStale    = "stale"
 	statePending  = "pending"
-	stateSkipped  = "skipped"
 	stateRunning  = "running"
 )
 
@@ -134,7 +132,6 @@ const (
 	flowStateEligible       = "eligible"
 	flowStateBlocked        = "blocked"
 	flowStateFinalized      = "finalized"
-	flowStateNotSeeded      = "not-seeded"
 	flowStateNoEligibleStep = "no-eligible-step"
 	flowStateNoMatchingFlow = "no-matching-flow"
 )
@@ -265,7 +262,7 @@ type listItemPayload struct {
 // field the other lacks.
 type blockPayload struct {
 	// Blocked answers "is this blocked right now?" — item-level, and the same
-	// whoever asks, unlike Availability which reports `closed` or `unhandled`
+	// whoever asks, unlike Availability which reports `closed` or `outside-remit`
 	// instead when those come first on the ladder.
 	Blocked   bool   `json:"blocked,omitempty"`
 	BlockKind string `json:"block_kind,omitempty"`

@@ -78,6 +78,52 @@ func TestAllParkKinds_ExhaustiveAgainstAST(t *testing.T) {
 	}
 }
 
+// The AST crosswalk above proves the SET is complete; it cannot recover the
+// string VALUES, which are what a stored park and a `--json` payload carry. So
+// the wire spelling of every kind is written down once, here.
+//
+// The two renames this vocabulary took are the reason it is worth pinning:
+// `budget-exhausted` became `treasurer-refused` — the treasurer refused to fund
+// the dispatch, which is a decision, not a clock reading — and
+// `step-did-not-resolve` became `step-did-not-complete`, since a step completes
+// by electing a route and "resolve" named the artifact it no longer must
+// produce.
+func TestParkKind_WireSpellings(t *testing.T) {
+	want := map[flow.ParkKind]string{
+		flow.ParkBlocked:            "blocked",
+		flow.ParkQuestion:           "question",
+		flow.ParkTreasurerRefused:   "treasurer-refused",
+		flow.ParkStepDidNotComplete: "step-did-not-complete",
+		flow.ParkInfraTransient:     "infra-transient",
+		flow.ParkRemoteUnreachable:  "remote-unreachable",
+		flow.ParkRefused:            "refused",
+		flow.ParkWriteContract:      "write-contract",
+	}
+	got := flow.AllParkKinds()
+	if len(got) != len(want) {
+		t.Fatalf("AllParkKinds() has %d members, but %d spellings are written down: %v", len(got), len(want), got)
+	}
+	for _, k := range got {
+		spelling, ok := want[k]
+		if !ok {
+			t.Errorf("park kind %q has no spelling written down here", k)
+			continue
+		}
+		if string(k) != spelling {
+			t.Errorf("park kind spelled %q, want %q", string(k), spelling)
+		}
+	}
+	// The old spellings are gone, not aliased: a reader that still writes them
+	// is writing a value nothing in the vocabulary answers to.
+	for _, gone := range []string{"budget-exhausted", "step-did-not-resolve"} {
+		for _, k := range got {
+			if string(k) == gone {
+				t.Errorf("the retired spelling %q is still a declared park kind", gone)
+			}
+		}
+	}
+}
+
 func TestAllInvocationStatuses_ExhaustiveAgainstAST(t *testing.T) {
 	declared := constNamesOfType(t, "wire.go", "InvocationStatus")
 	if len(declared) == 0 {

@@ -261,6 +261,24 @@ func LoadWork(item, step string) (string, error) {
 	return rec.Body, nil
 }
 
+// ClearItemWork removes EVERY work-in-progress record for one item. Idempotent.
+//
+// What Reset needs: a reset clears the flow's whole record, and a draft kept
+// past the journal it belonged to is scratch prose with nothing left to resume.
+// Per-item rather than wholesale, because one arena's other items are not part
+// of the record being cleared.
+func ClearItemWork(item string) error {
+	dir, err := WorkDir()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(dir, sanitizeSegment(item))
+	if err := os.RemoveAll(path); err != nil {
+		return fmt.Errorf("remove %s: %w", path, err)
+	}
+	return nil
+}
+
 // ClearWork removes the record for (item, step). Idempotent — no error if
 // already absent.
 func ClearWork(item, step string) error {

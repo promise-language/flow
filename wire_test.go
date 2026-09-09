@@ -75,7 +75,7 @@ func TestInvocationResult_WithPark(t *testing.T) {
 		Step:   "write plan",
 		Status: "parked",
 		Park: &ParkRequest{
-			Kind:   ParkBudgetExhausted,
+			Kind:   ParkTreasurerRefused,
 			Step:   "write plan",
 			Axis:   AxisInvocations,
 			Reason: "ran 3 times without resolving",
@@ -92,8 +92,8 @@ func TestInvocationResult_WithPark(t *testing.T) {
 	if out.Park == nil {
 		t.Fatalf("Park nil after round-trip")
 	}
-	if out.Park.Kind != ParkBudgetExhausted || out.Park.Axis != AxisInvocations {
-		t.Errorf("Park = %+v, want kind=budget-exhausted axis=invocations", out.Park)
+	if out.Park.Kind != ParkTreasurerRefused || out.Park.Axis != AxisInvocations {
+		t.Errorf("Park = %+v, want kind=treasurer-refused axis=invocations", out.Park)
 	}
 }
 
@@ -256,100 +256,150 @@ func TestInvocationResult_DurationOmittedWhenZero(t *testing.T) {
 	}
 }
 
-// GrantClearsPark is the single rule every orchestrator applies in Grant. The cases
-// that matter: only a budget park on THIS step clears, and only when the axis
-// actually has room afterwards — a token grant must leave the park standing.
+// GrantClearsPark is the single rule every orchestrator applies in Grant. The
+// cases that matter: only a `treasurer-refused` park on THIS step clears, and
+// only when the offending axis actually has room afterwards — a token grant
+// must leave the park standing.
+//
+// The cap comes from the PARK's own snapshot of the axis (ParkRequest.Axes),
+// not from the ledger row: an orchestrator holds no policy and could not
+// recompute the cap. Consumption comes from the row, which is where the meter
+// lives. Each case below therefore states both.
 func TestGrantClearsPark(t *testing.T) {
-	budgetPark := func(step StepId, axis BudgetAxis) *ParkRequest {
-		return &ParkRequest{Kind: ParkBudgetExhausted, Step: step, Axis: axis}
+	refused := func(step StepId, axis BudgetAxis, used, granted float64) *ParkRequest {
+		return &ParkRequest{
+			Kind: ParkTreasurerRefused, Step: step, Axis: axis,
+			Axes: []AxisReport{NewAxisReport(axis, used, granted)},
+		}
 	}
 	tests := []struct {
 		name string
 		park *ParkRequest
-		key  ArtifactId
-		post ArtifactRecord
+		step StepId
+		post LedgerRow
 		g    Grant
 		want bool
 	}{
 		{
 			name: "no park",
-			key:  "plan",
+			step: "plan",
 			want: false,
 		},
 		{
-			name: "question park is never cleared by budget",
+			name: "question park is never cleared by a grant",
 			park: &ParkRequest{Kind: ParkQuestion, Step: "plan"},
-			key:  "plan",
-			post: ArtifactRecord{GrantedInvocations: 99},
+			step: "plan",
+			g:    Grant{Invocations: 99},
+			want: false,
+		},
+		{
+			name: "a park of some other kind on the right step is left alone",
+			park: &ParkRequest{Kind: ParkStepDidNotComplete, Step: "plan"},
+			step: "plan",
 			g:    Grant{Invocations: 99},
 			want: false,
 		},
 		{
 			name: "park on a different step",
-			park: budgetPark("implementation", AxisInvocations),
-			key:  "plan",
-			post: ArtifactRecord{Invocations: 3, GrantedInvocations: 4},
+			park: refused("implementation", AxisInvocations, 3, 3),
+			step: "plan",
+			post: LedgerRow{Step: "plan", Dispatches: 3},
 			g:    Grant{Invocations: 1},
 			want: false,
 		},
 		{
 			name: "invocations now have headroom",
-			park: budgetPark("plan", AxisInvocations),
-			key:  "plan",
-			post: ArtifactRecord{Invocations: 3, GrantedInvocations: 4},
+			park: refused("plan", AxisInvocations, 3, 3),
+			step: "plan",
+			post: LedgerRow{Step: "plan", Dispatches: 3},
 			g:    Grant{Invocations: 1},
 			want: true,
 		},
 		{
 			name: "invocations still at the cap",
-			park: budgetPark("plan", AxisInvocations),
-			key:  "plan",
-			post: ArtifactRecord{Invocations: 4, GrantedInvocations: 4},
+			park: refused("plan", AxisInvocations, 4, 4),
+			step: "plan",
+			// A dispatch landed between the park and the grant: the row is at
+			// 5 and one more invocation does not reach it.
+			post: LedgerRow{Step: "plan", Dispatches: 5},
 			g:    Grant{Invocations: 1},
 			want: false,
 		},
 		{
+			name: "a grant on an axis the park did not refuse on clears nothing",
+			park: refused("plan", AxisCost, 12.40, 10.00),
+			step: "plan",
+			post: LedgerRow{Step: "plan", CostUSD: 12.40},
+			g:    Grant{Invocations: 10},
+			want: false,
+		},
+		{
 			name: "cost grant too small to clear the cap",
-			park: budgetPark("plan", AxisCost),
-			key:  "plan",
-			post: ArtifactRecord{CostUSDSpent: 12.40, GrantedCostUSD: 10.01},
+			park: refused("plan", AxisCost, 12.40, 10.01),
+			step: "plan",
+			post: LedgerRow{Step: "plan", CostUSD: 12.40},
 			g:    Grant{CostUSD: 0.01},
 			want: false,
 		},
 		{
 			name: "cost grant clears the cap",
-			park: budgetPark("plan", AxisCost),
-			key:  "plan",
-			post: ArtifactRecord{CostUSDSpent: 12.40, GrantedCostUSD: 22.40},
-			g:    Grant{CostUSD: 12.39},
+			park: refused("plan", AxisCost, 12.40, 10.01),
+			step: "plan",
+			post: LedgerRow{Step: "plan", CostUSD: 12.40},
+			g:    Grant{CostUSD: 2.40},
 			want: true,
 		},
 		{
+			name: "prompts clear against the run's own snapshot",
+			park: refused("plan", AxisPrompts, 40, 40),
+			step: "plan",
+			// The ledger keeps no prompt counter — the cap is per-invocation —
+			// so the park's snapshot is the only record of what was burned.
+			post: LedgerRow{Step: "plan"},
+			g:    Grant{PromptsPerInvocation: 10},
+			want: true,
+		},
+		{
+			name: "prompt grant too small",
+			park: refused("plan", AxisPrompts, 50, 40),
+			step: "plan",
+			post: LedgerRow{Step: "plan"},
+			g:    Grant{PromptsPerInvocation: 5},
+			want: false,
+		},
+		{
 			name: "timeout clears on any added time",
-			park: budgetPark("plan", AxisTimeout),
-			key:  "plan",
+			park: refused("plan", AxisTimeout, 3600, 3600),
+			step: "plan",
 			g:    Grant{TimeoutAdd: 60},
 			want: true,
 		},
 		{
 			name: "timeout park with no added time",
-			park: budgetPark("plan", AxisTimeout),
-			key:  "plan",
+			park: refused("plan", AxisTimeout, 3600, 3600),
+			step: "plan",
 			g:    Grant{Invocations: 5},
 			want: false,
 		},
 		{
-			name: "budget park with no axis recorded",
-			park: &ParkRequest{Kind: ParkBudgetExhausted, Step: "plan"},
-			key:  "plan",
-			post: ArtifactRecord{GrantedInvocations: 9},
+			name: "refused park with no axis recorded",
+			park: &ParkRequest{Kind: ParkTreasurerRefused, Step: "plan"},
+			step: "plan",
 			g:    Grant{Invocations: 9},
+			want: false,
+		},
+		{
+			name: "refused park whose axis carries no snapshot",
+			park: &ParkRequest{Kind: ParkTreasurerRefused, Step: "plan", Axis: AxisCost},
+			step: "plan",
+			post: LedgerRow{Step: "plan", CostUSD: 12.40},
+			g:    Grant{CostUSD: 100},
 			want: false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := GrantClearsPark(tt.park, tt.key, tt.post, tt.g); got != tt.want {
+			if got := GrantClearsPark(tt.park, tt.step, tt.post, tt.g); got != tt.want {
 				t.Errorf("GrantClearsPark() = %v, want %v", got, tt.want)
 			}
 		})

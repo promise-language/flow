@@ -18,18 +18,22 @@ import (
 type capturingBackend struct {
 	*fake.Orchestrator
 	captures []flow.ArtifactBody
-	refuse   error
+	// entries is what was appended, whole: the capture is now one write with
+	// the route, so a test that only saw the body could not tell the two apart.
+	entries []flow.JournalEntry
+	refuse  error
 	// saveErr models a backend that cannot write a work-in-progress record,
 	// which is the store the refused-capture path stashes into.
 	saveErr error
 }
 
-func (b *capturingBackend) ResolveArtifact(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId, body flow.ArtifactBody) error {
-	b.captures = append(b.captures, body)
+func (b *capturingBackend) AppendEntry(ctx context.Context, ref flow.ItemRef, e flow.JournalEntry) error {
+	b.captures = append(b.captures, e.Result)
+	b.entries = append(b.entries, e)
 	if b.refuse != nil {
 		return b.refuse
 	}
-	return b.Orchestrator.ResolveArtifact(ctx, ref, id, body)
+	return b.Orchestrator.AppendEntry(ctx, ref, e)
 }
 
 func (b *capturingBackend) SaveWorkInProgress(ctx context.Context, ref flow.ItemRef, step flow.StepId, body string) error {
@@ -96,7 +100,7 @@ func TestCompletion_ZeroResultParks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
-	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkStepDidNotResolve {
+	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkStepDidNotComplete {
 		t.Fatalf("res = %+v, want parked step-did-not-resolve", res)
 	}
 	if len(be.captures) != 0 {
@@ -199,7 +203,7 @@ func TestCompletion_DeadlineCapturesNothing(t *testing.T) {
 	}
 }
 
-// ResolveArtifact publishes, so it can refuse. With capture after the handler
+// AppendEntry publishes, so it can refuse. With capture after the handler
 // returns there is no in-invocation revision left, so the refusal is stashed
 // and the item parks — and the park reason carries the ACT and nothing the
 // guard said, because a park is published through that same guard.
@@ -246,13 +250,18 @@ func TestCompletion_DisclosureRefusalParksAndKeepsTheWork(t *testing.T) {
 	if rec := state.Artifact("plan"); rec.Resolved {
 		t.Errorf("plan artifact = %+v, want unresolved after a refused capture", rec)
 	}
+	// Nothing was journaled: result and route land together or not at all, and
+	// the refusal is the "not at all".
+	if len(state.Journal) != 0 {
+		t.Errorf("journal = %+v after a refused capture, want empty", state.Journal)
+	}
 	// "A correction round is priced as a round, not as a dispatch"
 	// (docs/resolution.md § The treasurer). Charged as one, three refused
 	// sentences would exhaust the default three invocations and park on the
 	// budget — reporting a budget cap for a problem no grant can fix.
-	if rec := state.Artifact("plan"); rec.Invocations != 0 {
+	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {
 		t.Errorf("invocations = %d after a refused capture, want 0 — a refused expression of "+
-			"finished work is not a failed attempt at the step", rec.Invocations)
+			"finished work is not a failed attempt at the step", row.Dispatches)
 	}
 }
 
@@ -364,8 +373,8 @@ func TestCompletion_EveryOtherOutcomeCountsTheDispatch(t *testing.T) {
 				t.Fatalf("res = %+v, want %s", res, tc.status)
 			}
 			state, _ := be.Load(context.Background(), claim.ItemRef)
-			if rec := state.Artifact("plan"); rec.Invocations != 1 {
-				t.Errorf("invocations = %d, want the dispatch counted once", rec.Invocations)
+			if row := state.Ledger.Row("plan"); row.Dispatches != 1 {
+				t.Errorf("invocations = %d, want the dispatch counted once", row.Dispatches)
 			}
 		})
 	}
@@ -384,7 +393,7 @@ func accessorCtx(t *testing.T, state *flow.Item) *stepCtx {
 	li, _ := f.Item("write plan")
 	app := &App{Orchestrator: fake.New(), Agent: &stubAgent{name: "stub"}}
 	claim := flow.Claim{ItemRef: flow.ItemRef{Display: "1"}, Account: "runner-account"}
-	return newStepCtx(context.Background(), app, claim, f, li, state, time.Minute)
+	return newStepCtx(context.Background(), app, claim, f, li, state, flow.StepBudget{Timeout: time.Minute})
 }
 
 func TestStepCtx_JournalIsACopy(t *testing.T) {
@@ -431,13 +440,20 @@ func TestStepCtx_NotesAreFilteredAndOrdered(t *testing.T) {
 }
 
 func TestStepCtx_RunNumberCountsDispatches(t *testing.T) {
-	state := &flow.Item{Artifacts: map[flow.ArtifactId]flow.ArtifactRecord{}}
+	state := &flow.Item{}
 	if got := accessorCtx(t, state).RunNumber(); got != 1 {
 		t.Errorf("RunNumber() = %d on the first dispatch, want 1", got)
 	}
-	state.Artifacts["plan"] = flow.ArtifactRecord{Id: "plan", Invocations: 1}
+	state.Ledger = flow.Ledger{Steps: map[flow.StepId]flow.LedgerRow{
+		"plan": {Step: "plan", Dispatches: 1},
+	}}
 	if got := accessorCtx(t, state).RunNumber(); got != 2 {
-		t.Errorf("RunNumber() = %d after one bump, want 2", got)
+		t.Errorf("RunNumber() = %d after one dispatch, want 2", got)
+	}
+	// Another step's row is not this step's: rows are keyed by StepId.
+	state.Ledger.Steps["impl"] = flow.LedgerRow{Step: "impl", Dispatches: 5}
+	if got := accessorCtx(t, state).RunNumber(); got != 2 {
+		t.Errorf("RunNumber() = %d, want 2 — another step's dispatches are not this step's", got)
 	}
 }
 
@@ -487,5 +503,212 @@ func TestStepCtx_RoleAccount(t *testing.T) {
 	empty := accessorCtx(t, &flow.Item{})
 	if got, err := empty.RoleAccount("contributor"); err != nil || got != "" {
 		t.Errorf("RoleAccount = (%q, %v), want empty and no error for a role that has not acted", got, err)
+	}
+}
+
+// --- What the appended entry carries ---
+
+// ONE APPEND, carrying everything derived from the completion: the elected
+// route, the message and the standing note, what the item now awaits, who ran
+// the step and in what role, and what the execution cost. A field missing here
+// is a field no orchestrator can persist, because this is the only write.
+func TestCompletion_TheEntryCarriesTheWholeCompletion(t *testing.T) {
+	app, be, claim := capturingApp(t, func(f *flow.Flow) {
+		f.Role("contributor", flow.CapPush)
+		f.Role("reviewer", flow.CapApprove)
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p"}); err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Next("commit", "the plan is written").
+				Markdown("the plan").
+				WithNote("the base branch is release-2"), nil
+		}, flow.StepConfig{Role: "contributor", Entry: true, Next: []flow.StepId{"commit"}})
+		f.AddStep("record the commit", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("abc"), nil
+		}, flow.StepConfig{Role: "reviewer", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	})
+	// The agent bills, so the entry's Spend has something to carry.
+	app.Agent = &stubAgent{name: "stub", responses: []flow.AgentResponse{{LastText: "ok", CostUSD: 1.25}}}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "done" {
+		t.Fatalf("res = %+v, want done", res)
+	}
+	if len(be.entries) != 1 {
+		t.Fatalf("appended %d entries, want exactly one", len(be.entries))
+	}
+	e := be.entries[0]
+	if e.Step != "plan" || e.Execution != 1 {
+		t.Errorf("entry identity = %s/%d, want plan/1", e.Step, e.Execution)
+	}
+	if e.Route != (flow.Route{Next: "commit"}) {
+		t.Errorf("Route = %+v, want the elected successor", e.Route)
+	}
+	if e.Message != "the plan is written" {
+		t.Errorf("Message = %q, want the handler's", e.Message)
+	}
+	if e.Note != "the base branch is release-2" {
+		t.Errorf("Note = %q, want the standing note", e.Note)
+	}
+	// The successor's declared role, computed by the SDK because the
+	// orchestrator holds no flow.
+	if e.Awaits != (flow.Awaits{Role: "reviewer"}) {
+		t.Errorf("Awaits = %+v, want the successor's role with no account", e.Awaits)
+	}
+	if e.By != claim.Account {
+		t.Errorf("By = %q, want the claim's account %q", e.By, claim.Account)
+	}
+	if e.Role != "contributor" {
+		t.Errorf("Role = %q, want the step's own tag", e.Role)
+	}
+	if e.Result.Type != flow.ArtifactMarkdown || e.Result.Markdown != "the plan" {
+		t.Errorf("Result = %+v, want the markdown the handler returned", e.Result)
+	}
+	if e.Spend.CostUSD != 1.25 {
+		t.Errorf("Spend.CostUSD = %v, want 1.25 — this execution's cost", e.Spend.CostUSD)
+	}
+	if e.Spend.Duration <= 0 {
+		t.Errorf("Spend.Duration = %v, want the execution's active time", e.Spend.Duration)
+	}
+	if e.At.IsZero() {
+		t.Error("At is zero; an entry records when the execution completed")
+	}
+}
+
+// A finalizing election awaits nobody, and carries the disposition through to
+// Finalize.
+func TestCompletion_FinalizingEntryAwaitsNobody(t *testing.T) {
+	app, be, claim := capturingApp(t, func(f *flow.Flow) {
+		f.Role("contributor", flow.CapPush)
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionRejected, "not worth doing").Markdown("why not"), nil
+		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionRejected}})
+	})
+
+	if _, err := RunOne(context.Background(), app, claim); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if len(be.entries) != 1 {
+		t.Fatalf("appended %d entries, want one", len(be.entries))
+	}
+	e := be.entries[0]
+	if e.Route.Finalize != flow.DispositionRejected {
+		t.Errorf("Route = %+v, want a finalizing election", e.Route)
+	}
+	if !e.Awaits.Empty() {
+		t.Errorf("Awaits = %+v on a finalizing entry, want the zero value", e.Awaits)
+	}
+}
+
+// A step the route reaches again appends a SECOND execution. The number is
+// counted off the JOURNAL — the record — rather than off a stored counter,
+// which would be a second answer to a question the entries already settle.
+func TestExecutionOf_CountsPriorEntriesForThatStep(t *testing.T) {
+	empty := &flow.Item{}
+	if got := executionOf(empty, "plan"); got != 1 {
+		t.Errorf("executionOf on an empty journal = %d, want 1", got)
+	}
+
+	state := &flow.Item{Journal: []flow.JournalEntry{
+		{Step: "plan", Execution: 1},
+		{Step: "impl", Execution: 1},
+		{Step: "plan", Execution: 2},
+		{Step: "review", Execution: 1},
+	}}
+	if got := executionOf(state, "plan"); got != 3 {
+		t.Errorf("executionOf(plan) = %d, want 3 — two prior executions plus this one", got)
+	}
+	// Another step's entries are not this step's.
+	if got := executionOf(state, "impl"); got != 2 {
+		t.Errorf("executionOf(impl) = %d, want 2", got)
+	}
+	if got := executionOf(state, "never-run"); got != 1 {
+		t.Errorf("executionOf(never-run) = %d, want 1", got)
+	}
+}
+
+// A step that elects nothing parks `step-did-not-complete` and appends NOTHING:
+// only completion appends, and a park is recorded beside the journal.
+func TestCompletion_ZeroResultAppendsNothing(t *testing.T) {
+	app, be, claim := capturingApp(t, func(f *flow.Flow) {
+		f.AddStep("forgetful", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkStepDidNotComplete {
+		t.Fatalf("res = %+v, want parked step-did-not-complete", res)
+	}
+	if len(be.entries) != 0 {
+		t.Errorf("appended %+v for a step that completed nothing", be.entries)
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if len(state.Journal) != 0 {
+		t.Errorf("journal = %+v, want empty — the park is recorded beside it", state.Journal)
+	}
+	// The dispatch is still counted: the step ran, it just decided nothing.
+	if got := state.Ledger.Row("plan").Dispatches; got != 1 {
+		t.Errorf("Dispatches = %d, want 1", got)
+	}
+}
+
+// A dispatch that picks the item up from a park on this very step is a
+// RESUMPTION, counted apart from dispatches: one number says how often the step
+// was attempted, the other how often something had to unstick it.
+func TestRunOne_ResumingAParkRecordsOneResumption(t *testing.T) {
+	runs := 0
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			runs++
+			if runs == 1 {
+				return flow.StepResult{}, nil // elects nothing → parks
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, &stubAgent{name: "stub"})
+
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "parked" {
+		t.Fatalf("first RunOne = (%+v, %v), want parked", res, err)
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if got := state.Ledger.Row("plan").Resumptions; got != 0 {
+		t.Fatalf("Resumptions = %d before any resume, want 0", got)
+	}
+
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
+		t.Fatalf("second RunOne = (%+v, %v), want done", res, err)
+	}
+	state, _ = be.Load(context.Background(), claim.ItemRef)
+	row := state.Ledger.Row("plan")
+	if row.Resumptions != 1 {
+		t.Errorf("Resumptions = %d, want 1 — the second dispatch picked the item up from a park", row.Resumptions)
+	}
+	if row.Dispatches != 2 {
+		t.Errorf("Dispatches = %d, want 2 — a resumption is counted APART from the dispatch, not instead of it", row.Dispatches)
+	}
+}
+
+// A dispatch that is not resuming anything records no resumption.
+func TestRunOne_AnOrdinaryDispatchRecordsNoResumption(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, &stubAgent{name: "stub"})
+
+	if _, err := RunOne(context.Background(), app, claim); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if got := state.Ledger.Row("plan").Resumptions; got != 0 {
+		t.Errorf("Resumptions = %d, want 0 — nothing was resumed", got)
 	}
 }

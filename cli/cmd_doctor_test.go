@@ -381,7 +381,7 @@ type failingBackend struct {
 	err error
 }
 
-func (b *failingBackend) ListAutoSelectable(ctx context.Context, _ []flow.TagId) ([]flow.ItemRef, error) {
+func (b *failingBackend) ListAutoSelectable(ctx context.Context, _ []flow.TagId, _ func(flow.RoleName) bool) ([]flow.ItemRef, error) {
 	return nil, b.err
 }
 

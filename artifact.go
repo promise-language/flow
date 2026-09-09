@@ -90,17 +90,7 @@ func (d ArtifactDef) WithDoc(doc string) ArtifactDef {
 	return d
 }
 
-// ArtifactSpec — what the seed phase records for each artifact: cap values
-// pre-loaded from the binary's budget policy (or the package defaults),
-// required flag, type.
-type ArtifactSpec struct {
-	Id       ArtifactId
-	Type     ArtifactType
-	Required bool
-	Budget   StepBudget
-}
-
-// ArtifactBody — the union written by Backend.ResolveArtifact. Exactly one
+// ArtifactBody — the captured artifact value inside a JournalEntry. Exactly one
 // field is populated; which one is determined by the matching ArtifactType.
 type ArtifactBody struct {
 	Type ArtifactType
@@ -112,13 +102,23 @@ type ArtifactBody struct {
 	Patch      PatchBody
 }
 
-// ArtifactRecord — what LoadState returns per artifact. Carries the resolved
-// value (if any) alongside budget caps and usage counters.
+// ArtifactRecord — the orchestrator's projection of the journal's latest result
+// per artifact: the value, and where it came from.
+//
+// IT IS NOT A SECOND COPY OF STATE. AppendEntry is the one write, and the
+// record is derived inside it from the entry being appended, so the projection
+// cannot drift from the journal it projects. It exists because the typed
+// accessors (StepCtx.Artifact, Markdown, Patch, …) still read it — they move to
+// reading entries once entries persist (#240) — and because the outgoing
+// checklist derivation reads it until #245 retires that too.
+//
+// It carries NO budget and NO checklist bits. Counters are the ledger's
+// (LedgerRow); `required` and `stale` went with seeding and MarkStale, and a
+// field nothing can write is a field every reader would have to guess the
+// meaning of.
 type ArtifactRecord struct {
 	Id       ArtifactId
 	Type     ArtifactType
-	Required bool
-	Stale    bool
 	Resolved bool
 
 	// Value — exactly one populated when Resolved, matching Type.
@@ -132,20 +132,6 @@ type ArtifactRecord struct {
 	ProducedAt time.Time
 	Version    int
 	ResolvedBy string
-
-	// Budget caps — pre-loaded at SeedState from the binary's budget policy
-	// (or package defaults). User grants ADD to these directly.
-	GrantedInvocations          int
-	GrantedPromptsPerInvocation int
-	GrantedCostUSD              float64
-	GrantedTimeout              time.Duration
-
-	// Usage counters.
-	Invocations           int
-	PromptsThisInvocation int
-	CostUSDSpent          float64
-	DurationWorked        time.Duration
-	LastRunAt             time.Time
 }
 
 // GateName identifies a gate, as a declared concept and an optional instance:

@@ -36,7 +36,7 @@ func (app *App) cmdList(ctx context.Context, args []string) int {
 
 	scope := flow.ItemScope(*scopeStr)
 	if !flow.ValidScope(scope) {
-		return app.usageError("list: unknown scope %q (valid: all|open|processable|workable|free|auto)", *scopeStr)
+		return app.usageError("list: unknown scope %q (valid: all|open|processable|actionable|workable|free|auto)", *scopeStr)
 	}
 
 	want, ok := app.tagFilter("list", tags)
@@ -47,7 +47,7 @@ func (app *App) cmdList(ctx context.Context, args []string) int {
 	// The remit gating a listing, which is what it is for
 	// (docs/flow-registration.md § Item types): it answers *is this our work*
 	// statically, without dispatching anything.
-	items, err := app.Orchestrator.List(ctx, scope, flow.BinaryName(app.Name), app.Flow.InRemit)
+	items, err := app.Orchestrator.List(ctx, scope, flow.BinaryName(app.Name), app.Flow.InRemit, app.assumesRole(ctx))
 	if err != nil {
 		fmt.Fprintln(app.Err, "list:", err)
 		return 1

@@ -95,7 +95,7 @@ type AgentFailure struct {
 	// Transient signals an infrastructure failure (remote runner died,
 	// network blip, transient 5xx) rather than a real claude-side
 	// failure. When true, the orchestrator parks the step with
-	// ParkInfraTransient and SKIPS the BumpInvocations call — a flapping
+	// ParkInfraTransient and DOES NOT COUNT THE DISPATCH — a flapping
 	// runner must not burn the step's invocation budget. Agent impls
 	// (typically a backend's runner-HTTP wrapper) set this from
 	// substrate-specific signals; cli.RunOne is backend-agnostic.

@@ -31,9 +31,13 @@ type ghMock struct {
 	repo  string
 
 	// issue state
-	issueNum    int
-	issueTitle  string
-	issueBody   string
+	issueNum   int
+	issueTitle string
+	issueBody  string
+	// issueUser is the account that FILED the issue — deliberately not the
+	// operator's login, so a test asserting Item.Creator proves the filer is
+	// read rather than the caller.
+	issueUser   string
 	issueState  string // "open" or "closed" — Finalize refuses a non-terminal item
 	issueLabels []string
 	assignees   []string
@@ -167,6 +171,7 @@ func newGHMock(t *testing.T) *ghMock {
 		issueNum:          42,
 		issueTitle:        "Test issue",
 		issueBody:         "Add hello()",
+		issueUser:         "carol",
 		issueState:        "open",
 		nextCommentID:     1000,
 		commentClock:      time.Now().UTC().Truncate(time.Second),
@@ -417,6 +422,7 @@ func (m *ghMock) handleIssue(w http.ResponseWriter, r *http.Request) {
 		"title":      m.issueTitle,
 		"body":       m.issueBody,
 		"state":      m.issueState,
+		"user":       map[string]string{"login": m.issueUser},
 		"html_url":   fmt.Sprintf("https://github.com/%s/%s/issues/%d", m.owner, m.repo, m.issueNum),
 		"labels":     toLabelObjs(served),
 		"assignees":  toLoginObjs(m.assignees),
@@ -809,6 +815,41 @@ func activeJSONPath(t *testing.T) string {
 	return p
 }
 
+// resultEntry is one completed execution of `step` producing `body`. The shape
+// every test that used to call the checklist's ResolveArtifact needs, spelled
+// once: the entry is the only write now, and the artifact projection follows
+// from it.
+//
+// The route names a successor rather than finalizing, because a finalizing
+// entry says the flow is over — which almost none of these tests are about.
+func resultEntry(step flow.StepId, exec int, body flow.ArtifactBody) flow.JournalEntry {
+	return flow.JournalEntry{
+		Step:      step,
+		Execution: exec,
+		Result:    body,
+		Route:     flow.Route{Next: "next"},
+		Awaits:    flow.Awaits{Role: "contributor"},
+		By:        "tester",
+		Role:      "contributor",
+	}
+}
+
+// appendResult appends one completed execution and fails the test if the append
+// is refused. `exec` is the execution number: a step the route reaches again
+// appends again, and the later entry's result stands as the step's current one.
+func appendResult(t *testing.T, b *Orchestrator, ref flow.ItemRef, step flow.StepId, exec int, body flow.ArtifactBody) {
+	t.Helper()
+	if err := b.AppendEntry(t.Context(), ref, resultEntry(step, exec, body)); err != nil {
+		t.Fatalf("AppendEntry(%s exec %d): %v", step, exec, err)
+	}
+}
+
+// appendMarkdown is appendResult for the common markdown case.
+func appendMarkdown(t *testing.T, b *Orchestrator, ref flow.ItemRef, step flow.StepId, text string) {
+	t.Helper()
+	appendResult(t, b, ref, step, 1, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: text})
+}
+
 // newMockedOrchestrator wires a Orchestrator at the mock server. Uses Test mode (no
 // real network), no real gh CLI. Sets FLOW_DIR to a tempdir so Orchestrator.Claim
 // (which now writes .flow/active.json via pkg/clistate) doesn't pollute
@@ -919,52 +960,39 @@ func TestBackend_ClaimSeedResolveRoundTrip(t *testing.T) {
 		}
 	}
 
-	// SeedState — should post the state comment with the artifact set.
-	specs := []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
-	}
-	if err := b.SeedState(ctx, claim.ItemRef, specs); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
-
-	// Load should return the seeded artifact.
+	// Nothing seeds an item: the claim leaves it with no record at all, and
+	// the first entry is what brings one into being.
 	state, err := b.Load(ctx, claim.ItemRef)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	rec, ok := state.Artifacts["plan"]
-	if !ok {
-		t.Fatalf("Load missing plan artifact; got %+v", state.Artifacts)
-	}
-	if rec.GrantedInvocations != flow.DefaultStepBudget().MaxInvocations {
-		t.Errorf("GrantedInvocations = %d, want default %d",
-			rec.GrantedInvocations, flow.DefaultStepBudget().MaxInvocations)
+	if len(state.Journal) != 0 || len(state.Artifacts) != 0 {
+		t.Fatalf("post-claim state = journal %+v artifacts %+v, want both empty", state.Journal, state.Artifacts)
 	}
 	if state.Type != "" {
 		t.Errorf("Item.Type = %q, want empty (no type:* labels in mock)", state.Type)
 	}
 
-	// ResolveArtifact (markdown) — posts a new comment + updates state.
-	body := flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan content"}
-	if err := b.ResolveArtifact(ctx, claim.ItemRef, "plan", body); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
-	}
+	// AppendEntry (markdown) — posts a new comment + writes the state document.
+	appendMarkdown(t, b, claim.ItemRef, "plan", "the plan content")
 	state, err = b.Load(ctx, claim.ItemRef)
 	if err != nil {
-		t.Fatalf("Load after resolve: %v", err)
+		t.Fatalf("Load after the entry: %v", err)
 	}
-	rec = state.Artifacts["plan"]
+	rec := state.Artifacts["plan"]
 	if !rec.Resolved || rec.Version != 1 {
-		t.Errorf("after resolve: %+v, want Resolved version=1", rec)
+		t.Errorf("after the entry: %+v, want Resolved version=1", rec)
 	}
-
-	// Second seed must refuse.
-	if err := b.SeedState(ctx, claim.ItemRef, specs); err == nil {
-		t.Errorf("expected SeedState to refuse re-seed")
+	if len(state.Journal) != 1 || state.Journal[0].Step != "plan" {
+		t.Errorf("journal = %+v, want the one entry", state.Journal)
+	}
+	// The first entry binds the flow.
+	if state.Flow != "implement" {
+		t.Errorf("Flow = %q after the first entry, want implement", state.Flow)
 	}
 }
 
-func TestBackend_BumpInvocations_PersistsViaStateComment(t *testing.T) {
+func TestBackend_RecordDispatch_PersistsViaStateComment(t *testing.T) {
 	mock := newGHMock(t)
 	srv := mock.server()
 	defer srv.Close()
@@ -976,27 +1004,44 @@ func TestBackend_BumpInvocations_PersistsViaStateComment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := b.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
-	}); err != nil {
-		t.Fatalf("SeedState: %v", err)
+	if err := b.RecordDispatch(ctx, claim.ItemRef, "plan"); err != nil {
+		t.Fatalf("RecordDispatch: %v", err)
 	}
-	if err := b.BumpInvocations(ctx, claim.ItemRef, "plan"); err != nil {
-		t.Fatalf("BumpInvocations: %v", err)
-	}
-	if err := b.BumpInvocations(ctx, claim.ItemRef, "plan"); err != nil {
-		t.Fatalf("BumpInvocations 2: %v", err)
+	if err := b.RecordDispatch(ctx, claim.ItemRef, "plan"); err != nil {
+		t.Fatalf("RecordDispatch 2: %v", err)
 	}
 	if err := b.AddCost(ctx, claim.ItemRef, "plan", 1.5); err != nil {
 		t.Fatalf("AddCost: %v", err)
 	}
-	state, _ := b.Load(ctx, claim.ItemRef)
-	rec := state.Artifacts["plan"]
-	if rec.Invocations != 2 {
-		t.Errorf("Invocations = %d, want 2", rec.Invocations)
+	if err := b.AddDuration(ctx, claim.ItemRef, "plan", 2*time.Minute); err != nil {
+		t.Fatalf("AddDuration: %v", err)
 	}
-	if rec.CostUSDSpent != 1.5 {
-		t.Errorf("CostUSDSpent = %v, want 1.5", rec.CostUSDSpent)
+	if err := b.AddWaiting(ctx, claim.ItemRef, "plan", 7*time.Minute); err != nil {
+		t.Fatalf("AddWaiting: %v", err)
+	}
+	if err := b.RecordResumption(ctx, claim.ItemRef, "plan"); err != nil {
+		t.Fatalf("RecordResumption: %v", err)
+	}
+	state, _ := b.Load(ctx, claim.ItemRef)
+	row := state.Ledger.Row("plan")
+	if row.Dispatches != 2 {
+		t.Errorf("Dispatches = %d, want 2", row.Dispatches)
+	}
+	if row.Resumptions != 1 {
+		t.Errorf("Resumptions = %d, want 1", row.Resumptions)
+	}
+	if row.CostUSD != 1.5 {
+		t.Errorf("CostUSD = %v, want 1.5", row.CostUSD)
+	}
+	// Active and waiting are kept apart: waiting is evidence about contention,
+	// not about the work.
+	if row.Active != 2*time.Minute || row.Waiting != 7*time.Minute {
+		t.Errorf("Active/Waiting = %v/%v, want 2m/7m", row.Active, row.Waiting)
+	}
+	if state.Ledger.TotalCostUSD != 1.5 || state.Ledger.TotalActive != 2*time.Minute ||
+		state.Ledger.TotalWaiting != 7*time.Minute {
+		t.Errorf("totals = %v / %v / %v, want 1.5 / 2m / 7m",
+			state.Ledger.TotalCostUSD, state.Ledger.TotalActive, state.Ledger.TotalWaiting)
 	}
 }
 
@@ -1012,19 +1057,12 @@ func TestBackend_ResolveFileArtifactSpills(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := b.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
-		{Id: "screenshot", Type: flow.ArtifactFile, Required: true, Budget: flow.DefaultStepBudget()},
-	}); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
 
 	body := flow.ArtifactBody{
 		Type: flow.ArtifactFile,
 		File: flow.FileBody{Name: "result.png", Content: []byte("PNG\x89big content")},
 	}
-	if err := b.ResolveArtifact(ctx, claim.ItemRef, "screenshot", body); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
-	}
+	appendResult(t, b, claim.ItemRef, "screenshot", 1, body)
 
 	// Branch was created on first spill.
 	mock.mu.Lock()
@@ -1063,18 +1101,13 @@ func TestBackend_ResolvePatchArtifactSpills(t *testing.T) {
 	ctx := t.Context()
 	ref := b.refFromIssue(42)
 	claim, _ := b.Claim(ctx, ref, nil)
-	_ = b.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
-		{Id: "implementation", Type: flow.ArtifactPatch, Required: true, Budget: flow.DefaultStepBudget()},
-	})
 
 	patch := []byte("--- a/foo\n+++ b/foo\n@@ -1 +1 @@\n-old\n+new\n")
 	body := flow.ArtifactBody{
 		Type:  flow.ArtifactPatch,
 		Patch: flow.PatchBody{Diff: patch, BaseSHA: "abc1234", BaseBranch: "main"},
 	}
-	if err := b.ResolveArtifact(ctx, claim.ItemRef, "implementation", body); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
-	}
+	appendResult(t, b, claim.ItemRef, "implementation", 1, body)
 
 	mock.mu.Lock()
 	_, ok := mock.orphanFiles[artifactFilePath(42, "implementation", "patch.diff")]
@@ -1095,15 +1128,10 @@ func TestBackend_LargeMarkdownAutoSpills(t *testing.T) {
 	ctx := t.Context()
 	ref := b.refFromIssue(42)
 	claim, _ := b.Claim(ctx, ref, nil)
-	_ = b.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
-		{Id: "log", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
-	})
 
 	// 2 KiB markdown — well above 256 byte cap.
 	bigBody := strings.Repeat("verbose output line\n", 200)
-	if err := b.ResolveArtifact(ctx, claim.ItemRef, "log", flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: bigBody}); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
-	}
+	appendResult(t, b, claim.ItemRef, "log", 1, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: bigBody})
 
 	mock.mu.Lock()
 	_, spilled := mock.orphanFiles[artifactFilePath(42, "log", "body.md")]
@@ -1126,22 +1154,12 @@ func TestBackend_SecondSpillUpdatesViaContentsAPI(t *testing.T) {
 	ctx := t.Context()
 	ref := b.refFromIssue(42)
 	claim, _ := b.Claim(ctx, ref, nil)
-	_ = b.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
-		{Id: "blob", Type: flow.ArtifactFile, Required: true, Budget: flow.DefaultStepBudget()},
-	})
 
-	// First resolve creates the branch.
-	if err := b.ResolveArtifact(ctx, claim.ItemRef, "blob", flow.ArtifactBody{Type: flow.ArtifactFile, File: flow.FileBody{Name: "x.bin", Content: []byte("v1")}}); err != nil {
-		t.Fatalf("first ResolveArtifact: %v", err)
-	}
-	// Mark the artifact stale so a second resolve is accepted.
-	if err := b.MarkStale(ctx, claim.ItemRef, "blob"); err != nil {
-		t.Fatalf("MarkStale: %v", err)
-	}
-	// Second resolve must use the Contents PUT path (branch exists).
-	if err := b.ResolveArtifact(ctx, claim.ItemRef, "blob", flow.ArtifactBody{Type: flow.ArtifactFile, File: flow.FileBody{Name: "x.bin", Content: []byte("v2")}}); err != nil {
-		t.Fatalf("second ResolveArtifact: %v", err)
-	}
+	// The first execution creates the branch.
+	appendResult(t, b, claim.ItemRef, "blob", 1, flow.ArtifactBody{Type: flow.ArtifactFile, File: flow.FileBody{Name: "x.bin", Content: []byte("v1")}})
+	// A step the route reaches again appends a second execution — no staleness
+	// flag stands between the two, because there is nothing to un-stale.
+	appendResult(t, b, claim.ItemRef, "blob", 2, flow.ArtifactBody{Type: flow.ArtifactFile, File: flow.FileBody{Name: "x.bin", Content: []byte("v2")}})
 
 	mock.mu.Lock()
 	defer mock.mu.Unlock()
@@ -1325,20 +1343,21 @@ func TestBackend_ParkSurvivesLoadAndClearsOnGrant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := b.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true,
-			Budget: flow.StepBudget{MaxInvocations: 2, MaxCostUSD: 10}},
-	}); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
 	for range 2 {
-		if err := b.BumpInvocations(ctx, claim.ItemRef, "plan"); err != nil {
-			t.Fatalf("BumpInvocations: %v", err)
+		if err := b.RecordDispatch(ctx, claim.ItemRef, "plan"); err != nil {
+			t.Fatalf("RecordDispatch: %v", err)
 		}
 	}
+	// The park carries the run's own snapshot of every axis: that is the record
+	// of the cap that was refused on, and GrantClearsPark reads it because an
+	// orchestrator holds no policy of its own.
 	if err := b.Park(ctx, claim.ItemRef, flow.ParkRequest{
-		Kind: flow.ParkBudgetExhausted, Step: "plan", Axis: flow.AxisInvocations,
-		Reason: `ran 2 times without resolving "plan"`,
+		Kind: flow.ParkTreasurerRefused, Step: "plan", Axis: flow.AxisInvocations,
+		Reason: `ran 2 times without completing "plan"`,
+		Axes: []flow.AxisReport{
+			flow.NewAxisReport(flow.AxisInvocations, 2, 2),
+			flow.NewAxisReport(flow.AxisCost, 1, 10),
+		},
 	}); err != nil {
 		t.Fatalf("Park: %v", err)
 	}
@@ -1381,8 +1400,14 @@ func TestBackend_ParkSurvivesLoadAndClearsOnGrant(t *testing.T) {
 	if hasLabel(mock.labelNames(), parkLabelName) {
 		t.Errorf("labels = %v, want %q removed", mock.labelNames(), parkLabelName)
 	}
-	if rec := state.Artifacts["plan"]; rec.GrantedInvocations != 3 || rec.GrantedCostUSD != 15 {
-		t.Errorf("record = inv %d / cost %v, want 3 / 15", rec.GrantedInvocations, rec.GrantedCostUSD)
+	// Both grants are recorded on the row, in their own units — the cap the
+	// binary reads is its policy plus these (flow.EffectiveBudget).
+	row := state.Ledger.Row("plan")
+	if got := row.GrantedOn(flow.AxisInvocations); got != 1 {
+		t.Errorf("GrantedOn(invocations) = %v, want 1", got)
+	}
+	if got := row.GrantedOn(flow.AxisCost); got != 5 {
+		t.Errorf("GrantedOn(cost) = %v, want 5", got)
 	}
 }
 
@@ -1399,15 +1424,13 @@ func TestBackend_SignalWritePreservesPark(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := b.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
-	}); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
 	if err := b.Park(ctx, claim.ItemRef, flow.ParkRequest{
-		Kind: flow.ParkBudgetExhausted, Step: "plan", Axis: flow.AxisCost,
+		Kind: flow.ParkTreasurerRefused, Step: "plan", Axis: flow.AxisCost,
 	}); err != nil {
 		t.Fatalf("Park: %v", err)
+	}
+	if err := b.AddCost(ctx, claim.ItemRef, "plan", 12.40); err != nil {
+		t.Fatalf("AddCost: %v", err)
 	}
 	if err := b.markSignalSetOnState(ctx, claim.ItemRef, "pr-open"); err != nil {
 		t.Fatalf("markSignalSetOnState: %v", err)
@@ -1423,8 +1446,8 @@ func TestBackend_SignalWritePreservesPark(t *testing.T) {
 	if state.Park.Axis != flow.AxisCost {
 		t.Errorf("park axis = %q, want cost", state.Park.Axis)
 	}
-	if rec := state.Artifacts["plan"]; rec.GrantedInvocations != flow.DefaultStepBudget().MaxInvocations {
-		t.Errorf("the signal write disturbed the budget: %+v", rec)
+	if got := state.Ledger.Row("plan").CostUSD; got != 12.40 {
+		t.Errorf("the signal write disturbed the ledger: CostUSD = %v, want 12.40", got)
 	}
 }
 
@@ -1440,8 +1463,8 @@ func (m *ghMock) labelNames() []string {
 // ---------------------------------------------------------------------------
 
 // The compile-time assertion lives in backend.go. This test exercises the
-// method end-to-end: claim, seed, resolve an artifact, then load via ref
-// alone — no claim token — and verify the result matches Load.
+// method end-to-end: claim, append an entry, then load via ref alone — no claim
+// token — and verify the result matches Load.
 func TestBackend_LoadStateByRef_MatchesLoadState(t *testing.T) {
 	mock := newGHMock(t)
 	srv := mock.server()
@@ -1455,15 +1478,7 @@ func TestBackend_LoadStateByRef_MatchesLoadState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	specs := []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
-	}
-	if err := b.SeedState(ctx, claim.ItemRef, specs); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
-	if err := b.ResolveArtifact(ctx, claim.ItemRef, "plan", flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"}); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
-	}
+	appendResult(t, b, claim.ItemRef, "plan", 1, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"})
 
 	// Load (via claim) is the reference.
 	want, err := b.Load(ctx, claim.ItemRef)
@@ -1504,18 +1519,15 @@ func TestBackend_LoadStateByRef_ColdCache(t *testing.T) {
 	ctx := t.Context()
 	ref := b.refFromIssue(42)
 
-	// Claim and seed via a SEPARATE backend instance (simulating a different
+	// Claim and append via a SEPARATE backend instance (simulating a different
 	// process) so b's stateCommentCache is cold.
 	b2 := newMockedOrchestrator(t, mock, srv)
 	claim, err := b2.Claim(ctx, ref, nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := b2.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
-		{Id: "plan", Type: flow.ArtifactMarkdown, Required: true, Budget: flow.DefaultStepBudget()},
-	}); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
+	appendResult(t, b2, claim.ItemRef, "plan", 1,
+		flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"})
 
 	// b has never seen this issue — cache is empty.
 	got, err := b.Load(ctx, ref)
@@ -1527,9 +1539,8 @@ func TestBackend_LoadStateByRef_ColdCache(t *testing.T) {
 	}
 }
 
-// Load on an issue with NO state comment returns an empty (unseeded)
-// state — not an error. This is the expected shape for an issue that has never
-// been claimed.
+// Load on an issue with NO state comment returns an empty state — not an error.
+// This is the expected shape for an issue nothing has ever recorded work on.
 func TestBackend_LoadStateByRef_NoStateComment(t *testing.T) {
 	mock := newGHMock(t)
 	srv := mock.server()
@@ -1544,7 +1555,10 @@ func TestBackend_LoadStateByRef_NoStateComment(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(got.Artifacts) != 0 {
-		t.Errorf("expected no artifacts on unseeded issue; got %+v", got.Artifacts)
+		t.Errorf("expected no artifacts on an issue with no record; got %+v", got.Artifacts)
+	}
+	if len(got.Journal) != 0 {
+		t.Errorf("expected an empty journal; got %+v", got.Journal)
 	}
 	if got.Title != "Test issue" {
 		t.Errorf("Title = %q, want %q", got.Title, "Test issue")
@@ -1675,7 +1689,7 @@ func TestBackend_Finalize_ReturnsWorktreeToBaseAndReleases(t *testing.T) {
 		t.Fatalf("clistate.Save: %v", err)
 	}
 
-	if err := b.Finalize(t.Context(), claim.ItemRef); err != nil {
+	if err := b.Finalize(t.Context(), claim.ItemRef, flow.DispositionResolved); err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
 
@@ -1718,7 +1732,7 @@ func TestBackend_Finalize_AlreadyOnBase(t *testing.T) {
 		t.Fatalf("clistate.Save: %v", err)
 	}
 
-	if err := b.Finalize(t.Context(), claim.ItemRef); err != nil {
+	if err := b.Finalize(t.Context(), claim.ItemRef, flow.DispositionResolved); err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
 
@@ -1748,7 +1762,7 @@ func TestBackend_Finalize_RefusesDirtyWorktree(t *testing.T) {
 		t.Fatalf("clistate.Save: %v", err)
 	}
 
-	err := b.Finalize(t.Context(), claim.ItemRef)
+	err := b.Finalize(t.Context(), claim.ItemRef, flow.DispositionResolved)
 	if err == nil {
 		t.Fatal("Finalize should refuse a dirty worktree")
 	}
@@ -1784,7 +1798,7 @@ func TestBackend_Finalize_RefusesMissingBaseBranch(t *testing.T) {
 		t.Fatalf("clistate.Save: %v", err)
 	}
 
-	err := b.Finalize(t.Context(), claim.ItemRef)
+	err := b.Finalize(t.Context(), claim.ItemRef, flow.DispositionResolved)
 	if err == nil {
 		t.Fatal("Finalize should refuse when base branch is missing")
 	}
@@ -1823,7 +1837,7 @@ func TestBackend_Finalize_CheckoutFailureKeepsClaimIntact(t *testing.T) {
 		t.Fatalf("clistate.Save: %v", err)
 	}
 
-	err := b.Finalize(t.Context(), claim.ItemRef)
+	err := b.Finalize(t.Context(), claim.ItemRef, flow.DispositionResolved)
 	if err == nil {
 		t.Fatal("Finalize should fail when checkout fails")
 	}
@@ -2756,12 +2770,6 @@ func TestBackend_ParkRecordsOnDisclosureRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := b.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
-		{Id: "review", Type: flow.ArtifactMarkdown, Required: true,
-			Budget: flow.StepBudget{MaxInvocations: 3, MaxCostUSD: 10}},
-	}); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
 
 	parkReq := flow.ParkRequest{
 		Kind:   flow.ParkBlocked,
@@ -2834,12 +2842,6 @@ func TestBackend_ParkRetryOriginAndDetailsClear(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := b.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
-		{Id: "review", Type: flow.ArtifactMarkdown, Required: true,
-			Budget: flow.StepBudget{MaxInvocations: 3, MaxCostUSD: 10}},
-	}); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
 
 	parkReq := flow.ParkRequest{
 		Kind:    flow.ParkBlocked,
@@ -2884,12 +2886,6 @@ func TestBackend_ParkRetryFailurePropagates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if err := b.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
-		{Id: "review", Type: flow.ArtifactMarkdown, Required: true,
-			Budget: flow.StepBudget{MaxInvocations: 3, MaxCostUSD: 10}},
-	}); err != nil {
-		t.Fatalf("SeedState: %v", err)
-	}
 
 	parkReq := flow.ParkRequest{
 		Kind:   flow.ParkBlocked,
@@ -2918,12 +2914,6 @@ func TestBackend_ParkNonDisclosureErrorStillFails(t *testing.T) {
 	claim, err := b.Claim(ctx, b.refFromIssue(42), nil)
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
-	}
-	if err := b.SeedState(ctx, claim.ItemRef, []flow.ArtifactSpec{
-		{Id: "review", Type: flow.ArtifactMarkdown, Required: true,
-			Budget: flow.StepBudget{MaxInvocations: 3, MaxCostUSD: 10}},
-	}); err != nil {
-		t.Fatalf("SeedState: %v", err)
 	}
 
 	// Shut down the server so the HTTP call fails with a network error,

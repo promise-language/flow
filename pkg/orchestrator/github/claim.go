@@ -342,12 +342,9 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 	if stateBody != "" {
 		_, existingOwner, _, perr := extractStateDoc(stateBody)
 		if perr == nil && existingOwner != "" && flow.AccountId(existingOwner) != owner {
-			// Different author — post a fresh state comment authored by us
-			// with state copied forward (zero state copy: the caller's
-			// SeedState pass will repopulate from cfg.Artifacts).
-			// Mark the previous comment off-topic via reactions API.
-			// For v1, we simply create a fresh comment with empty doc; the
-			// next LoadState + Seed cycle handles the rest.
+			// Different author — post a fresh state comment authored by us,
+			// empty: nothing seeds an item, so the next entry, ledger row,
+			// park or question is what brings its record back into being.
 			newDoc := stateDoc{Flow: b.cfg.BinaryName, Schema: stateSchemaVersion, SeededAt: nowUTC()}
 			id, _, postErr := b.postStateComment(ctx, issueNum, newDoc, owner)
 			if postErr != nil {
@@ -498,7 +495,7 @@ func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef) error {
 // The state-comment write comes first so a failure there leaves the claim
 // intact; the worktree return precedes the release so a checkout failure also
 // keeps the claim recoverable.
-func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef) error {
+func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef, d flow.Disposition) error {
 	issueNum, err := b.issueNumber(ref)
 	if err != nil {
 		return fmt.Errorf("github.Finalize: %w", err)
@@ -532,6 +529,10 @@ func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef) error {
 		}
 		if found && doc != nil {
 			doc.Finalized = true
+			// The disposition the finalizing election carried, recorded beside
+			// the flag: the read is required with the write, so Load reports
+			// both and neither is inferred from the other.
+			doc.Disposition = string(d)
 			if _, err := b.updateStateComment(ctx, issueNum, stateID, *doc, owner); err != nil {
 				return fmt.Errorf("github.Finalize: update state comment: %w", err)
 			}

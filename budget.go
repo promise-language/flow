@@ -61,3 +61,25 @@ func ResolveStepBudget(over StepBudget) StepBudget {
 	}
 	return out
 }
+
+// EffectiveBudget is what a step may actually spend: the binary's policy,
+// resolved against the package defaults, plus every extension recorded on the
+// step's ledger row.
+//
+// THE ONE PLACE A CAP IS COMPUTED. Nothing seeds caps onto an item any more —
+// the ledger records what was granted and the binary holds the policy — so
+// every reader that used to compare against a stored `Granted*` field asks here
+// instead. A second arithmetic would be a second answer to "may this run", and
+// the gate that refuses a dispatch and the `grant` that tops it up must agree
+// exactly or an operator grants into a cap nothing reads.
+//
+// Grant amounts are in each axis's own unit (GrantRecord), so timeout seconds
+// become a Duration here and nowhere else.
+func EffectiveBudget(base StepBudget, row LedgerRow) StepBudget {
+	out := ResolveStepBudget(base)
+	out.MaxInvocations += int(row.GrantedOn(AxisInvocations))
+	out.MaxPromptsPerInvocation += int(row.GrantedOn(AxisPrompts))
+	out.MaxCostUSD += row.GrantedOn(AxisCost)
+	out.Timeout += time.Duration(row.GrantedOn(AxisTimeout) * float64(time.Second))
+	return out
+}

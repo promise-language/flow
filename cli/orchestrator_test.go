@@ -211,11 +211,10 @@ func TestWriteContract_ViolationChargesInvocation(t *testing.T) {
 		t.Fatalf("status = %q, want parked", res.Status)
 	}
 
-	// Invocation must have been charged.
+	// The dispatch must have been charged.
 	state, _ := be.Load(context.Background(), claim.ItemRef)
-	rec := state.Artifact("plan")
-	if rec.Invocations != 1 {
-		t.Errorf("Invocations = %d, want 1 (violation must charge)", rec.Invocations)
+	if got := state.Ledger.Row("plan").Dispatches; got != 1 {
+		t.Errorf("Dispatches = %d, want 1 (violation must charge)", got)
 	}
 }
 
@@ -421,6 +420,37 @@ func (a *stubAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Agent
 	return &r, nil
 }
 
+// resultEntry is one completed execution of `step` producing `body`: the shape
+// every test that used to call the checklist's ResolveArtifact needs, spelled
+// once. The route names a successor rather than finalizing, because a
+// finalizing entry says the flow is over and almost none of these tests are
+// about that.
+func resultEntry(step flow.StepId, exec int, body flow.ArtifactBody) flow.JournalEntry {
+	return flow.JournalEntry{
+		Step:      step,
+		Execution: exec,
+		Result:    body,
+		Route:     flow.Route{Next: "next"},
+		Awaits:    flow.Awaits{Role: "contributor"},
+		By:        "tester",
+		Role:      "contributor",
+	}
+}
+
+// appendResult appends one completed execution, failing the test if refused.
+func appendResult(t *testing.T, o flow.Orchestrator, ref flow.ItemRef, step flow.StepId, exec int, body flow.ArtifactBody) {
+	t.Helper()
+	if err := o.AppendEntry(context.Background(), ref, resultEntry(step, exec, body)); err != nil {
+		t.Fatalf("AppendEntry(%s exec %d): %v", step, exec, err)
+	}
+}
+
+// appendMarkdown is appendResult for the common markdown case.
+func appendMarkdown(t *testing.T, o flow.Orchestrator, ref flow.ItemRef, step flow.StepId, text string) {
+	t.Helper()
+	appendResult(t, o, ref, step, 1, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: text})
+}
+
 // testApp builds a minimal App with the fake backend pre-populated with one
 // item and a single-flow registration.
 func testApp(t *testing.T, configure func(*flow.Flow), agent flow.Agent) (*App, *fake.Orchestrator, flow.Claim) {
@@ -500,8 +530,8 @@ func TestRunOne_SeedsAndDispatchesFirstStep(t *testing.T) {
 	if !rec.Resolved || rec.Markdown != "the plan" {
 		t.Errorf("plan artifact = %+v, want resolved markdown 'the plan'", rec)
 	}
-	if rec.Invocations != 1 {
-		t.Errorf("Invocations = %d, want 1", rec.Invocations)
+	if got := state.Ledger.Row("plan").Dispatches; got != 1 {
+		t.Errorf("Dispatches = %d, want 1", got)
 	}
 }
 
@@ -617,67 +647,6 @@ func TestRunOne_WritesAndClearsRunningRecord(t *testing.T) {
 	}
 }
 
-// seedFailBackend forces SeedState to fail — modeling a transport/tracker
-// error while declaring the checklist.
-type seedFailBackend struct{ *fake.Orchestrator }
-
-func (b seedFailBackend) SeedState(ctx context.Context, ref flow.ItemRef, specs []flow.ArtifactSpec) error {
-	return errors.New("boom: seed unavailable")
-}
-
-// noopSeedBackend models the pre-fix bug: SeedState silently no-ops, leaving
-// the item with no required-artifact checklist.
-type noopSeedBackend struct{ *fake.Orchestrator }
-
-func (b noopSeedBackend) SeedState(ctx context.Context, ref flow.ItemRef, specs []flow.ArtifactSpec) error {
-	return nil
-}
-
-// TestRunOne_SeedFailureErrorsOutNoStep — when seeding fails, RunOne errors
-// out and the step handler NEVER runs. Seeding is mandatory; no fallback.
-func TestRunOne_SeedFailureErrorsOutNoStep(t *testing.T) {
-	a := &stubAgent{name: "stub"}
-	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
-			t.Fatal("step handler ran despite seeding failure — must not happen")
-			return flow.StepResult{}, nil
-		}, flow.StepConfig{})
-
-	}, a)
-	app.Orchestrator = seedFailBackend{Orchestrator: be}
-
-	_, err := RunOne(context.Background(), app, claim)
-	if err == nil {
-		t.Fatal("RunOne returned nil error on seed failure; want a hard error")
-	}
-	if !strings.Contains(err.Error(), "seed") {
-		t.Errorf("err = %v, want it to mention the seed failure", err)
-	}
-}
-
-// TestRunOne_UnseededAfterNoopSeedErrorsOut — if SeedState reports success but
-// the item still has no required-artifact checklist, RunOne refuses to run any
-// step and errors out (seeding is mandatory).
-func TestRunOne_UnseededAfterNoopSeedErrorsOut(t *testing.T) {
-	a := &stubAgent{name: "stub"}
-	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
-			t.Fatal("step handler ran against an unseeded item — must not happen")
-			return flow.StepResult{}, nil
-		}, flow.StepConfig{})
-
-	}, a)
-	app.Orchestrator = noopSeedBackend{Orchestrator: be}
-
-	_, err := RunOne(context.Background(), app, claim)
-	if err == nil {
-		t.Fatal("RunOne returned nil error for an unseeded item; want a hard error")
-	}
-	if !strings.Contains(err.Error(), "seeding is mandatory") {
-		t.Errorf("err = %v, want it to name the mandatory-seed refusal", err)
-	}
-}
-
 func TestRunOne_PreflightSkipsBeforeFlowSelection(t *testing.T) {
 	handlerCalled := false
 	app, be, claim := testApp(t, func(f *flow.Flow) {
@@ -710,8 +679,8 @@ func TestRunOne_PreflightSkipsBeforeFlowSelection(t *testing.T) {
 	// (seed only happens after preflight passes), so Invocations stays 0
 	// after re-loading state.
 	state, _ := be.Load(context.Background(), claim.ItemRef)
-	if rec := state.Artifact("plan"); rec.Invocations != 0 {
-		t.Errorf("Invocations = %d, want 0 (preflight skip must not consume budget)", rec.Invocations)
+	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {
+		t.Errorf("Dispatches = %d, want 0 (preflight skip must not consume budget)", row.Dispatches)
 	}
 }
 
@@ -957,8 +926,8 @@ func TestRunOne_CostCapFailureParksOnCost(t *testing.T) {
 	if res.Status != "parked" || res.Park == nil {
 		t.Fatalf("res = %+v, want parked", res)
 	}
-	if res.Park.Kind != flow.ParkBudgetExhausted || res.Park.Axis != flow.AxisCost {
-		t.Errorf("Park = %+v, want budget-exhausted on the cost axis", res.Park)
+	if res.Park.Kind != flow.ParkTreasurerRefused || res.Park.Axis != flow.AxisCost {
+		t.Errorf("Park = %+v, want treasurer-refused on the cost axis", res.Park)
 	}
 	// The stopped turn still bills: a park that forgot the spend would let the
 	// next dispatch re-run the same turn against a meter that never moved.
@@ -966,8 +935,8 @@ func TestRunOne_CostCapFailureParksOnCost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := st.Artifact("plan").CostUSDSpent; got != 21.868663 {
-		t.Errorf("CostUSDSpent = %v, want 21.868663", got)
+	if got := st.Ledger.Row("plan").CostUSD; got != 21.868663 {
+		t.Errorf("CostUSD = %v, want 21.868663", got)
 	}
 	var cost flow.AxisReport
 	for _, ax := range res.Park.Axes {
@@ -980,25 +949,11 @@ func TestRunOne_CostCapFailureParksOnCost(t *testing.T) {
 	}
 }
 
-// zeroCostGrantBackend hands back state whose cost axis carries no grant —
-// the shape a backend that does not meter cost produces.
-type zeroCostGrantBackend struct{ *fake.Orchestrator }
-
-func (b zeroCostGrantBackend) Load(ctx context.Context, ref flow.ItemRef) (*flow.Item, error) {
-	st, err := b.Orchestrator.Load(ctx, ref)
-	if err != nil {
-		return nil, err
-	}
-	for id, rec := range st.Artifacts {
-		rec.GrantedCostUSD = 0
-		st.Artifacts[id] = rec
-	}
-	return st, nil
-}
-
-// With no cost grant the cap was never ours to claim: a cost-cap response is
-// an ordinary agent failure, not a park on an axis this step does not meter.
-func TestRunOne_CostCapWithoutAGrantIsAPlainFailure(t *testing.T) {
+// Every step has a cost cap now: it is the binary's policy resolved against the
+// package defaults, not a value seeded onto the item — so a step with NO policy
+// entry of its own still meters cost, and a cost-cap response still parks on the
+// cost axis rather than reading as an ordinary agent failure.
+func TestRunOne_CostCapUnderTheDefaultPolicyStillParks(t *testing.T) {
 	a := &stubAgent{
 		name: "stub",
 		responses: []flow.AgentResponse{{
@@ -1015,30 +970,27 @@ func TestRunOne_CostCapWithoutAGrantIsAPlainFailure(t *testing.T) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("never reached"), nil
 		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
-	app.Orchestrator = zeroCostGrantBackend{Orchestrator: be}
+	// No StepBudgets entry: the defaults are the whole policy.
+	_ = be
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
-	if res.Status != "failed" {
-		t.Fatalf("res = %+v, want failed (no cost grant to park against)", res)
+	if res.Status != "parked" || res.Park == nil || res.Park.Axis != flow.AxisCost {
+		t.Fatalf("res = %+v, want parked on the cost axis under the default cap", res)
 	}
-	if !strings.Contains(res.Reason, flow.FailureCostCap) {
-		t.Errorf("Reason = %q, want it to name the %s failure", res.Reason, flow.FailureCostCap)
-	}
-	// Nothing was capped by us, so nothing was passed down either.
-	if len(a.reqs) != 1 || a.reqs[0].MaxCostUSD != 0 {
-		t.Errorf("reqs = %+v, want one request with MaxCostUSD 0", a.reqs)
+	// And the turn was handed the default cap's headroom, so the substrate
+	// could stop it there rather than one whole turn late.
+	if len(a.reqs) != 1 || a.reqs[0].MaxCostUSD != flow.DefaultStepBudget().MaxCostUSD {
+		t.Errorf("reqs = %+v, want one request carrying the default cap's headroom", a.reqs)
 	}
 }
 
-// Without a grant there is no headroom to narrow to, so the handler's own
-// ceiling is the only one there is and must survive untouched. Narrowing
-// unconditionally would compute a NEGATIVE headroom once the step has spent
-// anything (0 - spent), and hand the turn a ceiling tighter than any real
-// budget — or, at zero spend, a 0 that means unbounded.
-func TestRunOne_NoCostGrantLeavesTheHandlerCeilingAlone(t *testing.T) {
+// A handler that set its own ceiling asked for a TIGHTER one than the step's,
+// so the narrowing must keep it: overwriting would silently widen the very
+// bound the handler wrote down.
+func TestRunOne_HandlerCeilingTighterThanTheCapSurvives(t *testing.T) {
 	a := &stubAgent{
 		name: "stub",
 		responses: []flow.AgentResponse{
@@ -1057,7 +1009,9 @@ func TestRunOne_NoCostGrantLeavesTheHandlerCeilingAlone(t *testing.T) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
 		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
-	app.Orchestrator = zeroCostGrantBackend{Orchestrator: be}
+	// The step's own cap is the package default ($20), so the handler's $3 is
+	// the tighter of the two on both turns.
+	_ = be
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -1071,7 +1025,7 @@ func TestRunOne_NoCostGrantLeavesTheHandlerCeilingAlone(t *testing.T) {
 	}
 	for i, req := range a.reqs {
 		if req.MaxCostUSD != 3 {
-			t.Errorf("req[%d] MaxCostUSD = %v, want 3 (the handler's ceiling, ungranted step)", i, req.MaxCostUSD)
+			t.Errorf("req[%d] MaxCostUSD = %v, want 3 (the handler's own, tighter ceiling)", i, req.MaxCostUSD)
 		}
 	}
 }
@@ -1194,15 +1148,15 @@ func TestRunOne_TimeoutParkDoesNotCapturePatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
-	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkBudgetExhausted || res.Park.Axis != flow.AxisTimeout {
+	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkTreasurerRefused || res.Park.Axis != flow.AxisTimeout {
 		t.Errorf("res = %+v, want parked with kind=budget-exhausted axis=timeout", res)
 	}
 	if counting.wt.captures != 0 {
 		t.Errorf("CapturePatch called %d times on a timeout park, want 0", counting.wt.captures)
 	}
 	state, _ := be.Load(context.Background(), claim.ItemRef)
-	if rec := state.Artifact("plan"); rec.Invocations != 1 {
-		t.Errorf("Invocations = %d, want 1 (timeout still counts as an invocation)", rec.Invocations)
+	if row := state.Ledger.Row("plan"); row.Dispatches != 1 {
+		t.Errorf("Dispatches = %d, want 1 (timeout still counts as an invocation)", row.Dispatches)
 	}
 }
 
@@ -1317,7 +1271,7 @@ func TestRunOne_NilReturnWithoutResolveParks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
-	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkStepDidNotResolve {
+	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkStepDidNotComplete {
 		t.Errorf("res = %+v, want parked step-did-not-resolve", res)
 	}
 }
@@ -1434,30 +1388,6 @@ func TestSelectFlow_RequireSignalGate(t *testing.T) {
 	}
 }
 
-// pendingArtifactBackend wraps fake.Orchestrator so Load reports a required-
-// but-unresolved artifact on the loaded state — modelling a status=done item
-// whose finalization (summary / inspection) hasn't completed yet. T0481.
-type pendingArtifactBackend struct {
-	*fake.Orchestrator
-	pending flow.ArtifactId
-}
-
-func (b *pendingArtifactBackend) Load(ctx context.Context, ref flow.ItemRef) (*flow.Item, error) {
-	state, err := b.Orchestrator.Load(ctx, ref)
-	if err != nil {
-		return state, err
-	}
-	if b.pending != "" {
-		state.Artifacts[b.pending] = flow.ArtifactRecord{
-			Id:       b.pending,
-			Type:     flow.ArtifactMarkdown,
-			Required: true,
-			Resolved: false,
-		}
-	}
-	return state, nil
-}
-
 // finalizingBackend wraps fake.Orchestrator and counts Finalize calls so tests can
 // distinguish the premature-finalize regression from the happy path.
 type finalizingBackend struct {
@@ -1465,50 +1395,9 @@ type finalizingBackend struct {
 	finalizeCalls int
 }
 
-func (b *finalizingBackend) Finalize(ctx context.Context, ref flow.ItemRef) error {
+func (b *finalizingBackend) Finalize(ctx context.Context, ref flow.ItemRef, d flow.Disposition) error {
 	b.finalizeCalls++
 	return nil
-}
-
-// TestRunOne_RefusesFinalizeWhenRequiredArtifactPending (T0481): when
-// SelectFlow finds no eligible step but the loaded state still has a
-// required-but-unresolved artifact, RunOne must refuse to Finalize+release —
-// returning a "failed" InvocationResult that names the pending artifact —
-// rather than silently dropping the operator's lease before the operator can
-// hand-run the remaining steps (the T0474 stall).
-func TestRunOne_RefusesFinalizeWhenRequiredArtifactPending(t *testing.T) {
-	a := &stubAgent{name: "stub"}
-	app, be, claim := testApp(t, func(f *flow.Flow) {
-		// RequireSignal "pr-open" never set, so IsReady → false →
-		// SelectFlow returns nil. The flow's compiled-in step is unreachable.
-		f.RequireSignal("pr-open")
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
-			t.Fatal("step handler ran despite gated flow — must not happen")
-			return flow.StepResult{}, nil
-		}, flow.StepConfig{})
-
-	}, a)
-	wrapped := &finalizingBackend{Orchestrator: be}
-	app.Orchestrator = &pendingArtifactBackend{Orchestrator: be, pending: "summary"}
-	// Compose: the outer pendingArtifactBackend's Load is what RunOne
-	// sees; the finalizing wrapper is only used to PROVE Finalize is NOT
-	// called. Swap in the finalizing one as the concrete Finalizer the type
-	// assertion picks up.
-	_ = wrapped
-
-	res, err := RunOne(context.Background(), app, claim)
-	if err != nil {
-		t.Fatalf("RunOne: %v", err)
-	}
-	if res.Status != "failed" {
-		t.Fatalf("status = %q, want failed (premature-finalize guard). res=%+v", res.Status, res)
-	}
-	if !strings.Contains(res.Reason, "summary") {
-		t.Errorf("reason = %q, want it to name the pending artifact %q", res.Reason, "summary")
-	}
-	if !strings.Contains(res.Reason, "refusing premature finalize") {
-		t.Errorf("reason = %q, want a 'refusing premature finalize' phrase", res.Reason)
-	}
 }
 
 // unmatchedTypeApp builds an app whose flow has {task,bug} in its remit over an
@@ -1550,34 +1439,14 @@ func TestRunOne_BlocksWhenItemTypeIsOutsideTheRemit(t *testing.T) {
 	if wrapped.finalizeCalls != 0 {
 		t.Errorf("finalizeCalls = %d, want 0 — an unmatched item must not be finalized", wrapped.finalizeCalls)
 	}
-	// And nothing was seeded: the blind spot in the pending-artifact guard is
-	// exactly that an unmatched item has no records for it to iterate.
+	// And nothing was recorded: an item outside the remit never reaches a
+	// dispatch, so its journal and its projection stay empty.
 	state, err := be.Load(context.Background(), claim.ItemRef)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(state.Artifacts) != 0 {
-		t.Errorf("artifacts = %+v, want none seeded", state.Artifacts)
-	}
-}
-
-// TestRunOne_BlocksUnmatchedTypeEvenWhenSeeded (#10): the type mismatch is the
-// root cause, so it is reported ahead of the pending-artifact guard — an item
-// that WAS seeded (by an earlier run, or a since-changed type) and now matches
-// nothing reports the mismatch, not "required artifact still pending".
-func TestRunOne_BlocksUnmatchedTypeEvenWhenSeeded(t *testing.T) {
-	app, be, claim := unmatchedTypeApp(t, flow.Item{Ref: itemRefFor("1"), Type: "chore", Title: "test#1"})
-	app.Orchestrator = &pendingArtifactBackend{Orchestrator: be, pending: "summary"}
-
-	res, err := RunOne(context.Background(), app, claim)
-	if err != nil {
-		t.Fatalf("RunOne: %v", err)
-	}
-	if res.Status != "blocked" {
-		t.Fatalf("status = %q, want blocked (type mismatch beats the artifact guard). res=%+v", res.Status, res)
-	}
-	if !strings.Contains(res.Reason, `item type "chore"`) {
-		t.Errorf("reason = %q, want it to name the unmatched type", res.Reason)
+	if len(state.Artifacts) != 0 || len(state.Journal) != 0 {
+		t.Errorf("artifacts = %+v journal = %+v, want nothing recorded", state.Artifacts, state.Journal)
 	}
 }
 
@@ -1758,27 +1627,29 @@ func TestRunOne_FinalizesWhenAllRequiredArtifactsResolved(t *testing.T) {
 	}
 }
 
-// A granted timeout on the artifact record must win over the step's
-// compiled-in budget — otherwise `grant --timeout` is write-only and a
-// timeout-parked step re-parks forever at the same deadline.
-// The three tiers effectiveTimeout resolves through, one test because the
-// point is the ORDER: a granted timeout beats the policy, the policy beats the
-// package default, and a step the policy says nothing about lands on the
-// default rather than on zero.
-func TestEffectiveTimeout_GrantedThenPolicyThenDefault(t *testing.T) {
+// A granted timeout on the step's LEDGER ROW adds to the step's policy —
+// otherwise `grant --timeout` is write-only and a timeout-parked step re-parks
+// forever at the same deadline. The three tiers effectiveBudget resolves
+// through, one test because the point is the ORDER: the grant tops up the
+// policy, the policy displaces the package default, and a step the policy says
+// nothing about lands on the default rather than on zero.
+func TestEffectiveBudget_GrantedThenPolicyThenDefault(t *testing.T) {
 	app := &App{StepBudgets: map[flow.StepId]flow.StepBudget{
 		"plan": {Timeout: 5 * time.Minute},
 	}}
-	planned := flow.LifecycleItem{Kind: flow.LifecycleArtifact, ArtifactId: "plan"}
-	unplanned := flow.LifecycleItem{Kind: flow.LifecycleArtifact, ArtifactId: "commit"}
+	granted := &flow.Item{Ledger: flow.Ledger{Steps: map[flow.StepId]flow.LedgerRow{
+		// Timeout grants are recorded in seconds.
+		"plan": {Step: "plan", Granted: []flow.GrantRecord{{Axis: flow.AxisTimeout, Amount: 3600}}},
+	}}}
+	empty := &flow.Item{}
 
-	if got := app.effectiveTimeout(planned, flow.ArtifactRecord{GrantedTimeout: time.Hour}); got != time.Hour {
-		t.Errorf("with a granted timeout: %v, want 1h — the grant wins over the policy", got)
+	if got := app.effectiveBudget(granted, "plan").Timeout; got != 5*time.Minute+time.Hour {
+		t.Errorf("with a granted timeout: %v, want 1h5m — the grant tops up the policy", got)
 	}
-	if got := app.effectiveTimeout(planned, flow.ArtifactRecord{}); got != 5*time.Minute {
-		t.Errorf("with no grant: %v, want 5m — the policy wins over the default", got)
+	if got := app.effectiveBudget(empty, "plan").Timeout; got != 5*time.Minute {
+		t.Errorf("with no grant: %v, want 5m — the policy displaces the default", got)
 	}
-	if got := app.effectiveTimeout(unplanned, flow.ArtifactRecord{}); got != flow.DefaultStepBudget().Timeout {
+	if got := app.effectiveBudget(empty, "commit").Timeout; got != flow.DefaultStepBudget().Timeout {
 		t.Errorf("step absent from the policy: %v, want the package default %v",
 			got, flow.DefaultStepBudget().Timeout)
 	}
@@ -1898,9 +1769,9 @@ func TestRunOne_BareGrantRecoversAStepOutOfTimeAndInvocations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if rec := st.Artifact("plan"); rec.Invocations != rec.GrantedInvocations {
-		t.Fatalf("invocations = %d/%d, want the axis exhausted by the timeout kill",
-			rec.Invocations, rec.GrantedInvocations)
+	if row, cap := st.Ledger.Row("plan"), app.effectiveBudget(st, "plan"); row.Dispatches != cap.MaxInvocations {
+		t.Fatalf("dispatches = %d/%d, want the axis exhausted by the timeout kill",
+			row.Dispatches, cap.MaxInvocations)
 	}
 
 	if code := app.cmdGrant(ctx, nil); code != 0 {
@@ -1921,19 +1792,29 @@ func TestRunOne_BareGrantRecoversAStepOutOfTimeAndInvocations(t *testing.T) {
 
 // outOfBandPatchBackend models a backend whose patches live server-side: its
 // Worktree.CapturePatch returns no bytes (the runner attaches the diff to the
-// item itself), and ResolveArtifact validates that the evidence is really
-// there instead of writing body content. `evidence` says whether the
-// out-of-band attachment happened.
+// item itself), and AppendEntry validates that the evidence is really there
+// instead of writing body content. `evidence` says whether the out-of-band
+// attachment happened.
+//
+// The empty-body check belongs on the ORCHESTRATOR, which is the party that
+// knows where the bytes live: the contract allows an empty body exactly where
+// the orchestrator can verify the content it stands for exists somewhere else.
 type outOfBandPatchBackend struct {
 	*fake.Orchestrator
 	evidence bool
 }
 
-func (b *outOfBandPatchBackend) ResolveArtifact(ctx context.Context, ref flow.ItemRef, id flow.ArtifactId, body flow.ArtifactBody) error {
-	if body.Type == flow.ArtifactPatch && !b.evidence {
-		return fmt.Errorf("backend: ResolveArtifact %q: no implementation evidence on item", id)
+func (b *outOfBandPatchBackend) AppendEntry(ctx context.Context, ref flow.ItemRef, e flow.JournalEntry) error {
+	if e.Result.Type == flow.ArtifactPatch && !b.evidence {
+		return fmt.Errorf("backend: AppendEntry %q: no implementation evidence on item", e.Step)
 	}
-	return b.Orchestrator.ResolveArtifact(ctx, ref, id, body)
+	if e.Result.Type == flow.ArtifactPatch {
+		// The fake refuses an empty body because it stores the bytes; this
+		// backend does not, so the entry lands with a stand-in the fake will
+		// accept and the assertion reads the journal.
+		e.Result.Patch.Diff = []byte("out-of-band")
+	}
+	return b.Orchestrator.AppendEntry(ctx, ref, e)
 }
 
 func (b *outOfBandPatchBackend) Worktree(ctx context.Context, ref flow.ItemRef) (flow.Worktree, error) {
@@ -2382,8 +2263,8 @@ func TestRunOne_ErrRefusedParksWithoutBurningBudget(t *testing.T) {
 
 	// The invocation must NOT have been counted.
 	state, _ := be.Load(context.Background(), claim.ItemRef)
-	if rec := state.Artifact("plan"); rec.Invocations != 0 {
-		t.Errorf("Invocations = %d, want 0 (ErrRefused must not burn budget)", rec.Invocations)
+	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {
+		t.Errorf("Dispatches = %d, want 0 (ErrRefused must not burn budget)", row.Dispatches)
 	}
 
 	// A second dispatch must NOT pre-gate on budget — the budget is untouched.
@@ -2414,8 +2295,8 @@ func TestRunOne_PlainErrorStillBumpsInvocations(t *testing.T) {
 		t.Fatalf("status = %q, want failed", res.Status)
 	}
 	state, _ := be.Load(context.Background(), claim.ItemRef)
-	if rec := state.Artifact("plan"); rec.Invocations != 1 {
-		t.Errorf("Invocations = %d, want 1 (plain error must consume budget)", rec.Invocations)
+	if row := state.Ledger.Row("plan"); row.Dispatches != 1 {
+		t.Errorf("Dispatches = %d, want 1 (plain error must consume budget)", row.Dispatches)
 	}
 }
 
@@ -2436,8 +2317,8 @@ func TestRunOne_ErrTransientStillParksInfraTransient(t *testing.T) {
 		t.Fatalf("res = %+v, want parked/infra-transient", res)
 	}
 	state, _ := be.Load(context.Background(), claim.ItemRef)
-	if rec := state.Artifact("plan"); rec.Invocations != 0 {
-		t.Errorf("Invocations = %d, want 0 (ErrTransient must not burn budget)", rec.Invocations)
+	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {
+		t.Errorf("Dispatches = %d, want 0 (ErrTransient must not burn budget)", row.Dispatches)
 	}
 }
 
@@ -2463,7 +2344,7 @@ func (b *clearMarkerBackend) wasCleared() bool {
 
 // TestRunOne_BudgetParkDoesNotClearQuestionMarker verifies that the gate-path
 // label clearing only fires for ParkQuestion, not for other park kinds like
-// ParkBudgetExhausted. Regression guard for the condition in orchestrator.go.
+// ParkTreasurerRefused. Regression guard for the condition in orchestrator.go.
 func TestRunOne_BudgetParkDoesNotClearQuestionMarker(t *testing.T) {
 	invocations := 0
 	app, be, claim := testApp(t, func(f *flow.Flow) {
@@ -2591,8 +2472,8 @@ func TestRunOne_ErrUnfitBlocksWithoutParkOrBudget(t *testing.T) {
 		t.Errorf("Reason = %q, want it to contain the handler's message", res.Reason)
 	}
 	state, _ := be.Load(context.Background(), claim.ItemRef)
-	if rec := state.Artifact("plan"); rec.Invocations != 0 {
-		t.Errorf("Invocations = %d, want 0 (ErrUnfit must not burn budget)", rec.Invocations)
+	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {
+		t.Errorf("Dispatches = %d, want 0 (ErrUnfit must not burn budget)", row.Dispatches)
 	}
 }
 
@@ -2620,8 +2501,8 @@ func TestRunOne_PlainErrorOnUnfitMachineReportsBlocked(t *testing.T) {
 		t.Fatalf("Park = %+v, want nil (unfit catch-all must not park)", res.Park)
 	}
 	state, _ := be.Load(context.Background(), claim.ItemRef)
-	if rec := state.Artifact("plan"); rec.Invocations != 0 {
-		t.Errorf("Invocations = %d, want 0 (unfit catch-all must not burn budget)", rec.Invocations)
+	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {
+		t.Errorf("Dispatches = %d, want 0 (unfit catch-all must not burn budget)", row.Dispatches)
 	}
 }
 
@@ -2693,11 +2574,11 @@ func TestRunOne_BlockedOnItemsStopsBeforeDispatch(t *testing.T) {
 		t.Error("the handler ran on a blocked item — an agent turn was spent on work that cannot proceed")
 	}
 	state, _ := be.Load(context.Background(), claim.ItemRef)
-	if state.HasRequiredArtifacts() {
-		t.Error("the item was seeded — a blocked stop records nothing")
+	if len(state.Journal) != 0 || len(state.Artifacts) != 0 {
+		t.Error("the item carries a record — a blocked stop records nothing")
 	}
-	if rec := state.Artifact("plan"); rec.Invocations != 0 {
-		t.Errorf("Invocations = %d, want 0", rec.Invocations)
+	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {
+		t.Errorf("Dispatches = %d, want 0", row.Dispatches)
 	}
 	if be.ParkRequest("1") != nil {
 		t.Errorf("park recorded: %+v — a blocked stop is not a park", be.ParkRequest("1"))
@@ -2860,11 +2741,10 @@ func TestRunOne_HandlerWaitsOnItemsRecordsTheBlockerAndStopsClean(t *testing.T) 
 	if !state.Blocked || len(state.BlockedBy) != 1 || state.BlockedBy[0].Ref.Display != "2" {
 		t.Errorf("item = blocked %v by %+v, want the declared blocker recorded on the item", state.Blocked, state.BlockedBy)
 	}
-	rec := state.Artifact("plan")
-	if rec.Invocations != 0 {
-		t.Errorf("Invocations = %d, want 0 — a wait is not charged", rec.Invocations)
+	if got := state.Ledger.Row("plan").Dispatches; got != 0 {
+		t.Errorf("Dispatches = %d, want 0 — a wait is not charged", got)
 	}
-	if rec.Resolved {
+	if state.Artifact("plan").Resolved {
 		t.Error("the artifact resolved on a stop")
 	}
 	if wip, _ := be.LoadWorkInProgress(context.Background(), claim.ItemRef, "plan"); wip != "half a plan" {
@@ -2926,8 +2806,8 @@ func TestRunOne_HandlerWaitsOnFinishedItemsFailsAndTheNextAdvanceRuns(t *testing
 	if len(state.BlockedBy) != 1 || state.BlockedBy[0].Status != flow.StatusTerminal {
 		t.Errorf("BlockedBy = %+v, want the declared blocker recorded, listed as terminal", state.BlockedBy)
 	}
-	if rec := state.Artifact("plan"); rec.Invocations != 1 {
-		t.Errorf("Invocations = %d, want 1 — a turn that declared a wait that does not hold is charged like any failure", rec.Invocations)
+	if row := state.Ledger.Row("plan"); row.Dispatches != 1 {
+		t.Errorf("Dispatches = %d, want 1 — a turn that declared a wait that does not hold is charged like any failure", row.Dispatches)
 	}
 	if be.ParkRequest("1") != nil {
 		t.Errorf("park recorded: %+v — a failure is not a park", be.ParkRequest("1"))
@@ -3158,8 +3038,8 @@ func TestRunOne_ReloadFailureAfterDeclaringBlockersIsAnError(t *testing.T) {
 	if len(state.BlockedBy) != 1 || state.BlockedBy[0].Ref.Display != "2" {
 		t.Errorf("BlockedBy = %+v, want the declared blocker recorded before the reload failed", state.BlockedBy)
 	}
-	if rec := state.Artifact("plan"); rec.Invocations != 0 {
-		t.Errorf("Invocations = %d, want 0 — nothing is charged for a report that could not be made", rec.Invocations)
+	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {
+		t.Errorf("Dispatches = %d, want 0 — nothing is charged for a report that could not be made", row.Dispatches)
 	}
 
 	wrapped.armed = false
@@ -3191,8 +3071,8 @@ func TestRunOne_PlainErrorOnFitMachineStillFails(t *testing.T) {
 		t.Fatalf("status = %q, want failed", res.Status)
 	}
 	state, _ := be.Load(context.Background(), claim.ItemRef)
-	if rec := state.Artifact("plan"); rec.Invocations != 1 {
-		t.Errorf("Invocations = %d, want 1 (plain error on fit machine must consume budget)", rec.Invocations)
+	if row := state.Ledger.Row("plan"); row.Dispatches != 1 {
+		t.Errorf("Dispatches = %d, want 1 (plain error on fit machine must consume budget)", row.Dispatches)
 	}
 }
 
@@ -3217,8 +3097,8 @@ func TestRunOne_PlainErrorNoWorktreeOnUnfitMachineStillFails(t *testing.T) {
 		t.Fatalf("status = %q, want failed (no worktree → catch-all does not fire)", res.Status)
 	}
 	state, _ := be.Load(context.Background(), claim.ItemRef)
-	if rec := state.Artifact("plan"); rec.Invocations != 1 {
-		t.Errorf("Invocations = %d, want 1 (no catch-all → budget consumed)", rec.Invocations)
+	if row := state.Ledger.Row("plan"); row.Dispatches != 1 {
+		t.Errorf("Dispatches = %d, want 1 (no catch-all → budget consumed)", row.Dispatches)
 	}
 }
 

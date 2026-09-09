@@ -52,7 +52,7 @@ func TestFake_ListAutoSelectable_ReturnsTheSelectionOrder(t *testing.T) {
 	b := fake.New()
 	selectionSet(b)
 
-	refs, err := b.ListAutoSelectable(t.Context(), nil)
+	refs, err := b.ListAutoSelectable(t.Context(), nil, nil)
 	if err != nil {
 		t.Fatalf("ListAutoSelectable: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestFake_ListAutoSelectable_OmitsADeferredItem(t *testing.T) {
 	selectionSet(b)
 	addAged(b, "f-deferred-critical", jan, flow.PriorityCritical, flow.UrgencyDeferred)
 
-	refs, err := b.ListAutoSelectable(t.Context(), nil)
+	refs, err := b.ListAutoSelectable(t.Context(), nil, nil)
 	if err != nil {
 		t.Fatalf("ListAutoSelectable: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestFake_List_OrdersScopeAutoOnly(t *testing.T) {
 	selectionSet(b)
 	acceptsAll := func(flow.ItemType) bool { return true }
 
-	auto, err := b.List(t.Context(), flow.ScopeAuto, "test", acceptsAll)
+	auto, err := b.List(t.Context(), flow.ScopeAuto, "test", acceptsAll, nil)
 	if err != nil {
 		t.Fatalf("List(auto): %v", err)
 	}
@@ -110,7 +110,7 @@ func TestFake_List_OrdersScopeAutoOnly(t *testing.T) {
 		t.Errorf("scope auto = %v, want the selection order %v", got, fakeSelectionOrder)
 	}
 
-	wide, err := b.List(t.Context(), flow.ScopeProcessable, "test", acceptsAll)
+	wide, err := b.List(t.Context(), flow.ScopeProcessable, "test", acceptsAll, nil)
 	if err != nil {
 		t.Fatalf("List(processable): %v", err)
 	}
@@ -133,14 +133,14 @@ func TestFake_ADeferredItemReportsAvailableNotAuto(t *testing.T) {
 	plain := addAged(b, "plain", jan, "", "")
 	acceptsAll := func(flow.ItemType) bool { return true }
 
-	info, err := b.Get(t.Context(), ref, "test", acceptsAll)
+	info, err := b.Get(t.Context(), ref, "test", acceptsAll, nil)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if info.Availability != flow.AvailAvailable {
 		t.Errorf("Availability = %q, want %q", info.Availability, flow.AvailAvailable)
 	}
-	other, err := b.Get(t.Context(), plain, "test", acceptsAll)
+	other, err := b.Get(t.Context(), plain, "test", acceptsAll, nil)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestFake_ReportsTheNeutralValuesWhenNothingIsSet(t *testing.T) {
 	b := fake.New()
 	ref := addItem(b, "unset")
 
-	info, err := b.Get(t.Context(), ref, "test", func(flow.ItemType) bool { return true })
+	info, err := b.Get(t.Context(), ref, "test", func(flow.ItemType) bool { return true }, nil)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestFake_EditorSetsAndClearsBothAxes(t *testing.T) {
 		t.Fatalf("after setting = %q/%q, want critical/deferred", it.Priority, it.Urgency)
 	}
 	// And the deferral takes effect where it is meant to.
-	refs, err := b.ListAutoSelectable(t.Context(), nil)
+	refs, err := b.ListAutoSelectable(t.Context(), nil, nil)
 	if err != nil {
 		t.Fatalf("ListAutoSelectable: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestFake_EditorSetsAndClearsBothAxes(t *testing.T) {
 	if it.Priority != flow.PriorityMedium || it.Urgency != flow.UrgencyDefault {
 		t.Errorf("after clearing = %q/%q, want medium/default", it.Priority, it.Urgency)
 	}
-	if refs, err := b.ListAutoSelectable(t.Context(), nil); err != nil || len(refs) != 1 {
+	if refs, err := b.ListAutoSelectable(t.Context(), nil, nil); err != nil || len(refs) != 1 {
 		t.Errorf("selectable = %v (err %v), want the item back in the set", refs, err)
 	}
 }

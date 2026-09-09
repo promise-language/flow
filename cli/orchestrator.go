@@ -99,30 +99,13 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		f, nextName = SelectFlow(app, state)
 	}
 	if f == nil {
-		// T0481: refuse to Finalize+release when any required artifact in the
-		// loaded state is still unresolved. status=done ≠ finalized — a missing
-		// summary/inspection means finalization work is owed on this arena, and
-		// a release here would strand the operator's next hand-run `run-step`
-		// with "no active claim". This is a defensive guard against a
-		// misseeded flow / a future regression that lets SelectFlow return nil
-		// over an unfinalized item; the happy-path producer-flow already
-		// derives the next step (review/coverage/commit/push/...) for it.
-		for _, rec := range state.Artifacts {
-			if rec.Required && !rec.Resolved {
-				return flow.InvocationResult{
-					Item:   claim.ItemRef.Display,
-					Status: string(flow.StatusFailed),
-					Reason: fmt.Sprintf("no eligible flow but required artifact %q still pending — refusing premature finalize/release", rec.Id),
-				}, nil
-			}
-		}
 		// No step remains — the flow is complete (or the item is terminal).
 		// Finalize + release the claim if the backend supports it, so a manual
 		// run closes the item and frees the arena the same way the orchestrator
 		// does on completion (instead of leaving it un-finalized + leased).
 		reason := "no eligible flow — finalized + released"
 		finalized := true
-		if err := app.Orchestrator.Finalize(ctx, ref); err != nil {
+		if err := app.Orchestrator.Finalize(ctx, ref, finalDisposition(app, state)); err != nil {
 			// Finalize REFUSES an item the orchestrator does not yet consider
 			// finished, and that refusal is not a failure of this run: the flow
 			// has done everything it can, and the item reaches terminal by the
@@ -203,43 +186,6 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		}
 	}
 
-	// Mandatory seed gate. A flow that declares required artifacts runs steps
-	// ONLY against an item whose finalization checklist has been seeded (the
-	// required-artifact set). An item with no required artifact has not been
-	// seeded; seed it now. If seeding fails, OR it produces no checklist, OR
-	// no flow is derivable afterwards, the invocation errors out — the flow
-	// NEVER runs a step against an unseeded item, and there is no fallback.
-	// This binds step-selection to the seed instead of the compiled-in step
-	// list. (Signal-only flows declare no required artifacts and are exempt.)
-	seedSpecs := f.SeedSpec(app.artifactById, app.StepBudgets)
-	requiresSeed := false
-	for _, s := range seedSpecs {
-		if s.Required {
-			requiresSeed = true
-			break
-		}
-	}
-	if requiresSeed && !state.HasRequiredArtifacts() {
-		if err := app.Orchestrator.SeedState(ctx, ref, seedSpecs); err != nil {
-			return flow.InvocationResult{}, fmt.Errorf("seed state: %w", err)
-		}
-		state, err = app.Orchestrator.Load(ctx, ref)
-		if err != nil {
-			return flow.InvocationResult{}, fmt.Errorf("reload after seed: %w", err)
-		}
-		if !state.HasRequiredArtifacts() {
-			return flow.InvocationResult{}, fmt.Errorf(
-				"item %s has no required-artifact checklist after seed — refusing to run any step (seeding is mandatory)",
-				claim.ItemRef.Display)
-		}
-		// Re-derive against the now-seeded state.
-		f, nextName = SelectFlow(app, state)
-		if f == nil {
-			return flow.InvocationResult{}, fmt.Errorf(
-				"no eligible flow for item %s after seed — refusing to run", claim.ItemRef.Display)
-		}
-	}
-
 	li, err := lifecycleItemOf(f, nextName)
 	if err != nil {
 		return flow.InvocationResult{}, err
@@ -261,44 +207,51 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		return result, nil
 	}
 
-	// Pre-dispatch budget gate (artifact steps only — signal steps don't
-	// own an artifact record yet on the first invocation). Parks name the
-	// step by its RESULT ID (not the label) so `grant` can act on the record
-	// whose budget caused the park — see ParkRequest.Step.
-	art := state.Artifact(li.ArtifactId)
+	// Pre-dispatch budget gate. Parks name the step by its RESULT ID (not the
+	// label) so `grant` can act on the ledger row whose caps caused the park —
+	// see ParkRequest.Step.
+	//
+	// The caps come from flow.EffectiveBudget: the binary's policy plus the
+	// extensions recorded on the step's ledger row. That is the ONE arithmetic,
+	// shared with `grant`, so the gate that refuses a dispatch and the top-up
+	// meant to clear it cannot disagree about what the cap was.
+	//
+	// Artifact steps only, as before. A signal step owns a ledger row now, but
+	// what may fund one is the treasurer's question (#235), not this gate's.
+	budget := app.effectiveBudget(state, li.Result())
+	row := state.Ledger.Row(li.Result())
 	if li.Kind == flow.LifecycleArtifact {
-		if art.GrantedInvocations > 0 && art.Invocations >= art.GrantedInvocations {
+		if budget.MaxInvocations > 0 && row.Dispatches >= budget.MaxInvocations {
 			return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
-				Kind:   flow.ParkBudgetExhausted,
-				Step:   li.Result(),
-				Axis:   flow.AxisInvocations,
-				Axes:   axisReports(art, app.effectiveTimeout(li, art), art.PromptsThisInvocation, 0),
-				Reason: fmt.Sprintf("ran %d times without resolving %q", art.Invocations, li.ArtifactId),
+				Kind: flow.ParkTreasurerRefused,
+				Step: li.Result(),
+				Axis: flow.AxisInvocations,
+				// Prompts are per-invocation and this dispatch has not begun, so
+				// nothing has been spent on that axis yet.
+				Axes:   axisReports(row, budget, 0, 0),
+				Reason: fmt.Sprintf("ran %d times without completing %q", row.Dispatches, li.Result()),
 			})
 		}
-		if art.GrantedCostUSD > 0 && art.CostUSDSpent >= art.GrantedCostUSD {
+		if budget.MaxCostUSD > 0 && row.CostUSD >= budget.MaxCostUSD {
 			return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
-				Kind:   flow.ParkBudgetExhausted,
+				Kind:   flow.ParkTreasurerRefused,
 				Step:   li.Result(),
 				Axis:   flow.AxisCost,
-				Axes:   axisReports(art, app.effectiveTimeout(li, art), art.PromptsThisInvocation, 0),
-				Reason: fmt.Sprintf("spent $%.2f without resolving %q", art.CostUSDSpent, li.ArtifactId),
+				Axes:   axisReports(row, budget, 0, 0),
+				Reason: fmt.Sprintf("spent $%.2f without completing %q", row.CostUSD, li.Result()),
 			})
 		}
 	}
 
-	// Wrap a context for this invocation. All three budget axes resolve from
-	// the persisted record so that grants actually land: the record's granted
-	// timeout wins when set (`grant --timeout` raises it), otherwise fall back
-	// to the step's compiled-in budget and then the package default. A signal
-	// step owns no record yet, so Artifact returns the zero record and the
-	// flow definition applies.
-	timeout := app.effectiveTimeout(li, art)
+	// Wrap a context for this invocation on the same effective timeout the gate
+	// above judged by, so `grant --timeout` lands on the deadline as well as on
+	// the check.
+	timeout := budget.Timeout
 	stepCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// Build the per-invocation StepCtx.
-	sctx := newStepCtx(stepCtx, app, claim, f, li, state, timeout)
+	sctx := newStepCtx(stepCtx, app, claim, f, li, state, budget)
 
 	// Auto-emit step entry so every step transition reaches the tracker
 	// without each handler having to call ctx.Notify. Handlers that DO call
@@ -320,6 +273,17 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	})
 	defer clistate.ClearRunning()
 
+	// A dispatch that picks the item up from a park on this very step is a
+	// RESUMPTION, and the treasurer counts those apart from dispatches: one
+	// number says how often the step was attempted, the other how often
+	// something had to unstick it. Recorded once, before the dispatch, because
+	// after it there is no longer a park to have resumed from.
+	if state.Park != nil && state.Park.Step == li.Result() {
+		if err := app.Orchestrator.RecordResumption(ctx, ref, li.Result()); err != nil {
+			return flow.InvocationResult{}, fmt.Errorf("record resumption: %w", err)
+		}
+	}
+
 	// Dispatch. The handler completes by RETURNING its election; res is read
 	// only on the completion path (translateHandlerError's nil-error branch),
 	// because every other way a dispatch ends is one where nothing was elected.
@@ -340,20 +304,20 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 			return flow.InvocationResult{}, err
 		}
 		return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
-			Kind: flow.ParkBudgetExhausted,
+			Kind: flow.ParkTreasurerRefused,
 			Step: li.Result(),
 			Axis: flow.AxisTimeout,
 			// The charge above is already counted here: a timeout park that
-			// under-reported invocations is exactly what sent the operator back
+			// under-reported dispatches is exactly what sent the operator back
 			// for a second grant.
-			Axes:   sctx.axisReports(timeout),
+			Axes:   sctx.axisReports(),
 			Reason: fmt.Sprintf("step %q exceeded %s", li.Result(), timeout),
 		}))
 	}
 
 	// Machine unfit (handler returned flow.ErrUnfit). The machine is not
 	// fit to perform work — e.g. disk full. No park (a machine condition
-	// has no step and ends on its own), no BumpInvocations (a condition is
+	// has no step and ends on its own), no dispatch counted (a condition is
 	// not a failure), status blocked. The claim is kept.
 	if handlerErr != nil && errors.Is(handlerErr, flow.ErrUnfit) {
 		result.Status = string(flow.StatusBlocked)
@@ -364,7 +328,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// Transient infra failure (handler returned flow.ErrTransient OR the
 	// metered agent observed AgentResponse.Failure.Transient and surfaced
 	// it through the wrapped error). Park with ParkInfraTransient and
-	// SKIP the BumpInvocations call — a flapping runner must not burn the
+	// SKIP the dispatch count — a flapping runner must not burn the
 	// step's invocation budget.
 	if handlerErr != nil && errors.Is(handlerErr, flow.ErrTransient) {
 		return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
@@ -376,7 +340,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 
 	// Deterministic refusal (handler returned flow.ErrRefused): the failure
 	// provably cannot change on re-run, so retrying is pointless. Park with
-	// ParkRefused and SKIP the BumpInvocations call — symmetric with the
+	// ParkRefused and SKIP the dispatch count — symmetric with the
 	// ErrTransient branch above. The park reason is the refusal's own
 	// message so the operator sees what was refused.
 	if handlerErr != nil && errors.Is(handlerErr, flow.ErrRefused) {
@@ -392,7 +356,7 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// park, not a failure, not a refusal: the same clean stop the check before
 	// dispatch makes, reported from the same derivation — the item is reloaded
 	// so the report carries what the orchestrator now says, blockers and
-	// statuses included. No BumpInvocations: the work exists elsewhere and will
+	// statuses included. No dispatch counted: the work exists elsewhere and will
 	// land, and charging the wait would spend the budget on nothing. The
 	// artifact stays unresolved, and work in progress is kept for the resume,
 	// as with a question.
@@ -542,10 +506,10 @@ func translateHandlerError(
 	var budget flow.ErrBudgetExhausted
 	if errors.As(handlerErr, &budget) {
 		return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
-			Kind:   flow.ParkBudgetExhausted,
+			Kind:   flow.ParkTreasurerRefused,
 			Step:   li.Result(),
 			Axis:   budget.Axis,
-			Axes:   sctx.axisReports(sctx.timeout),
+			Axes:   sctx.axisReports(),
 			Reason: budget.Error(),
 		})
 	}
@@ -591,7 +555,7 @@ func completeStep(
 		var incomplete flow.ErrStepDidNotComplete
 		if errors.As(err, &incomplete) {
 			return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
-				Kind:   flow.ParkStepDidNotResolve,
+				Kind:   flow.ParkStepDidNotComplete,
 				Step:   li.Result(),
 				Reason: incomplete.Error(),
 			})
@@ -600,41 +564,76 @@ func completeStep(
 		result.Reason = err.Error()
 		return result, nil
 	}
-	if li.Kind == flow.LifecycleArtifact {
-		if err := app.Orchestrator.ResolveArtifact(ctx, ref, li.ArtifactId, body); err != nil {
-			var refused flow.ErrDisclosureRefused
-			if errors.As(err, &refused) {
-				// The ONE outcome that is not charged — the correction round
-				// chargeDispatch names.
-				return refusedCapture(ctx, app, ref, result, li, sctx, refused, body)
-			}
-			if cerr := chargeDispatch(ctx, app, ref, state, li); cerr != nil {
-				return flow.InvocationResult{}, cerr
-			}
-			result.Status = string(flow.StatusFailed)
-			result.Reason = err.Error()
-			return result, nil
+	// ONE APPEND. The captured result and the elected route are the same write
+	// — "result and route land together or not at all" — and the entry also
+	// carries what the item now awaits, who ran the step and what it spent. The
+	// separate ClearWorkInProgress is gone with it: the draft ends where the
+	// result begins, inside the one write.
+	entry := flow.JournalEntry{
+		Step:      li.Result(),
+		Execution: executionOf(state, li.Result()),
+		Result:    body,
+		Route:     res.Route,
+		Message:   res.Message,
+		Note:      res.Note,
+		// The SDK computes the awaited marker: the orchestrator has no flow, so
+		// the step-to-role mapping cannot be derived on the far side.
+		Awaits: sctx.flow.AwaitsAfter(res.Route),
+		By:     sctx.claim.Account,
+		Role:   li.Role,
+		At:     time.Now().UTC(),
+		Spend: flow.Spend{
+			CostUSD:  sctx.agent.costThisInvocation,
+			Duration: time.Since(sctx.startedAt),
+		},
+	}
+	if err := app.Orchestrator.AppendEntry(ctx, ref, entry); err != nil {
+		var refused flow.ErrDisclosureRefused
+		if errors.As(err, &refused) {
+			// The ONE outcome that is not charged — the correction round
+			// chargeDispatch names. AppendEntry publishes, so it can still
+			// refuse, and nothing is journaled when it does.
+			return refusedCapture(ctx, app, ref, result, li, sctx, refused, body)
 		}
-		// The step has a result now, so its scaffolding is done. Clearing lives
-		// HERE and nowhere else — the one place a step completes — so no handler
-		// can complete while leaving stale prose behind for a later reader to
-		// mistake for a record.
-		//
-		// Best-effort, and deliberately so. The artifact has already landed, so
-		// failing the step now would report a failure for work that is recorded
-		// — and a record that outlives its step is harmless anyway, because
-		// keying by (item, step) means the next dispatch of a resolved step
-		// never reads it. Keying is the correctness property; clearing is
-		// hygiene.
-		if err := app.Orchestrator.ClearWorkInProgress(ctx, ref, li.Result()); err != nil {
-			sctx.Notify("", "could not clear work in progress: "+err.Error())
+		if cerr := chargeDispatch(ctx, app, ref, state, li); cerr != nil {
+			return flow.InvocationResult{}, cerr
 		}
+		result.Status = string(flow.StatusFailed)
+		result.Reason = err.Error()
+		return result, nil
 	}
 	if cerr := chargeDispatch(ctx, app, ref, state, li); cerr != nil {
 		return flow.InvocationResult{}, cerr
 	}
 	result.Status = string(flow.StatusDone)
 	return result, nil
+}
+
+// executionOf is which completed execution of this step the entry about to be
+// appended is, 1-based: the prior entries for it, plus this one.
+//
+// Counted off the journal rather than off a stored number, because the journal
+// is the record — a counter beside it would be a second answer to a question
+// the entries already settle.
+func executionOf(state *flow.Item, step flow.StepId) int {
+	n := 1
+	for _, e := range state.Journal {
+		if e.Step == step {
+			n++
+		}
+	}
+	return n
+}
+
+// finalDisposition is what a Finalize records: the disposition the finalizing
+// election carried, read from the journal, and DispositionResolved on the
+// legacy no-flow branch — where nothing elected anything and the flow reaching
+// its end is the whole record there is.
+func finalDisposition(app *App, state *flow.Item) flow.Disposition {
+	if pos, err := app.Flow.Position(state); err == nil && pos.Finalized {
+		return pos.Disposition
+	}
+	return flow.DispositionResolved
 }
 
 // chargeDispatch counts this dispatch against the step's record — the same
@@ -650,30 +649,42 @@ func completeStep(
 // that produced the refused text was metered on the cost axis when it ran, and
 // the next dispatch pays for its own.
 //
-// A signal step owns no record, so there is nothing to count against it.
+// It counts a SIGNAL step's dispatch too. A ledger row is keyed by StepId, not
+// by an artifact, so a step that completes on an observation has a row like any
+// other — and a step dispatched a hundred times without its signal arriving is
+// exactly the thing a treasurer needs to be able to see.
 //
-// The count is mirrored into the in-memory record as well as written to the
+// The count is mirrored into the in-memory ledger as well as written to the
 // orchestrator, because the park paths downstream snapshot their axes from it:
 // a timeout park reporting the pre-charge count would under-report the
 // invocations axis, which is precisely the axis that re-parks the step once the
 // operator grants the time.
 func chargeDispatch(ctx context.Context, app *App, ref flow.ItemRef, state *flow.Item, li flow.LifecycleItem) error {
-	if li.Kind != flow.LifecycleArtifact {
-		return nil
+	step := li.Result()
+	if err := app.Orchestrator.RecordDispatch(ctx, ref, step); err != nil {
+		return fmt.Errorf("record dispatch: %w", err)
 	}
-	if err := app.Orchestrator.BumpInvocations(ctx, ref, li.ArtifactId); err != nil {
-		return fmt.Errorf("bump invocations: %w", err)
-	}
-	rec := state.Artifact(li.ArtifactId)
-	rec.Invocations++
-	rec.PromptsThisInvocation = 0 // mirror the backend exactly — it resets here too
-	state.Artifacts[li.ArtifactId] = rec
+	mirrorLedger(state, step, func(row *flow.LedgerRow) { row.Dispatches++ })
 	return nil
+}
+
+// mirrorLedger applies a ledger write to the loaded item, so a park snapshot
+// taken later in the same dispatch reads what the orchestrator now holds rather
+// than what it held when the item was loaded.
+func mirrorLedger(state *flow.Item, step flow.StepId, mutate func(*flow.LedgerRow)) flow.LedgerRow {
+	row := state.Ledger.Row(step)
+	row.Step = step
+	mutate(&row)
+	if state.Ledger.Steps == nil {
+		state.Ledger.Steps = map[flow.StepId]flow.LedgerRow{}
+	}
+	state.Ledger.Steps[step] = row
+	return row
 }
 
 // refusedCapture is what a disclosure refusal at capture leaves behind.
 //
-// ResolveArtifact publishes, so it can refuse — and with capture after the
+// AppendEntry publishes, so it can refuse — and with capture after the
 // handler returns there is no in-invocation revision loop to catch it any more.
 // So the capture path does what that loop did on its last round: stash the
 // refusal and the text it refused in the step's work-in-progress record, which
@@ -733,19 +744,15 @@ func refusedPayload(body flow.ArtifactBody) string {
 	return fmt.Sprintf("(the %s artifact carries no payload)", body.Type)
 }
 
-// effectiveTimeout resolves a step's per-run deadline: the granted timeout
-// from the record wins when set (`grant --timeout` raises it), then the
-// binary's policy for the step, which already falls back to the package
-// default. Shared by the dispatch deadline and the park-time axis snapshot so
-// the two can never disagree about what the cap actually was.
-func (app *App) effectiveTimeout(li flow.LifecycleItem, rec flow.ArtifactRecord) time.Duration {
-	if rec.GrantedTimeout > 0 {
-		return rec.GrantedTimeout
-	}
-	return app.stepBudget(li.Result()).Timeout
+// effectiveBudget resolves a step's caps: the binary's policy for it, plus the
+// extensions recorded on its ledger row. Shared by the pre-dispatch gate, the
+// dispatch deadline, the metered agent and the park-time axis snapshot, so none
+// of them can disagree about what the cap actually was.
+func (app *App) effectiveBudget(state *flow.Item, step flow.StepId) flow.StepBudget {
+	return flow.EffectiveBudget(app.stepBudget(step), state.Ledger.Row(step))
 }
 
-// axisReports snapshots all four budget axes for a budget park.
+// axisReports snapshots all four budget axes for a treasurer-refused park.
 //
 // Every axis is reported, never just the one that tripped. The axes go flat
 // together — a run that times out has usually burned its invocations too, and
@@ -753,26 +760,27 @@ func (app *App) effectiveTimeout(li flow.LifecycleItem, rec flow.ArtifactRecord)
 // one axis sent the operator back for another grant as soon as the next
 // dispatch re-parked on the next axis. One park, one report, one grant.
 //
-// prompts is passed in rather than read off the record: the record's counter
-// resets on the invocation bump, and what the operator needs to judge the cap
-// by is what the run that just parked actually spent. elapsed is likewise
-// unrecorded — it is wall time against the deadline, meaningful only for a
-// park that happens after dispatch, and zero for the pre-dispatch gates.
-func axisReports(rec flow.ArtifactRecord, timeout time.Duration, prompts int, elapsed time.Duration) []flow.AxisReport {
+// prompts is passed in rather than read off the ledger: the prompt cap is
+// per-invocation and the ledger keeps no counter for it, so what the operator
+// needs to judge the cap by is what the run that just parked actually spent.
+// elapsed is likewise unrecorded — it is wall time against the deadline,
+// meaningful only for a park that happens after dispatch, and zero for the
+// pre-dispatch gates.
+func axisReports(row flow.LedgerRow, budget flow.StepBudget, prompts int, elapsed time.Duration) []flow.AxisReport {
 	return []flow.AxisReport{
-		flow.NewAxisReport(flow.AxisInvocations, float64(rec.Invocations), float64(rec.GrantedInvocations)),
-		flow.NewAxisReport(flow.AxisPrompts, float64(prompts), float64(rec.GrantedPromptsPerInvocation)),
-		flow.NewAxisReport(flow.AxisCost, rec.CostUSDSpent, rec.GrantedCostUSD),
-		flow.NewAxisReport(flow.AxisTimeout, elapsed.Seconds(), timeout.Seconds()),
+		flow.NewAxisReport(flow.AxisInvocations, float64(row.Dispatches), float64(budget.MaxInvocations)),
+		flow.NewAxisReport(flow.AxisPrompts, float64(prompts), float64(budget.MaxPromptsPerInvocation)),
+		flow.NewAxisReport(flow.AxisCost, row.CostUSD, budget.MaxCostUSD),
+		flow.NewAxisReport(flow.AxisTimeout, elapsed.Seconds(), budget.Timeout.Seconds()),
 	}
 }
 
-// axisReports is the post-dispatch snapshot: same four axes, read from the
-// live view of the invocation rather than the record alone. Cost and
-// invocations come off the in-memory mirror (kept current by meteredAgent and
-// chargeDispatch), prompts off the metered agent's own counter, and elapsed
-// off the step's start.
-func (sc *stepCtx) axisReports(timeout time.Duration) []flow.AxisReport {
+// axisReports is the post-dispatch snapshot: same four axes, read from the live
+// view of the invocation rather than the loaded row alone. Cost and dispatches
+// come off the in-memory mirror (kept current by meteredAgent and
+// chargeDispatch), prompts off the metered agent's own counter, and elapsed off
+// the step's start.
+func (sc *stepCtx) axisReports() []flow.AxisReport {
 	if sc.li.Kind != flow.LifecycleArtifact {
 		return nil
 	}
@@ -780,7 +788,7 @@ func (sc *stepCtx) axisReports(timeout time.Duration) []flow.AxisReport {
 	if sc.agent != nil {
 		prompts = sc.agent.promptsThisInvocation
 	}
-	return axisReports(sc.state.Artifact(sc.li.ArtifactId), timeout, prompts, time.Since(sc.startedAt))
+	return axisReports(sc.state.Ledger.Row(sc.li.Result()), sc.budget, prompts, time.Since(sc.startedAt))
 }
 
 // checkWriteContract compares the current worktree state against the
@@ -941,16 +949,18 @@ type stepCtx struct {
 	wip       string
 	wipLoaded bool
 	wipErr    error
-	// startedAt and timeout back the timeout axis of a park-time snapshot:
-	// elapsed-vs-cap is the one axis with no counter on the record.
+	// startedAt and budget back the park-time axis snapshot: elapsed-vs-cap is
+	// the one axis with no counter in the ledger, and the caps are the ones the
+	// pre-dispatch gate judged by — read once, so nothing downstream can resolve
+	// them a second way.
 	startedAt time.Time
-	timeout   time.Duration
+	budget    flow.StepBudget
 	// writeSnap is the worktree state captured when the handler first acquires
 	// the worktree. nil when no worktree was acquired (no check will run).
 	writeSnap *writeSnapshot
 }
 
-func newStepCtx(ctx context.Context, app *App, claim flow.Claim, f *flow.Flow, li flow.LifecycleItem, state *flow.Item, timeout time.Duration) *stepCtx {
+func newStepCtx(ctx context.Context, app *App, claim flow.Claim, f *flow.Flow, li flow.LifecycleItem, state *flow.Item, budget flow.StepBudget) *stepCtx {
 	sc := &stepCtx{
 		ctx:       ctx,
 		app:       app,
@@ -959,7 +969,7 @@ func newStepCtx(ctx context.Context, app *App, claim flow.Claim, f *flow.Flow, l
 		li:        li,
 		state:     state,
 		startedAt: time.Now(),
-		timeout:   timeout,
+		budget:    budget,
 	}
 	sc.agent = &meteredAgent{
 		// agentImpl, not App.Agent: the field refuses Run() so nothing but a
@@ -974,7 +984,7 @@ func newStepCtx(ctx context.Context, app *App, claim flow.Claim, f *flow.Flow, l
 }
 
 // stampResult fills in duration and cost on a post-dispatch InvocationResult
-// and persists duration to the artifact record. When err is non-nil the
+// and persists the step's ACTIVE duration to its ledger row. When err is non-nil the
 // orchestrator itself failed catastrophically — there is no meaningful result
 // to stamp.
 func (s *stepCtx) stampResult(r flow.InvocationResult, err error) (flow.InvocationResult, error) {
@@ -985,9 +995,9 @@ func (s *stepCtx) stampResult(r flow.InvocationResult, err error) (flow.Invocati
 	r.DurationSeconds = elapsed.Seconds()
 	cost := s.agent.costThisInvocation
 	r.CostUSD = &cost
-	if s.li.Kind == flow.LifecycleArtifact {
-		_ = s.app.Orchestrator.AddDuration(s.ctx, s.claim.ItemRef, s.li.ArtifactId, elapsed)
-	}
+	// ACTIVE time. A wait on a declared exclusion is reported by the party that
+	// held it, through AddWaiting, and never lands here.
+	_ = s.app.Orchestrator.AddDuration(s.ctx, s.claim.ItemRef, s.li.Result(), elapsed)
 	return r, nil
 }
 
@@ -1063,20 +1073,16 @@ func (s *stepCtx) Notes() []flow.JournalEntry {
 
 // RunNumber is which dispatch of the pending step this is, 1-based.
 //
-// Read from the record's invocation counter, which the bump at the end of every
-// dispatch maintains: this dispatch is the one after those. A signal step owns
-// no record, so it reads 1 — accurate for the only counter it has.
+// Read from the ledger row's dispatch count, which chargeDispatch maintains at
+// the end of every dispatch: this dispatch is the one after those. A signal step
+// has a row like any other, so it reads truthfully too.
 //
-// The counter is the treasurer's, so it does not move for the one dispatch that
-// is not charged as one — a result the disclosure guard refused (chargeDispatch)
-// — and a dispatch resuming from that refusal reads the same number as the one
-// that was refused. That is the ledger this reads having one carve-out, not two
-// counters: the step's own count lands with the ledger itself (#240).
+// The count is the treasurer's, so it does not move for the one dispatch that is
+// not charged as one — a result the disclosure guard refused (chargeDispatch) —
+// and a dispatch resuming from that refusal reads the same number as the one
+// that was refused. That is the ledger having one carve-out, not two counters.
 func (s *stepCtx) RunNumber() int {
-	if s.li.Kind != flow.LifecycleArtifact {
-		return 1
-	}
-	return s.state.Artifact(s.li.ArtifactId).Invocations + 1
+	return s.state.Ledger.Row(s.li.Result()).Dispatches + 1
 }
 
 // Next and Finalize build the two elections. They are on the context rather
@@ -1331,70 +1337,73 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 	// back door of the orchestrator having nothing to say, which is the one
 	// thing docs/agent.md says this field is never set by.
 	req.Worktree = m.orch.ArenaRoot()
-	// Signal/await steps don't own an artifact budget. Allow the call to
-	// pass through unmetered — those steps shouldn't normally call the
-	// agent, but if they do the spend is not gated here.
+	// Signal/await steps carry no cap policy worth metering. Allow the call to
+	// pass through unmetered — those steps shouldn't normally call the agent,
+	// but if they do the spend is not gated here.
 	if li.Kind != flow.LifecycleArtifact {
 		return m.inner.Run(ctx, req)
 	}
-	art := m.stepCtx.state.Artifact(li.ArtifactId)
+	step := li.Result()
+	row := m.stepCtx.state.Ledger.Row(step)
+	budget := m.stepCtx.budget
 	// Both caps name the step by result id: the message tells the operator
 	// exactly what to pass to `grant`.
-	if art.GrantedPromptsPerInvocation > 0 && m.promptsThisInvocation >= art.GrantedPromptsPerInvocation {
+	if budget.MaxPromptsPerInvocation > 0 && m.promptsThisInvocation >= budget.MaxPromptsPerInvocation {
 		return nil, flow.ErrBudgetExhausted{
-			Step: string(li.Result()),
+			Step: string(step),
 			Axis: flow.AxisPrompts,
-			Cap:  fmt.Sprintf("%d", art.GrantedPromptsPerInvocation),
+			Cap:  fmt.Sprintf("%d", budget.MaxPromptsPerInvocation),
 		}
 	}
-	if art.GrantedCostUSD > 0 && art.CostUSDSpent >= art.GrantedCostUSD {
+	if budget.MaxCostUSD > 0 && row.CostUSD >= budget.MaxCostUSD {
 		return nil, flow.ErrBudgetExhausted{
-			Step: string(li.Result()),
+			Step: string(step),
 			Axis: flow.AxisCost,
-			Cap:  fmt.Sprintf("$%.2f", art.GrantedCostUSD),
+			Cap:  fmt.Sprintf("$%.2f", budget.MaxCostUSD),
 		}
 	}
-	// Hand the turn the headroom left in the grant, so the substrate can stop
-	// it at the cap. Without this the grant only bounds when a step stops
-	// being dispatched: a turn that starts inside the grant can spend
-	// whatever it spends, and the overrun is discovered one whole turn late.
-	// A handler that set its own ceiling asked for a TIGHTER one than the
-	// step's, so narrow to it — overwriting would silently widen the very
-	// bound the handler wrote down.
-	if headroom := art.GrantedCostUSD - art.CostUSDSpent; art.GrantedCostUSD > 0 &&
+	// Hand the turn the headroom left in the budget, so the substrate can stop
+	// it at the cap. Without this the cap only bounds when a step stops being
+	// dispatched: a turn that starts inside it can spend whatever it spends, and
+	// the overrun is discovered one whole turn late. A handler that set its own
+	// ceiling asked for a TIGHTER one than the step's, so narrow to it —
+	// overwriting would silently widen the very bound the handler wrote down.
+	if headroom := budget.MaxCostUSD - row.CostUSD; budget.MaxCostUSD > 0 &&
 		(req.MaxCostUSD <= 0 || headroom < req.MaxCostUSD) {
 		req.MaxCostUSD = headroom
 	}
-	if err := m.orch.BumpPrompts(ctx, m.claim.ItemRef, li.ArtifactId); err != nil {
-		return nil, fmt.Errorf("bump prompts: %w", err)
-	}
+	// The prompt counter lives HERE and not in the ledger. The cap is
+	// per-invocation and every dispatch resets it, so it was never durable
+	// across one: counting in memory is the same number by a shorter route, and
+	// the axis survives as a park and grant axis whose granted extensions do
+	// live on the row.
 	m.promptsThisInvocation++
 
 	resp, err := m.inner.Run(ctx, req)
-	// Skip cost accounting on transient infra failures — symmetric with
-	// the orchestrator's skip-BumpInvocations policy for ParkInfraTransient.
-	// A flapping runner must not burn the cost axis any more than it burns
-	// the invocations axis.
+	// Skip cost accounting on transient infra failures — symmetric with the
+	// orchestrator's skip-the-dispatch-count policy for ParkInfraTransient. A
+	// flapping runner must not burn the cost axis any more than it burns the
+	// invocations axis.
 	transient := resp != nil && resp.Failure != nil && resp.Failure.Transient
 	if err == nil && resp != nil && resp.CostUSD > 0 && !transient {
-		_ = m.orch.AddCost(ctx, m.claim.ItemRef, li.ArtifactId, resp.CostUSD)
-		// Update local mirror so subsequent calls see fresh cost.
-		art.CostUSDSpent += resp.CostUSD
-		m.stepCtx.state.Artifacts[li.ArtifactId] = art
+		_ = m.orch.AddCost(ctx, m.claim.ItemRef, step, resp.CostUSD)
+		// Update the local mirror so subsequent calls, and the park snapshot,
+		// see fresh cost.
+		row = mirrorLedger(m.stepCtx.state, step, func(r *flow.LedgerRow) { r.CostUSD += resp.CostUSD })
 		m.costThisInvocation += resp.CostUSD
 	}
 	// A turn the substrate stopped at the cap we set IS this step reaching
 	// its cost cap, so it parks on cost through the same sentinel the
 	// pre-prompt gate returns — one park path, one axis snapshot, and the
 	// AddCost above has already put the true spend on the mirror the
-	// snapshot reads. Without a cost grant the cap was never ours to claim:
+	// snapshot reads. Without a cost cap the stop was never ours to claim:
 	// fall through to the ordinary agent failure.
 	if err == nil && resp != nil && resp.Failure != nil &&
-		resp.Failure.Kind == flow.FailureCostCap && art.GrantedCostUSD > 0 {
+		resp.Failure.Kind == flow.FailureCostCap && budget.MaxCostUSD > 0 {
 		return resp, flow.ErrBudgetExhausted{
-			Step: string(li.Result()),
+			Step: string(step),
 			Axis: flow.AxisCost,
-			Cap:  fmt.Sprintf("$%.2f", art.GrantedCostUSD),
+			Cap:  fmt.Sprintf("$%.2f", budget.MaxCostUSD),
 		}
 	}
 	// Surface AgentResponse.Failure through the error return so the
@@ -1402,7 +1411,7 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 	// it up without forcing every handler to interrogate resp.Failure
 	// separately. If Failure.Transient is set, the returned error wraps
 	// flow.ErrTransient — the orchestrator's transient check will park
-	// the step and skip the BumpInvocations call.
+	// the step and skip the dispatch count.
 	if err == nil && resp != nil && resp.Failure != nil {
 		err = agentFailureError(resp.Failure)
 	}

@@ -112,3 +112,85 @@ func TestREADME_BudgetDefaultsMatchCode(t *testing.T) {
 		check(prefix+" timeout", sm[4], "30m")
 	}
 }
+
+// --- EffectiveBudget ---
+//
+// The ONE place a cap is computed now that nothing seeds caps onto an item: the
+// binary's policy, resolved against the package defaults, plus the extensions
+// the ledger row records. The gate that refuses a dispatch and the `grant` that
+// tops it up read this and nothing else, so they cannot disagree.
+
+func TestEffectiveBudget_NoGrantsIsThePolicyResolved(t *testing.T) {
+	base := StepBudget{MaxInvocations: 5}
+	got := EffectiveBudget(base, LedgerRow{Step: "plan"})
+	want := ResolveStepBudget(base)
+	if got != want {
+		t.Errorf("EffectiveBudget with no grants = %+v, want the resolved policy %+v", got, want)
+	}
+}
+
+// An unfunded step — no policy of its own and no grants — is the package
+// defaults whole, not a set of zero caps.
+func TestEffectiveBudget_UnfundedStepIsTheDefaults(t *testing.T) {
+	got := EffectiveBudget(StepBudget{}, LedgerRow{})
+	if got != DefaultStepBudget() {
+		t.Errorf("EffectiveBudget of an unfunded step = %+v, want the defaults %+v", got, DefaultStepBudget())
+	}
+}
+
+func TestEffectiveBudget_OneAxisExtended(t *testing.T) {
+	base := StepBudget{MaxInvocations: 3, MaxPromptsPerInvocation: 50, MaxCostUSD: 20, Timeout: 30 * time.Minute}
+	row := LedgerRow{Step: "plan", Granted: []GrantRecord{{Axis: AxisInvocations, Amount: 2}}}
+	got := EffectiveBudget(base, row)
+	if got.MaxInvocations != 5 {
+		t.Errorf("MaxInvocations = %d, want 5 (3 policy + 2 granted)", got.MaxInvocations)
+	}
+	// Every other axis is untouched: a grant raises what it names.
+	if got.MaxCostUSD != 20 || got.MaxPromptsPerInvocation != 50 || got.Timeout != 30*time.Minute {
+		t.Errorf("a grant on invocations moved another axis: %+v", got)
+	}
+}
+
+func TestEffectiveBudget_EveryAxisExtended(t *testing.T) {
+	base := StepBudget{MaxInvocations: 3, MaxPromptsPerInvocation: 50, MaxCostUSD: 20, Timeout: 30 * time.Minute}
+	row := LedgerRow{Step: "plan", Granted: []GrantRecord{
+		{Axis: AxisInvocations, Amount: 2},
+		{Axis: AxisPrompts, Amount: 10},
+		{Axis: AxisCost, Amount: 5.50},
+		// Timeout grants are recorded in SECONDS, per GrantRecord; the
+		// conversion to a Duration happens here and nowhere else.
+		{Axis: AxisTimeout, Amount: 900},
+	}}
+	want := StepBudget{
+		MaxInvocations:          5,
+		MaxPromptsPerInvocation: 60,
+		MaxCostUSD:              25.50,
+		Timeout:                 45 * time.Minute,
+	}
+	if got := EffectiveBudget(base, row); got != want {
+		t.Errorf("EffectiveBudget = %+v, want %+v", got, want)
+	}
+}
+
+// Repeated grants on one axis accumulate — GrantedOn sums them, so two $5
+// grants are $10 of headroom and not the larger of the two.
+func TestEffectiveBudget_RepeatedGrantsAccumulate(t *testing.T) {
+	row := LedgerRow{Step: "plan", Granted: []GrantRecord{
+		{Axis: AxisCost, Amount: 5},
+		{Axis: AxisCost, Amount: 5},
+	}}
+	got := EffectiveBudget(StepBudget{MaxCostUSD: 20}, row)
+	if got.MaxCostUSD != 30 {
+		t.Errorf("MaxCostUSD = %v, want 30 (20 policy + 5 + 5)", got.MaxCostUSD)
+	}
+}
+
+// A sub-second timeout grant is not silently truncated to nothing: the amount
+// is scaled as a float, the way AxisReport.Format does for the same reason.
+func TestEffectiveBudget_FractionalTimeoutGrant(t *testing.T) {
+	row := LedgerRow{Step: "plan", Granted: []GrantRecord{{Axis: AxisTimeout, Amount: 0.5}}}
+	got := EffectiveBudget(StepBudget{Timeout: time.Second}, row)
+	if got.Timeout != 1500*time.Millisecond {
+		t.Errorf("Timeout = %v, want 1.5s", got.Timeout)
+	}
+}

@@ -261,7 +261,6 @@ func TestRunWithArgs_ReadOnlyCommandsRunWithoutGates(t *testing.T) {
 		{name: "release", args: []string{"release"}},
 		{name: "reseed", args: []string{"reseed"}},
 		{name: "grant", args: []string{"grant"}},
-		{name: "stale", args: []string{"stale", "plan"}},
 		{name: "doctor", args: []string{"doctor"}, probes: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -82,6 +82,33 @@ func (w *worktree) Push(ctx context.Context) error {
 	return w.b.out.Push(ctx)
 }
 
+// Drift measures how far the world has moved under the branch: what HEAD
+// carries past the recorded cut point, and what the mainline has taken since.
+//
+// A READ, so it goes through gitOps rather than `outward`: fetching a branch
+// publishes nothing, and the chokepoint exists for what leaves the machine.
+//
+// Evidence for a route election, never a safety check — see flow.Worktree.Drift.
+// A base that will not resolve is an ERROR rather than a zero pair: (0, 0) means
+// the branch is level, and reporting it for a mainline that was never compared
+// against would elect the mechanical land on no evidence at all.
+func (w *worktree) Drift(ctx context.Context) (flow.Drift, error) {
+	base, err := w.b.DefaultBranch(ctx)
+	if err != nil {
+		return flow.Drift{}, fmt.Errorf("worktree.Drift: resolve default branch: %w", err)
+	}
+	if err := w.b.git.FetchBranch(ctx, "origin", string(base)); err != nil {
+		return flow.Drift{}, fmt.Errorf("worktree.Drift: %w", err)
+	}
+	// Left is origin/<base>'s own commits — what the branch is BEHIND by; right
+	// is HEAD's — what it is AHEAD by.
+	behind, ahead, err := w.b.git.RevListLeftRight(ctx, "origin/"+string(base), "HEAD")
+	if err != nil {
+		return flow.Drift{}, fmt.Errorf("worktree.Drift: %w", err)
+	}
+	return flow.Drift{Ahead: ahead, Behind: behind, At: nowUTC()}, nil
+}
+
 // Request exposes the pull-request surface. This orchestrator lands changes
 // through pull requests, so it returns the worktree itself — one capability,
 // not six.

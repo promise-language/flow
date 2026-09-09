@@ -412,6 +412,38 @@ func (f *Flow) Position(it *Item) (Position, error) {
 	return Position{Step: toLifecycleItem(succ)}, nil
 }
 
+// AwaitsAfter is what the item awaits once an entry carrying this route lands:
+// the successor's declared role, or the signal when the successor is a pure
+// wait. The zero value on a finalizing route — a finished flow awaits nobody.
+//
+// THE SDK COMPUTES IT BECAUSE THE ORCHESTRATOR CANNOT. The step-to-role mapping
+// is the flow's, and an orchestrator holds no flow (docs/orchestrator.md
+// § Writing payloads), so the value is handed across on the entry rather than
+// derived on the far side. It sits beside Position because both read one
+// election and answer a different question about it.
+//
+// A route naming no registered lifecycle item awaits nothing. Position refuses
+// that route loudly, which is where the defect is reported; answering with a
+// role invented for an id that names nothing would be worse than answering
+// empty.
+//
+// Account is never set here. The entry records a decision; who holds the role is
+// read from the journal (Item.AccountForRole), and a value written into the
+// decision would be a second copy of that answer.
+func (f *Flow) AwaitsAfter(r Route) Awaits {
+	if r.Finalizes() {
+		return Awaits{}
+	}
+	succ, ok := f.stepByResult[r.Next]
+	if !ok {
+		return Awaits{}
+	}
+	if succ.kind == stepAwait {
+		return Awaits{Signal: succ.signal}
+	}
+	return Awaits{Role: succ.role}
+}
+
 // Pending, stepPending, DeriveNext, IsDone and TerminalReason below are the
 // OUTGOING derivation: position as a checklist walked in registration order,
 // which Flow.Position replaces. They are not a second copy of one rule kept in
@@ -436,30 +468,11 @@ func (f *Flow) Pending(it *Item, description string) bool {
 func (f *Flow) stepPending(state *Item, st *step) bool {
 	switch st.kind {
 	case stepArtifact:
-		// Operator opt-out: when the orchestrator surfaces an ArtifactRecord
-		// for this id with Required=false AND it isn't already resolved,
-		// the operator has explicitly removed it from the checklist
-		// ("don't run this step"). Skip — DeriveNext moves on to the
-		// next step instead of dispatching a handler against an item
-		// the operator marked as not-required.
-		//
-		// A resolved record with Required=false (run completed, then
-		// operator unchecked) is also skipped from a future re-run
-		// here, but the resolved branch below would short-circuit
-		// anyway, so the opt-out check only matters for unresolved
-		// entries.
-		if rec, ok := state.Artifacts[st.artifact]; ok && !rec.Required && !rec.Resolved {
-			return false
-		}
-		rec := state.Artifact(st.artifact)
-		if !rec.Resolved {
-			return true
-		}
-		if rec.Stale {
-			return true
-		}
-		// Resolved and not flagged stale by the orchestrator → nothing to do.
-		return false
+		// Unresolved means pending, and that is the whole test. The
+		// Required=false opt-out and the stale bit both went with seeding and
+		// MarkStale — nothing writes either any more, so a branch reading them
+		// would skip every step on an item with no seeded records at all.
+		return !state.Artifact(st.artifact).Resolved
 	case stepSignal, stepAwait:
 		return !state.SignalSet(st.signal)
 	}
@@ -606,9 +619,8 @@ func (f *Flow) IsReady(it *Item) bool {
 }
 
 // IsDone returns true iff every lifecycle item is resolved. There is no
-// per-step opt-out to skip: what an operator can still strike off is the
-// artifact RECORD (stepPending's Required=false branch), which lives on the
-// item and not in the declaration.
+// per-step opt-out to skip: routing subsumed step optionality, and nothing
+// writes a not-required record any more.
 func (f *Flow) IsDone(it *Item) bool {
 	for _, st := range f.steps {
 		if f.stepPending(it, st) {
@@ -631,34 +643,4 @@ func (f *Flow) TerminalReason(it *Item) string {
 		return "no-pending-steps"
 	}
 	return ""
-}
-
-// SeedSpec returns the ArtifactSpec slice the orchestrator should pre-load at
-// seed time.
-//
-// `budgets` is the caller's cap POLICY, keyed by step id — a step with no
-// entry, and every zero axis of one that has an entry, takes the package
-// default (ResolveStepBudget). It is a parameter rather than something read
-// off the steps because budgets are not a step declaration: what a resolution
-// may spend belongs to whoever funds it (docs/flow-registration.md § Step
-// configuration).
-func (f *Flow) SeedSpec(artifactDefs map[ArtifactId]ArtifactDef, budgets map[StepId]StepBudget) []ArtifactSpec {
-	out := make([]ArtifactSpec, 0, len(f.steps))
-	for _, st := range f.steps {
-		if st.kind != stepArtifact {
-			continue
-		}
-		def, ok := artifactDefs[st.artifact]
-		if !ok {
-			// validation should have caught this; defensive default
-			def = ArtifactDef{Id: st.artifact, Type: ArtifactMarkdown}
-		}
-		out = append(out, ArtifactSpec{
-			Id:       st.artifact,
-			Type:     def.Type,
-			Required: true,
-			Budget:   ResolveStepBudget(budgets[st.result()]),
-		})
-	}
-	return out
 }

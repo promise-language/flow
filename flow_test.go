@@ -92,7 +92,7 @@ func TestRequireSignal_Records(t *testing.T) {
 }
 
 func resolvedArtifact(id ArtifactId, t ArtifactType) ArtifactRecord {
-	return ArtifactRecord{Id: id, Type: t, Required: true, Resolved: true}
+	return ArtifactRecord{Id: id, Type: t, Resolved: true}
 }
 
 func TestDeriveNext_FirstUnresolved(t *testing.T) {
@@ -110,21 +110,6 @@ func TestDeriveNext_FirstUnresolved(t *testing.T) {
 	next, ok := f.DeriveNext(state)
 	if !ok || next != "implement" {
 		t.Errorf("DeriveNext = (%q, %v), want (\"implement\", true)", next, ok)
-	}
-}
-
-func TestDeriveNext_StaleArtifactIsPending(t *testing.T) {
-	f := NewFlow("x", nil)
-	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
-
-	state := &Item{
-		Artifacts: map[ArtifactId]ArtifactRecord{
-			"plan": {Id: "plan", Type: ArtifactMarkdown, Required: true, Resolved: true, Stale: true},
-		},
-	}
-	next, ok := f.DeriveNext(state)
-	if !ok || next != "write plan" {
-		t.Errorf("stale artifact should be pending; got (%q, %v)", next, ok)
 	}
 }
 
@@ -214,74 +199,6 @@ func TestIsDone_EveryStepResolved(t *testing.T) {
 	state.Artifacts["two"] = resolvedArtifact("two", ArtifactMarkdown)
 	if !f.IsDone(state) {
 		t.Errorf("IsDone should be true once every step is resolved")
-	}
-}
-
-// The operator's opt-out survives: it lives on the persisted RECORD, not in
-// the declaration, so removing step optionality does not remove the ability to
-// strike a step off one item's checklist.
-func TestIsDone_UnresolvedRecordMarkedNotRequiredIsSkipped(t *testing.T) {
-	f := NewFlow("x", nil)
-	f.AddStep("first", "one", noopHandler, StepConfig{})
-	f.AddStep("second", "two", noopHandler, StepConfig{})
-
-	state := &Item{Artifacts: map[ArtifactId]ArtifactRecord{
-		"one": resolvedArtifact("one", ArtifactMarkdown),
-		"two": {Id: "two", Type: ArtifactMarkdown, Required: false, Resolved: false},
-	}}
-	if !f.IsDone(state) {
-		t.Errorf("IsDone should be true: the unresolved record is marked not-required by the operator")
-	}
-}
-
-func TestSeedSpec_ResolvesBudgetFromPolicy(t *testing.T) {
-	f := NewFlow("x", nil)
-	f.AddStep("a", "art-a", noopHandler, StepConfig{})
-	f.AddStep("b", "art-b", noopHandler, StepConfig{})
-	f.AddSignalStep("sig", "pr-open", noopHandler, StepConfig{}) // signal steps not in seed
-
-	defs := map[ArtifactId]ArtifactDef{
-		"art-a": {Id: "art-a", Type: ArtifactMarkdown},
-		"art-b": {Id: "art-b", Type: ArtifactMarkdown},
-	}
-	// art-a is in the policy; art-b is not, and takes the package defaults.
-	budgets := map[StepId]StepBudget{"art-a": {MaxInvocations: 2}}
-
-	specs := f.SeedSpec(defs, budgets)
-	if len(specs) != 2 {
-		t.Fatalf("SeedSpec len = %d, want 2 (signal steps excluded)", len(specs))
-	}
-	byId := map[ArtifactId]ArtifactSpec{}
-	for _, sp := range specs {
-		byId[sp.Id] = sp
-	}
-
-	a := byId["art-a"]
-	if a.Type != ArtifactMarkdown || !a.Required {
-		t.Errorf("art-a spec = %+v, want markdown required", a)
-	}
-	if a.Budget.MaxInvocations != 2 {
-		t.Errorf("art-a MaxInvocations = %d, want 2 (from policy)", a.Budget.MaxInvocations)
-	}
-	if a.Budget.Timeout != DefaultStepBudget().Timeout {
-		t.Errorf("art-a Timeout = %v, want default %v (unset axis)", a.Budget.Timeout, DefaultStepBudget().Timeout)
-	}
-
-	if b := byId["art-b"]; b.Budget != DefaultStepBudget() {
-		t.Errorf("art-b budget = %+v, want the package defaults whole (absent from policy)", b.Budget)
-	}
-}
-
-func TestSeedSpec_NilPolicyIsAllDefaults(t *testing.T) {
-	f := NewFlow("x", nil)
-	f.AddStep("a", "art-a", noopHandler, StepConfig{})
-
-	specs := f.SeedSpec(map[ArtifactId]ArtifactDef{"art-a": {Id: "art-a", Type: ArtifactMarkdown}}, nil)
-	if len(specs) != 1 {
-		t.Fatalf("SeedSpec len = %d, want 1", len(specs))
-	}
-	if specs[0].Budget != DefaultStepBudget() {
-		t.Errorf("budget = %+v, want the package defaults whole", specs[0].Budget)
 	}
 }
 

@@ -26,15 +26,15 @@ func (noWorkBackend) LoadWorkInProgress(context.Context, flow.ItemRef, flow.Step
 	return "", nil
 }
 
-// clearFailsBackend answers every clear with an error. The artifact has landed
-// by the time the clear runs, so this is the case that must NOT be reported as
-// a failed step.
-type clearFailsBackend struct {
+// appendFailsBackend refuses every append. The result, the route and the end of
+// the draft are ONE write now, so a refusal must leave all three untouched —
+// which is what makes the draft still there for the resume.
+type appendFailsBackend struct {
 	*fake.Orchestrator
 	err error
 }
 
-func (b clearFailsBackend) ClearWorkInProgress(context.Context, flow.ItemRef, flow.StepId) error {
+func (b appendFailsBackend) AppendEntry(context.Context, flow.ItemRef, flow.JournalEntry) error {
 	return b.err
 }
 
@@ -116,7 +116,7 @@ func TestWorkInProgress_SurvivesToTheNextDispatch(t *testing.T) {
 
 // Scaffolding that outlives its work becomes stale prose a later reader
 // mistakes for a record.
-func TestWorkInProgress_ClearedWhenTheStepResolves(t *testing.T) {
+func TestWorkInProgress_ClearedWhenTheStepCompletes(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			if err := ctx.RecordWorkInProgress("half a plan"); err != nil {
@@ -134,15 +134,21 @@ func TestWorkInProgress_ClearedWhenTheStepResolves(t *testing.T) {
 		t.Fatalf("LoadWorkInProgress: %v", err)
 	}
 	if got != "" {
-		t.Errorf("record after resolve = %q, want it cleared", got)
+		t.Errorf("record after the completion = %q, want it cleared", got)
+	}
+	// And the draft went with the entry, not before it: the journal carries the
+	// completion the clear belongs to.
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if len(state.Journal) != 1 {
+		t.Errorf("journal = %+v, want the one entry the clear belongs to", state.Journal)
 	}
 }
 
-// The artifact is already written when the clear runs, so a failure there
-// cannot make the invocation a failure: that would report a failed step for
-// work that landed. Keying, not clearing, is what makes a leftover harmless.
-func TestWorkInProgress_ClearFailureDoesNotFailTheStep(t *testing.T) {
-	tel := &recordingTelemetry{}
+// Result, route and the end of the draft land together or not at all. A refused
+// append leaves the draft in place, because nothing was recorded and the resume
+// has to pick up where the step left off — the clear cannot be a separate write
+// that succeeded against a result that did not.
+func TestWorkInProgress_RefusedAppendKeepsTheDraft(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			if err := ctx.RecordWorkInProgress("half a plan"); err != nil {
@@ -151,34 +157,34 @@ func TestWorkInProgress_ClearFailureDoesNotFailTheStep(t *testing.T) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
 		}, flow.StepConfig{MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
-	app.Telemetry = tel
-	app.Orchestrator = clearFailsBackend{Orchestrator: be, err: errors.New("disk went away")}
+	app.Orchestrator = appendFailsBackend{Orchestrator: be, err: errors.New("disk went away")}
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
 		t.Fatalf("RunOne: %v", err)
 	}
-	if res.Status != "done" {
-		t.Errorf("res = %+v, want done — the artifact landed", res)
+	if res.Status == string(flow.StatusDone) {
+		t.Errorf("res = %+v, want a non-done status — nothing was recorded", res)
 	}
 	state, _ := be.Load(context.Background(), claim.ItemRef)
-	if rec := state.Artifact("plan"); !rec.Resolved {
-		t.Error("plan is not resolved, but ResolveArtifact succeeded")
+	if rec := state.Artifact("plan"); rec.Resolved {
+		t.Error("the projection moved though the append was refused")
 	}
-	var reported bool
-	for _, e := range tel.events {
-		if e.Detail == "could not clear work in progress: disk went away" {
-			reported = true
-		}
+	if len(state.Journal) != 0 {
+		t.Errorf("journal = %+v, want empty — the append was refused", state.Journal)
 	}
-	if !reported {
-		t.Errorf("the failed clear was never reported; events = %+v", tel.events)
+	got, err := be.LoadWorkInProgress(context.Background(), claim.ItemRef, "plan")
+	if err != nil {
+		t.Fatalf("LoadWorkInProgress: %v", err)
+	}
+	if got != "half a plan" {
+		t.Errorf("draft = %q, want it kept for the resume", got)
 	}
 }
 
-// A record belongs to the step that wrote it. Reading another step's would
-// hand one step reasoning it did not produce and cannot judge — and the record
-// left here is exactly what a crash between resolve and clear leaves behind.
+// A record belongs to the step that wrote it. Reading another step's would hand
+// one step reasoning it did not produce and cannot judge — so the keying has to
+// hold even for a record that outlives the step that wrote it.
 func TestWorkInProgress_IsNotVisibleToAnotherStep(t *testing.T) {
 	var reviewSaw string
 	app, be, claim := testApp(t, func(f *flow.Flow) {
@@ -203,11 +209,12 @@ func TestWorkInProgress_IsNotVisibleToAnotherStep(t *testing.T) {
 	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "parked" {
 		t.Fatalf("first RunOne = (%+v, %v), want parked", res, err)
 	}
-	// Resolve the plan through the backend, which does NOT clear the record —
-	// the state a run killed between the write and the cleanup leaves behind.
-	if err := be.ResolveArtifact(context.Background(), claim.ItemRef, "plan",
-		flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"}); err != nil {
-		t.Fatalf("ResolveArtifact: %v", err)
+	// Complete the plan through the backend, then put a record back under its
+	// step id: a record that outlived the step that wrote it, which is the
+	// state the keying has to hold under.
+	appendMarkdown(t, be, claim.ItemRef, "plan", "the plan")
+	if err := be.SaveWorkInProgress(context.Background(), claim.ItemRef, "plan", "the plan step's reasoning"); err != nil {
+		t.Fatalf("SaveWorkInProgress: %v", err)
 	}
 	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Step != "review" {
 		t.Fatalf("second RunOne = (%+v, %v), want the review step", res, err)

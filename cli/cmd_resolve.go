@@ -130,7 +130,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			if !ok {
 				return 1
 			}
-			refs, err := app.Orchestrator.ListAutoSelectable(ctx, want)
+			refs, err := app.Orchestrator.ListAutoSelectable(ctx, want, app.assumesRole(ctx))
 			if err != nil {
 				fmt.Fprintln(app.Err, "resolve:", err)
 				return 1
@@ -370,13 +370,13 @@ func finalTotalSuffix(ctx context.Context, app *App, claim flow.Claim) string {
 	if err != nil {
 		return "" // best-effort; finalization already succeeded
 	}
-	var totalDur time.Duration
-	var totalCost float64
+	// The ledger's own totals: the treasurer keeps them, and re-summing the
+	// rows here would be a second answer to a question it already holds.
+	totalDur := state.Ledger.TotalActive
+	totalCost := state.Ledger.TotalCostUSD
 	lowerBound := false
-	for _, art := range state.Artifacts {
-		totalDur += art.DurationWorked
-		totalCost += art.CostUSDSpent
-		if art.Resolved && art.DurationWorked == 0 {
+	for _, row := range state.Ledger.Steps {
+		if row.Dispatches > 0 && row.Active == 0 {
 			lowerBound = true
 		}
 	}

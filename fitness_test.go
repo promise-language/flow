@@ -32,6 +32,7 @@ func (s *stubWorktree) IsDirty(context.Context) (bool, error) { panic("not imple
 func (s *stubWorktree) Stage(context.Context) error           { panic("not implemented") }
 func (s *stubWorktree) Commit(context.Context, string) error  { panic("not implemented") }
 func (s *stubWorktree) Push(context.Context) error            { panic("not implemented") }
+func (s *stubWorktree) Drift(context.Context) (Drift, error)  { panic("not implemented") }
 func (s *stubWorktree) RevParse(context.Context, Revision) (CommitSha, error) {
 	panic("not implemented")
 }

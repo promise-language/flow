@@ -68,7 +68,7 @@ type failingListBackend struct {
 	err error
 }
 
-func (b *failingListBackend) ListAutoSelectable(ctx context.Context, _ []flow.TagId) ([]flow.ItemRef, error) {
+func (b *failingListBackend) ListAutoSelectable(ctx context.Context, _ []flow.TagId, _ func(flow.RoleName) bool) ([]flow.ItemRef, error) {
 	return nil, b.err
 }
 
@@ -105,7 +105,7 @@ type resolvingFailingListBackend struct {
 	listErr error
 }
 
-func (b *resolvingFailingListBackend) ListAutoSelectable(ctx context.Context, _ []flow.TagId) ([]flow.ItemRef, error) {
+func (b *resolvingFailingListBackend) ListAutoSelectable(ctx context.Context, _ []flow.TagId, _ func(flow.RoleName) bool) ([]flow.ItemRef, error) {
 	return nil, b.listErr
 }
 
@@ -344,7 +344,7 @@ type conflictThenOkBackend struct {
 	nonConflict   error // if set, every Claim returns this error instead
 }
 
-func (b *conflictThenOkBackend) ListAutoSelectable(ctx context.Context, _ []flow.TagId) ([]flow.ItemRef, error) {
+func (b *conflictThenOkBackend) ListAutoSelectable(ctx context.Context, _ []flow.TagId, _ func(flow.RoleName) bool) ([]flow.ItemRef, error) {
 	if b.listErr != nil {
 		return nil, b.listErr
 	}
@@ -517,7 +517,7 @@ type arenaScopedRefusalBackend struct {
 	claimAttempts int
 }
 
-func (b *arenaScopedRefusalBackend) ListAutoSelectable(ctx context.Context, _ []flow.TagId) ([]flow.ItemRef, error) {
+func (b *arenaScopedRefusalBackend) ListAutoSelectable(ctx context.Context, _ []flow.TagId, _ func(flow.RoleName) bool) ([]flow.ItemRef, error) {
 	return b.refs, nil
 }
 
@@ -882,7 +882,7 @@ type tagFilterBackend struct {
 	calledTags []flow.TagId
 }
 
-func (b *tagFilterBackend) ListAutoSelectable(ctx context.Context, tags []flow.TagId) ([]flow.ItemRef, error) {
+func (b *tagFilterBackend) ListAutoSelectable(ctx context.Context, tags []flow.TagId, _ func(flow.RoleName) bool) ([]flow.ItemRef, error) {
 	b.calledTags = tags
 	return b.taggedRefs, nil
 }
@@ -954,7 +954,7 @@ type discoverPanicBackend struct {
 	*fake.Orchestrator
 }
 
-func (b *discoverPanicBackend) List(ctx context.Context, scope flow.ItemScope, binaryName flow.BinaryName, acceptsType func(flow.ItemType) bool) ([]flow.ItemInfo, error) {
+func (b *discoverPanicBackend) List(ctx context.Context, scope flow.ItemScope, binaryName flow.BinaryName, acceptsType func(flow.ItemType) bool, assumesRole func(flow.RoleName) bool) ([]flow.ItemInfo, error) {
 	panic("INVARIANT VIOLATION: resolve's auto-select called Discover")
 }
 
@@ -1104,9 +1104,9 @@ func TestFinalTotalSuffix_NoFigures(t *testing.T) {
 	be := &totalSuffixInspectBackend{
 		Orchestrator: fake.New(),
 		state: &flow.Item{
-			Artifacts: map[flow.ArtifactId]flow.ArtifactRecord{
-				"plan": {}, // zero duration, zero cost
-			},
+			Ledger: flow.Ledger{Steps: map[flow.StepId]flow.LedgerRow{
+				"plan": {Step: "plan"}, // never dispatched: nothing spent
+			}},
 		},
 	}
 	app := &App{Orchestrator: be}
@@ -1120,9 +1120,13 @@ func TestFinalTotalSuffix_BothFigures(t *testing.T) {
 	be := &totalSuffixInspectBackend{
 		Orchestrator: fake.New(),
 		state: &flow.Item{
-			Artifacts: map[flow.ArtifactId]flow.ArtifactRecord{
-				"plan":           {DurationWorked: 5 * time.Minute, CostUSDSpent: 1.20, Resolved: true},
-				"implementation": {DurationWorked: 9*time.Minute + 2*time.Second, CostUSDSpent: 1.51, Resolved: true},
+			Ledger: flow.Ledger{
+				Steps: map[flow.StepId]flow.LedgerRow{
+					"plan":           {Step: "plan", Dispatches: 1, Active: 5 * time.Minute, CostUSD: 1.20},
+					"implementation": {Step: "implementation", Dispatches: 1, Active: 9*time.Minute + 2*time.Second, CostUSD: 1.51},
+				},
+				TotalActive:  14*time.Minute + 2*time.Second,
+				TotalCostUSD: 2.71,
 			},
 		},
 	}
@@ -1143,9 +1147,15 @@ func TestFinalTotalSuffix_LowerBound(t *testing.T) {
 	be := &totalSuffixInspectBackend{
 		Orchestrator: fake.New(),
 		state: &flow.Item{
-			Artifacts: map[flow.ArtifactId]flow.ArtifactRecord{
-				"plan":   {DurationWorked: 5 * time.Minute, CostUSDSpent: 1.20, Resolved: true},
-				"legacy": {DurationWorked: 0, CostUSDSpent: 0.50, Resolved: true}, // resolved but no duration → lower bound
+			Ledger: flow.Ledger{
+				Steps: map[flow.StepId]flow.LedgerRow{
+					"plan": {Step: "plan", Dispatches: 1, Active: 5 * time.Minute, CostUSD: 1.20},
+					// Dispatched but no active time recorded → the total is a
+					// lower bound, not the whole figure.
+					"legacy": {Step: "legacy", Dispatches: 1, Active: 0, CostUSD: 0.50},
+				},
+				TotalActive:  5 * time.Minute,
+				TotalCostUSD: 1.70,
 			},
 		},
 	}
@@ -1159,22 +1169,26 @@ func TestFinalTotalSuffix_LowerBound(t *testing.T) {
 	}
 }
 
-func TestFinalTotalSuffix_UnresolvedZeroDurationNotLowerBound(t *testing.T) {
-	// An unresolved artifact with zero duration is not a lower bound —
-	// it just hasn't run yet.
+func TestFinalTotalSuffix_UndispatchedZeroDurationNotLowerBound(t *testing.T) {
+	// A step that was never dispatched is not a lower bound — it has not run,
+	// so there is no unrecorded time to be missing.
 	be := &totalSuffixInspectBackend{
 		Orchestrator: fake.New(),
 		state: &flow.Item{
-			Artifacts: map[flow.ArtifactId]flow.ArtifactRecord{
-				"plan":    {DurationWorked: 5 * time.Minute, CostUSDSpent: 1.20, Resolved: true},
-				"pending": {DurationWorked: 0, CostUSDSpent: 0, Resolved: false},
+			Ledger: flow.Ledger{
+				Steps: map[flow.StepId]flow.LedgerRow{
+					"plan":    {Step: "plan", Dispatches: 1, Active: 5 * time.Minute, CostUSD: 1.20},
+					"pending": {Step: "pending"},
+				},
+				TotalActive:  5 * time.Minute,
+				TotalCostUSD: 1.20,
 			},
 		},
 	}
 	app := &App{Orchestrator: be}
 	got := finalTotalSuffix(context.Background(), app, flow.Claim{})
 	if strings.Contains(got, "≥") {
-		t.Errorf("unresolved artifact with zero duration must not trigger lower-bound; got %q", got)
+		t.Errorf("an undispatched step must not trigger lower-bound; got %q", got)
 	}
 }
 
@@ -1974,7 +1988,7 @@ func TestCmdResolve_HeldClaimSurvivesTheItemBecomingBlocked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if rec := state.Artifact("plan"); rec.Resolved || rec.Invocations != 0 {
+	if rec, row := state.Artifact("plan"), state.Ledger.Row("plan"); rec.Resolved || row.Dispatches != 0 {
 		t.Errorf("plan = %+v, want it pending and undispatched", rec)
 	}
 	if state.Parked() {

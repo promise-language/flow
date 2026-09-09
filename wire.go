@@ -11,10 +11,17 @@ import (
 type ParkKind string
 
 const (
-	ParkBlocked           ParkKind = "blocked"
-	ParkQuestion          ParkKind = "question"
-	ParkBudgetExhausted   ParkKind = "budget-exhausted"
-	ParkStepDidNotResolve ParkKind = "step-did-not-resolve"
+	ParkBlocked  ParkKind = "blocked"
+	ParkQuestion ParkKind = "question"
+	// ParkTreasurerRefused — the treasurer would not fund the next dispatch on
+	// some BudgetAxis. The only kind a Grant can clear, and only when the
+	// treasurer accepts the extension as clearing what it refused on
+	// (docs/orchestrator.md § Vocabularies).
+	ParkTreasurerRefused ParkKind = "treasurer-refused"
+	// ParkStepDidNotComplete — the step returned without completing: it elected
+	// no route, or elected one and produced no result. A re-dispatch can still
+	// do the job, which is why it parks rather than fails.
+	ParkStepDidNotComplete ParkKind = "step-did-not-complete"
 	// ParkInfraTransient — the step's failure was observed-infra (remote
 	// runner offline, transient 5xx, network timeout). The orchestrator
 	// parks the step WITHOUT consuming an invocation, so the
@@ -34,10 +41,10 @@ const (
 	// return the identical answer. A repository guard refused a staged file,
 	// a required tool is out of date, or an environment precondition is unmet.
 	//
-	// Like ParkInfraTransient the orchestrator SKIPS BumpInvocations — the
+	// Like ParkInfraTransient the orchestrator records no dispatch — the
 	// handler never got a real chance to do its work, so charging it would
 	// burn the invocation budget on identical no-op failures and eventually
-	// park with ParkBudgetExhausted, which describes the clock rather than
+	// park with ParkTreasurerRefused, which describes the clock rather than
 	// the refusal.
 	ParkRefused ParkKind = "refused"
 	// ParkWriteContract — the step modified the worktree outside its declared
@@ -52,8 +59,8 @@ const (
 // crosswalks enumerate it to prove they handle each one.
 func AllParkKinds() []ParkKind {
 	return []ParkKind{
-		ParkBlocked, ParkQuestion, ParkBudgetExhausted,
-		ParkStepDidNotResolve, ParkInfraTransient,
+		ParkBlocked, ParkQuestion, ParkTreasurerRefused,
+		ParkStepDidNotComplete, ParkInfraTransient,
 		ParkRemoteUnreachable, ParkRefused, ParkWriteContract,
 	}
 }
@@ -91,7 +98,7 @@ func AllDispositions() []Disposition {
 func (d Disposition) Valid() bool { return slices.Contains(AllDispositions(), d) }
 
 // BudgetAxis identifies which budget axis was exhausted (when
-// ParkKind==ParkBudgetExhausted).
+// ParkKind==ParkTreasurerRefused).
 type BudgetAxis string
 
 const (
@@ -112,13 +119,13 @@ type ParkRequest struct {
 	// matched to the record whose budget caused it. The SDK fills this in
 	// from LifecycleItem.Result() when a handler leaves it empty.
 	Step StepId     `json:"step,omitempty"`
-	Axis BudgetAxis `json:"axis,omitempty"` // set when Kind==ParkBudgetExhausted
+	Axis BudgetAxis `json:"axis,omitempty"` // set when Kind==ParkTreasurerRefused
 	// Axes is the state of EVERY budget axis at park time, not just the one
 	// in Axis. Reporting only the tripping axis cost the operator a round-trip
 	// per axis: the axes go flat together, so granting the named one bought a
 	// dispatch that re-parked on the next. With the full set an operator reads
 	// one park and grants once. Set alongside Axis when
-	// Kind==ParkBudgetExhausted; empty for every other park kind.
+	// Kind==ParkTreasurerRefused; empty for every other park kind.
 	Axes    []AxisReport `json:"axes,omitempty"`
 	Reason  string       `json:"reason,omitempty"`
 	Details string       `json:"details,omitempty"`
@@ -253,35 +260,69 @@ func QuestionAskedAt(park *ParkRequest) time.Time {
 	return time.Time{}
 }
 
-// GrantClearsPark reports whether a grant against the artifact `key` —
-// producing the post-grant record `post` — satisfies the park in `park` and so
-// must clear it. Orchestrators call this from Grant so the rule is identical
-// everywhere (see the Orchestrator.Grant contract).
+// GrantClearsPark reports whether a grant against `step` — leaving the ledger
+// row `post` — satisfies the park in `park` and so must clear it. Orchestrators
+// call this from Grant so the rule is identical everywhere (see the
+// Orchestrator.Grant contract).
 //
-// Only a ParkBudgetExhausted park on this very step can be cleared, and only
+// Only a ParkTreasurerRefused park on this very step can be cleared, and only
 // when the offending axis now has headroom: granting $0.01 against a step that
 // is $2.40 over clears nothing, and saying otherwise would report an item as
 // resumable when the next dispatch would re-park it.
-func GrantClearsPark(park *ParkRequest, key ArtifactId, post ArtifactRecord, g Grant) bool {
-	if park == nil || park.Kind != ParkBudgetExhausted || park.Step != StepId(key) {
+//
+// THE CAP COMES FROM THE PARK, NOT FROM THE ROW. A step's cap is the binary's
+// policy plus the row's extensions (EffectiveBudget), and the policy is the
+// binary's — an orchestrator does not hold it and could not recompute the cap
+// if it wanted to. What it does hold is the run's own snapshot of every axis at
+// park time (ParkRequest.Axes), which records the cap that was refused on; the
+// new cap is that plus what this grant adds. Consumption comes from the row,
+// which is where the meter lives.
+//
+// A park carrying no snapshot for its axis is left in place rather than guessed
+// away, for the same reason a park with no axis at all is: there is nothing to
+// reason about.
+func GrantClearsPark(park *ParkRequest, step StepId, post LedgerRow, g Grant) bool {
+	if park == nil || park.Kind != ParkTreasurerRefused || park.Step != step {
 		return false
 	}
-	switch park.Axis {
-	case AxisInvocations:
-		return post.GrantedInvocations > post.Invocations
-	case AxisCost:
-		return post.GrantedCostUSD > post.CostUSDSpent
-	case AxisPrompts:
-		return post.GrantedPromptsPerInvocation > post.PromptsThisInvocation
-	case AxisTimeout:
+	if park.Axis == AxisTimeout {
 		// Timeout is a per-run duration, not a meter that fills up: there is no
 		// "consumed" value to clear. Any added time is what lets the step run
 		// again, so a positive TimeoutAdd — and nothing else — clears it.
 		return g.TimeoutAdd > 0
 	}
-	// Budget-exhausted with no axis recorded: nothing to reason about, so
-	// leave the park in place rather than guess it away.
+	snap, ok := park.axisSnapshot(park.Axis)
+	if !ok {
+		return false
+	}
+	switch park.Axis {
+	case AxisInvocations:
+		return snap.Granted+float64(g.Invocations) > float64(post.Dispatches)
+	case AxisCost:
+		return snap.Granted+g.CostUSD > post.CostUSD
+	case AxisPrompts:
+		// Prompts are per-invocation and the ledger keeps no counter for them —
+		// the cap resets at every dispatch, so the run's own snapshot is the
+		// only record of what it burned.
+		return snap.Granted+float64(g.PromptsPerInvocation) > snap.Used
+	}
+	// Refused with no axis recorded: nothing to reason about, so leave the park
+	// in place rather than guess it away.
 	return false
+}
+
+// axisSnapshot returns the park's recorded meter for one axis. ok is false when
+// the park carries no snapshot for it.
+func (p *ParkRequest) axisSnapshot(axis BudgetAxis) (AxisReport, bool) {
+	if p == nil {
+		return AxisReport{}, false
+	}
+	for _, a := range p.Axes {
+		if a.Axis == axis {
+			return a, true
+		}
+	}
+	return AxisReport{}, false
 }
 
 // QuestionFormat is the presentation hint an agent attaches to a question:
@@ -355,8 +396,10 @@ func AskMultiChoice(header, text string, options ...string) AgentQuestion {
 	return AgentQuestion{Header: header, Text: text, Format: FormatChoice, Options: options, MultiSelect: true}
 }
 
-// Grant adds budget to an artifact's existing Granted* caps. Zero values mean
-// "no change on this axis" — Grant is additive, not a replacement.
+// Grant is one operator extension, in the treasurer's own axes. Zero values
+// mean "no change on this axis" — a grant is ADDITIVE, recorded against the
+// step's ledger row and read back through EffectiveBudget, never a replacement
+// for the binary's policy.
 type Grant struct {
 	Invocations          int
 	PromptsPerInvocation int
