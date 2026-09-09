@@ -241,8 +241,10 @@ func (f *Flow) appendStep(s *step, resultKey StepId) {
 	}
 }
 
-// RequireSignal adds an eligibility precondition. The flow is only selected
-// by cli.App once this signal is already set on the item.
+// RequireSignal adds an eligibility precondition. An item is only begun once
+// every required signal is already set on it — a gate on eligibility, not a
+// lifecycle item: it does not appear in the graph and is never routed to
+// (docs/flow-registration.md § Signal preconditions).
 func (f *Flow) RequireSignal(signal SignalId) {
 	if signal == "" {
 		panic("flow.RequireSignal: empty signal id")

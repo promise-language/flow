@@ -72,11 +72,21 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		overrides = claim.Overrides
 	}
 
-	f, _ := SelectFlow(app, state)
-	// The binary's flow, independent of step eligibility. A finalized/complete
-	// item has no eligible step (SelectFlow → nil), but it still belongs to the
-	// flow — so its checklist is what gets rendered either way.
-	typeFlow := app.Flow
+	// The remit, read exactly as the advance reads it (inRemit) rather than
+	// assumed: an item outside it is not this binary's work, and RunOne blocks
+	// it without dispatching anything. Reporting the flow here regardless would
+	// have `status` call the item eligible while `resolve` stops before
+	// dispatch — the one fact answered two ways that statusFlowState exists to
+	// prevent.
+	var f, typeFlow *flow.Flow
+	if inRemit(app, state) {
+		// The binary's flow, independent of step eligibility. A
+		// finalized/complete item has no eligible step (SelectFlow → nil), but
+		// it still belongs to the flow — so its checklist is what gets rendered
+		// either way.
+		typeFlow = app.Flow
+		f, _ = SelectFlow(app, state)
+	}
 	if owner == "" {
 		owner = "(unclaimed)"
 	}

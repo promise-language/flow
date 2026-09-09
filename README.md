@@ -180,7 +180,7 @@ func main() {
         Orchestrator: orch,
         Agent:     claude.New(),
         Artifacts: []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-        Flows:     []*flow.Flow{f},
+        Flow:      f,
     }))
 }
 ```
@@ -198,7 +198,7 @@ type App struct {
     Agent     flow.Agent         // REQUIRED — what ctx.Agent() returns
     Artifacts []flow.ArtifactDef // REQUIRED — every artifact id a step resolves
     Signals   []flow.SignalDef   // optional — every signal id a step references
-    Flows     []*flow.Flow       // REQUIRED — at least one; registration order matters
+    Flow      *flow.Flow         // REQUIRED — the binary's one flow
     Telemetry flow.Telemetry     // optional — sink for ctx.Notify progress events
     Preflight flow.PreflightFunc // optional — cross-flow gate run before every dispatch
     Owner     string             // optional — claim attribution; defaults to $USER
@@ -209,12 +209,11 @@ func Run(app App) int // os.Exit(cli.Run(app))
 ```
 
 `cli.Run` validates the whole wiring at startup and refuses to start (named
-error, non-zero exit) on: nil `Orchestrator`/`Agent`; empty `Flows`/`Artifacts`;
+error, non-zero exit) on: nil `Orchestrator`/`Agent`/`Flow`; empty `Artifacts`;
 a flow with zero steps; duplicate artifact/signal ids; an `AddStep`
-referencing an unknown `ArtifactId`; an
+referencing an unknown `ArtifactId`; or an
 `AddSignalStep`/`AwaitSignal`/`RequireSignal` referencing a signal not in
-`Orchestrator.SupportedSignals()`; or two flows that would ambiguously shadow each
-other.
+`Orchestrator.SupportedSignals()`.
 
 ### 3. How a step is dispatched (`run-step` → `RunOne`)
 
@@ -226,9 +225,11 @@ Every `run-step` runs the same orchestrator (`cli/cmd_run.go` → `RunOne`):
    (signals refreshed by orchestrator-internal polling).
 3. **Preflight** (if configured) — a non-nil error short-circuits the
    invocation as `skipped`, no budget spent.
-4. **Select the flow** — the first flow whose `Types()` match `Item.Type`,
-   whose `RequireSignal` preconditions are all set, and that has a pending
-   step. No pending step anywhere → **finalize** (via `Finalizer`, if the
+4. **The remit, then the step** — an item whose `Type` is outside the flow's
+   remit (`Types()`, empty meaning universal) is reported `blocked`: it is
+   another binary's work, and nothing is dispatched. Otherwise the flow runs
+   when its `RequireSignal` preconditions are all set and it has a pending
+   step. No pending step → **finalize** (via `Finalizer`, if
    the orchestrator can finalize it) and report `done`.
 5. **Seed once** — on an item with no artifacts yet, `SeedState` pre-loads
    the artifact set and per-step budget caps. Frozen thereafter (see
@@ -262,15 +263,20 @@ func (f *Flow) AddSignalStep(name string, signal flow.SignalId, do StepHandler, 
 // (another flow's signal step, or an external event the orchestrator observes).
 func (f *Flow) AwaitSignal(name string, signal flow.SignalId, opts ...StepOption)
 
-// Eligibility precondition (NOT a lifecycle item): this flow is only selected
-// once `signal` is already set. Gate one flow on another's completion.
+// Eligibility precondition (NOT a lifecycle item): an item is only begun once
+// `signal` is already set on it. Gate the flow on something else's completion.
 func (f *Flow) RequireSignal(signal flow.SignalId)
 ```
 
-Multiple flows can live in one binary, distinguished by `Item.Type` and
-`RequireSignal`. The canonical example is a contributor flow (plan → … → open
-PR) and a maintainer flow (`RequireSignal("pr-open")` → review → merge) on the
-same item — see [examples/issue/main.go](examples/issue/main.go).
+A binary registers **exactly one** flow. What differs by item is the route
+through the graph, never which graph: heterogeneous processing is the entry
+step electing routes — on the item's type, the creator's standing, or anything
+else it reads — recorded in the journal with its reasons like every other
+decision. `types` is the flow's *remit* (which item types are this binary's
+work); it gates listing and selection and nothing else, and it is consulted
+before the journal's first entry and never after. `RequireSignal` is an
+eligibility precondition on that one flow, not a way to pick between several.
+See [docs/flow-registration.md](docs/flow-registration.md) § What a flow is.
 
 ### `StepHandler` and `StepCtx`
 

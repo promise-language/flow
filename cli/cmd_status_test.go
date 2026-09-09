@@ -791,6 +791,37 @@ func TestStatusFlowState_BlockedDisplacesEligibleOnly(t *testing.T) {
 	}
 }
 
+// The table above exercises the two renderers directly, so it can hand them a
+// combination the command must actually reach. This one goes through cmdStatus:
+// an item whose type is outside the remit is one RunOne blocks without
+// dispatching anything (docs/flow-registration.md § Item types), so `status`
+// must not report a step of the flow as pending on it. Announcing an eligible
+// step here while `resolve` stops before dispatch is the one fact answered two
+// ways that statusFlowState exists to prevent.
+func TestCmdStatus_ItemOutsideTheRemitReportsNoMatchingFlow(t *testing.T) {
+	app, _, _ := unmatchedTypeApp(t, flow.Item{Ref: itemRefFor("1"), Type: "chore", Title: "chore#1"})
+	out := &bytes.Buffer{}
+	errBuf := &bytes.Buffer{}
+	app.Out, app.Err = out, errBuf
+
+	if code := app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus --json = %d; stderr=%q", code, errBuf.String())
+	}
+	var payload statusPayload
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if payload.FlowState != flowStateNoMatchingFlow {
+		t.Errorf("flow_state = %q, want %q", payload.FlowState, flowStateNoMatchingFlow)
+	}
+	if payload.Flow != "" {
+		t.Errorf("flow = %q, want none for an item outside the remit", payload.Flow)
+	}
+	if len(payload.Steps) != 0 {
+		t.Errorf("steps = %+v, want none for an item outside the remit", payload.Steps)
+	}
+}
+
 // blockStatusEnv is the park/grant scaffolding with one landed blocker and one
 // still open declared on the claimed item.
 func blockStatusEnv(t *testing.T) *parkGrantEnv {

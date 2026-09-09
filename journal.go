@@ -76,6 +76,14 @@ type Spend struct {
 // argument StepId makes for merging the two id namespaces. The wire's `type`
 // field (docs/github-schema.md § Journal entries) exists because a wire reader
 // has no flow; it is derived at write time.
+//
+// Nor does it carry the AWAITED marker yet — the successor's role, or the
+// signal when the successor is a wait (docs/orchestrator.md § Writing
+// payloads). That one is not derivable by its reader: the orchestrator has no
+// flow, so the SDK must hand it the value for the `flow:awaits:<…>` label it
+// maintains. It lands with the write path that needs it, AppendEntry (#239);
+// here, where the entry is only read back, there is nothing to compute it from
+// and nothing that would read it.
 type JournalEntry struct {
 	// Step is the step's result id — a step's identity everywhere.
 	Step StepId
