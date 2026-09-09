@@ -113,6 +113,23 @@ func TestNewRefusesARelativeWorktreeDir(t *testing.T) {
 	if got, err := resolveWorktreeDir("bin"); err == nil {
 		t.Errorf("resolveWorktreeDir(\"bin\") = %q, want a refusal — an existing relative path is still the operator's cwd", got)
 	}
+
+	// A relative name that CANONICALIZES TO AN ABSOLUTE PATH is the case that
+	// tells the two orderings apart, and "bin" above is not it: EvalSymlinks
+	// answers a relative path for a relative one, so a refusal that ran second
+	// would still catch "bin" and the ordering would look guarded when it was
+	// not. An absolute symbolic link is the exception — EvalSymlinks follows it
+	// and the answer comes back absolute — so this name would sail past a
+	// second-place IsAbs check and be accepted as the caller's worktree. What
+	// they configured was a name; what they would have got is a directory
+	// chosen by wherever the operator was standing, which is the whole of what
+	// the refusal exists to prevent.
+	if err := os.Symlink(t.TempDir(), "link"); err != nil {
+		t.Skipf("symlinks are unavailable here: %v", err)
+	}
+	if got, err := resolveWorktreeDir("link"); err == nil {
+		t.Errorf("resolveWorktreeDir(\"link\") = %q, want a refusal — a relative name is the operator's cwd however it resolves", got)
+	}
 }
 
 // An absolute WorktreeDir is the caller's answer and is kept exactly: New
@@ -253,6 +270,35 @@ func TestResolveWorktreeDirAcceptsAnAbsoluteWorktreeThatDoesNotExistYet(t *testi
 		(&Orchestrator{cfg: Config{WorktreeDir: after}}).arenaFingerprint(); pre != post {
 		t.Errorf("flow:arena fingerprints differ (%s vs %s) for one worktree before and after it was created", pre, post)
 	}
+
+	// And through New, which is where a caller meets this. "New never touches
+	// the filesystem" is the premise the acceptance rests on, and it is a
+	// property of New rather than of the helper above: a check added anywhere
+	// along the way — a stat to confirm the directory is real, a rev-parse to
+	// confirm it is a checkout — would refuse the caller naming a worktree they
+	// are about to create, and every assertion above would still pass while it
+	// did. What comes back is the canonical path, already the ArenaId the item
+	// will be claimed under.
+	t.Run("through New", func(t *testing.T) {
+		absent := filepath.Join(tmp, "also", "not", "created")
+		want := mustResolveWorktree(t, absent)
+		b, err := New(Config{
+			WorktreeDir: absent,
+			Owner:       "acme",
+			Repo:        "widget",
+			BinaryName:  "issue",
+			Token:       "fake-token",
+		})
+		if err != nil {
+			t.Fatalf("New(WorktreeDir: %q): %v — a worktree the caller is about to create is not a bad config", absent, err)
+		}
+		if b.cfg.WorktreeDir != want {
+			t.Errorf("WorktreeDir = %q, want %q", b.cfg.WorktreeDir, want)
+		}
+		if got := string(b.arena().Id); got != want {
+			t.Errorf("ArenaId = %q, want the worktree %q", got, want)
+		}
+	})
 }
 
 func mustResolveWorktree(t *testing.T, dir string) string {

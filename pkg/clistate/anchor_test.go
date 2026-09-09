@@ -209,6 +209,46 @@ func TestStateDirRefusesToAnchorOnTheHomeDirectory(t *testing.T) {
 	}
 }
 
+// The guard refuses the home directory ITSELF, and nothing under it. The
+// everyday install is a checkout inside $HOME — ~/prog/flow, with the binary at
+// bin/issue — and canonicalizing $HOME is what puts that install through this
+// comparison for the first time on a machine whose home is reached through a
+// symlink, where the comparison never used to match. A guard that refused a
+// DESCENDANT of home rather than home itself would be indistinguishable from
+// this one everywhere the other tests look — they place the checkout beside the
+// home, not below it — and would leave the ordinary install with no arena at
+// all, refusing the checkout the operator is standing in for looking too much
+// like a home.
+func TestStateDirAnchorsOnACheckoutInsideASymlinkedHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX layout")
+	}
+	// The real tree is canonical because the answer the child reports is; only
+	// the $HOME it is handed goes through the link.
+	tmp := flow.CanonicalPath(t.TempDir())
+	realTree := filepath.Join(tmp, "real")
+	home := filepath.Join(realTree, "home")
+	checkout := filepath.Join(home, "prog", "flow")
+	decoy := filepath.Join(realTree, "decoy")
+	for _, d := range []string{filepath.Join(checkout, ".git"), filepath.Join(decoy, ".git")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(tmp, "link")
+	if err := os.Symlink(realTree, link); err != nil {
+		t.Skipf("symlinks are unavailable here: %v", err)
+	}
+	exe := filepath.Join(checkout, "bin", "prog")
+	installExe(t, exe)
+
+	spelled := filepath.Join(link, "home")
+	if got, want := runHelper(t, exe, decoy, spelled), "DIR "+filepath.Join(checkout, ".flow"); got != want {
+		t.Errorf("a binary at %s, with $HOME spelled %s, answered %q, want %q — a checkout under home is still a checkout",
+			exe, spelled, got, want)
+	}
+}
+
 // And it refuses that home however $HOME is SPELLED. The guard is a string
 // comparison against a walk that descends from the resolved executable, while
 // $HOME arrives verbatim: a home reached through a symlinked component —
