@@ -120,14 +120,13 @@ func anchorTree(t *testing.T) (root, decoy, home string) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX layout")
 	}
-	// EvalSymlinks, because the derivation resolves the binary's path and the
-	// comparison is by string: on macOS /var is a symlink to /private/var, so
-	// an unresolved tempdir would describe a different tree than the one the
-	// child reports.
-	tmp, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	// CanonicalPath, because the derived answer the child reports is canonical
+	// by contract — one location has one spelling — so the path these tests
+	// build their expectation from has to be too. On macOS /var is a symlink to
+	// /private/var, and an unresolved tempdir would describe a different tree
+	// than the one the child names. The production helper is what says this is
+	// the same canonicalization rather than a test's own idea of one.
+	tmp := flow.CanonicalPath(t.TempDir())
 	root, decoy, home = filepath.Join(tmp, "checkout"), filepath.Join(tmp, "decoy"), filepath.Join(tmp, "home")
 	// The decoy is a checkout too, and it is where the process is started. A
 	// state dir read off the working directory would resolve HERE and look
@@ -204,6 +203,90 @@ func TestStateDirRefusesToAnchorOnTheHomeDirectory(t *testing.T) {
 	got := runHelper(t, exe, decoy, home)
 	if !strings.HasPrefix(got, "ERR ") {
 		t.Fatalf("a binary installed at %s answered %q, want a refusal", exe, got)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".flow")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("claim state was written into the home directory; stat err = %v", err)
+	}
+}
+
+// The guard refuses the home directory ITSELF, and nothing under it. The
+// everyday install is a checkout inside $HOME — ~/prog/flow, with the binary at
+// bin/issue — and canonicalizing $HOME is what puts that install through this
+// comparison for the first time on a machine whose home is reached through a
+// symlink, where the comparison never used to match. A guard that refused a
+// DESCENDANT of home rather than home itself would be indistinguishable from
+// this one everywhere the other tests look — they place the checkout beside the
+// home, not below it — and would leave the ordinary install with no arena at
+// all, refusing the checkout the operator is standing in for looking too much
+// like a home.
+func TestStateDirAnchorsOnACheckoutInsideASymlinkedHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX layout")
+	}
+	// The real tree is canonical because the answer the child reports is; only
+	// the $HOME it is handed goes through the link.
+	tmp := flow.CanonicalPath(t.TempDir())
+	realTree := filepath.Join(tmp, "real")
+	home := filepath.Join(realTree, "home")
+	checkout := filepath.Join(home, "prog", "flow")
+	decoy := filepath.Join(realTree, "decoy")
+	for _, d := range []string{filepath.Join(checkout, ".git"), filepath.Join(decoy, ".git")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(tmp, "link")
+	if err := os.Symlink(realTree, link); err != nil {
+		t.Skipf("symlinks are unavailable here: %v", err)
+	}
+	exe := filepath.Join(checkout, "bin", "prog")
+	installExe(t, exe)
+
+	spelled := filepath.Join(link, "home")
+	if got, want := runHelper(t, exe, decoy, spelled), "DIR "+filepath.Join(checkout, ".flow"); got != want {
+		t.Errorf("a binary at %s, with $HOME spelled %s, answered %q, want %q — a checkout under home is still a checkout",
+			exe, spelled, got, want)
+	}
+}
+
+// And it refuses that home however $HOME is SPELLED. The guard is a string
+// comparison against a walk that descends from the resolved executable, while
+// $HOME arrives verbatim: a home reached through a symlinked component —
+// /home → /mnt/home, or any macOS home under /var → /private/var — is spelled
+// one way on each side, the comparison never matches, and the guard silently
+// does not fire. What follows is not a refusal but the walk continuing into the
+// home directory and adopting it: the ArenaId shared by every binary installed
+// that way, which is precisely what the guard exists to refuse.
+//
+// The fixture's temp root is deliberately NOT resolved here. Handing the child
+// an already-canonical $HOME is what hides this.
+func TestStateDirRefusesAHomeDirectoryReachedThroughASymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX layout")
+	}
+	tmp := t.TempDir()
+	// A real subtree, and a sibling symlink pointing at it. The binary is
+	// installed at its real path, the way an install puts it there; only the
+	// $HOME the child is handed goes through the link.
+	realTree := filepath.Join(tmp, "real")
+	home := filepath.Join(realTree, "home")
+	decoy := filepath.Join(realTree, "decoy")
+	for _, d := range []string{filepath.Join(home, ".git"), filepath.Join(decoy, ".git")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(tmp, "link")
+	if err := os.Symlink(realTree, link); err != nil {
+		t.Skipf("symlinks are unavailable here: %v", err)
+	}
+	exe := filepath.Join(home, "go", "bin", "prog")
+	installExe(t, exe)
+
+	got := runHelper(t, exe, decoy, filepath.Join(link, "home"))
+	if !strings.HasPrefix(got, "ERR ") {
+		t.Fatalf("a binary installed at %s, with $HOME spelled %s, answered %q, want a refusal",
+			exe, filepath.Join(link, "home"), got)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".flow")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("claim state was written into the home directory; stat err = %v", err)
