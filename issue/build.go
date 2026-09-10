@@ -217,12 +217,18 @@ func (b *builder) resolveFlow(cfg Config) *flow.Flow {
 // step (docs/issue-flow.md § The branching sequence is declared): plan touches
 // nothing, open branch establishes the item's branch, and every producing step
 // from there both requires and returns it.
+//
+// Every registration also declares its Prompts. The mechanical steps —
+// docs/issue-flow.md § The graph marks them in bold — declare none, and the
+// declaration is what a driver relies on to run them without waiting for
+// quota: a prompt from one is refused before anything is sent.
 func (b *builder) addContributorSteps(f *flow.Flow) {
 	f.AddStep("write plan", flow.ArtifactId(StepPlan), b.stepPlan,
 		flow.StepConfig{
-			Role:  contributorRole,
-			Entry: true,
-			Next:  []flow.StepId{flow.StepId(StepBranch)},
+			Role:    contributorRole,
+			Entry:   true,
+			Next:    []flow.StepId{flow.StepId(StepBranch)},
+			Prompts: flow.PromptsAgent,
 			// The one step in the flow that modifies nothing: a plan written by
 			// a step that had already started changing things would describe
 			// work done rather than decide work to do.
@@ -231,46 +237,56 @@ func (b *builder) addContributorSteps(f *flow.Flow) {
 		})
 	f.AddStep("open branch", flow.ArtifactId(StepBranch), b.stepOpenBranch,
 		flow.StepConfig{
-			Role:   contributorRole,
-			Next:   []flow.StepId{flow.StepId(StepImplement)},
-			Needs:  flow.NeedsAny,
-			Writes: flow.WriteContract{MayBranch: true, MayCommit: true},
-			Leaves: flow.LeavesItemBranch,
+			Role:    contributorRole,
+			Next:    []flow.StepId{flow.StepId(StepImplement)},
+			Prompts: flow.PromptsNone,
+			Needs:   flow.NeedsAny,
+			Writes:  flow.WriteContract{MayBranch: true, MayCommit: true},
+			Leaves:  flow.LeavesItemBranch,
 		})
 	f.AddStep("implement the change", flow.ArtifactId(StepImplement), b.stepImplement,
 		flow.StepConfig{
-			Role:   contributorRole,
-			Next:   []flow.StepId{flow.StepId(StepReview)},
-			Needs:  flow.NeedsItemBranch,
-			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true},
-			Leaves: flow.LeavesItemBranch,
+			Role:    contributorRole,
+			Next:    []flow.StepId{flow.StepId(StepReview)},
+			Prompts: flow.PromptsAgent,
+			Needs:   flow.NeedsItemBranch,
+			Writes:  flow.WriteContract{MayCommit: true, MayEditTree: true},
+			Leaves:  flow.LeavesItemBranch,
 		})
 	f.AddStep("review the work", flow.ArtifactId(StepReview), b.stepReview,
 		flow.StepConfig{
-			Role:   contributorRole,
-			Next:   []flow.StepId{flow.StepId(StepCoverage)},
-			Needs:  flow.NeedsItemBranch,
-			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true},
-			Leaves: flow.LeavesItemBranch,
+			Role:    contributorRole,
+			Next:    []flow.StepId{flow.StepId(StepCoverage)},
+			Prompts: flow.PromptsAgent,
+			Needs:   flow.NeedsItemBranch,
+			Writes:  flow.WriteContract{MayCommit: true, MayEditTree: true},
+			Leaves:  flow.LeavesItemBranch,
 		})
 	f.AddStep("analyze coverage", flow.ArtifactId(StepCoverage), b.stepCoverage,
 		flow.StepConfig{
-			Role:   contributorRole,
-			Next:   []flow.StepId{flow.StepId(StepOpenPR)},
-			Needs:  flow.NeedsItemBranch,
-			Writes: flow.WriteContract{MayCommit: true, MayEditTree: true},
-			Leaves: flow.LeavesItemBranch,
+			Role:    contributorRole,
+			Next:    []flow.StepId{flow.StepId(StepOpenPR)},
+			Prompts: flow.PromptsAgent,
+			Needs:   flow.NeedsItemBranch,
+			Writes:  flow.WriteContract{MayCommit: true, MayEditTree: true},
+			Leaves:  flow.LeavesItemBranch,
 		})
 	// The method, not a closure over a successor: the request has ONE successor
 	// now, so there is nothing left for a closure to carry. Close branch is
 	// where the contributor's part ends whoever is running it.
 	f.AddSignalStep("create pull request", flow.SignalId(StepOpenPR), b.stepOpenPR,
 		flow.StepConfig{
-			Role:   contributorRole,
-			Next:   []flow.StepId{flow.StepId(StepCloseBranch)},
-			Needs:  flow.NeedsItemBranch,
-			Writes: flow.WriteContract{MayBranch: true, MayCommit: true},
-			Leaves: flow.LeavesItemBranch,
+			Role: contributorRole,
+			Next: []flow.StepId{flow.StepId(StepCloseBranch)},
+			// Declared as the step BEHAVES, not as docs/issue-flow.md § The
+			// graph bolds it for the end state: stepOpenPR prompts on its
+			// disclosure-repair path, and a step that prompts on any path is
+			// an agent step. Splitting the repair out so the request becomes
+			// mechanical is #321, which flips this one value.
+			Prompts: flow.PromptsAgent,
+			Needs:   flow.NeedsItemBranch,
+			Writes:  flow.WriteContract{MayBranch: true, MayCommit: true},
+			Leaves:  flow.LeavesItemBranch,
 		})
 }
 
@@ -288,11 +304,12 @@ func (b *builder) addCloseBranch(f *flow.Flow) {
 			// housekeeping on the branch the contributor cut — it needs nothing
 			// the merge needs, so tagging it maintainer would put a capability
 			// requirement on the one step that has none.
-			Role:   contributorRole,
-			Next:   []flow.StepId{flow.StepId(StepReviewProposal)},
-			Needs:  flow.NeedsItemBranch,
-			Writes: flow.WriteContract{MayBranch: true},
-			Leaves: flow.LeavesBase,
+			Role:    contributorRole,
+			Next:    []flow.StepId{flow.StepId(StepReviewProposal)},
+			Prompts: flow.PromptsNone,
+			Needs:   flow.NeedsItemBranch,
+			Writes:  flow.WriteContract{MayBranch: true},
+			Leaves:  flow.LeavesBase,
 		})
 }
 
@@ -311,25 +328,31 @@ func (b *builder) addMaintainerSteps(f *flow.Flow) {
 				flow.StepId(StepImplement),
 			},
 			MayFinalize: []flow.Disposition{flow.DispositionRejected},
+			Prompts:     flow.PromptsAgent,
 			// It judges what is proposed and touches nothing: the diff, the
 			// plan, the briefings and the gate result all reach it as records.
 			Needs:  flow.NeedsAny,
 			Leaves: flow.LeavesAsFound,
 		})
+	// The three that carry a judged proposal to a merged change are mechanical:
+	// they run the gate, land the change and record what landed, and none of
+	// them reaches the agent.
 	f.AddStep("verify merge result", flow.ArtifactId(StepVerifyMerge), b.stepVerifyMerge,
 		flow.StepConfig{
-			Role:   maintainerRole,
-			Next:   []flow.StepId{flow.StepId(StepMerge)},
-			Needs:  flow.NeedsItemBranch,
-			Writes: flow.WriteContract{MayBranch: true, MayCommit: true},
-			Leaves: flow.LeavesAsFound,
+			Role:    maintainerRole,
+			Next:    []flow.StepId{flow.StepId(StepMerge)},
+			Prompts: flow.PromptsNone,
+			Needs:   flow.NeedsItemBranch,
+			Writes:  flow.WriteContract{MayBranch: true, MayCommit: true},
+			Leaves:  flow.LeavesAsFound,
 		})
 	f.AddSignalStep("merge pull request", flow.SignalId(StepMerge), b.stepMerge,
 		flow.StepConfig{
-			Role:   maintainerRole,
-			Next:   []flow.StepId{flow.StepId(StepRecordMerge)},
-			Needs:  flow.NeedsAny,
-			Leaves: flow.LeavesAsFound,
+			Role:    maintainerRole,
+			Next:    []flow.StepId{flow.StepId(StepRecordMerge)},
+			Prompts: flow.PromptsNone,
+			Needs:   flow.NeedsAny,
+			Leaves:  flow.LeavesAsFound,
 		})
 	// The finalizer. What landed has exactly one name, and recording it is the
 	// last thing the resolution owes — finalization is elected, never derived
@@ -338,6 +361,7 @@ func (b *builder) addMaintainerSteps(f *flow.Flow) {
 		flow.StepConfig{
 			Role:        maintainerRole,
 			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+			Prompts:     flow.PromptsNone,
 			Needs:       flow.NeedsAny,
 			Leaves:      flow.LeavesAsFound,
 		})

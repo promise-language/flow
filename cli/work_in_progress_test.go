@@ -53,7 +53,7 @@ func TestWorkInProgress_BackendWithoutAStore(t *testing.T) {
 			gotBody, gotErr = ctx.WorkInProgress()
 			saveErr = ctx.RecordWorkInProgress("half a plan")
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Orchestrator = noWorkBackend{app.Orchestrator}
 
@@ -97,7 +97,7 @@ func TestWorkInProgress_SurvivesToTheNextDispatch(t *testing.T) {
 			}
 			nextInvocation = seen
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "parked" {
@@ -123,7 +123,7 @@ func TestWorkInProgress_ClearedWhenTheStepCompletes(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
@@ -155,7 +155,7 @@ func TestWorkInProgress_RefusedAppendKeepsTheDraft(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Orchestrator = appendFailsBackend{Orchestrator: be, err: errors.New("disk went away")}
 
@@ -193,7 +193,7 @@ func TestWorkInProgress_IsNotVisibleToAnotherStep(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return flow.StepResult{}, ctx.Park(flow.ParkRequest{Kind: flow.ParkBlocked, Reason: "stopping here so the record outlives the step"})
-		}, flow.StepConfig{Role: "contributor", Entry: true, Next: []flow.StepId{"commit"}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, Next: []flow.StepId{"commit"}})
 		// The second step, and the entry's declared successor — the route the
 		// journal below elects. Registered here rather than after the helper's
 		// validate, because the whole graph is validated at startup and a
@@ -201,7 +201,7 @@ func TestWorkInProgress_IsNotVisibleToAnotherStep(t *testing.T) {
 		f.AddStep("record the commit", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			successorSaw, _ = ctx.WorkInProgress()
 			return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("abc"), nil
-		}, flow.StepConfig{Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "parked" {
@@ -266,7 +266,7 @@ func TestWorkInProgress_ReadFailureReachesTheStep(t *testing.T) {
 			body, first = ctx.WorkInProgress()
 			_, second = ctx.WorkInProgress()
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	store := &loadFailsBackend{Orchestrator: be, err: wantErr}
 	app.Orchestrator = store
@@ -303,7 +303,7 @@ func TestWorkInProgress_SaveFailureReachesTheStepAndStashesNothing(t *testing.T)
 			saveErr = ctx.RecordWorkInProgress("half a plan")
 			readBack, _ = ctx.WorkInProgress()
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Orchestrator = saveFailsBackend{Orchestrator: be, err: wantErr}
 

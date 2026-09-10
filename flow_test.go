@@ -9,9 +9,9 @@ func noopHandler(StepCtx) (StepResult, error) { return StepResult{}, nil }
 
 func TestNewFlow_AddStepRegistersInOrder(t *testing.T) {
 	f := NewFlow("implement", []ItemType{"task"})
-	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
-	f.AddStep("implement", "impl", noopHandler, StepConfig{})
-	f.AddSignalStep("create pr", "pr-open", noopHandler, StepConfig{})
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{Prompts: PromptsAgent})
+	f.AddStep("implement", "impl", noopHandler, StepConfig{Prompts: PromptsAgent})
+	f.AddSignalStep("create pr", "pr-open", noopHandler, StepConfig{Prompts: PromptsAgent})
 
 	got := f.Steps()
 	want := []string{"write plan", "implement", "create pr"}
@@ -49,8 +49,8 @@ func TestAddStep_PanicsOnDuplicateName(t *testing.T) {
 		}
 	}()
 	f := NewFlow("x", nil)
-	f.AddStep("plan", "plan-a", noopHandler, StepConfig{})
-	f.AddStep("plan", "plan-b", noopHandler, StepConfig{}) // duplicate name
+	f.AddStep("plan", "plan-a", noopHandler, StepConfig{Prompts: PromptsAgent})
+	f.AddStep("plan", "plan-b", noopHandler, StepConfig{Prompts: PromptsAgent}) // duplicate name
 }
 
 func TestAddStep_PanicsOnDuplicateResult(t *testing.T) {
@@ -60,8 +60,8 @@ func TestAddStep_PanicsOnDuplicateResult(t *testing.T) {
 		}
 	}()
 	f := NewFlow("x", nil)
-	f.AddStep("step-a", "plan", noopHandler, StepConfig{})
-	f.AddStep("step-b", "plan", noopHandler, StepConfig{}) // duplicate result
+	f.AddStep("step-a", "plan", noopHandler, StepConfig{Prompts: PromptsAgent})
+	f.AddStep("step-b", "plan", noopHandler, StepConfig{Prompts: PromptsAgent}) // duplicate result
 }
 
 func TestAddStep_PanicsOnNilHandler(t *testing.T) {
@@ -71,7 +71,7 @@ func TestAddStep_PanicsOnNilHandler(t *testing.T) {
 		}
 	}()
 	f := NewFlow("x", nil)
-	f.AddStep("plan", "plan", nil, StepConfig{})
+	f.AddStep("plan", "plan", nil, StepConfig{Prompts: PromptsAgent})
 }
 
 func TestAwaitSignal_AllowsNoHandler(t *testing.T) {
@@ -98,7 +98,7 @@ func resolvedArtifact(id ArtifactId, t ArtifactType) ArtifactRecord {
 func TestIsReady_RequireSignal(t *testing.T) {
 	f := NewFlow("merge", nil)
 	f.RequireSignal("pr-open")
-	f.AddStep("merge-step", "merge-commit", noopHandler, StepConfig{})
+	f.AddStep("merge-step", "merge-commit", noopHandler, StepConfig{Prompts: PromptsAgent})
 
 	state := &Item{Signals: map[SignalId]SignalState{}}
 	if f.IsReady(state) {
@@ -127,6 +127,7 @@ func TestStepConfig_EveryFieldRoundTripsOntoLifecycleItem(t *testing.T) {
 		Needs:       NeedsItemBranch,
 		Writes:      WriteContract{MayCommit: true, MayEditTree: true},
 		Leaves:      LeavesItemBranch,
+		Prompts:     PromptsNone,
 	}
 	f.AddStep("implement the change", "impl", noopHandler, cfg)
 
@@ -134,6 +135,9 @@ func TestStepConfig_EveryFieldRoundTripsOntoLifecycleItem(t *testing.T) {
 		t.Helper()
 		if li.Role != "contributor" {
 			t.Errorf("%s: Role = %q, want contributor", what, li.Role)
+		}
+		if li.Prompts != PromptsNone {
+			t.Errorf("%s: Prompts = %q, want %q", what, li.Prompts, PromptsNone)
 		}
 		if !li.Entry {
 			t.Errorf("%s: Entry = false, want true", what)
@@ -177,13 +181,15 @@ func TestStepConfig_EveryFieldRoundTripsOntoLifecycleItem(t *testing.T) {
 	check("Items", items[0])
 }
 
-// The zero value stays legal and means what the code does today: nothing
-// established, nothing verified, a handler-produced result, no route, no
-// finalization, not the entry.
+// Every defaulting field's zero value stays legal and means what the code does
+// today: nothing established, nothing verified, a handler-produced result, no
+// route, no finalization, not the entry. Prompts is the one field with no
+// default — a step declares it, and only the wait registers with the zero
+// StepConfig.
 func TestStepConfig_ZeroValueNormalisesToTheLoosestMembers(t *testing.T) {
 	f := NewFlow("x", nil)
-	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
-	f.AddSignalStep("create pr", "pr-open", noopHandler, StepConfig{})
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{Prompts: PromptsAgent})
+	f.AddSignalStep("create pr", "pr-open", noopHandler, StepConfig{Prompts: PromptsAgent})
 	f.AwaitSignal("await merge", "pr-merged", StepConfig{})
 
 	for _, li := range f.Items() {
@@ -240,9 +246,9 @@ func mustPanic(t *testing.T, want string, fn func()) {
 
 func TestAddStep_PanicsOnSecondEntry(t *testing.T) {
 	f := NewFlow("x", nil)
-	f.AddStep("write plan", "plan", noopHandler, StepConfig{Entry: true})
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{Prompts: PromptsAgent, Entry: true})
 	mustPanic(t, "already does", func() {
-		f.AddStep("implement", "impl", noopHandler, StepConfig{Entry: true})
+		f.AddStep("implement", "impl", noopHandler, StepConfig{Prompts: PromptsAgent, Entry: true})
 	})
 }
 
@@ -250,7 +256,7 @@ func TestAddStep_PanicsOnSecondEntry(t *testing.T) {
 // is one entry per GRAPH, not one per kind of lifecycle item.
 func TestAwaitSignal_PanicsOnSecondEntry(t *testing.T) {
 	f := NewFlow("x", nil)
-	f.AddStep("write plan", "plan", noopHandler, StepConfig{Entry: true})
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{Prompts: PromptsAgent, Entry: true})
 	mustPanic(t, "already does", func() {
 		f.AwaitSignal("await merge", "pr-merged", StepConfig{Entry: true})
 	})
@@ -286,6 +292,7 @@ func TestStepConfig_DeclaredSlicesAreCopiedInAndOut(t *testing.T) {
 	next := []StepId{"impl"}
 	finals := []Disposition{DispositionResolved}
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Entry:       true,
 		Next:        next,
 		MayFinalize: finals,
@@ -323,28 +330,128 @@ func TestStepConfig_DeclaredSlicesAreCopiedInAndOut(t *testing.T) {
 func TestAddStep_PanicsOnUnknownCapture(t *testing.T) {
 	f := NewFlow("x", nil)
 	mustPanic(t, "Capture", func() {
-		f.AddStep("write plan", "plan", noopHandler, StepConfig{Capture: "guessed"})
+		f.AddStep("write plan", "plan", noopHandler, StepConfig{Prompts: PromptsAgent, Capture: "guessed"})
 	})
 }
 
 func TestAddStep_PanicsOnUnknownNeeds(t *testing.T) {
 	f := NewFlow("x", nil)
 	mustPanic(t, "Needs", func() {
-		f.AddStep("write plan", "plan", noopHandler, StepConfig{Needs: "as-found"})
+		f.AddStep("write plan", "plan", noopHandler, StepConfig{Prompts: PromptsAgent, Needs: "as-found"})
 	})
 }
 
 func TestAddStep_PanicsOnUnknownLeaves(t *testing.T) {
 	f := NewFlow("x", nil)
 	mustPanic(t, "Leaves", func() {
-		f.AddStep("write plan", "plan", noopHandler, StepConfig{Leaves: "any"})
+		f.AddStep("write plan", "plan", noopHandler, StepConfig{Prompts: PromptsAgent, Leaves: "any"})
 	})
+}
+
+// Prompts is REQUIRED on a step, and its absence is a defect of its own: none
+// as a zero value would publish a guarantee no author wrote, and agent as one
+// would leave the property carried by accident, which is what makes a
+// property unreliable (docs/flow-registration.md § Step configuration). Both
+// registrars that take a handler refuse the omission, naming themselves and
+// the step, and the omission is named apart from an unknown value so the
+// reader is not sent looking for a typo that is not there.
+func TestRegistration_PanicsWhenAStepDeclaresNoPrompts(t *testing.T) {
+	cases := []struct {
+		registrar string
+		declare   func(*Flow)
+	}{
+		{"flow.AddStep:", func(f *Flow) { f.AddStep("write plan", "plan", noopHandler, StepConfig{}) }},
+		{"flow.AddSignalStep:", func(f *Flow) { f.AddSignalStep("create pr", "pr-open", noopHandler, StepConfig{}) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.registrar, func(t *testing.T) {
+			f := NewFlow("x", nil)
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatal("a step registered with no Prompts; every default would be wrong, so the omission must panic")
+				}
+				msg, _ := r.(string)
+				for _, want := range []string{tc.registrar, "declares no Prompts", "agent", "none"} {
+					if !strings.Contains(msg, want) {
+						t.Errorf("panic = %q, want it to mention %q", msg, want)
+					}
+				}
+			}()
+			tc.declare(f)
+		})
+	}
+}
+
+// An out-of-vocabulary value is refused the way an unknown Capture, Needs or
+// Leaves is: naming the field and the vocabulary.
+func TestAddStep_PanicsOnUnknownPrompts(t *testing.T) {
+	f := NewFlow("x", nil)
+	mustPanic(t, "Prompts \"mechanical\", which is not one of [agent none]", func() {
+		f.AddStep("write plan", "plan", noopHandler, StepConfig{Prompts: "mechanical"})
+	})
+}
+
+// A wait dispatches nothing, so it has no prompt policy: given one it is
+// refused where it is written, as a Role or a MayFinalize on a wait is, and
+// without one it registers — the zero StepConfig is legal there and nowhere
+// else.
+func TestAwaitSignal_PanicsOnPromptsAndRegistersWithout(t *testing.T) {
+	for _, p := range AllPromptPolicies() {
+		t.Run(string(p), func(t *testing.T) {
+			f := NewFlow("x", nil)
+			mustPanic(t, "dispatches nothing, so it has no prompt policy", func() {
+				f.AwaitSignal("await merge", "pr-merged", StepConfig{Prompts: p})
+			})
+		})
+	}
+	f := NewFlow("x", nil)
+	f.AwaitSignal("await merge", "pr-merged", StepConfig{}) // must not panic
+	li, ok := f.ItemByResult("pr-merged")
+	if !ok {
+		t.Fatal("ItemByResult missing for the registered wait")
+	}
+	if li.Prompts != "" {
+		t.Errorf("a wait's Prompts = %q, want empty: it declares none", li.Prompts)
+	}
+}
+
+// Mechanical is the ONE definition of "dispatching this invokes no agent": a
+// step declaring none, and a wait, which dispatches nothing at all. Every
+// consumer — the chokepoint, the envelope, a driver's pacing — reads it, so it
+// is pinned here rather than re-derived in each of their tests.
+func TestLifecycleItem_Mechanical(t *testing.T) {
+	f := NewFlow("x", nil)
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{Prompts: PromptsAgent})
+	f.AddStep("open branch", "branch", noopHandler, StepConfig{Prompts: PromptsNone})
+	f.AddSignalStep("create pr", "pr-open", noopHandler, StepConfig{Prompts: PromptsAgent})
+	f.AddSignalStep("merge", "pr-merge", noopHandler, StepConfig{Prompts: PromptsNone})
+	f.AwaitSignal("await merge", "pr-merged", StepConfig{})
+
+	want := map[StepId]bool{
+		"plan":      false,
+		"branch":    true,
+		"pr-open":   false,
+		"pr-merge":  true,
+		"pr-merged": true,
+	}
+	items := f.Items()
+	if len(items) != len(want) {
+		t.Fatalf("Items len = %d, want %d", len(items), len(want))
+	}
+	for _, li := range items {
+		if got := li.Mechanical(); got != want[li.Result()] {
+			t.Errorf("%s (kind %d, Prompts %q): Mechanical() = %v, want %v",
+				li.Result(), li.Kind, li.Prompts, got, want[li.Result()])
+		}
+	}
 }
 
 func TestAddStep_PanicsOnUnknownDisposition(t *testing.T) {
 	f := NewFlow("x", nil)
 	mustPanic(t, "not one of", func() {
 		f.AddStep("write plan", "plan", noopHandler, StepConfig{
+			Prompts:     PromptsAgent,
 			MayFinalize: []Disposition{"abandoned"},
 		})
 	})
@@ -354,6 +461,7 @@ func TestAddStep_PanicsOnDuplicateDisposition(t *testing.T) {
 	f := NewFlow("x", nil)
 	mustPanic(t, "twice in MayFinalize", func() {
 		f.AddStep("write plan", "plan", noopHandler, StepConfig{
+			Prompts:     PromptsAgent,
 			MayFinalize: []Disposition{DispositionResolved, DispositionResolved},
 		})
 	})
@@ -362,14 +470,14 @@ func TestAddStep_PanicsOnDuplicateDisposition(t *testing.T) {
 func TestAddStep_PanicsOnEmptyNextId(t *testing.T) {
 	f := NewFlow("x", nil)
 	mustPanic(t, "empty successor id", func() {
-		f.AddStep("write plan", "plan", noopHandler, StepConfig{Next: []StepId{""}})
+		f.AddStep("write plan", "plan", noopHandler, StepConfig{Prompts: PromptsAgent, Next: []StepId{""}})
 	})
 }
 
 func TestAddStep_PanicsOnDuplicateNextId(t *testing.T) {
 	f := NewFlow("x", nil)
 	mustPanic(t, "twice in Next", func() {
-		f.AddStep("write plan", "plan", noopHandler, StepConfig{Next: []StepId{"impl", "impl"}})
+		f.AddStep("write plan", "plan", noopHandler, StepConfig{Prompts: PromptsAgent, Next: []StepId{"impl", "impl"}})
 	})
 }
 
@@ -379,6 +487,7 @@ func TestAddStep_PanicsOnDuplicateNextId(t *testing.T) {
 func TestAddStep_FullyPopulatedLegalConfigDoesNotPanic(t *testing.T) {
 	f := NewFlow("x", nil)
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts:     PromptsNone,
 		Role:        "contributor",
 		Entry:       true,
 		Next:        []StepId{"impl", "pr-open"},
@@ -389,8 +498,9 @@ func TestAddStep_FullyPopulatedLegalConfigDoesNotPanic(t *testing.T) {
 		Leaves:      LeavesItemBranch,
 	})
 	f.AddSignalStep("create pr", "pr-open", noopHandler, StepConfig{
-		Role:  "contributor",
-		Needs: NeedsItemBranch,
+		Prompts: PromptsAgent,
+		Role:    "contributor",
+		Needs:   NeedsItemBranch,
 	})
 	f.AwaitSignal("await merge", "pr-merged", StepConfig{Next: []StepId{"plan"}})
 	if len(f.Steps()) != 3 {
@@ -409,19 +519,26 @@ func TestAddStep_FullyPopulatedLegalConfigDoesNotPanic(t *testing.T) {
 // from each registrar at all — the signal-step path through it is otherwise
 // unexercised.
 func TestRegistration_PanicNamesTheRegistrarThatWasCalled(t *testing.T) {
+	// Each registrar gets its own config: a step must carry Prompts and a wait
+	// must not, and a shared config would trip one of those refusals instead
+	// of the second-entry one the case is about.
 	cases := []struct {
 		registrar string
+		cfg       StepConfig
 		declare   func(*Flow, StepConfig)
 	}{
-		{"flow.AddStep:", func(f *Flow, cfg StepConfig) { f.AddStep("second", "two", noopHandler, cfg) }},
-		{"flow.AddSignalStep:", func(f *Flow, cfg StepConfig) { f.AddSignalStep("second", "two", noopHandler, cfg) }},
-		{"flow.AwaitSignal:", func(f *Flow, cfg StepConfig) { f.AwaitSignal("second", "two", cfg) }},
+		{"flow.AddStep:", StepConfig{Entry: true, Prompts: PromptsAgent},
+			func(f *Flow, cfg StepConfig) { f.AddStep("second", "two", noopHandler, cfg) }},
+		{"flow.AddSignalStep:", StepConfig{Entry: true, Prompts: PromptsAgent},
+			func(f *Flow, cfg StepConfig) { f.AddSignalStep("second", "two", noopHandler, cfg) }},
+		{"flow.AwaitSignal:", StepConfig{Entry: true},
+			func(f *Flow, cfg StepConfig) { f.AwaitSignal("second", "two", cfg) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.registrar, func(t *testing.T) {
 			f := NewFlow("x", nil)
-			f.AddStep("first", "one", noopHandler, StepConfig{Entry: true})
-			mustPanic(t, tc.registrar, func() { tc.declare(f, StepConfig{Entry: true}) })
+			f.AddStep("first", "one", noopHandler, StepConfig{Prompts: PromptsAgent, Entry: true})
+			mustPanic(t, tc.registrar, func() { tc.declare(f, tc.cfg) })
 		})
 	}
 }
@@ -429,7 +546,7 @@ func TestRegistration_PanicNamesTheRegistrarThatWasCalled(t *testing.T) {
 // The step label is a DESCRIPTION, not a name: display text, never an identity.
 func TestLifecycleItem_CarriesTheDescription(t *testing.T) {
 	f := NewFlow("resolve", nil)
-	f.AddStep("write the implementation plan", "plan", noopHandler, StepConfig{})
+	f.AddStep("write the implementation plan", "plan", noopHandler, StepConfig{Prompts: PromptsAgent})
 	li, ok := f.Item("write the implementation plan")
 	if !ok {
 		t.Fatal("Item did not find the step by its description")
@@ -452,5 +569,5 @@ func TestAddStep_PanicsOnEmptyDescription(t *testing.T) {
 			t.Errorf("panic = %v, want it to name the empty description", r)
 		}
 	}()
-	NewFlow("x", nil).AddStep("", "plan", noopHandler, StepConfig{})
+	NewFlow("x", nil).AddStep("", "plan", noopHandler, StepConfig{Prompts: PromptsAgent})
 }

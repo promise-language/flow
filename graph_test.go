@@ -52,6 +52,7 @@ func soloFlow(name string) *Flow {
 func TestValidateGraph_RefusesZeroEntries(t *testing.T) {
 	f := soloFlow("x")
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        soloRole,
 		MayFinalize: []Disposition{DispositionResolved},
 	})
@@ -61,6 +62,7 @@ func TestValidateGraph_RefusesZeroEntries(t *testing.T) {
 func TestValidateGraph_RefusesSuccessorNamingNoRegisteredItem(t *testing.T) {
 	f := soloFlow("x")
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        soloRole,
 		Entry:       true,
 		Next:        []StepId{"typo"},
@@ -72,14 +74,16 @@ func TestValidateGraph_RefusesSuccessorNamingNoRegisteredItem(t *testing.T) {
 func TestValidateGraph_RefusesStepNothingRoutesTo(t *testing.T) {
 	f := soloFlow("x")
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        soloRole,
 		Entry:       true,
 		MayFinalize: []Disposition{DispositionResolved},
 	})
 	// Registered, routes to the entry, and nothing routes to it.
 	f.AddStep("implement", "impl", noopHandler, StepConfig{
-		Role: soloRole,
-		Next: []StepId{"plan"},
+		Prompts: PromptsAgent,
+		Role:    soloRole,
+		Next:    []StepId{"plan"},
 	})
 	wantGraphError(t, f, "implement", "impl", "not reachable from the entry")
 }
@@ -89,13 +93,15 @@ func TestValidateGraph_RefusesStepNothingRoutesTo(t *testing.T) {
 func TestValidateGraph_RefusesCycleWithNoFinalization(t *testing.T) {
 	f := soloFlow("x")
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
-		Role:  soloRole,
-		Entry: true,
-		Next:  []StepId{"impl"},
+		Prompts: PromptsAgent,
+		Role:    soloRole,
+		Entry:   true,
+		Next:    []StepId{"impl"},
 	})
 	f.AddStep("implement", "impl", noopHandler, StepConfig{
-		Role: soloRole,
-		Next: []StepId{"plan"},
+		Prompts: PromptsAgent,
+		Role:    soloRole,
+		Next:    []StepId{"plan"},
 	})
 	wantGraphError(t, f, "write plan", "plan", "cannot reach finalization")
 }
@@ -105,19 +111,21 @@ func TestValidateGraph_RefusesCycleWithNoFinalization(t *testing.T) {
 func TestValidateGraph_RefusesBranchThatCannotFinalize(t *testing.T) {
 	f := soloFlow("x")
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        soloRole,
 		Entry:       true,
 		Next:        []StepId{"impl"},
 		MayFinalize: []Disposition{DispositionRejected},
 	})
 	// Reachable from the entry, routes nowhere, finalizes nothing.
-	f.AddStep("implement", "impl", noopHandler, StepConfig{Role: soloRole})
+	f.AddStep("implement", "impl", noopHandler, StepConfig{Prompts: PromptsAgent, Role: soloRole})
 	wantGraphError(t, f, "implement", "impl", "cannot reach finalization")
 }
 
 func TestValidateGraph_RefusesSignalWaitWithNoSuccessor(t *testing.T) {
 	f := soloFlow("x")
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        soloRole,
 		Entry:       true,
 		Next:        []StepId{"pr-merged"},
@@ -130,16 +138,19 @@ func TestValidateGraph_RefusesSignalWaitWithNoSuccessor(t *testing.T) {
 func TestValidateGraph_RefusesSignalWaitWithTwoSuccessors(t *testing.T) {
 	f := soloFlow("x")
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
-		Role:  soloRole,
-		Entry: true,
-		Next:  []StepId{"pr-merged"},
+		Prompts: PromptsAgent,
+		Role:    soloRole,
+		Entry:   true,
+		Next:    []StepId{"pr-merged"},
 	})
 	f.AwaitSignal("await merge", "pr-merged", StepConfig{Next: []StepId{"impl", "review"}})
 	f.AddStep("implement", "impl", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        soloRole,
 		MayFinalize: []Disposition{DispositionResolved},
 	})
 	f.AddStep("review", "review", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        soloRole,
 		MayFinalize: []Disposition{DispositionRejected},
 	})
@@ -149,11 +160,13 @@ func TestValidateGraph_RefusesSignalWaitWithTwoSuccessors(t *testing.T) {
 func TestValidateGraph_AcceptsEntryThroughStepToFinalization(t *testing.T) {
 	f := soloFlow("x")
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
-		Role:  soloRole,
-		Entry: true,
-		Next:  []StepId{"impl"},
+		Prompts: PromptsAgent,
+		Role:    soloRole,
+		Entry:   true,
+		Next:    []StepId{"impl"},
 	})
 	f.AddStep("implement", "impl", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        soloRole,
 		MayFinalize: []Disposition{DispositionResolved, DispositionRejected},
 	})
@@ -165,12 +178,14 @@ func TestValidateGraph_AcceptsEntryThroughStepToFinalization(t *testing.T) {
 func TestValidateGraph_AcceptsRouteThroughSignalWait(t *testing.T) {
 	f := soloFlow("x")
 	f.AddSignalStep("create pr", "pr-open", noopHandler, StepConfig{
-		Role:  soloRole,
-		Entry: true,
-		Next:  []StepId{"pr-merged"},
+		Prompts: PromptsAgent,
+		Role:    soloRole,
+		Entry:   true,
+		Next:    []StepId{"pr-merged"},
 	})
 	f.AwaitSignal("await merge", "pr-merged", StepConfig{Next: []StepId{"merge-commit"}})
 	f.AddStep("record merge commit", "merge-commit", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        soloRole,
 		MayFinalize: []Disposition{DispositionResolved},
 	})
@@ -182,11 +197,13 @@ func TestValidateGraph_AcceptsRouteThroughSignalWait(t *testing.T) {
 func TestValidateGraph_AcceptsCycleWithAFinalizingExit(t *testing.T) {
 	f := soloFlow("x")
 	f.AddStep("implement", "impl", noopHandler, StepConfig{
-		Role:  soloRole,
-		Entry: true,
-		Next:  []StepId{"review"},
+		Prompts: PromptsAgent,
+		Role:    soloRole,
+		Entry:   true,
+		Next:    []StepId{"review"},
 	})
 	f.AddStep("review the work", "review", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        soloRole,
 		Next:        []StepId{"impl"},
 		MayFinalize: []Disposition{DispositionResolved, DispositionRejected},
@@ -198,6 +215,7 @@ func TestValidateGraph_AcceptsCycleWithAFinalizingExit(t *testing.T) {
 func TestValidateGraph_AcceptsLoneEntryThatFinalizes(t *testing.T) {
 	f := soloFlow("x")
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        soloRole,
 		Entry:       true,
 		MayFinalize: []Disposition{DispositionResolved},
@@ -216,6 +234,7 @@ func TestValidateGraph_RefusesTagNamingNoDeclaredRole(t *testing.T) {
 	f := soloFlow("x")
 	f.Role("maintainer", CapPush, CapMerge)
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        "contribtuor", // the typo the check is for
 		Entry:       true,
 		MayFinalize: []Disposition{DispositionResolved},
@@ -243,6 +262,7 @@ func TestValidateGraph_RefusesTagNamingNoDeclaredRole(t *testing.T) {
 func TestValidateGraph_RefusesStepWithNoRole(t *testing.T) {
 	f := soloFlow("x")
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Entry:       true,
 		MayFinalize: []Disposition{DispositionResolved},
 	})
@@ -256,6 +276,7 @@ func TestValidateGraph_RefusesRoleWithNoCapability(t *testing.T) {
 	f := NewFlow("x", nil)
 	f.Role("ghost")
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        "ghost",
 		Entry:       true,
 		MayFinalize: []Disposition{DispositionResolved},
@@ -268,12 +289,14 @@ func TestValidateGraph_RefusesRoleWithNoCapability(t *testing.T) {
 func TestValidateGraph_AcceptsSignalWaitWithNoRole(t *testing.T) {
 	f := soloFlow("x")
 	f.AddSignalStep("create pr", "pr-open", noopHandler, StepConfig{
-		Role:  soloRole,
-		Entry: true,
-		Next:  []StepId{"pr-merged"},
+		Prompts: PromptsAgent,
+		Role:    soloRole,
+		Entry:   true,
+		Next:    []StepId{"pr-merged"},
 	})
 	f.AwaitSignal("await merge", "pr-merged", StepConfig{Next: []StepId{"merge-commit"}})
 	f.AddStep("record merge commit", "merge-commit", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        soloRole,
 		MayFinalize: []Disposition{DispositionResolved},
 	})
@@ -289,6 +312,7 @@ func TestValidateGraph_AcceptsSignalWaitWithNoRole(t *testing.T) {
 func TestValidateGraph_RefusesSignalStepWithNoRole(t *testing.T) {
 	f := soloFlow("x")
 	f.AddSignalStep("create pr", "pr-open", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Entry:       true,
 		MayFinalize: []Disposition{DispositionResolved},
 	})
@@ -303,6 +327,7 @@ func TestValidateGraph_AcceptsADeclaredRoleNoStepPerforms(t *testing.T) {
 	f := soloFlow("x")
 	f.Role("reviewer", CapApprove)
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        soloRole,
 		Entry:       true,
 		MayFinalize: []Disposition{DispositionResolved},

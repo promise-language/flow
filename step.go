@@ -31,6 +31,7 @@ type step struct {
 	writes      WriteContract
 	needs       NeedsState
 	leaves      LeavesState
+	prompts     PromptPolicy
 }
 
 // resultName returns the result identifier (artifact id OR signal id) as a
@@ -141,6 +142,39 @@ func AllLeavesStates() []LeavesState {
 // StepConfig.normalized resolves it to LeavesAsFound before it is stored.
 func (l LeavesState) Valid() bool { return slices.Contains(AllLeavesStates(), l) }
 
+// PromptPolicy is whether a step may prompt the agent at all
+// (docs/flow-registration.md § Step configuration). Closed at two, and one
+// axis with a restriction at one end rather than two categories of work: a
+// step declaring PromptsAgent may do everything a mechanical one does and may
+// also prompt.
+//
+// It is not a budget field. It says whether the step may prompt, never what a
+// prompt may cost — that is the treasurer's policy, held with the treasurer.
+type PromptPolicy string
+
+const (
+	// PromptsAgent — the step may prompt the agent. A step that prompts on one
+	// branch and not on the others declares this, because that is what it is:
+	// the restriction is a property of the step, not of a path through it.
+	PromptsAgent PromptPolicy = "agent"
+	// PromptsNone — the step is MECHANICAL: it runs no agent prompt, and a
+	// prompt attempted from it is refused before anything is sent. What the
+	// declaration earns is that the step can be relied on to be free,
+	// deterministic and cheap to retry.
+	PromptsNone PromptPolicy = "none"
+)
+
+// AllPromptPolicies returns every declared policy, in declaration order.
+func AllPromptPolicies() []PromptPolicy {
+	return []PromptPolicy{PromptsAgent, PromptsNone}
+}
+
+// Valid reports whether p is one of the two. The empty policy is not one, and
+// unlike the vocabularies above nothing resolves it: a step must declare which,
+// because every default would be wrong (docs/flow-registration.md § Step
+// configuration).
+func (p PromptPolicy) Valid() bool { return slices.Contains(AllPromptPolicies(), p) }
+
 // StepHandler is the function dispatched by the SDK for AddStep/AddSignalStep
 // lifecycle items. AwaitSignal items have no handler.
 //
@@ -160,12 +194,14 @@ type StepHandler func(ctx StepCtx) (StepResult, error)
 // a named field here, so a registration reads as one value instead of a list
 // of mutating callbacks.
 //
-// The zero value is legal and is the loosest declaration in every axis: no
-// role, not the entry, no declared successors, no finalization, a
+// The zero value is legal only on a signal wait, because a step must declare
+// Prompts. Every other field's zero value is the loosest declaration in its
+// axis: no role, not the entry, no declared successors, no finalization, a
 // handler-returned result, any worktree state going in, nothing verified
 // coming out, and nothing writable. Each defaulting field's empty value
 // resolves to the loosest member of its set — see normalized, which is the one
-// place that mapping is written down.
+// place that mapping is written down. Prompts has no entry there: it has no
+// meaning when empty, and a registration omitting it panics.
 //
 // There is no budget field. What a resolution may spend is policy held with
 // the treasurer, never a step declaration (docs/flow-registration.md § Step
@@ -201,6 +237,14 @@ type StepConfig struct {
 	// result is captured. The zero value means LeavesAsFound — nothing
 	// verified.
 	Leaves LeavesState
+	// Prompts is whether the step may prompt the agent: PromptsAgent, or
+	// PromptsNone for a mechanical step. Required on steps, the way Role is,
+	// and with no default in either direction: PromptsNone as a zero value
+	// would publish a guarantee no author wrote, and PromptsAgent as one would
+	// leave half the graph carrying the property by accident, which is what
+	// makes a property unreliable. Absent on signal waits, which dispatch
+	// nothing and panic if given one.
+	Prompts PromptPolicy
 }
 
 // normalized returns the config with every defaulting field resolved to the

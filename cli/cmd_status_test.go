@@ -336,7 +336,7 @@ func TestCmdStatus_InspectsById(t *testing.T) {
 	f.Role("contributor", flow.CapPush)
 	f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-	}, flow.StepConfig{Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, flow.StepConfig{Prompts: flow.PromptsAgent, Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	app.Flow = f
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations: 3, MaxPromptsPerInvocation: 1, MaxCostUSD: 10,
@@ -1152,7 +1152,7 @@ func TestCmdStatus_ReportsAnItemWhoseRouteNamesNoRegisteredStep(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("status dispatches nothing")
 			return flow.StepResult{}, nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	out := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}

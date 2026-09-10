@@ -20,7 +20,7 @@ func nothingLeftToDo(t *testing.T) (*App, *fake.Orchestrator, flow.Claim) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("no step should dispatch: the flow's precondition is never met")
 			return flow.StepResult{}, nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 }
 
@@ -129,7 +129,7 @@ func TestRunOne_AFailureOnAnUnfitMachineReportsBoth(t *testing.T) {
 		f.AddStep("broken", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			ctx.Worktree() // acquire a worktree so the post-handler fitness check runs
 			return flow.StepResult{}, errors.New("no space left on device")
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	be.SetGateVerdict(false)
 

@@ -27,13 +27,13 @@ func newParkGrantEnv(t *testing.T) *parkGrantEnv {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Next("commit", "the plan is written").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, Next: []flow.StepId{"commit"}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, Next: []flow.StepId{"commit"}})
 		f.AddStep("record the commit", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Next("pr-open", "the change is committed").CommitHash("abc"), nil
-		}, flow.StepConfig{Role: "contributor", Next: []flow.StepId{"pr-open"}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Next: []flow.StepId{"pr-open"}})
 		f.AddSignalStep("create pull request", "pr-open", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "the change is proposed"), nil
-		}, flow.StepConfig{Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	// The cap the sweep and the increment are computed against — the binary's

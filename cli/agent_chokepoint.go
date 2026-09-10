@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"runtime"
 
 	"github.com/promise-language/flow"
 )
@@ -13,6 +15,48 @@ import (
 // error, identical on every retry — from an agent or transport failure, which
 // is not.
 var ErrAgentOutsideStep = errors.New("agent turn requested outside a step handler")
+
+// ErrMechanicalStepPrompt is returned by an agent prompt requested from a step
+// that declared Prompts: none. The sibling of ErrAgentOutsideStep: the same
+// shape of refusal — a program error, identical on every retry — for a
+// different reason. The step's declaration is what the rest of the system
+// relies on (docs/flow-registration.md § Step configuration), so the prompt is
+// refused BEFORE anything is sent, and the dispatch parks naming the step and
+// the call site that tried.
+var ErrMechanicalStepPrompt = errors.New("agent prompt requested from a step declaring Prompts: none")
+
+// mechanicalPromptRefusal is the one text a refused prompt carries — as the
+// error the handler receives, and as the reason the park is written with — so
+// the two cannot say different things about the same event.
+//
+// It names both the step and the site, because a reader cannot tell which to
+// argue about without both: the fix is either that the handler should not be
+// asking, or that the step should not have declared none.
+func mechanicalPromptRefusal(step flow.StepId, site string) error {
+	return fmt.Errorf(
+		"%w: step %q declares Prompts: none, but %s asked for one. "+
+			"The prompt was refused before anything was sent, so nothing was billed for it. "+
+			"Either the handler should not be asking, or the step should not declare none — "+
+			"a step that prompts on any path declares Prompts: agent. See docs/flow-registration.md § Step configuration",
+		ErrMechanicalStepPrompt, step, site)
+}
+
+// callSite renders the frame `skip` levels above the caller of callSite as
+// "function (file:line)" — skip 0 is the caller's own caller. The function is
+// the fully qualified name, which says which package the file is in; the file
+// is its base name, because the full path is a fact about the machine the
+// binary was built on and the reason is published.
+func callSite(skip int) string {
+	pc, file, line, ok := runtime.Caller(skip + 2)
+	if !ok {
+		return "an unknown call site"
+	}
+	fn := "an unknown function"
+	if f := runtime.FuncForPC(pc); f != nil {
+		fn = f.Name()
+	}
+	return fmt.Sprintf("%s (%s:%d)", fn, filepath.Base(file), line)
+}
 
 // outsideStepAgent is what App.Agent becomes at startup validation. It answers
 // Name() and refuses Run().

@@ -463,6 +463,47 @@ func TestResolveFlow_DeclaresTheBranchingSequence(t *testing.T) {
 	}
 }
 
+// Which steps are mechanical, step by step, as docs/issue-flow.md § The graph
+// bolds them — with one exception the table names. The declaration is what a
+// driver relies on to run a step without waiting for quota, and what refuses a
+// prompt from it before anything is sent, so a step declared none here is one
+// whose handler never reaches the agent.
+func TestResolveFlow_DeclaresWhichStepsAreMechanical(t *testing.T) {
+	want := map[flow.StepId]flow.PromptPolicy{
+		flow.StepId(StepPlan):      flow.PromptsAgent,
+		flow.StepId(StepBranch):    flow.PromptsNone,
+		flow.StepId(StepImplement): flow.PromptsAgent,
+		flow.StepId(StepReview):    flow.PromptsAgent,
+		flow.StepId(StepCoverage):  flow.PromptsAgent,
+		// Bold in the document for the end state, but declared as it behaves:
+		// stepOpenPR prompts on its disclosure-repair path. #321 splits that
+		// out and flips this value.
+		flow.StepId(StepOpenPR):         flow.PromptsAgent,
+		flow.StepId(StepCloseBranch):    flow.PromptsNone,
+		flow.StepId(StepReviewProposal): flow.PromptsAgent,
+		flow.StepId(StepVerifyMerge):    flow.PromptsNone,
+		flow.StepId(StepMerge):          flow.PromptsNone,
+		flow.StepId(StepRecordMerge):    flow.PromptsNone,
+	}
+	items := (&builder{cfg: Config{}, role: RoleContributor}).resolveFlow(Config{}).Items()
+	if len(items) != len(want) {
+		t.Fatalf("the flow registers %d steps, and the table covers %d", len(items), len(want))
+	}
+	for _, li := range items {
+		w, ok := want[li.Result()]
+		if !ok {
+			t.Errorf("step %q declares no prompt policy in the table", li.Result())
+			continue
+		}
+		if li.Prompts != w {
+			t.Errorf("step %q declares Prompts %q, want %q", li.Result(), li.Prompts, w)
+		}
+		if li.Mechanical() != (w == flow.PromptsNone) {
+			t.Errorf("step %q: Mechanical() = %v, want %v from its declaration", li.Result(), li.Mechanical(), w == flow.PromptsNone)
+		}
+	}
+}
+
 // The graph does not vary by who is running. Coverage is what narrows a
 // binary's part of it, at dispatch; building a different graph per role would
 // decide the processing before the journal begins, with nothing recording why —
@@ -494,7 +535,8 @@ func TestResolveFlow_IsTheSameGraphForEveryRole(t *testing.T) {
 				if a.Description != want.Description || a.Result() != want.Result() ||
 					a.Kind != want.Kind || a.Role != want.Role || a.Entry != want.Entry ||
 					!slices.Equal(a.Next, want.Next) || !slices.Equal(a.MayFinalize, want.MayFinalize) ||
-					a.Needs != want.Needs || a.Leaves != want.Leaves || a.Writes != want.Writes {
+					a.Needs != want.Needs || a.Leaves != want.Leaves || a.Writes != want.Writes ||
+					a.Prompts != want.Prompts {
 					t.Errorf("step %d differs from the contributor build:\n got %+v\nwant %+v", i, a, want)
 				}
 			}

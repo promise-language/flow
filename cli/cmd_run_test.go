@@ -78,7 +78,7 @@ var _ flow.Orchestrator = (*failingLoadBackend)(nil)
 func runStepStubFlow(f *flow.Flow) {
 	f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-	}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 }
 
 // A run-step that never reached a step still reports on the machine channel:
@@ -204,7 +204,7 @@ func TestCmdRun_ParkedResultCarriesRedispatchMayClearOnTheWire(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("guarded", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, fmt.Errorf("guard refused staged file main.go: %w", flow.ErrRefused)
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
 	app.Out, app.Err = out, errBuf
@@ -218,6 +218,48 @@ func TestCmdRun_ParkedResultCarriesRedispatchMayClearOnTheWire(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `"redispatch_may_clear":false`) {
 		t.Errorf("stdout = %q, want the key redispatch_may_clear with a present false — the one thing that tells a scheduler this park is a loop", out.String())
+	}
+}
+
+// A driver calling run-step one step at a time cannot read the pending step's
+// declaration: it must decide whether to wait for quota BEFORE the invocation
+// that would tell it. So the fact rides out on the result of the previous
+// step, on the command's own output, keyed for a caller that never links the
+// SDK: next_step names what the route now points at, and next_mechanical
+// says whether dispatching it invokes no agent (docs/cli.md § Output).
+func TestCmdRun_ResultCarriesTheNextStepOnTheWire(t *testing.T) {
+	app, _, _ := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Next("commit", "planned").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, Next: []flow.StepId{"commit"}})
+		f.AddStep("open branch", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("abc"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsNone, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, &stubAgent{name: "stub"})
+	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+	app.Out, app.Err = out, errBuf
+
+	if code := app.cmdRun(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdRun = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	got := decodeResultStream(t, out.String())
+	if len(got) != 1 || got[0].Status != string(flow.StatusDone) {
+		t.Fatalf("stdout = %q, want exactly one done result", out.String())
+	}
+	for _, want := range []string{`"next_step":"commit"`, `"next_mechanical":true`} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("stdout = %q, want it to carry %s — the one thing that tells a driver it need not wait for quota before the next step", out.String(), want)
+		}
+	}
+
+	// The mechanical step then runs and finalizes: nothing pending, so neither
+	// key is on the wire — absent means nothing pending, never unknown.
+	out.Reset()
+	if code := app.cmdRun(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("second cmdRun = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	if strings.Contains(out.String(), `"next_step"`) || strings.Contains(out.String(), `"next_mechanical"`) {
+		t.Errorf("stdout = %q, want neither next_step nor next_mechanical after a finalizing route", out.String())
 	}
 }
 
@@ -316,7 +358,7 @@ func TestCmdRun_JSONModeCompactOutput(t *testing.T) {
 			app, _, _ := testApp(t, func(f *flow.Flow) {
 				f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 					return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-				}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+				}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 			}, &stubAgent{name: "stub"})
 			out := &bytes.Buffer{}
 			app.Out = out
@@ -346,7 +388,7 @@ func TestCmdRun_HumanModeOneLine(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	out := &bytes.Buffer{}
 	app.Out = out
@@ -374,7 +416,7 @@ func TestCmdRun_HumanModeWithReason(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	// Use a preflight that returns ErrBlocked to produce a reason.
@@ -405,7 +447,7 @@ func TestCmdRun_AutoDetectsHuman(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	out := &bytes.Buffer{}
 	app.Out = out
@@ -430,7 +472,7 @@ func TestCmdRun_PipedStdoutSelectsJSON(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	r, w, err := os.Pipe()
@@ -464,7 +506,7 @@ func TestCmdRun_EnvHumanProducesHumanOutput(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	// Use an os.Pipe so auto-detect would pick JSON — the env var must override.
@@ -500,7 +542,7 @@ func TestCmdRun_MutuallyExclusiveFlags(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	code := app.cmdRun(context.Background(), []string{"--json", "--human"})
@@ -518,7 +560,7 @@ func TestCmdRun_BudgetParkNarratesAxes(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, errors.New("boom")
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations:          1,
@@ -562,7 +604,7 @@ func TestCmdRun_BlockedOnItemsNarratesTheBlockers(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("the step must not dispatch on a blocked item")
 			return flow.StepResult{}, nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "landed"})
 	be.AddItem("3", flow.Item{Type: "task", Title: "still open"})
@@ -594,7 +636,7 @@ func TestCmdRun_BlockedOnItemsJSONCarriesTheKindAndBlockers(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("the step must not dispatch on a blocked item")
 			return flow.StepResult{}, nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "still open"})
 	blockOn(t, be, claim.ItemRef, be.Ref("2"))
@@ -621,7 +663,7 @@ func TestCmdRun_NonBudgetParkOmitsAxes(t *testing.T) {
 	app, _, _ := testApp(t, func(f *flow.Flow) {
 		f.AddStep("silent", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, nil // returns without resolving
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	out := &bytes.Buffer{}
 	app.Out = out
