@@ -319,6 +319,24 @@ type blockerRepo struct {
 	open  map[int]bool  // number → exists (all open)
 	deps  map[int][]int // number → the numbers it waits on
 	added [][2]int      // (issue, blocker global id) actually recorded
+
+	// When postStatus is set, every POST answers with it and postMessage in
+	// GitHub's error shape, so the boundary of what AddBlockedBy absorbs can be
+	// exercised without a second mock.
+	postStatus  int
+	postMessage string
+}
+
+// alreadyTakenMessage is what GitHub answers, with a 422, when the pair being
+// recorded is already recorded. Verbatim, since the message is the only thing
+// that separates it from the refusals sharing its status.
+const alreadyTakenMessage = "An error occurred while adding the blocking issue to the issue. Validation failed: Target issue has already been taken"
+
+// ghError writes an error in GitHub's shape: a message and the status as a
+// string, which is how the real API spells it.
+func ghError(w http.ResponseWriter, status int, message string) {
+	body, _ := json.Marshal(map[string]string{"message": message, "status": strconv.Itoa(status)})
+	http.Error(w, string(body), status)
 }
 
 func newBlockerOrchestrator(t *testing.T, repo *blockerRepo) *Orchestrator {
@@ -364,6 +382,17 @@ func newBlockerOrchestrator(t *testing.T, repo *blockerRepo) *Orchestrator {
 				IssueID int64 `json:"issue_id"`
 			}
 			_ = decodeJSON(r, &doc)
+			if repo.postStatus != 0 {
+				ghError(w, repo.postStatus, repo.postMessage)
+				return
+			}
+			// Like GitHub: the pair already recorded is refused, not re-recorded.
+			for _, d := range repo.deps[n] {
+				if int64(d)*1000 == doc.IssueID {
+					ghError(w, http.StatusUnprocessableEntity, alreadyTakenMessage)
+					return
+				}
+			}
 			repo.added = append(repo.added, [2]int{n, int(doc.IssueID)})
 			writeJSON(w, map[string]any{})
 			return
@@ -478,6 +507,80 @@ func TestEditor_RecordsAnAcyclicBlockerAndSurvivesARingAlreadyThere(t *testing.T
 	defer repo.mu.Unlock()
 	if len(repo.added) != 1 || repo.added[0] != [2]int{42, 43000} {
 		t.Errorf("recorded %v, want #43 as a blocker of #42 by its global id", repo.added)
+	}
+}
+
+// Adding a blocker already recorded changes nothing and is not an error. GitHub
+// refuses the second POST of a pair with a 422, and a step that re-derives the
+// same blockers on every pass re-POSTs them, so without the absorption a stop
+// that was clean on the first pass reports failed on every pass after it.
+func TestEditor_RecordingABlockerAlreadyRecordedIsNotAnError(t *testing.T) {
+	repo := &blockerRepo{
+		open: map[int]bool{42: true, 43: true},
+		deps: map[int][]int{42: {43}}, // 42 already waits on 43
+	}
+	b := newBlockerOrchestrator(t, repo)
+
+	ed, err := b.Edit(t.Context(), b.refFromIssue(42))
+	if err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+	ed.AddBlocker(b.refFromIssue(43))
+	if err := ed.Commit(t.Context()); err != nil {
+		t.Fatalf("Commit refused a blocker that is already recorded: %v", err)
+	}
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	if len(repo.added) != 0 {
+		t.Errorf("recorded %v, want nothing newly recorded for a pair already there", repo.added)
+	}
+}
+
+// The absorption is pinned to BOTH the status and the message. The same 422
+// carries refusals that must stay errors, so the status alone cannot
+// discriminate; and the message on any other status is not GitHub's
+// already-recorded refusal, whatever it says.
+func TestEditor_OnlyTheAlreadyRecordedRefusalIsAbsorbed(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		status  int
+		message string
+	}{{
+		name:   "a 422 with a different validation message",
+		status: http.StatusUnprocessableEntity, message: "Blocking issue cannot be a pull request",
+	}, {
+		name:   "a 500 carrying the already-taken message",
+		status: http.StatusInternalServerError, message: alreadyTakenMessage,
+	}} {
+		t.Run(c.name, func(t *testing.T) {
+			repo := &blockerRepo{
+				open:       map[int]bool{42: true, 43: true},
+				deps:       map[int][]int{},
+				postStatus: c.status, postMessage: c.message,
+			}
+			b := newBlockerOrchestrator(t, repo)
+
+			ed, err := b.Edit(t.Context(), b.refFromIssue(42))
+			if err != nil {
+				t.Fatalf("Edit: %v", err)
+			}
+			ed.AddBlocker(b.refFromIssue(43))
+			err = ed.Commit(t.Context())
+			if err == nil {
+				t.Fatal("Commit absorbed a refusal that is not the already-recorded one")
+			}
+			if !strings.Contains(err.Error(), c.message) {
+				t.Errorf("error = %q, want it to carry the refusal %q", err, c.message)
+			}
+			if !strings.Contains(err.Error(), "#43") {
+				t.Errorf("error = %q, want it to name the blocker", err)
+			}
+			repo.mu.Lock()
+			defer repo.mu.Unlock()
+			if len(repo.added) != 0 {
+				t.Errorf("a dependency was recorded anyway: %v", repo.added)
+			}
+		})
 	}
 }
 
