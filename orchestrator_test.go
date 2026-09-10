@@ -148,16 +148,16 @@ func TestFindPR_PropagatesError(t *testing.T) {
 // cannot, which is what the degradation case rests on.
 type stubExaminingWorktree struct {
 	stubWorktreeBase
-	err     error
-	asks    int
-	pushses int
+	err    error
+	asks   int
+	pushes int
 }
 
 func (w *stubExaminingWorktree) ExaminePush(context.Context) error {
 	w.asks++
 	return w.err
 }
-func (w *stubExaminingWorktree) Push(context.Context) error { w.pushses++; return nil }
+func (w *stubExaminingWorktree) Push(context.Context) error { w.pushes++; return nil }
 
 // A worktree that cannot answer says so TYPED. The two answers lead opposite
 // ways — a refusal is work for a repair step, an unsupported examine is a
@@ -193,8 +193,8 @@ func TestExaminePush_DelegatesAndPublishesNothing(t *testing.T) {
 	if wt.asks != 1 {
 		t.Errorf("the worktree was asked %d times, want 1", wt.asks)
 	}
-	if wt.pushses != 0 {
-		t.Errorf("ExaminePush pushed %d times — it asks, it does not act", wt.pushses)
+	if wt.pushes != 0 {
+		t.Errorf("ExaminePush pushed %d times — it asks, it does not act", wt.pushes)
 	}
 }
 

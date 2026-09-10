@@ -744,9 +744,16 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) (flow.StepResult, error) {
 // one dispatch, so a branch arriving back from it still refused has had its
 // round, and electing the same round again is how a loop is built. A rework
 // round arrives from coverage instead, so a fresh refusal there still gets a
-// repair. After a round, an infrastructure failure parks too — the history the
-// repair rewrote is in the branch, and failing would report a transient push
-// failure as though the round had never happened.
+// repair. After a round, anything else parks too — the history the repair
+// rewrote is in the branch, and failing would report a transient push failure
+// as though the round had never happened.
+//
+// A park record is PUBLISHED, so it carries an infrastructure failure's words
+// and never a guard's. The refusal that reaches that last branch is the
+// ActPullRequest one — the push went out and the title and body did not — and
+// copying it into the record is a second attempt to publish exactly the text
+// that was just refused (docs/disclosure.md § A refusal does not travel). It
+// goes where every other refusal here goes: with the step, unpublished.
 func (b *builder) electRepairOrPark(ctx flow.StepCtx, err error) (flow.StepResult, error) {
 	// Stashed unpublished, and never quoted into the park record — that record
 	// is published, through the same guard (docs/disclosure.md § A refusal does
@@ -784,6 +791,16 @@ func (b *builder) electRepairOrPark(ctx flow.StepCtx, err error) (flow.StepResul
 			"the disclosure guard refused the push of this branch; repair the history that "+
 				"names what may not leave the machine, and the request is opened after it"), nil
 	case repairedJustNow(ctx):
+		var refused flow.ErrDisclosureRefused
+		if errors.As(err, &refused) {
+			stash("The proposal was refused after a repair round.")
+			return flow.StepResult{}, ctx.Park(flow.ParkRequest{
+				Kind: flow.ParkBlocked,
+				Reason: "the proposal was refused after a repair round, so the repair's work stays " +
+					"in the branch rather than being discarded; what was refused is kept with " +
+					"the step for the next run",
+			})
+		}
 		return flow.StepResult{}, ctx.Park(flow.ParkRequest{
 			Kind: flow.ParkBlocked,
 			Reason: fmt.Sprintf("the proposal failed after a repair round, so the repair's work "+

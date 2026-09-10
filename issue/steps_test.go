@@ -1692,6 +1692,40 @@ func TestStepOpenPR_InfraErrorAfterARepairRound_Parks(t *testing.T) {
 	}
 }
 
+// The OTHER refusal a repair round can end on: the push went out and the title
+// and body did not. It parks like an infrastructure failure — the history the
+// repair rewrote is in the branch — but a park record is PUBLISHED, so what
+// the guard refused goes into the step's own unpublished record and never into
+// the reason (docs/disclosure.md § A refusal does not travel). Quoting it
+// there is a second attempt to publish exactly the text that was just refused.
+func TestStepOpenPR_RequestRefusedAfterARepairRound_ParksWithoutQuotingIt(t *testing.T) {
+	wt := resumedWorktree()
+	wt.openErrs = []error{flow.ErrDisclosureRefused{
+		Act:    flow.ActPullRequest,
+		Reason: errors.New("the body names /Users/someone/"),
+	}}
+
+	agent := &scriptedAgent{}
+	ctx := routedFrom(ctxWithPlan(wt, agent), StepRepairDisclosure)
+
+	_, err := testBuilder(t).stepOpenPR(ctx)
+	if err == nil || !strings.Contains(err.Error(), "parked") {
+		t.Fatalf("err = %v, want a park (the repair's work stays in the branch)", err)
+	}
+	if ctx.park == nil || ctx.park.Kind != flow.ParkBlocked {
+		t.Fatalf("park = %+v, want ParkBlocked", ctx.park)
+	}
+	if strings.Contains(ctx.park.Reason, "/Users/someone/") {
+		t.Errorf("the park record quotes what the guard refused: %q", ctx.park.Reason)
+	}
+	if len(ctx.wipSaves) != 1 || !strings.Contains(ctx.wipSaves[0], "/Users/someone/") {
+		t.Errorf("WIP saves = %q, want one carrying the refusal for the next run", ctx.wipSaves)
+	}
+	if agent.calls != 0 {
+		t.Errorf("agent called %d times, want 0 — the request declares Prompts: none", agent.calls)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // The repair step: it re-derives the refusal, repairs, and elects the request
 // back (#321).
@@ -3269,7 +3303,7 @@ func TestCommitRepair_SecondRefusalParks(t *testing.T) {
 
 // The same repair path over the tree the checking steps left, in the step that
 // now owns it: what open request could not commit, the repair step commits.
-// The request itself prompts nothing (TestStepOpenPR_CommitRefusalElectsTheRepair).
+// The request itself prompts nothing (TestStepOpenPR_CommitRefusalParksWithoutPrompting).
 func TestCommitRepair_TheRepairStepRecordsWhatTheRequestCouldNot(t *testing.T) {
 	wt := resumedWorktree()
 	wt.commits = 1              // implement already committed
