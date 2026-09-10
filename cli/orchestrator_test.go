@@ -54,6 +54,11 @@ func TestWriteContract_BranchViolation(t *testing.T) {
 	if !strings.Contains(res.Park.Reason, "branch moved") {
 		t.Errorf("reason = %q, want contains 'branch moved'", res.Park.Reason)
 	}
+	// Same prompt, same result: the result tells a driver that re-dispatching
+	// is a loop, not a retry.
+	if res.RedispatchMayClear == nil || *res.RedispatchMayClear {
+		t.Errorf("RedispatchMayClear = %v, want a present false on a write-contract park", res.RedispatchMayClear)
+	}
 }
 
 func TestWriteContract_CommitViolation(t *testing.T) {
@@ -1308,6 +1313,12 @@ func TestRunOne_NilReturnWithoutResolveParks(t *testing.T) {
 	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkStepDidNotComplete {
 		t.Errorf("res = %+v, want parked step-did-not-resolve", res)
 	}
+	// The member on which "can re-dispatch help" and "who must act" disagree:
+	// nobody acts and nothing clears it, yet a re-dispatch is exactly what does
+	// the job. The result must say so end to end, not only in the table.
+	if res.RedispatchMayClear == nil || !*res.RedispatchMayClear {
+		t.Errorf("RedispatchMayClear = %v, want a present true on a step-did-not-complete park", res.RedispatchMayClear)
+	}
 }
 
 func TestApp_Validate_RejectsUnknownArtifact(t *testing.T) {
@@ -2350,6 +2361,12 @@ func TestRunOne_ErrRefusedParksWithoutBurningBudget(t *testing.T) {
 	if !strings.Contains(res.Park.Reason, "guard refused staged file") {
 		t.Errorf("Park.Reason = %q, want the refusal's own message", res.Park.Reason)
 	}
+	// The refusal is deterministic and consumes no invocation, so nothing in
+	// flow would ever stop a scheduler that re-dispatches it. The result is
+	// what tells the scheduler to stop.
+	if res.RedispatchMayClear == nil || *res.RedispatchMayClear {
+		t.Errorf("RedispatchMayClear = %v, want a present false on a refused park", res.RedispatchMayClear)
+	}
 
 	// The invocation must NOT have been counted.
 	state, _ := be.Load(context.Background(), claim.ItemRef)
@@ -2405,6 +2422,10 @@ func TestRunOne_ErrTransientStillParksInfraTransient(t *testing.T) {
 	}
 	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkInfraTransient {
 		t.Fatalf("res = %+v, want parked/infra-transient", res)
+	}
+	// A transient park exists to be retried against a healthy runner.
+	if res.RedispatchMayClear == nil || !*res.RedispatchMayClear {
+		t.Errorf("RedispatchMayClear = %v, want a present true on an infra-transient park", res.RedispatchMayClear)
 	}
 	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {

@@ -59,6 +59,8 @@ The report *is* the output. It goes to **stdout**, rendered in the selected mode
 
 A result that reports a stop may carry **`item_scoped`**: `true` when this item is the problem and a different one might succeed, `false` when this arena is and every item would meet the same answer. It is optional and absent means unclassified, which a caller reads as `false` — stopping on a refusal nobody classified is the safe direction. It is the same distinction, and the same name, that a refused claim carries.
 
+A result that reports a park carries **`redispatch_may_clear`**: `true` when dispatching the same item again could possibly do anything — the runner or remote may be back, or the step left a job a re-dispatch can finish — and `false` when the answer is the same until a person or a grant acts, so a driver that re-dispatches is looping rather than retrying. It is derived from the park's kind ([orchestrator.md](orchestrator.md) § Vocabularies), never declared by the site that parked. It is optional and absent means unclassified, which a caller reads as `false` — the same direction `item_scoped` takes.
+
 In human mode a refusal that never reached a step is prose on stderr and the exit code is the signal; stdout carries nothing. A step that ran and stopped is still a report, and renders on stdout like every other one.
 
 ### Streaming — `resolve`

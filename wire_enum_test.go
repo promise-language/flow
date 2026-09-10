@@ -124,6 +124,61 @@ func TestParkKind_WireSpellings(t *testing.T) {
 	}
 }
 
+// RedispatchMayClear is the retry classification the vocabulary carries: whether
+// dispatching a parked item again could possibly do anything. It is written
+// down once, here, per kind, so a kind that joins the vocabulary without a
+// classification fails this test rather than silently reading as "no" through
+// the fail-closed default.
+func TestParkKind_RedispatchMayClear_ClassifiesEveryKind(t *testing.T) {
+	want := map[flow.ParkKind]bool{
+		flow.ParkBlocked:            false, // a person decides on the refusal
+		flow.ParkQuestion:           false, // an answer must arrive
+		flow.ParkTreasurerRefused:   false, // only a grant clears it
+		flow.ParkStepDidNotComplete: true,  // a re-dispatch does the job it left
+		flow.ParkInfraTransient:     true,  // against a healthy runner
+		flow.ParkRemoteUnreachable:  true,  // once the remote returns
+		flow.ParkRefused:            false, // deterministic
+		flow.ParkWriteContract:      false, // same prompt, same result
+	}
+	got := flow.AllParkKinds()
+	if len(got) != len(want) {
+		t.Fatalf("AllParkKinds() has %d members, but %d classifications are written down: %v", len(got), len(want), got)
+	}
+	for _, k := range got {
+		mayClear, ok := want[k]
+		if !ok {
+			t.Errorf("park kind %q has no classification written down here", k)
+			continue
+		}
+		if k.RedispatchMayClear() != mayClear {
+			t.Errorf("%q.RedispatchMayClear() = %v, want %v", k, k.RedispatchMayClear(), mayClear)
+		}
+	}
+}
+
+// The one member where "can re-dispatch help" and "who must act" disagree. A
+// step that did not complete waits on nobody and clears on nothing — it is not
+// a `waits-on-condition` park that heals itself while a scheduler backs off —
+// yet an active re-dispatch is exactly its cure. This is why the classification
+// is its own table over ParkKind and not a reading of BlockKind: deriving one
+// from the other would define this member's answer away.
+func TestParkKind_RedispatchMayClear_StepDidNotCompleteIsRetryable(t *testing.T) {
+	if !flow.ParkStepDidNotComplete.RedispatchMayClear() {
+		t.Error("step-did-not-complete must classify as clearable by re-dispatch: a re-dispatch is what does the job the step left undone")
+	}
+}
+
+// A kind this binary does not know — a park written by a newer one — fails
+// closed. A scheduler reading false stops; one reading true would loop on a
+// park it cannot reason about.
+func TestParkKind_RedispatchMayClear_UnknownKindFailsClosed(t *testing.T) {
+	for _, k := range []flow.ParkKind{"not-a-kind", ""} {
+		if k.RedispatchMayClear() {
+			t.Errorf("ParkKind(%q).RedispatchMayClear() = true, want false: an unrecognised kind must stop a scheduler, not loop it", k)
+		}
+	}
+}
+
 func TestAllInvocationStatuses_ExhaustiveAgainstAST(t *testing.T) {
 	declared := constNamesOfType(t, "wire.go", "InvocationStatus")
 	if len(declared) == 0 {

@@ -26,11 +26,12 @@ func TestInvocationResult_JSONRoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(out, in) {
 		t.Errorf("round-trip: %+v != %+v", out, in)
 	}
-	// A result that did not stop on items carries neither block field: the
-	// wire is byte-identical to what it was before they existed.
-	for _, key := range []string{"block_kind", "blocked_by"} {
+	// A result that did not stop on items carries neither block field, and one
+	// that classified nothing carries no classification: the wire is
+	// byte-identical to what it was before any of them existed.
+	for _, key := range []string{"block_kind", "blocked_by", "item_scoped", "redispatch_may_clear"} {
 		if strings.Contains(string(b), key) {
-			t.Errorf("JSON %s carries %q on a result that did not stop on items", b, key)
+			t.Errorf("JSON %s carries %q on a result that neither stopped on items nor classified anything", b, key)
 		}
 	}
 }
@@ -214,6 +215,62 @@ func TestInvocationResult_ScopeArenaVsUnclassified(t *testing.T) {
 	}
 	if out.ItemScoped == nil || *out.ItemScoped {
 		t.Errorf("ItemScoped round-tripped to %v, want a present false", out.ItemScoped)
+	}
+}
+
+// RedispatchMayClear is three-state for the reason ItemScoped is: a present
+// false — "re-dispatching this is a loop" — is the classification a scheduler
+// most needs, and a plain bool with omitempty would put it on the wire
+// identically to absent. So &true, &false, and nil must each serialise
+// distinctly, and &false must round-trip to a present false rather than nil.
+func TestInvocationResult_RedispatchTrueVsFalseVsAbsent(t *testing.T) {
+	yes, no := true, false
+	mayClear := InvocationResult{
+		Flow: "f", Item: "i", Step: "s", Status: "parked",
+		RedispatchMayClear: &yes,
+	}
+	cannotClear := InvocationResult{
+		Flow: "f", Item: "i", Step: "s", Status: "parked",
+		RedispatchMayClear: &no,
+	}
+	unclassified := InvocationResult{
+		Flow: "f", Item: "i", Step: "s", Status: "parked",
+	}
+	bYes, err := json.Marshal(mayClear)
+	if err != nil {
+		t.Fatalf("Marshal &true: %v", err)
+	}
+	bNo, err := json.Marshal(cannotClear)
+	if err != nil {
+		t.Fatalf("Marshal &false: %v", err)
+	}
+	bNil, err := json.Marshal(unclassified)
+	if err != nil {
+		t.Fatalf("Marshal nil: %v", err)
+	}
+	if !strings.Contains(string(bYes), `"redispatch_may_clear":true`) {
+		t.Errorf("RedispatchMayClear=&true must serialise as redispatch_may_clear:true; got %s", bYes)
+	}
+	if !strings.Contains(string(bNo), `"redispatch_may_clear":false`) {
+		t.Errorf("RedispatchMayClear=&false must serialise as redispatch_may_clear:false; got %s", bNo)
+	}
+	// Absent stays absent: a result that classifies nothing is byte-for-byte
+	// what it was before the field existed.
+	if strings.Contains(string(bNil), `"redispatch_may_clear"`) {
+		t.Errorf("RedispatchMayClear=nil must omit redispatch_may_clear; got %s", bNil)
+	}
+	var out InvocationResult
+	if err := json.Unmarshal(bNo, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.RedispatchMayClear == nil || *out.RedispatchMayClear {
+		t.Errorf("RedispatchMayClear round-tripped to %v, want a present false", out.RedispatchMayClear)
+	}
+	if err := json.Unmarshal(bYes, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.RedispatchMayClear == nil || !*out.RedispatchMayClear {
+		t.Errorf("RedispatchMayClear round-tripped to %v, want a present true", out.RedispatchMayClear)
 	}
 }
 
