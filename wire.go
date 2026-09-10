@@ -67,8 +67,8 @@ func AllParkKinds() []ParkKind {
 
 // RedispatchMayClear reports whether dispatching the parked item again could
 // possibly do anything. True means the condition may differ next time; false
-// means the answer is the same until someone or something else acts, so a
-// driver that re-dispatches on false is looping.
+// means the answer is the same until a person or a grant acts, so a driver
+// that re-dispatches on false is looping.
 //
 // The classification is a property of WHY the item parked, so it lives on the
 // kind and not on the ParkRequest (docs/environment.md § The classification
@@ -85,7 +85,10 @@ func AllParkKinds() []ParkKind {
 func (k ParkKind) RedispatchMayClear() bool {
 	switch k {
 	case ParkBlocked:
-		// Every site that parks blocked is a refusal a person must decide on.
+		// A refusal a person must decide on, or a condition only a person can
+		// lift (docs/resolution.md § Parking). A site whose condition the next
+		// dispatch cures is under the wrong kind, not an exception here — the
+		// disclosure refusal at capture is one such site (#325).
 		return false
 	case ParkQuestion:
 		// An answer must arrive.
@@ -526,8 +529,8 @@ type InvocationResult struct {
 
 	// RedispatchMayClear reports whether dispatching this item again could
 	// possibly do anything: true → the condition may differ next time; false →
-	// the answer is the same until someone or something else acts, so a driver
-	// that re-dispatches is looping. Set on a parked result from
+	// the answer is the same until a person or a grant acts, so a driver that
+	// re-dispatches is looping. Set on a parked result from
 	// ParkKind.RedispatchMayClear, so a caller that never links the SDK can
 	// read it. nil means the result classified nothing, and a caller reads nil
 	// as false — stopping on an unclassified stop is the safe direction, as
