@@ -320,6 +320,10 @@ type blockerRepo struct {
 	deps  map[int][]int // number → the numbers it waits on
 	added [][2]int      // (issue, blocker global id) actually recorded
 
+	// refused is every (issue, blocker global id) POST the mock answered with
+	// GitHub's already-taken 422: the pair was there, so nothing was recorded.
+	refused [][2]int
+
 	// When postStatus is set, every POST answers with it and postMessage in
 	// GitHub's error shape, so the boundary of what AddBlockedBy absorbs can be
 	// exercised without a second mock.
@@ -389,6 +393,7 @@ func newBlockerOrchestrator(t *testing.T, repo *blockerRepo) *Orchestrator {
 			// Like GitHub: the pair already recorded is refused, not re-recorded.
 			for _, d := range repo.deps[n] {
 				if int64(d)*1000 == doc.IssueID {
+					repo.refused = append(repo.refused, [2]int{n, int(doc.IssueID)})
 					ghError(w, http.StatusUnprocessableEntity, alreadyTakenMessage)
 					return
 				}
@@ -514,6 +519,10 @@ func TestEditor_RecordsAnAcyclicBlockerAndSurvivesARingAlreadyThere(t *testing.T
 // refuses the second POST of a pair with a 422, and a step that re-derives the
 // same blockers on every pass re-POSTs them, so without the absorption a stop
 // that was clean on the first pass reports failed on every pass after it.
+//
+// The mock's refusal log is what tells a POST answered 422 apart from a POST
+// never sent: the pair must have been offered and refused, and Commit must have
+// been clean anyway.
 func TestEditor_RecordingABlockerAlreadyRecordedIsNotAnError(t *testing.T) {
 	repo := &blockerRepo{
 		open: map[int]bool{42: true, 43: true},
@@ -531,6 +540,9 @@ func TestEditor_RecordingABlockerAlreadyRecordedIsNotAnError(t *testing.T) {
 	}
 	repo.mu.Lock()
 	defer repo.mu.Unlock()
+	if len(repo.refused) != 1 || repo.refused[0] != [2]int{42, 43000} {
+		t.Errorf("refused %v, want the one POST of #43 as a blocker of #42 answered already-taken", repo.refused)
+	}
 	if len(repo.added) != 0 {
 		t.Errorf("recorded %v, want nothing newly recorded for a pair already there", repo.added)
 	}
