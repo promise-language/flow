@@ -434,6 +434,15 @@ func (o *outward) EditIssue(ctx context.Context, issue int, title, body *flow.Te
 // the editor resolves every blocker before committing — which is also the
 // refusal the contract asks for, since an identifier naming nothing cannot be
 // resolved.
+//
+// Recording one already recorded is not an error, so the 422 that says so is
+// absorbed: the pair is in the store, which is what the caller asked for. The
+// message, not the status, is the discriminator, because the status is shared
+// with refusals that must stay errors — a pull request or cross-repository
+// target, the feature's own limits — and only the message tells them apart.
+// "Already been taken" is the uniqueness-validation wording; if it is ever
+// reworded, the failure mode is today's visible error, never a swallowed
+// refusal.
 func (o *outward) AddBlockedBy(ctx context.Context, issue int, blockerID int64) error {
 	return o.publish(ctx, flow.Disclosure{
 		Act:  flow.ActBlocker,
@@ -445,9 +454,20 @@ func (o *outward) AddBlockedBy(ctx context.Context, issue int, blockerID int64) 
 		if err != nil {
 			return err
 		}
-		_, err = o.client.Do(ctx, req, nil)
+		resp, err := o.client.Do(ctx, req, nil)
+		if err != nil && resp != nil && resp.StatusCode == http.StatusUnprocessableEntity && isAlreadyRecorded(err) {
+			return nil
+		}
 		return err
 	})
+}
+
+// isAlreadyRecorded reports whether err is GitHub's refusal to record a
+// dependency pair that is already recorded, by the one thing that separates it
+// from the other refusals sharing its status: the validation message.
+func isAlreadyRecorded(err error) bool {
+	var er *github.ErrorResponse
+	return errors.As(err, &er) && strings.Contains(er.Message, "already been taken")
 }
 
 // RemoveBlockedBy retracts one dependency. Removing one that is not recorded is
