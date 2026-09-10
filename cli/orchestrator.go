@@ -562,11 +562,14 @@ func translateHandlerError(
 // artifact behind: the result is "verified before capture"
 // (docs/flow-registration.md § Step configuration).
 //
-// One election, one check (flow.StepResult.Elect), and two ways it can end
+// One election, one check (flow.StepResult.Elect), and three ways it can end
 // without a capture: a step that decided nothing PARKS, because a re-dispatch
 // can still do the job; a step that decided something it may not decide FAILS,
-// because only a change to the handler or the registration will help. Nothing
-// is journaled and nothing is published in either case.
+// because only a change to the handler or the registration will help; and a
+// result the disclosure guard refused at capture PARKS under the same kind as
+// the step that decided nothing, for the same reason — the next dispatch is
+// what does the job this one left undone (refusedCapture). Nothing is
+// journaled and nothing is published in any of the three.
 //
 // It counts the dispatch itself, at each outcome, because one outcome does not
 // count it: see chargeDispatch.
@@ -725,6 +728,21 @@ func mirrorLedger(state *flow.Item, step flow.StepId, mutate func(*flow.LedgerRo
 // its prompt, so the author is answering something this one did not know — and
 // that dispatch, not this refusal, is what the treasurer counts (chargeDispatch).
 //
+// It parks STEP-DID-NOT-COMPLETE, not blocked. The step produced nothing the
+// journal could record, and nobody has to act: no revision has been attempted
+// yet, so the next dispatch IS the first revision round — the re-prompt with
+// what was refused, why, and what would satisfy the rule that
+// docs/disclosure.md § What a refusal carries requires. A blocked park says the
+// opposite, that a person must decide (docs/resolution.md § Parking), and every
+// other site that parks under it has exhausted its own revision rounds first.
+// The kind's classification (flow.ParkKind.RedispatchMayClear) is what a
+// scheduler reads, so blocked here told it to stop on a condition whose
+// designed cure is a re-dispatch. The loop is bounded the way a correction
+// round is priced (docs/resolution.md § The treasurer): the refusal costs no
+// dispatch, the revising dispatch is charged at every outcome but another
+// refusal, and every turn a revision spends is metered on the cost axis whether
+// or not the guard accepts what it produced.
+//
 // The park reason carries NOTHING the guard said. A park IS published — the
 // orchestrator posts the request through the same guard — and a refusal names
 // what it found and quotes it (docs/disclosure.md § What a refusal carries), so
@@ -748,7 +766,7 @@ func refusedCapture(
 		sctx.Notify("", "could not record refused text: "+err.Error())
 	}
 	return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
-		Kind: flow.ParkBlocked,
+		Kind: flow.ParkStepDidNotComplete,
 		Step: li.Result(),
 		Reason: fmt.Sprintf(
 			"the disclosure guard refused this step's result (%s); "+
