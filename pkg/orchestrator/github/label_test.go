@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/flow"
 )
 
 func TestLabels_Vocabulary(t *testing.T) {
@@ -174,5 +176,24 @@ func TestLabels_Maintained(t *testing.T) {
 	}
 	if custom.Maintained("flow:seeded") {
 		t.Error("Maintained(flow:seeded) under the custom: prefix = true, want false")
+	}
+}
+
+// A result the disclosure guard refuses at capture parks step-did-not-complete
+// rather than blocked (#325), and the move was made on one premise: the
+// tracker's visible state does not change, because the kind is advertised by
+// the same flow:blocked label a blocked park carries (docs/github-schema.md §
+// Labels). This pins that premise. A label of the kind's own would move every
+// refused capture off the one label discover reads as "parked, do not offer",
+// and nothing else in the move would notice.
+func TestParkLabel_StepDidNotCompleteIsAdvertisedAsBlocked(t *testing.T) {
+	l := newLabels("flow:")
+	req := &flow.ParkRequest{
+		Kind:   flow.ParkStepDidNotComplete,
+		Step:   "plan",
+		Reason: "the disclosure guard refused this step's result (artifact-comment)",
+	}
+	if got := parkLabel(l, req); got != l.Blocked() {
+		t.Errorf("parkLabel(step-did-not-complete) = %q, want %q — the label a refused capture was advertised under before it left the blocked kind", got, l.Blocked())
 	}
 }

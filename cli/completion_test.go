@@ -439,6 +439,45 @@ func TestCompletion_RefusedCaptureAgainParksAgainUncharged(t *testing.T) {
 	}
 }
 
+// Two sites park under step-did-not-complete — a handler that returned without
+// completing, and a result the disclosure guard refused at capture — and the
+// grant remedy sends the operator to the park's reason to tell which
+// (remedyFor). So the refused one must name the guard, and the other must not:
+// a reason merged into a generic "did not complete" leaves an operator
+// re-running a step whose text is refused identically each time, with nothing
+// saying why.
+func TestCompletion_StepDidNotCompleteReasonNamesTheSite(t *testing.T) {
+	refusedAtCapture := func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "the plan is written").Markdown("the plan"), nil
+		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}
+	decidedNothing := func(f *flow.Flow) {
+		f.AddStep("forgetful", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, nil
+		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}
+	parkOf := func(t *testing.T, configure func(*flow.Flow), refuse error) *flow.ParkRequest {
+		t.Helper()
+		app, be, claim := capturingApp(t, configure)
+		be.refuse = refuse
+		res, err := RunOne(context.Background(), app, claim)
+		if err != nil || res.Park == nil || res.Park.Kind != flow.ParkStepDidNotComplete {
+			t.Fatalf("RunOne = (%+v, %v), want parked step-did-not-complete", res, err)
+		}
+		return res.Park
+	}
+
+	refused := parkOf(t, refusedAtCapture, flow.ErrDisclosureRefused{Act: flow.ActArtifactComment, Reason: errors.New("a home path")})
+	if !strings.Contains(refused.Reason, "disclosure guard") {
+		t.Errorf("refused-capture park reason = %q, want it to name the disclosure guard — the remedy sends the operator here to learn which site parked", refused.Reason)
+	}
+	forgetful := parkOf(t, decidedNothing, nil)
+	if strings.Contains(forgetful.Reason, "disclosure guard") {
+		t.Errorf("zero-result park reason = %q, want no mention of a guard that refused nothing", forgetful.Reason)
+	}
+}
+
 // What the stash carries for each kind of payload. The next dispatch is asked
 // to revise text it can only read here, so a payload rendered as nothing is a
 // author asked to fix a sentence they were never shown.
