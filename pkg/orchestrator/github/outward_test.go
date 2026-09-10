@@ -1278,6 +1278,42 @@ func TestExaminePushWithNoGuardIsRefused(t *testing.T) {
 	}
 }
 
+// The capability is OPTIONAL and reached by type assertion, so nothing in the
+// type system requires this backend's worktree to carry it: drop the method and
+// flow.ExaminePush answers ErrUnsupported, the repair step parks "this arena
+// cannot report what a push would disclose", and every disclosure refusal in
+// the real arena stops the resolution instead of being repaired. No compiler
+// and no other test here says a word about it.
+//
+// So the assertion is made through flow.ExaminePush, the way the step reaches
+// it, and it asserts what the step needs: an answer ABOUT THE PUSH, delegated
+// to the one chokepoint. A guard that permits makes "not refused" the only
+// answer that can come back, so an ErrUnsupported cannot hide inside it.
+func TestTheWorktreeAnswersAboutAPushThroughTheChokepoint(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	gitInTest(t, dir, "init", "-b", "main", ".")
+	commitFile(t, dir, "a.txt", "content\n", "the only commit")
+
+	guard := &recordingGuard{}
+	w := &worktree{b: &Orchestrator{
+		out: &outward{git: newGitOps(dir), owner: "o", repo: "r", guard: guard},
+	}}
+
+	if err := flow.ExaminePush(t.Context(), w); err != nil {
+		t.Fatalf("flow.ExaminePush: %v — the repair step reaches the guard through exactly this call", err)
+	}
+	// The guard lives on `outward` and nowhere else, so being shown a push
+	// disclosure is what says the worktree delegated rather than answering for
+	// itself. There is no origin in this repository, so a nil answer is also
+	// what says nothing was pushed: a real push here could only have failed.
+	if got := len(guard.of(flow.ActPush)); got != 1 {
+		t.Fatalf("the guard was shown %d push disclosure(s), want 1: %+v", got, guard.all())
+	}
+}
+
 // The patch a push discloses is the diff and nothing around it. `git log
 // --patch` prints an author line under every format but the empty one, so the
 // identity that made the commits is one flag away from riding into the push

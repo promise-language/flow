@@ -1,7 +1,9 @@
 package issue
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -184,6 +186,125 @@ func TestTheRequestIsMechanicalOnThePushRefusalPath(t *testing.T) {
 	if last.Step != flow.StepId(StepOpenPR) || last.Route.Next != flow.StepId(StepRepairDisclosure) {
 		t.Errorf("the last entry is %q → %q, want the request electing the repair", last.Step, last.Route.Next)
 	}
+}
+
+// The round, driven end to end through the real dispatcher: refused, repaired,
+// proposed. Three properties live only here, and every one of them is invisible
+// to a handler-level test.
+//
+//   - THE ROUTE IS NAVIGABLE. Both edges are new and one of them is a back
+//     edge. A handler returning ctx.Next(StepRepairDisclosure) proves nothing
+//     about whether the next dispatch derives that step and runs it.
+//   - THE REPAIR'S DECLARATION COVERS WHAT IT DOES. It prompts, it commits, it
+//     leaves the item's branch, and it resolves a flag. Declare any of those
+//     short and the dispatch stops — refused, write-contract, mismatch — where
+//     a handler test sees a clean return and a payload nobody checked.
+//   - THE JOURNAL RECORDS THE REPAIR. This is the half of #321 the split was
+//     most for: a resolution that rewrote its own history to get a push out
+//     used to record one pr-open and no trace of why.
+//
+// The bound on the cycle is asserted where it is decided, on the handler
+// (TestStepOpenPR_RefusedAfterARepairRound_Parks). What is asserted here is
+// that the ordinary round REACHES the proposal: a repair that answers the
+// refusal leaves the request able to push, and the item leaves the cycle by the
+// edge it came in by.
+func TestTheRepairRoundIsJournalledAndEndsAtTheProposal(t *testing.T) {
+	ctx := context.Background()
+	wt := resumedWorktree()
+	wt.commits = 1
+	// Refused once at the push, and once more when the repair asks the guard
+	// what the push would carry. Both slices are then exhausted, which is the
+	// rewritten history: the third dispatch's push is not refused.
+	wt.openErrs = []error{pushRefusal}
+	wt.examineErrs = []error{pushRefusal}
+
+	agent := &recordingAgent{}
+	app, arena, claim := atTheRequest(t, wt, agent)
+
+	for i, want := range []struct {
+		step, next flow.StepId
+	}{
+		{flow.StepId(StepOpenPR), flow.StepId(StepRepairDisclosure)},
+		{flow.StepId(StepRepairDisclosure), flow.StepId(StepOpenPR)},
+		{flow.StepId(StepOpenPR), flow.StepId(StepCloseBranch)},
+	} {
+		res := runStep(t, app)
+		if res.Status != string(flow.StatusDone) {
+			t.Fatalf("dispatch %d: %s → %s: %s", i+1, res.Step, res.Status, res.Reason)
+		}
+		state, err := arena.Load(ctx, claim.ItemRef)
+		if err != nil {
+			t.Fatalf("dispatch %d: Load: %v", i+1, err)
+		}
+		last, ok := state.LastEntry()
+		if !ok {
+			t.Fatalf("dispatch %d journalled nothing", i+1)
+		}
+		if last.Step != want.step || last.Route.Next != want.next {
+			t.Fatalf("dispatch %d journalled %q → %q, want %q → %q",
+				i+1, last.Step, last.Route.Next, want.step, want.next)
+		}
+		if last.Step == flow.StepId(StepRepairDisclosure) {
+			// The entry is the trace, and it says a repair happened without
+			// saying what was refused: it is published, through the guard that
+			// refused it (docs/disclosure.md § A refusal does not travel).
+			if strings.Contains(last.Message, pushRefusal.Reason.Error()) {
+				t.Errorf("the journalled repair quotes what the guard refused: %q", last.Message)
+			}
+			if last.Result.Type != flow.ArtifactFlag {
+				t.Errorf("the repair recorded a %v, want a flag", last.Result.Type)
+			}
+		}
+	}
+
+	// One prompt across the whole round, and it is the repair's. The request
+	// declares none on both of its dispatches; the repair is where the turn was
+	// always spent, and now it is where the record says it was spent.
+	if len(agent.reqs) != 1 {
+		t.Fatalf("the round sent %d prompt(s), want 1 (the repair's)", len(agent.reqs))
+	}
+	if !strings.Contains(agent.reqs[0].Prompt, pushRefusal.Reason.Error()) {
+		t.Errorf("the repair prompt does not carry the guard's answer: %q", agent.reqs[0].Prompt)
+	}
+	// And nothing the guard refused is anywhere in what the round PUBLISHED.
+	// Each half of the route was checked for it above; this is the whole record
+	// the item carries away, which is what the guard would see again.
+	state, err := arena.Load(ctx, claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, entry := range state.Journal {
+		if strings.Contains(entry.Message, pushRefusal.Reason.Error()) ||
+			strings.Contains(entry.Result.Markdown, pushRefusal.Reason.Error()) {
+			t.Errorf("the journalled %q carries what the guard refused: %+v", entry.Step, entry)
+		}
+	}
+	if !wt.opened {
+		t.Error("the round ended without the request being opened")
+	}
+	if wt.examines != 1 {
+		t.Errorf("the guard was asked about a push %d times, want 1 — one repair round", wt.examines)
+	}
+}
+
+// runStep advances the item one step the way an operator does, through the
+// binary's own `run-step` command.
+//
+// Not cli.RunOne: the App a caller holds is not the App the binary runs. The
+// lookups a dispatch reads — the declared artifact type among them — are built
+// by the startup gate, which only the entry point runs, so an artifact election
+// dispatched through RunOne is judged against a type nobody declared and
+// refused as a mismatch (#335). Every step in this round elects one.
+func runStep(t *testing.T, app cli.App) flow.InvocationResult {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	app.Out, app.Err = &out, &errOut
+	cli.RunWithArgs(app, []string{"run-step", "--json"})
+	var res flow.InvocationResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("run-step: %v (stdout %q, stderr %q)", err, out.String(), errOut.String())
+	}
+	return res
 }
 
 // The mirror, and it is what makes the two above mean something: with the SAME

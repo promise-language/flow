@@ -1880,6 +1880,55 @@ func TestStepRepairDisclosure_UnsupportedExamineParksWithoutPrompting(t *testing
 	}
 }
 
+// The examine's third answer, and the one with no route: an error that is not
+// the guard's judgement about a push. It is returned unchanged — NOT parked and
+// NOT prompted — because neither is true of it. A park would report a broken
+// git or a dead network as content a person must clear, and a prompt would send
+// an agent to rewrite history over an error that says nothing about what the
+// branch carries.
+//
+// Both shapes that reach this branch are driven: a bare infrastructure failure,
+// and a refusal about some OTHER act — which is the guard answering a question
+// this step did not ask, and no more a mandate to rewrite history than the
+// network failure is.
+func TestStepRepairDisclosure_AnExamineThatIsNotAPushJudgementIsReturned(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"infrastructure", errors.New("git rev-list: fatal: bad revision")},
+		{"a refusal about another act", flow.ErrDisclosureRefused{
+			Act:    flow.ActPullRequest,
+			Reason: errors.New("the body names /Users/someone/"),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wt := resumedWorktree()
+			wt.examineErrs = []error{tc.err}
+
+			agent := &scriptedAgent{}
+			ctx := routedFrom(ctxWithPlan(wt, agent), StepOpenPR)
+
+			res, err := testBuilder(t).stepRepairDisclosure(ctx)
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("err = %v, want the examine's own error returned unchanged", err)
+			}
+			if ctx.park != nil {
+				t.Errorf("park = %+v, want none — this is not a refused branch", ctx.park)
+			}
+			if agent.calls != 0 {
+				t.Errorf("agent called %d times, want 0 — there is nothing to repair from", agent.calls)
+			}
+			if len(ctx.wipSaves) != 0 {
+				t.Errorf("WIP saved %d times, want 0 — no guard judgement about the push to keep", len(ctx.wipSaves))
+			}
+			if res.Route.Next != "" {
+				t.Errorf("elected %q — a step that could not repair elects nothing", res.Route.Next)
+			}
+		})
+	}
+}
+
 func TestPromptPushRepair_RendersRefusalAndRebaseInstructions(t *testing.T) {
 	pc := PromptContext{PushRefusal: "found /Users/someone/.ssh/id_rsa"}
 	got, err := renderPrompt(Config{}, PromptPushRepair, pc)
