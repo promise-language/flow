@@ -403,6 +403,24 @@ func TestWriteContract_RemedyForParkWriteContract(t *testing.T) {
 	}
 }
 
+// The step-did-not-complete remedy covers both sites that park under the kind:
+// a handler that returned without completing, and a result the disclosure guard
+// refused at capture. Neither is a budget problem, and the second is not a code
+// problem either — the next run revises what was refused — so the remedy names
+// re-running and not a code fix, which is what an operator running `grant` on
+// a refused capture would otherwise be sent to make.
+func TestRemedyFor_StepDidNotComplete_NamesTheCaptureRefusal(t *testing.T) {
+	got := remedyFor(flow.ParkStepDidNotComplete)
+	for _, want := range []string{"refused at capture", "Re-run"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("remedyFor(ParkStepDidNotComplete) = %q, want it to mention %q", got, want)
+		}
+	}
+	if strings.Contains(got, "code fix") {
+		t.Errorf("remedyFor(ParkStepDidNotComplete) = %q, must not prescribe a code fix: a refused result is revised by the next run", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 
 // stubAgent is a fake flow.Agent that returns canned responses and records
