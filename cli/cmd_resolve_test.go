@@ -41,6 +41,17 @@ func resolveTestAppStep(t *testing.T, be flow.Orchestrator, step func(flow.StepC
 // the caller — the lever for a test about what a mechanical step is spared.
 func resolveTestAppPrompts(t *testing.T, be flow.Orchestrator, step func(flow.StepCtx) (flow.StepResult, error), prompts flow.PromptPolicy) (*App, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
+	return resolveTestAppFlow(t, be, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", step, flow.StepConfig{Prompts: prompts, Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	})
+}
+
+// resolveTestAppFlow is the fixture under the others: the isolated App with the
+// contributor role declared, and a graph the caller registers — the lever for a
+// test about how the loop treats one step differently from the next. "plan"
+// (markdown) and "commit" (commit hash) are the artifacts a graph may produce.
+func resolveTestAppFlow(t *testing.T, be flow.Orchestrator, configure func(*flow.Flow)) (*App, *bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
 	// Isolate from real credential discovery (Keychain, claude binary) so
 	// reportQuota's exec calls don't hang or hit the network, and from the
 	// quota cache so one resolve test's recorded failure is not another's
@@ -53,13 +64,16 @@ func resolveTestAppPrompts(t *testing.T, be flow.Orchestrator, step func(flow.St
 	app := &App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
-		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Out:          out,
-		Err:          errBuf,
+		Artifacts: []flow.ArtifactDef{
+			flow.Artifact("plan", flow.ArtifactMarkdown),
+			flow.Artifact("commit", flow.ArtifactCommitHash),
+		},
+		Out: out,
+		Err: errBuf,
 	}
 	f := flow.NewFlow("implement", []flow.ItemType{"task"})
 	f.Role("contributor", flow.CapPush)
-	f.AddStep("write plan", "plan", step, flow.StepConfig{Prompts: prompts, Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	configure(f)
 
 	app.Flow = f
 	if err := app.validate(); err != nil {
@@ -1994,6 +2008,64 @@ func TestCmdResolve_AMechanicalStepIsNotPaced(t *testing.T) {
 				t.Errorf("a mechanical step waited for quota headroom it cannot spend; got:\n%s", output)
 			}
 		})
+	}
+}
+
+// The decision is made for EACH pending step, on the iteration that dispatches
+// it, never once for the resolution: a route that runs an agent step and then a
+// mechanical one waits before the first and not before the second. That is the
+// shape the stall was measured on — a resolution whose free steps sat under a
+// curve its prompting steps were nowhere near breaching — and a peek hoisted
+// out of the loop, or a verdict carried over from the previous iteration, would
+// pace the mechanical step on the agent step's declaration.
+func TestCmdResolve_PacingIsDecidedForEachPendingStep(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	quotaReads := 0
+	readsBeforePlan, readsBeforeBranch := -1, -1
+	app, _, errBuf := resolveTestAppFlow(t, be, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			readsBeforePlan = quotaReads
+			return ctx.Next("commit", "planned").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Entry: true, Role: "contributor", Next: []flow.StepId{"commit"}})
+		f.AddStep("open branch", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			readsBeforeBranch = quotaReads
+			return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("abc"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsNone, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	})
+	// Every reading forces a (short) wait, so an iteration that consults the
+	// quota is visible twice over: as a read, and as a pacing line.
+	app.Quota = func() ([]windowUsage, error) {
+		quotaReads++
+		return []windowUsage{{
+			Label:    "5h",
+			Length:   time.Second,
+			Used:     1.0,
+			ResetsAt: time.Now().Add(30 * time.Millisecond),
+		}}, nil
+	}
+
+	code := app.cmdResolve(context.Background(), []string{"1"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if readsBeforePlan != 1 {
+		t.Errorf("quota read %d times before the agent step, want 1 — an agent step is paced", readsBeforePlan)
+	}
+	if readsBeforeBranch != 1 {
+		t.Errorf("quota read %d times before the mechanical step, want 1 — the same one read: the loop reached the mechanical step without consulting the quota again", readsBeforeBranch)
+	}
+	output := errBuf.String()
+	planAt := strings.Index(output, `running "write plan"`)
+	branchAt := strings.Index(output, `running "open branch"`)
+	if planAt < 0 || branchAt < 0 || branchAt < planAt {
+		t.Fatalf("want both steps announced, the plan first; got:\n%s", output)
+	}
+	if !strings.Contains(output[:planAt], "pacing — waiting") {
+		t.Errorf("the agent step ran without waiting for quota headroom; got:\n%s", output)
+	}
+	if strings.Contains(output[planAt:branchAt], "pacing — waiting") {
+		t.Errorf("a pacing wait sits between the agent step and the mechanical one; got:\n%s", output)
 	}
 }
 

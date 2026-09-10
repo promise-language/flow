@@ -126,11 +126,19 @@ func assertMechanicalRefusalParked(t *testing.T, res flow.InvocationResult, agen
 	if res.RedispatchMayClear == nil || *res.RedispatchMayClear {
 		t.Errorf("redispatch_may_clear = %v, want a present false — a mis-declared step answers identically every time, so a driver that re-dispatches is looping", res.RedispatchMayClear)
 	}
-	for _, want := range []string{`"` + step + `"`, "Prompts: none", "promptFromMechanicalStep", "agent_chokepoint_test.go"} {
+	// The site is "function (file:line)" with the file's BASE name: the full
+	// path is a fact about the machine the binary was built on, and the reason
+	// is published on the item. Wanting "(agent_chokepoint_test.go:" rather than
+	// the bare file name is what makes a regression to the full path visible.
+	for _, want := range []string{`"` + step + `"`, "Prompts: none", "promptFromMechanicalStep", "(agent_chokepoint_test.go:"} {
 		if !strings.Contains(res.Reason, want) {
 			t.Errorf("park reason does not mention %q — a reader cannot tell whether to fix the handler or the declaration without both the step and the site: %q", want, res.Reason)
 		}
 	}
+	// A park moves nothing, so the step is still what the route points at, and
+	// it is mechanical: the envelope says both, so a driver that fixes the
+	// declaration or the handler knows the re-dispatch need not wait for quota.
+	assertNext(t, res, step, true)
 	if res.CostUSD == nil || *res.CostUSD != 0 {
 		t.Errorf("cost_usd = %v, want a present zero: the step ran and spent nothing", res.CostUSD)
 	}
