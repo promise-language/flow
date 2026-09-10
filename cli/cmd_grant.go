@@ -732,7 +732,7 @@ func remedyFor(kind flow.ParkKind) string {
 	case flow.ParkInfraTransient, flow.ParkRemoteUnreachable:
 		return "Nothing to grant — this park consumed no budget. Re-run the step once the infrastructure is back."
 	case flow.ParkStepDidNotComplete:
-		return "The handler returned without completing — it elected no route, or elected one and produced no result — a code fix, not a budget one."
+		return "Nothing to grant — the step left its job undone: the handler returned without completing (it elected no route, or elected one and produced no result), or its result was refused at capture by the disclosure guard; the park's reason says which. Re-run the step — a refused result is re-prompted with what was refused and why."
 	case flow.ParkRefused:
 		return "Nothing to grant — the failure is deterministic and consumed no budget. Fix the environment or precondition, then re-run."
 	case flow.ParkWriteContract:
