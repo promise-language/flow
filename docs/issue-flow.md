@@ -29,7 +29,8 @@ Each step produces exactly one result, and the result is the step's identity. **
 | implement | contributor | Make it work | the solution, a commit, the `implementation` record naming it | review |
 | review | contributor | Make it right | the solution, a commit, the `review` briefing | coverage |
 | coverage | contributor | Make it tested | tests **and** the solution, a commit, the `coverage` briefing | open request |
-| **open request** | contributor | Propose a change that can land | the gate's result, the pushed branch, the request, the `pr-open` signal | close branch |
+| **open request** | contributor | Propose a change that can land | the gate's result, the pushed branch, the request, the `pr-open` signal | close branch · repair disclosure *(refused push)* |
+| repair disclosure | contributor | Make what the branch carries publishable | the rewritten history, the `disclosure-repair` record | open request |
 | **close branch** | contributor | Return the worktree to the base | nothing — it restores | review the proposal |
 | review the proposal | maintainer | Judge the proposal as what will land | the `proposal-review` briefing — nothing in the worktree | verify merge result · implement *(rework)* · **finalize: rejected** |
 | **verify merge result** | maintainer | Measure the merge result | the gate's result | merge |
@@ -135,7 +136,7 @@ Every step declares the worktree state it needs and the state it leaves ([resolu
 |---|---|---|
 | plan · review the proposal · review the filing · file the items · merge · record merge commit | `any` | `as-found` |
 | open branch | `any` | `item-branch` |
-| implement · review · coverage · open request | `item-branch` | `item-branch` |
+| implement · review · coverage · open request · repair disclosure | `item-branch` | `item-branch` |
 | verify merge result | `item-branch` | `as-found` |
 | close branch | `item-branch` | `base` |
 
@@ -144,6 +145,8 @@ Implement, review and coverage refuse to run anywhere but the item's branch, and
 ### Branches are moved only by mechanical steps
 
 **Open branch, open request and close branch are the only steps that create, switch or publish a branch, and none of them runs an agent.** Every other step finds the worktree already established on its declared branch and leaves it there.
+
+Repair disclosure is the case that looks like an exception and is not: it is agent-driven and it **rewrites history**, which moves the commit and is what it is for. Moving the commit is not moving the branch — nothing is created, nothing is switched to, and nothing is published — and the step declares exactly that, so the rule is enforced against it like any other.
 
 This is a restriction on the agent-driven steps, and it is deliberate. An agent given a shell and a goal will reach for git when it seems expedient — cutting a branch of its own, committing directly to the base, resetting to escape a state it does not understand. Each of those is locally reasonable and globally wrong: a ghost branch strands the work where nothing will find it, and a commit on the base defeats the entire proposal model, which exists so that nothing reaches the mainline unreviewed.
 
@@ -177,7 +180,7 @@ Where a result is stored is the backend's business, not this flow's. What this f
 
 ### Where judgement lives, and why it is worth knowing
 
-Plan, implement, review, coverage, review the proposal and review the filing spend an agent prompt on a decision. Open branch, open request, close branch, verify merge result, merge, record merge commit and file the items spend none.
+Plan, implement, review, coverage, review the proposal and review the filing spend an agent prompt on a decision, and so does repair disclosure — the one whose prompt answers a refusal rather than producing a deliverable. Open branch, open request, close branch, verify merge result, merge, record merge commit and file the items spend none.
 
 That distinction is not bookkeeping. A step whose outcome an agent decides is **neither cheap nor reproducible**: it costs a prompt, and running it twice on the same input can produce different work. A mechanical step is both — it costs nothing beyond the operations it performs, and it does the same thing every time. File the items is mechanical for exactly that reason: *what* to file was the plan's decision and *whether it closes the gap* was the filing review's; executing the filing decides nothing.
 
@@ -257,6 +260,37 @@ The request body carries the plan, each producing step's briefing, and the gate'
 
 **On a rework round the request already exists.** The push updates it; a second request is never opened for the same branch, and the step completes on the request being current rather than on it being new.
 
+**It is mechanical on every path, and that is a declaration it is held to.** What the branch carries can be refused twice on the way out — by the pre-commit hook at the commit, and by the disclosure guard at the push — and **neither refusal is answered here**. Repairing one in place would make the longest cheap step in the flow one that can spend, which costs it all three guarantees a mechanical step earns ([flow-registration.md](flow-registration.md) § Step configuration): free, deterministic, and cheap to retry.
+
+The two refusals stop differently, and what separates them is the state of the tree:
+
+| Refused | What it does | Why |
+|---|---|---|
+| **the push**, by the disclosure guard | elects **repair disclosure** and completes | the tree is committed and clean, so the step completes into its declared state and the repair takes the branch from there |
+| **the commit**, by the pre-commit hook | **blocks**, keeping the hook's words with the step | the refused work is still in the tree, and a step that ends over a dirty tree has not completed ([resolution.md](resolution.md) § Steps and the worktree) — a flow does not leave one step's changes uncommitted for a later step to sweep up |
+
+**A commit refused here is an anomaly, not a routine repair.** Every producing step commits its own work through the same repair, in its own dispatch where prompting is what it is for, so uncommittable content reaching this step means a step before it left work behind. The block says so, and the remedy is the one the commit contract names — deletion, not an ignore rule ([resolution.md](resolution.md) § The commit contract).
+
+**A push refusal that survives one repair round blocks.** The repair answers the refusal in one dispatch, so a branch arriving back from it still refused has had its round, and electing the same round again is how a loop is built. What was refused is kept with the step, unpublished, for whoever clears the block. A later rework round arrives from coverage rather than from the repair, so a fresh refusal there earns a fresh repair.
+
+### Repair disclosure
+
+Rewrites the history that names what may not leave the machine, so the branch can be pushed, and elects the request back.
+
+It exists because the mechanical part is the deliverable: the request's job is to gate, commit, push and propose, and the repair is a rare answer to a refusal on that job's failure path — the one shape `flow-registration.md` recommends splitting. The record it leaves is the more valuable half: **a resolution that rewrote its own history to get a push out used to leave no trace of why**, and the journal entry names it.
+
+**It is not handed the refusal.** Every hand-off is published — an election message, a park record — through the same guard that refused it, and the unpublished draft belongs to the step that wrote it ([resolution.md](resolution.md) § Drafts). So it receives the **act**, and asks the guard itself what a push of this branch would carry, without pushing ([disclosure.md](disclosure.md) § A refusal does not travel). The answer never leaves the dispatch, and it is the current one where a copy could be stale.
+
+**It commits before it asks**, through the same repair every producing step commits through. The tree it is handed is clean, so that is normally nothing at all — it is there because what the guard is asked about must be the branch **as the commit left it**, and a round arriving over a tree that still carries work would otherwise ask about a state nobody proposes.
+
+**It moves no branch.** Rewriting history moves the commit, which it declares; it neither creates, switches nor publishes a branch, which is what keeps § Branches are moved only by mechanical steps true with an agent-driven step in the graph.
+
+Where an arena's worktree cannot answer what a push would disclose, the step **blocks naming that** rather than prompting: an agent asked to rewrite history without being told what was refused has nothing to work from.
+
+**It answers the push refusal only.** A commit refused at the request blocks instead of routing here, because the refused work is still in the tree and a step cannot complete over one (§ Open request). Both refusals name the same problem, so the intended end state is that both route.
+
+> The commit refusal reaches this step once the write-contract dirty check is differential rather than absolute — [#334](https://github.com/promise-language/flow/issues/334). Until then a commit refused at the request stops for a person where it used to be repaired in place; the push path, which is the one that fires in practice, keeps its repair.
+
 ### Close branch
 
 Returns the worktree to the base branch, and routes the item to the maintainer's review — the contributor's part is complete, and where the maintainer is another principal, this election is the handoff.
@@ -309,6 +343,6 @@ Mechanical: what to file was decided at plan, and that the set closes the gap wa
 
 **Filing is resumable, not atomic — completion is the atomic act.** The backend files one item at a time and offers no transaction, so the step never pretends otherwise: each intended item is filed through the orchestrator's idempotent surface ([orchestrator.md](orchestrator.md) § Filing), keyed by this item and the intended item's key, so a dispatch interrupted after filing three of five files the two missing on resume and duplicates nothing. The journal entry appends only when every intended item exists — the step completes whole or not at all, and the `filed-items` artifact lists exactly what exists.
 
-**A guard refusal routes back to plan.** The refused text is the plan's — the intended items are its artifact — and this step is mechanical: retrying it cannot change a word, so parking here would buy the loop the treasurer exists to stop. The election back to plan carries the refusal verbatim; items already filed stay filed and stay recorded, and the corrected set returns through the filing review before anything more goes out.
+**A guard refusal routes back to plan.** The refused text is the plan's — the intended items are its artifact — and this step is mechanical: retrying it cannot change a word, so parking here would buy the loop the treasurer exists to stop. The election back to plan names **the act and the origin** and quotes nothing the guard refused — a refusal does not travel ([disclosure.md](disclosure.md) § A refusal does not travel), so the plan step asks the guard what it would publish rather than reading a copy. Items already filed stay filed and stay recorded, and the corrected set returns through the filing review before anything more goes out.
 
 It finalizes the item as resolved: the filing **is** the resolution.

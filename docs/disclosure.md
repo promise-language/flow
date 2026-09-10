@@ -155,6 +155,16 @@ A refusal is not a failure of the step. The text is revised and re-offered — t
 
 **The work itself is never the casualty.** What was refused is an expression of work already done and paid for. Discarding it and starting over spends the whole cost again to reach the same sentence.
 
+### A refusal does not travel
+
+A refusal quotes what it caught, which is what makes it actionable — and which means **anything published that repeats it is refused by the same guard.** The other route is closed too: the unpublished store belongs to the step that wrote it ([resolution.md](resolution.md) § Drafts), so it is not a channel between steps either.
+
+So **a refusal is never copied into an election message, a park record, or a hand-off.** Those go outward, and a refusal carried in one is a second attempt to publish exactly the text that was just refused — the guard is consistent, so it fails, and the failure lands on the step trying to report a problem rather than on the step that caused it.
+
+**A step that must act on a refusal it did not receive asks the guard itself, about an act it does not perform.** The answer reaches it as a value, inside its own dispatch, and never leaves. That is available because the guard is a call and not a program (§ It is wired in, not launched): asking what a write *would* disclose is the same question the write asks, one step earlier, and it publishes nothing.
+
+Re-deriving is also the better answer, not merely the permitted one: a copied refusal is about a state that has since moved, and the step acting on it is acting on the branch as it is now. What travels is the **act** — that a push was refused, that a filing was — which is a fact about the flow rather than a quotation of what the guard found.
+
 ## Overriding
 
 **A person may override a refusal. Nothing else may.**

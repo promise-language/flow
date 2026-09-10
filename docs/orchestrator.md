@@ -343,6 +343,14 @@ The `Worktree` interface is the local-git boundary handlers use via `ctx.Worktre
 | `CapturePatch(ctx)` → `([]byte, error)` | Produces a unified diff. Returning no bytes is legal — the content may live server-side. |
 | `Request()` → `RequestManager` | Returns the `RequestManager` for pull-request operations, or nil when unsupported. |
 
+**One optional capability sits beside the interface rather than in it: `PushExaminer`.** It answers **what a push would disclose, asked without pushing** — the same disclosure `Push` shows the guard, assembled once and shown twice, because an examine that built its own copy would answer about a push nobody makes. A worktree that cannot answer is not a defect: the capability is probed by type assertion, in the shape `Request()` already uses, and the reach returns `ErrUnsupported` where the orchestrator cannot answer — typed, so *never here* stays distinguishable from *the guard refused*, which is the difference between a step that has nothing to repair from and one that has work to do.
+
+| Method | Contract |
+|---|---|
+| `ExaminePush(ctx)` → `error` | The guard's answer about a push of the current branch: nil when it would be permitted, a refusal naming the push act when it would not. **It publishes nothing.** Optional — reached through the SDK's `ExaminePush(ctx, wt)`, which returns `ErrUnsupported` when the worktree does not implement it. |
+
+It exists for the one case a refusal cannot be handed over: a step that must act on a refusal it did not receive asks the guard itself, because copying a refusal into anything published is refused by the same guard ([disclosure.md](disclosure.md) § A refusal does not travel).
+
 ### Drift is evidence for judgment, never a safety check
 
 Two questions wear the ahead/behind name, and they differ in what staleness does to them.

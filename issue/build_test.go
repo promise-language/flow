@@ -193,6 +193,7 @@ func (b *buildTestBackend) SupportedArtifacts() []flow.ArtifactDef {
 		flow.Artifact("review", flow.ArtifactMarkdown),
 		flow.Artifact("coverage", flow.ArtifactMarkdown),
 		flow.Artifact("branch-closed", flow.ArtifactFlag),
+		flow.Artifact("disclosure-repair", flow.ArtifactFlag),
 		flow.Artifact("proposal-review", flow.ArtifactMarkdown),
 		flow.Artifact("verify-merge", flow.ArtifactMarkdown),
 		flow.Artifact("merge-commit", flow.ArtifactCommitHash),
@@ -374,7 +375,17 @@ func TestResolveFlow_DeclaresTheDocumentedGraph(t *testing.T) {
 			flow.StepId(StepImplement): {flow.StepId(StepReview)},
 			flow.StepId(StepReview):    {flow.StepId(StepCoverage)},
 			flow.StepId(StepCoverage):  {flow.StepId(StepOpenPR)},
-			flow.StepId(StepOpenPR):    {flow.StepId(StepCloseBranch)},
+			// Two routes out of the request: the contributor's part ending,
+			// and the failure route it elects instead of prompting when what
+			// the branch carries is refused.
+			flow.StepId(StepOpenPR): {
+				flow.StepId(StepCloseBranch),
+				flow.StepId(StepRepairDisclosure),
+			},
+			// The back edge. A cycle is legal — ValidateGraph has no acyclicity
+			// constraint — because finalization stays reachable from both: the
+			// request keeps its route to close branch.
+			flow.StepId(StepRepairDisclosure): {flow.StepId(StepOpenPR)},
 			// The role boundary: the contributor's part ends by handing the
 			// proposal to the maintainer, not by finalizing.
 			flow.StepId(StepCloseBranch): {flow.StepId(StepReviewProposal)},
@@ -395,23 +406,26 @@ func TestResolveFlow_DeclaresTheDocumentedGraph(t *testing.T) {
 		})
 }
 
-// Eleven tags, and the boundary is the edge between them: close branch is the
+// Twelve tags, and the boundary is the edge between them: close branch is the
 // contributor's last step, review the proposal the maintainer's first.
 func TestResolveFlow_TagsEveryStepAndDeclaresBothRoles(t *testing.T) {
 	b := &builder{cfg: Config{}, role: RoleContributor}
 	f := b.resolveFlow(Config{})
 	wantRoles(t, f, []Role{RoleContributor, RoleMaintainer}, map[flow.StepId]Role{
-		flow.StepId(StepPlan):           RoleContributor,
-		flow.StepId(StepBranch):         RoleContributor,
-		flow.StepId(StepImplement):      RoleContributor,
-		flow.StepId(StepReview):         RoleContributor,
-		flow.StepId(StepCoverage):       RoleContributor,
-		flow.StepId(StepOpenPR):         RoleContributor,
-		flow.StepId(StepCloseBranch):    RoleContributor,
-		flow.StepId(StepReviewProposal): RoleMaintainer,
-		flow.StepId(StepVerifyMerge):    RoleMaintainer,
-		flow.StepId(StepMerge):          RoleMaintainer,
-		flow.StepId(StepRecordMerge):    RoleMaintainer,
+		flow.StepId(StepPlan):      RoleContributor,
+		flow.StepId(StepBranch):    RoleContributor,
+		flow.StepId(StepImplement): RoleContributor,
+		flow.StepId(StepReview):    RoleContributor,
+		flow.StepId(StepCoverage):  RoleContributor,
+		flow.StepId(StepOpenPR):    RoleContributor,
+		// The repair is the contributor's too: it rewrites the history of the
+		// branch the contributor cut, and needs nothing the merge needs.
+		flow.StepId(StepRepairDisclosure): RoleContributor,
+		flow.StepId(StepCloseBranch):      RoleContributor,
+		flow.StepId(StepReviewProposal):   RoleMaintainer,
+		flow.StepId(StepVerifyMerge):      RoleMaintainer,
+		flow.StepId(StepMerge):            RoleMaintainer,
+		flow.StepId(StepRecordMerge):      RoleMaintainer,
 	})
 	// The boundary itself, asserted as an edge rather than inferred from the
 	// tags: a graph whose roles were right but whose contributor half did not
@@ -433,17 +447,18 @@ func TestResolveFlow_DeclaresTheBranchingSequence(t *testing.T) {
 		needs  flow.NeedsState
 		leaves flow.LeavesState
 	}{
-		flow.StepId(StepPlan):           {flow.NeedsAny, flow.LeavesAsFound},
-		flow.StepId(StepBranch):         {flow.NeedsAny, flow.LeavesItemBranch},
-		flow.StepId(StepImplement):      {flow.NeedsItemBranch, flow.LeavesItemBranch},
-		flow.StepId(StepReview):         {flow.NeedsItemBranch, flow.LeavesItemBranch},
-		flow.StepId(StepCoverage):       {flow.NeedsItemBranch, flow.LeavesItemBranch},
-		flow.StepId(StepOpenPR):         {flow.NeedsItemBranch, flow.LeavesItemBranch},
-		flow.StepId(StepCloseBranch):    {flow.NeedsItemBranch, flow.LeavesBase},
-		flow.StepId(StepReviewProposal): {flow.NeedsAny, flow.LeavesAsFound},
-		flow.StepId(StepVerifyMerge):    {flow.NeedsItemBranch, flow.LeavesAsFound},
-		flow.StepId(StepMerge):          {flow.NeedsAny, flow.LeavesAsFound},
-		flow.StepId(StepRecordMerge):    {flow.NeedsAny, flow.LeavesAsFound},
+		flow.StepId(StepPlan):             {flow.NeedsAny, flow.LeavesAsFound},
+		flow.StepId(StepBranch):           {flow.NeedsAny, flow.LeavesItemBranch},
+		flow.StepId(StepImplement):        {flow.NeedsItemBranch, flow.LeavesItemBranch},
+		flow.StepId(StepReview):           {flow.NeedsItemBranch, flow.LeavesItemBranch},
+		flow.StepId(StepCoverage):         {flow.NeedsItemBranch, flow.LeavesItemBranch},
+		flow.StepId(StepOpenPR):           {flow.NeedsItemBranch, flow.LeavesItemBranch},
+		flow.StepId(StepRepairDisclosure): {flow.NeedsItemBranch, flow.LeavesItemBranch},
+		flow.StepId(StepCloseBranch):      {flow.NeedsItemBranch, flow.LeavesBase},
+		flow.StepId(StepReviewProposal):   {flow.NeedsAny, flow.LeavesAsFound},
+		flow.StepId(StepVerifyMerge):      {flow.NeedsItemBranch, flow.LeavesAsFound},
+		flow.StepId(StepMerge):            {flow.NeedsAny, flow.LeavesAsFound},
+		flow.StepId(StepRecordMerge):      {flow.NeedsAny, flow.LeavesAsFound},
 	}
 	b := &builder{cfg: Config{}, role: RoleContributor}
 	items := (&builder{cfg: b.cfg, role: b.role}).resolveFlow(Config{}).Items()
@@ -475,15 +490,15 @@ func TestResolveFlow_DeclaresWhichStepsAreMechanical(t *testing.T) {
 		flow.StepId(StepImplement): flow.PromptsAgent,
 		flow.StepId(StepReview):    flow.PromptsAgent,
 		flow.StepId(StepCoverage):  flow.PromptsAgent,
-		// Bold in the document for the end state, but declared as it behaves:
-		// stepOpenPR prompts on its disclosure-repair path. #321 splits that
-		// out and flips this value.
-		flow.StepId(StepOpenPR):         flow.PromptsAgent,
-		flow.StepId(StepCloseBranch):    flow.PromptsNone,
-		flow.StepId(StepReviewProposal): flow.PromptsAgent,
-		flow.StepId(StepVerifyMerge):    flow.PromptsNone,
-		flow.StepId(StepMerge):          flow.PromptsNone,
-		flow.StepId(StepRecordMerge):    flow.PromptsNone,
+		// Mechanical on every path: what used to prompt in place is the
+		// repair step below, which the request elects instead (#321).
+		flow.StepId(StepOpenPR):           flow.PromptsNone,
+		flow.StepId(StepRepairDisclosure): flow.PromptsAgent,
+		flow.StepId(StepCloseBranch):      flow.PromptsNone,
+		flow.StepId(StepReviewProposal):   flow.PromptsAgent,
+		flow.StepId(StepVerifyMerge):      flow.PromptsNone,
+		flow.StepId(StepMerge):            flow.PromptsNone,
+		flow.StepId(StepRecordMerge):      flow.PromptsNone,
 	}
 	items := (&builder{cfg: Config{}, role: RoleContributor}).resolveFlow(Config{}).Items()
 	if len(items) != len(want) {

@@ -76,6 +76,12 @@ type fakeWorktree struct {
 	// means success for that call. When exhausted, Open falls back to the
 	// default (success).
 	openErrs []error
+	// examineErrs scripts the guard's answer about a push that does not
+	// happen — flow.PushExaminer. A nil entry, and an exhausted slice, are a
+	// guard that permits. examines counts the asks, so a test can assert the
+	// step asked exactly once.
+	examineErrs []error
+	examines    int
 	// dirty models work appearing in the tree AFTER a commit — what the review
 	// and coverage steps do. A Commit that lands clears it, as git does; a
 	// Commit that lands nothing (noCommit) leaves it, as git also does. It also
@@ -179,6 +185,21 @@ func (w *fakeWorktree) Stage(context.Context) error {
 	return nil
 }
 func (w *fakeWorktree) Push(context.Context) error { w.pushed = true; return nil }
+
+// ExaminePush is the optional flow.PushExaminer capability: the guard's answer
+// about a push, and no push. Both halves are asserted — the answer the step
+// acted on, and that `pushed` stayed false — because performing the act would
+// defeat the whole reason for asking.
+func (w *fakeWorktree) ExaminePush(context.Context) error {
+	w.calls = append(w.calls, "examine-push")
+	w.examines++
+	if len(w.examineErrs) > 0 {
+		err := w.examineErrs[0]
+		w.examineErrs = w.examineErrs[1:]
+		return err
+	}
+	return nil
+}
 
 // Drift reports the pair a test recorded — evidence for a route election, never
 // a safety check.
@@ -1412,57 +1433,175 @@ func TestStepOpenPR_BodyCarriesTheGatesResult(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Push disclosure refusal recovery.
+// What the request does with a refusal: it elects the repair step, and prompts
+// nothing. The repair is a ROUTE, which is what lets the request declare
+// Prompts: none (#321).
 // ---------------------------------------------------------------------------
 
-func TestStepOpenPR_PushRefusal_AgentRepairs_RetrySucceeds(t *testing.T) {
-	wt := resumedWorktree()
-	pushRefusal := flow.ErrDisclosureRefused{
-		Act:    flow.ActPush,
-		Reason: fmt.Errorf("an absolute home path names the machine's user"),
-	}
-	wt.openErrs = []error{pushRefusal, nil}
+// pushRefusal is the shape a refused push arrives in.
+var pushRefusal = flow.ErrDisclosureRefused{
+	Act:    flow.ActPush,
+	Reason: errors.New("an absolute home path names the machine's user"),
+}
 
-	agent := &scriptedAgent{}
-	ctx := ctxWithPlan(wt, agent)
+// routedFrom records the entry that routed to this dispatch — what
+// repairedJustNow reads, and the bound on the repair round.
+func routedFrom(ctx *fakeCtx, step StepID) *fakeCtx {
+	ctx.journal = append(ctx.journal, flow.JournalEntry{
+		Step:      flow.StepId(step),
+		Execution: 1,
+		Route:     flow.Route{Next: flow.StepId(StepOpenPR)},
+		Message:   "propose the change",
+	})
+	return ctx
+}
 
-	if _, err := testBuilder(t).stepOpenPR(ctx); err != nil {
-		t.Fatalf("stepOpenPR: %v", err)
+// assertElectsTheRepair is what every inbound refusal must leave behind: the
+// repair elected, nothing prompted, no request opened, and a message that
+// quotes nothing the guard refused — the election is published, through the
+// guard that refused it.
+func assertElectsTheRepair(t *testing.T, res flow.StepResult, wt *fakeWorktree, agent *scriptedAgent, ctx *fakeCtx, refusedText string) {
+	t.Helper()
+	if res.Route.Next != flow.StepId(StepRepairDisclosure) {
+		t.Errorf("elected %q, want %q", res.Route.Next, StepRepairDisclosure)
 	}
-	if agent.calls != 1 {
-		t.Errorf("agent called %d times, want 1 (one repair turn)", agent.calls)
+	if agent.calls != 0 {
+		t.Errorf("agent called %d times, want 0 — a prompt from open request is refused off the chokepoint", agent.calls)
 	}
-	if len(agent.reqs) < 1 || agent.reqs[0].PermissionMode != "acceptEdits" {
-		t.Error("repair agent was not given acceptEdits permission — it needs to rebase")
+	if wt.opened {
+		t.Error("a request was opened over a branch the guard refused")
 	}
-	if len(agent.prompts) < 1 || !strings.Contains(agent.prompts[0], "absolute home path") {
-		t.Errorf("repair prompt does not contain the refusal text: %q", agent.prompts)
+	if ctx.park != nil {
+		t.Errorf("park = %+v, want none: a refusal on the way in is a route, not a stop", ctx.park)
 	}
-	if !wt.opened {
-		t.Error("PR was not opened after successful retry")
-	}
-	if len(ctx.wipSaves) == 0 {
-		t.Error("WIP was not stashed before the repair attempt")
+	if refusedText != "" && strings.Contains(res.Message, refusedText) {
+		t.Errorf("the election message quotes what was refused: %q", res.Message)
 	}
 }
 
-func TestStepOpenPR_PushRefusalTwice_Parks(t *testing.T) {
+func TestStepOpenPR_PushRefusalElectsTheRepair(t *testing.T) {
 	wt := resumedWorktree()
-	pushRefusal := flow.ErrDisclosureRefused{
-		Act:    flow.ActPush,
-		Reason: fmt.Errorf("an absolute home path names the machine's user"),
-	}
-	wt.openErrs = []error{pushRefusal, pushRefusal}
+	wt.openErrs = []error{pushRefusal}
 
 	agent := &scriptedAgent{}
-	ctx := ctxWithPlan(wt, agent)
+	ctx := routedFrom(ctxWithPlan(wt, agent), StepCoverage)
+
+	res, err := testBuilder(t).stepOpenPR(ctx)
+	if err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	assertElectsTheRepair(t, res, wt, agent, ctx, "absolute home path")
+}
+
+// The hook's refusal at the commit does NOT elect anything, and it must not
+// prompt either. It cannot elect: the refused work is still in the tree, and a
+// step that ends over a dirty tree has not completed — a flow does not leave
+// one step's changes uncommitted for a later step to sweep up
+// (docs/resolution.md § Steps and the worktree). So it parks, and what the hook
+// refused is kept with the step rather than published.
+func TestStepOpenPR_CommitRefusalParksWithoutPrompting(t *testing.T) {
+	wt := resumedWorktree()
+	wt.commits = 1              // implement already committed
+	wt.dirty = []byte("diff\n") // review/coverage changed something
+	wt.commitErrs = []error{hookErr}
+
+	agent := &scriptedAgent{}
+	ctx := routedFrom(ctxWithPlan(wt, agent), StepCoverage)
 
 	_, err := testBuilder(t).stepOpenPR(ctx)
 	if err == nil || !strings.Contains(err.Error(), "parked") {
 		t.Fatalf("err = %v, want a park", err)
 	}
-	if agent.calls != 1 {
-		t.Errorf("agent called %d times, want 1 (one attempt, then park)", agent.calls)
+	if agent.calls != 0 {
+		t.Errorf("agent called %d times, want 0 — a prompt from open request is refused off the chokepoint", agent.calls)
+	}
+	if ctx.park == nil {
+		t.Fatal("step did not park")
+	}
+	if ctx.park.Kind != flow.ParkBlocked {
+		t.Errorf("park kind = %v, want ParkBlocked", ctx.park.Kind)
+	}
+	if strings.Contains(ctx.park.Reason, "refusing to commit binary") {
+		t.Errorf("park reason quotes what the hook refused: %q", ctx.park.Reason)
+	}
+	if len(ctx.wipSaves) != 1 || !strings.Contains(ctx.wipSaves[0], "refusing to commit binary") {
+		t.Errorf("WIP saves = %q, want one carrying the hook's message", ctx.wipSaves)
+	}
+	if wt.pushed || wt.opened {
+		t.Error("something was published over a tree that could not be committed")
+	}
+	// And nothing was measured: the gate runs after recording, so a branch
+	// that could not be recorded has nothing worth measuring yet.
+	if wt.callIndex("gate:"+string(flow.GateIntegration)) != -1 {
+		t.Errorf("calls = %v, want no gate run before the branch could even be recorded", wt.calls)
+	}
+}
+
+func TestStepOpenPR_StageRefusalParksWithoutPrompting(t *testing.T) {
+	wt := resumedWorktree()
+	wt.commits = 1
+	wt.dirty = []byte("diff\n")
+	wt.stageErrs = []error{stageErr}
+
+	agent := &scriptedAgent{}
+	ctx := routedFrom(ctxWithPlan(wt, agent), StepCoverage)
+
+	_, err := testBuilder(t).stepOpenPR(ctx)
+	if err == nil || !strings.Contains(err.Error(), "parked") {
+		t.Fatalf("err = %v, want a park", err)
+	}
+	if agent.calls != 0 {
+		t.Errorf("agent called %d times, want 0", agent.calls)
+	}
+	if ctx.park == nil || ctx.park.Kind != flow.ParkBlocked {
+		t.Fatalf("park = %+v, want ParkBlocked", ctx.park)
+	}
+	if len(ctx.wipSaves) != 1 || !strings.Contains(ctx.wipSaves[0], "ignored by one of your .gitignore") {
+		t.Errorf("WIP saves = %q, want one carrying the staging error", ctx.wipSaves)
+	}
+}
+
+// An unfit machine is not a refusal: staging that failed for want of space is
+// ENOSPC, and parking it as content the hook refused would send a person
+// looking at the branch.
+func TestStepOpenPR_StagingOnAnUnfitMachineIsNotARefusal(t *testing.T) {
+	wt := resumedWorktree()
+	wt.commits = 1
+	wt.dirty = []byte("diff\n")
+	wt.stageErrs = []error{errors.New("no space left on device")}
+	wt.gateOutcome = map[flow.GateName]flow.Outcome{flow.GateFit: flow.OutcomeMeasured}
+	wt.judgeRefuses = true // the fit gate says this machine may not be given work
+
+	agent := &scriptedAgent{}
+	ctx := routedFrom(ctxWithPlan(wt, agent), StepCoverage)
+
+	_, err := testBuilder(t).stepOpenPR(ctx)
+	if err == nil {
+		t.Fatal("err = nil, want the fit failure returned")
+	}
+	if ctx.park != nil {
+		t.Errorf("park = %+v, want none — an unfit machine is not content a person must clear", ctx.park)
+	}
+	if agent.calls != 0 {
+		t.Errorf("agent called %d times, want 0", agent.calls)
+	}
+}
+
+// The bound: a branch that comes back from the repair step still refused has
+// had its repair round, so it parks rather than electing the same round again.
+func TestStepOpenPR_RefusedAfterARepairRound_Parks(t *testing.T) {
+	wt := resumedWorktree()
+	wt.openErrs = []error{pushRefusal}
+
+	agent := &scriptedAgent{}
+	ctx := routedFrom(ctxWithPlan(wt, agent), StepRepairDisclosure)
+
+	_, err := testBuilder(t).stepOpenPR(ctx)
+	if err == nil || !strings.Contains(err.Error(), "parked") {
+		t.Fatalf("err = %v, want a park", err)
+	}
+	if agent.calls != 0 {
+		t.Errorf("agent called %d times, want 0", agent.calls)
 	}
 	if ctx.park == nil {
 		t.Fatal("step did not park")
@@ -1474,8 +1613,13 @@ func TestStepOpenPR_PushRefusalTwice_Parks(t *testing.T) {
 	if strings.Contains(ctx.park.Reason, "absolute home path") {
 		t.Error("park reason contains guard details — it would be refused by the same rule")
 	}
-	if len(ctx.wipSaves) == 0 {
-		t.Error("WIP was not stashed")
+	// The guard's words go to the one place they may: this step's own
+	// unpublished record.
+	if len(ctx.wipSaves) != 1 {
+		t.Fatalf("WIP saved %d times, want 1", len(ctx.wipSaves))
+	}
+	if !strings.Contains(ctx.wipSaves[0], "absolute home path") {
+		t.Errorf("WIP stash does not carry the refusal: %q", ctx.wipSaves[0])
 	}
 }
 
@@ -1522,23 +1666,19 @@ func TestStepOpenPR_InfraErrorPassesThrough(t *testing.T) {
 	}
 }
 
-func TestStepOpenPR_PushRefusalThenInfraError_Parks(t *testing.T) {
+// An infrastructure failure after a repair round parks rather than failing:
+// the history the repair rewrote is in the branch, and a failed step reports a
+// transient push failure as if the round had never happened.
+func TestStepOpenPR_InfraErrorAfterARepairRound_Parks(t *testing.T) {
 	wt := resumedWorktree()
-	pushRefusal := flow.ErrDisclosureRefused{
-		Act:    flow.ActPush,
-		Reason: fmt.Errorf("an absolute home path names the machine's user"),
-	}
-	wt.openErrs = []error{pushRefusal, fmt.Errorf("network timeout")}
+	wt.openErrs = []error{fmt.Errorf("network timeout")}
 
 	agent := &scriptedAgent{}
-	ctx := ctxWithPlan(wt, agent)
+	ctx := routedFrom(ctxWithPlan(wt, agent), StepRepairDisclosure)
 
 	_, err := testBuilder(t).stepOpenPR(ctx)
 	if err == nil || !strings.Contains(err.Error(), "parked") {
-		t.Fatalf("err = %v, want a park (preserves the rebase work)", err)
-	}
-	if agent.calls != 1 {
-		t.Errorf("agent called %d times, want 1", agent.calls)
+		t.Fatalf("err = %v, want a park (the repair's work stays in the branch)", err)
 	}
 	if ctx.park == nil {
 		t.Fatal("step did not park")
@@ -1546,82 +1686,163 @@ func TestStepOpenPR_PushRefusalThenInfraError_Parks(t *testing.T) {
 	if ctx.park.Kind != flow.ParkBlocked {
 		t.Errorf("park kind = %v, want ParkBlocked", ctx.park.Kind)
 	}
+	// An infra error is not a refusal, so there are no guard words to stash.
+	if len(ctx.wipSaves) != 0 {
+		t.Errorf("WIP saved %d times, want 0 — an infra error has no guard text to record", len(ctx.wipSaves))
+	}
 }
 
-func TestStepOpenPR_PushRefusal_AgentFails_ReturnsAgentError(t *testing.T) {
+// ---------------------------------------------------------------------------
+// The repair step: it re-derives the refusal, repairs, and elects the request
+// back (#321).
+// ---------------------------------------------------------------------------
+
+// It is NOT handed the refusal — a published hand-off goes through the same
+// guard that refused it — so it asks the guard about a push it does not
+// perform, and prompts with THAT answer.
+func TestStepRepairDisclosure_AsksTheGuardAndRewritesTheHistory(t *testing.T) {
 	wt := resumedWorktree()
-	pushRefusal := flow.ErrDisclosureRefused{
-		Act:    flow.ActPush,
-		Reason: fmt.Errorf("an absolute home path names the machine's user"),
+	wt.examineErrs = []error{pushRefusal}
+
+	agent := &scriptedAgent{}
+	ctx := routedFrom(ctxWithPlan(wt, agent), StepOpenPR)
+
+	res, err := testBuilder(t).stepRepairDisclosure(ctx)
+	if err != nil {
+		t.Fatalf("stepRepairDisclosure: %v", err)
 	}
-	wt.openErrs = []error{pushRefusal}
+	if wt.examines != 1 {
+		t.Errorf("the guard was asked %d times, want 1", wt.examines)
+	}
+	// The point of the surface: asking must not publish.
+	if wt.pushed || wt.opened {
+		t.Errorf("the repair step published something (pushed=%v opened=%v) — it asks, it does not act", wt.pushed, wt.opened)
+	}
+	if agent.calls != 1 {
+		t.Fatalf("agent called %d times, want 1 (one repair turn)", agent.calls)
+	}
+	if !strings.Contains(agent.prompts[0], "absolute home path") {
+		t.Errorf("repair prompt does not carry the guard's answer: %q", agent.prompts[0])
+	}
+	if agent.reqs[0].PermissionMode != "acceptEdits" {
+		t.Errorf("repair PermissionMode = %q, want acceptEdits — it needs to rebase", agent.reqs[0].PermissionMode)
+	}
+	// Stashed once, before the agent ran: the guard's words are what the next
+	// run needs, and the one thing that may not be published.
+	if len(ctx.wipSaves) != 1 {
+		t.Fatalf("WIP saved %d times, want 1 (recorded before the agent runs, once)", len(ctx.wipSaves))
+	}
+	if !strings.Contains(ctx.wipSaves[0], "absolute home path") {
+		t.Errorf("WIP stash does not carry the refusal: %q", ctx.wipSaves[0])
+	}
+	wantNext(t, res, flow.StepId(StepOpenPR))
+	if strings.Contains(res.Message, "absolute home path") {
+		t.Errorf("the election message quotes what was refused: %q", res.Message)
+	}
+}
+
+// The commit half, repaired through commitWithRepair and then examined in the
+// SAME dispatch: the step answers both refusals in one round, which is what
+// makes one repair round a sound bound on the request.
+func TestStepRepairDisclosure_RepairsTheCommitThenAsksAboutThePush(t *testing.T) {
+	wt := resumedWorktree()
+	wt.commits = 1
+	wt.dirty = []byte("diff\n")
+	wt.commitErrs = []error{hookErr, nil}
+	wt.examineErrs = []error{pushRefusal}
+
+	agent := &scriptedAgent{replies: []string{"deleted the file", "rewrote the history"}}
+	ctx := routedFrom(ctxWithPlan(wt, agent), StepOpenPR)
+
+	res, err := testBuilder(t).stepRepairDisclosure(ctx)
+	if err != nil {
+		t.Fatalf("stepRepairDisclosure: %v", err)
+	}
+	if agent.calls != 2 {
+		t.Fatalf("agent called %d times, want 2 (commit repair + push repair)", agent.calls)
+	}
+	if !strings.Contains(agent.prompts[0], "refusing to commit binary") {
+		t.Errorf("first prompt = %q, want the hook's stderr", agent.prompts[0])
+	}
+	if !strings.Contains(agent.prompts[1], "absolute home path") {
+		t.Errorf("second prompt = %q, want the guard's answer about the push", agent.prompts[1])
+	}
+	// Order: the commit is repaired first, because what the guard is asked
+	// about is the branch as the commit left it.
+	if commit, examine := wt.callIndex("commit"), wt.callIndex("examine-push"); commit == -1 || examine == -1 || commit > examine {
+		t.Errorf("calls = %v, want the commit repaired before the guard is asked", wt.calls)
+	}
+	wantNext(t, res, flow.StepId(StepOpenPR))
+}
+
+// A guard that permits is an answer too: the commit half was the whole
+// refusal, or an earlier run already rewrote the history. Nothing is prompted,
+// and the request is still elected — it is the step that pushes.
+func TestStepRepairDisclosure_NothingLeftToRepairStillElectsTheRequest(t *testing.T) {
+	wt := resumedWorktree()
+	agent := &scriptedAgent{}
+	ctx := routedFrom(ctxWithPlan(wt, agent), StepOpenPR)
+
+	res, err := testBuilder(t).stepRepairDisclosure(ctx)
+	if err != nil {
+		t.Fatalf("stepRepairDisclosure: %v", err)
+	}
+	if agent.calls != 0 {
+		t.Errorf("agent called %d times, want 0 — there was nothing to repair", agent.calls)
+	}
+	if len(ctx.wipSaves) != 0 {
+		t.Errorf("WIP saved %d times, want 0 — no refusal to keep", len(ctx.wipSaves))
+	}
+	wantNext(t, res, flow.StepId(StepOpenPR))
+}
+
+// An agent failure is infrastructure, not a refusal: it is returned, not
+// swallowed and not parked, because a park would report a dead substrate as
+// something a person must clear.
+func TestStepRepairDisclosure_AgentFailureIsReturned(t *testing.T) {
+	wt := resumedWorktree()
+	wt.examineErrs = []error{pushRefusal}
 
 	agent := &scriptedAgent{errs: []error{fmt.Errorf("substrate died")}}
-	ctx := ctxWithPlan(wt, agent)
+	ctx := routedFrom(ctxWithPlan(wt, agent), StepOpenPR)
 
-	_, err := testBuilder(t).stepOpenPR(ctx)
+	res, err := testBuilder(t).stepRepairDisclosure(ctx)
 	if err == nil || !strings.Contains(err.Error(), "substrate died") {
-		t.Fatalf("err = %v, want the agent error propagated", err)
+		t.Fatalf("(%+v, %v), want the agent's error propagated", res, err)
 	}
 	if ctx.park != nil {
-		t.Error("agent failure should not park — the repair was not attempted")
+		t.Errorf("park = %+v, want none — the repair was not attempted", ctx.park)
 	}
-	// Open must not be retried when the agent itself failed.
-	if wt.opened {
-		t.Error("PR was opened despite agent failure")
-	}
-}
-
-func TestStepOpenPR_PushRefusalTwice_WIPUpdatedTwice(t *testing.T) {
-	wt := resumedWorktree()
-	first := flow.ErrDisclosureRefused{
-		Act:    flow.ActPush,
-		Reason: fmt.Errorf("first: found /Users/someone/"),
-	}
-	second := flow.ErrDisclosureRefused{
-		Act:    flow.ActPush,
-		Reason: fmt.Errorf("second: found /Users/someone/"),
-	}
-	wt.openErrs = []error{first, second}
-
-	agent := &scriptedAgent{}
-	ctx := ctxWithPlan(wt, agent)
-
-	_, err := testBuilder(t).stepOpenPR(ctx)
-	if err == nil || !strings.Contains(err.Error(), "parked") {
-		t.Fatalf("err = %v, want a park", err)
-	}
-	if len(ctx.wipSaves) != 2 {
-		t.Fatalf("WIP saved %d times, want 2 (initial stash + second refusal)", len(ctx.wipSaves))
-	}
-	if !strings.Contains(ctx.wipSaves[0], "first: found") {
-		t.Errorf("first WIP save does not carry the first refusal: %q", ctx.wipSaves[0])
-	}
-	if !strings.Contains(ctx.wipSaves[1], "second: found") {
-		t.Errorf("second WIP save does not carry the second refusal: %q", ctx.wipSaves[1])
+	if res.Route.Next != "" {
+		t.Errorf("elected %q — a step that could not repair elects nothing", res.Route.Next)
 	}
 }
 
-func TestStepOpenPR_PushRefusalThenInfraError_WIPNotUpdatedTwice(t *testing.T) {
+// An arena whose worktree cannot report what a push would disclose parks
+// naming the capability. It does NOT prompt: an agent asked to rewrite history
+// without being told what was refused would spend a turn guessing.
+func TestStepRepairDisclosure_UnsupportedExamineParksWithoutPrompting(t *testing.T) {
 	wt := resumedWorktree()
-	pushRefusal := flow.ErrDisclosureRefused{
-		Act:    flow.ActPush,
-		Reason: fmt.Errorf("an absolute home path names the machine's user"),
-	}
-	wt.openErrs = []error{pushRefusal, fmt.Errorf("network timeout")}
+	wt.examineErrs = []error{flow.ErrUnsupported}
 
 	agent := &scriptedAgent{}
-	ctx := ctxWithPlan(wt, agent)
+	ctx := routedFrom(ctxWithPlan(wt, agent), StepOpenPR)
 
-	_, err := testBuilder(t).stepOpenPR(ctx)
+	_, err := testBuilder(t).stepRepairDisclosure(ctx)
 	if err == nil || !strings.Contains(err.Error(), "parked") {
 		t.Fatalf("err = %v, want a park", err)
 	}
-	// Only one WIP save: the initial stash. An infra error is not a disclosure
-	// refusal, so the second RecordWorkInProgress (which captures the guard's
-	// words) must not fire.
-	if len(ctx.wipSaves) != 1 {
-		t.Fatalf("WIP saved %d times, want 1 (initial stash only — infra error has no guard text to record)", len(ctx.wipSaves))
+	if agent.calls != 0 {
+		t.Errorf("agent called %d times, want 0 — there is nothing to repair from", agent.calls)
+	}
+	if ctx.park == nil {
+		t.Fatal("step did not park")
+	}
+	if ctx.park.Kind != flow.ParkBlocked {
+		t.Errorf("park kind = %v, want ParkBlocked", ctx.park.Kind)
+	}
+	if !strings.Contains(ctx.park.Reason, "disclose") {
+		t.Errorf("park reason = %q, want it to name the capability the arena is missing", ctx.park.Reason)
 	}
 }
 
@@ -3046,21 +3267,23 @@ func TestCommitRepair_SecondRefusalParks(t *testing.T) {
 	}
 }
 
-// The same repair path through recordOutstanding (the stepOpenPR commit path).
-func TestCommitRepair_RecordOutstanding(t *testing.T) {
+// The same repair path over the tree the checking steps left, in the step that
+// now owns it: what open request could not commit, the repair step commits.
+// The request itself prompts nothing (TestStepOpenPR_CommitRefusalElectsTheRepair).
+func TestCommitRepair_TheRepairStepRecordsWhatTheRequestCouldNot(t *testing.T) {
 	wt := resumedWorktree()
 	wt.commits = 1              // implement already committed
 	wt.dirty = []byte("diff\n") // review/coverage changed something
 	wt.commitErrs = []error{hookErr, nil}
 	agent := &scriptedAgent{replies: []string{"deleted the file"}}
-	ctx := ctxWithPlan(wt, agent)
+	ctx := routedFrom(ctxWithPlan(wt, agent), StepOpenPR)
 
-	if _, err := testBuilder(t).stepOpenPR(ctx); err != nil {
-		t.Fatalf("stepOpenPR: %v", err)
+	if _, err := testBuilder(t).stepRepairDisclosure(ctx); err != nil {
+		t.Fatalf("stepRepairDisclosure: %v", err)
 	}
 	// The repair agent was called.
 	if agent.calls != 1 {
-		t.Errorf("agent ran %d times, want 1 (repair only, no agent in stepOpenPR)", agent.calls)
+		t.Errorf("agent ran %d times, want 1 (the commit repair)", agent.calls)
 	}
 	if !strings.Contains(agent.prompts[0], "refusing to commit binary") {
 		t.Errorf("repair prompt = %q, want the hook's stderr", agent.prompts[0])
@@ -3068,6 +3291,11 @@ func TestCommitRepair_RecordOutstanding(t *testing.T) {
 	// Verify must run after the repair.
 	if wt.validates < 1 {
 		t.Error("verify was not called after the repair")
+	}
+	// The message is the follow-up one: only the implement commit carries the
+	// closes-reference, whichever step records the rest.
+	if len(wt.commitMsgs) != 1 || !strings.Contains(wt.commitMsgs[0], "Review and coverage") {
+		t.Errorf("commit messages = %q, want the follow-up message", wt.commitMsgs)
 	}
 }
 
@@ -3516,17 +3744,18 @@ func TestStageRepair_PromptCarriesStageMessage(t *testing.T) {
 	}
 }
 
-// The same repair path through recordOutstanding (the stepOpenPR commit path).
-func TestStageRepair_RecordOutstanding(t *testing.T) {
+// The staging half, in the step that now owns it — what open request could not
+// stage, the repair step stages.
+func TestStageRepair_TheRepairStepStagesWhatTheRequestCouldNot(t *testing.T) {
 	wt := resumedWorktree()
 	wt.commits = 1              // implement already committed
 	wt.dirty = []byte("diff\n") // review/coverage changed something
 	wt.stageErrs = []error{stageErr, nil}
 	agent := &scriptedAgent{replies: []string{"deleted the file"}}
-	ctx := ctxWithPlan(wt, agent)
+	ctx := routedFrom(ctxWithPlan(wt, agent), StepOpenPR)
 
-	if _, err := testBuilder(t).stepOpenPR(ctx); err != nil {
-		t.Fatalf("stepOpenPR: %v", err)
+	if _, err := testBuilder(t).stepRepairDisclosure(ctx); err != nil {
+		t.Fatalf("stepRepairDisclosure: %v", err)
 	}
 	// The repair agent was called.
 	if agent.calls != 1 {

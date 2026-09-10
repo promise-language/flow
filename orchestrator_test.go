@@ -141,6 +141,74 @@ func TestFindPR_PropagatesError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ExaminePush — the optional PushExaminer capability.
+// ---------------------------------------------------------------------------
+
+// stubExaminingWorktree can answer about a push; stubWorktreeBase deliberately
+// cannot, which is what the degradation case rests on.
+type stubExaminingWorktree struct {
+	stubWorktreeBase
+	err     error
+	asks    int
+	pushses int
+}
+
+func (w *stubExaminingWorktree) ExaminePush(context.Context) error {
+	w.asks++
+	return w.err
+}
+func (w *stubExaminingWorktree) Push(context.Context) error { w.pushses++; return nil }
+
+// A worktree that cannot answer says so TYPED. The two answers lead opposite
+// ways — a refusal is work for a repair step, an unsupported examine is a
+// capability the arena lacks — so a caller that could not tell them apart
+// would either prompt blind or read a refused push as permitted.
+func TestExaminePush_UnsupportedIsTyped(t *testing.T) {
+	err := ExaminePush(context.Background(), &stubWorktreeNilRequest{})
+	if !errors.Is(err, ErrUnsupported) {
+		t.Errorf("ExaminePush on a worktree that cannot answer: got %v, want ErrUnsupported", err)
+	}
+	if errors.Is(err, ErrUnavailable) {
+		t.Error("an absent examine reported as ErrUnavailable — a caller would retry it forever")
+	}
+	var refused ErrDisclosureRefused
+	if errors.As(err, &refused) {
+		t.Error("an absent examine reported as a disclosure refusal — a repair step would prompt with nothing to repair from")
+	}
+}
+
+// The guard's answer reaches the caller unchanged, and asking pushes nothing.
+func TestExaminePush_DelegatesAndPublishesNothing(t *testing.T) {
+	refusal := ErrDisclosureRefused{Act: ActPush, Reason: errors.New("line 3 names a home path")}
+	wt := &stubExaminingWorktree{err: refusal}
+
+	err := ExaminePush(context.Background(), wt)
+	var got ErrDisclosureRefused
+	if !errors.As(err, &got) || got.Act != ActPush {
+		t.Fatalf("err = %v, want the worktree's own ActPush refusal", err)
+	}
+	if !errors.Is(err, refusal.Reason) {
+		t.Errorf("err = %v, want the guard's reason reachable through it", err)
+	}
+	if wt.asks != 1 {
+		t.Errorf("the worktree was asked %d times, want 1", wt.asks)
+	}
+	if wt.pushses != 0 {
+		t.Errorf("ExaminePush pushed %d times — it asks, it does not act", wt.pushses)
+	}
+}
+
+func TestExaminePush_PermittedIsNil(t *testing.T) {
+	wt := &stubExaminingWorktree{}
+	if err := ExaminePush(context.Background(), wt); err != nil {
+		t.Errorf("ExaminePush = %v, want nil: permission carries nothing", err)
+	}
+	if wt.asks != 1 {
+		t.Errorf("the worktree was asked %d times, want 1", wt.asks)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Declaration helpers.
 // ---------------------------------------------------------------------------
 

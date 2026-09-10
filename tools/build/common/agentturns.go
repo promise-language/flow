@@ -47,7 +47,7 @@ var approvedAgentTurns = map[string]int{
 	"issue/steps.go (*builder).stepImplement":         1,
 	"issue/steps.go (*builder).commitWithRepair":      2,
 	"issue/steps.go (*builder).producingMarkdownStep": 1,
-	"issue/steps.go (*builder).stepOpenPR":            1,
+	"issue/steps.go (*builder).stepRepairDisclosure":  1,
 	"issue/steps.go (*builder).runAgent":              1,
 	"issue/steps.go (*builder).resolveQuestion":       1,
 	"issue/steps.go (*builder).agentMarkdownStep":     1,

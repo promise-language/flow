@@ -598,7 +598,20 @@ func TestOutwardMethodsAreAllClassified(t *testing.T) {
 	// Neither a read nor a write of its own: publish IS the funnel the writes
 	// go through, and repoFullName only formats "owner/repo". Adding a name
 	// here is a claim that the method reaches GitHub by neither route.
-	notARoute := map[string]bool{"publish": true, "repoFullName": true}
+	//
+	// ExaminePush and pushDisclosure are the two that ask ABOUT a write without
+	// performing one: pushDisclosure assembles what a push would carry, out of
+	// local git, and ExaminePush shows the guard that assembly with a no-op act.
+	// Neither can join outwardWrites — the refusal test drives every write under
+	// an allowing guard and requires the mock to see the request, which is
+	// exactly what these two must never send — so the claim is checked instead
+	// by TestExaminePushShowsTheGuardThePushAndSendsNothing.
+	notARoute := map[string]bool{
+		"publish":        true,
+		"repoFullName":   true,
+		"ExaminePush":    true,
+		"pushDisclosure": true,
+	}
 
 	writes := outwardWrites()
 	found := 0
@@ -1168,6 +1181,100 @@ func TestPushSeparatesBranchMessagesAndDiff(t *testing.T) {
 		if found == 0 {
 			t.Errorf("the push disclosure does not carry %q at all", want.fragment)
 		}
+	}
+}
+
+// ExaminePush is the surface a repair step asks the guard through, and it has
+// exactly two properties: the guard sees the SAME disclosure Push would show
+// it, and nothing is pushed. Either one alone is worthless — an examine that
+// assembled its own copy would answer about a push nobody makes, and one that
+// pushed would defeat the reason for asking.
+//
+// Against a real repository, for the reason TestPushSeparatesBranchMessagesAndDiff is.
+func TestExaminePushShowsTheGuardThePushAndSendsNothing(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir, origin := t.TempDir(), t.TempDir()
+	gitInTest(t, origin, "init", "--bare", "-b", "main", ".")
+	gitInTest(t, dir, "init", "-b", "main", ".")
+	commitFile(t, dir, "a.txt", "old content\n", "on origin already")
+	gitInTest(t, dir, "remote", "add", "origin", origin)
+	gitInTest(t, dir, "push", "origin", "main")
+	gitInTest(t, dir, "checkout", "-b", "flow/issue-42")
+	commitFile(t, dir, "b.txt", "a line only this branch has\n", "new work here")
+
+	g := newGitOps(dir)
+	spawn := g.runner
+	var pushes int
+	g.runner = func(ctx context.Context, wd, name string, args ...string) ([]byte, []byte, error) {
+		if slices.Contains(args, "push") {
+			pushes++
+			return nil, nil, nil
+		}
+		return spawn(ctx, wd, name, args...)
+	}
+
+	guard := &recordingGuard{}
+	o := &outward{git: g, owner: "o", repo: "r", guard: guard}
+	if err := o.ExaminePush(t.Context()); err != nil {
+		t.Fatalf("ExaminePush: %v", err)
+	}
+	if pushes != 0 {
+		t.Errorf("ExaminePush ran %d git pushes — it asks, it does not act", pushes)
+	}
+	seen := guard.of(flow.ActPush)
+	if len(seen) != 1 {
+		t.Fatalf("guard saw %d push disclosures, want 1", len(seen))
+	}
+	// The same three parts under the same three origins Push states.
+	for _, want := range []struct {
+		fragment string
+		origin   flow.Origin
+	}{
+		{"flow/issue-42", flow.OriginFlow},
+		{"new work here", flow.OriginAgent},
+		{"a line only this branch has", flow.OriginWorktree},
+	} {
+		found := 0
+		for _, p := range seen[0].Text {
+			if !strings.Contains(p.Body, want.fragment) {
+				continue
+			}
+			found++
+			if p.Origin != want.origin {
+				t.Errorf("%q is stated %q, want %q — the examine must show what the push shows", want.fragment, p.Origin, want.origin)
+			}
+		}
+		if found == 0 {
+			t.Errorf("the examined disclosure does not carry %q at all", want.fragment)
+		}
+	}
+	if seen[0].Owner != "o" || seen[0].Repo != "r" || seen[0].Ref != "flow/issue-42" {
+		t.Errorf("the examined disclosure names (%q, %q, %q), want the repository and ref the push would reach",
+			seen[0].Owner, seen[0].Repo, seen[0].Ref)
+	}
+}
+
+// A missing guard fails closed here as it does for every other act: an examine
+// that answered "permitted" because nothing was there to refuse would send a
+// repair step away from a push nobody has checked.
+func TestExaminePushWithNoGuardIsRefused(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	gitInTest(t, dir, "init", "-b", "main", ".")
+	commitFile(t, dir, "a.txt", "content\n", "the only commit")
+
+	o := &outward{git: newGitOps(dir), owner: "o", repo: "r"}
+	err := o.ExaminePush(t.Context())
+	if !errors.Is(err, flow.ErrNoDisclosureGuard) {
+		t.Fatalf("err = %v, want ErrNoDisclosureGuard", err)
+	}
+	var refused flow.ErrDisclosureRefused
+	if !errors.As(err, &refused) || refused.Act != flow.ActPush {
+		t.Errorf("err = %v, want an ErrDisclosureRefused naming the push act", err)
 	}
 }
 
