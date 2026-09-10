@@ -83,7 +83,7 @@ their tags is its own compliance gaps.
 - [proposals/reusable-flows-and-leases.md](proposals/reusable-flows-and-leases.md) — Flows as
   reusable definitions, and leases.
 - [proposals/untrusted-sources.md](proposals/untrusted-sources.md) — Item text is executable
-  input, and the acceptance gate that must precede any agent turn on it.
+  input, and the acceptance gate that must precede any agent prompt on it.
 
 ## Archive — superseded or delivered
 

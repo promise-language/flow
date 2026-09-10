@@ -38,7 +38,7 @@ Two of these owners are already the runner's — the host, and whoever declared 
 
 This is the whole of what the classification buys, and each clause forbids something that otherwise happens by default:
 
-- **It does not reach an agent.** No prompt is rendered from it and no turn is spent on it. This does not follow from *infrastructure failures consume no budget* (`resolution.md`): a turn that is not charged against a cap is still a turn that was paid for, and a loop that re-prompts an agent with a full disk's error text spends real money to be told the same thing again. Where a failure is handed back to an agent to work from, the environment is measured **before** the hand-back, not after it.
+- **It does not reach an agent.** No prompt is rendered from it and no prompt is spent on it. This does not follow from *infrastructure failures consume no budget* (`resolution.md`): a prompt that is not charged against a cap is still a prompt that was paid for, and a loop that re-prompts an agent with a full disk's error text spends real money to be told the same thing again. Where a failure is handed back to an agent to work from, the environment is measured **before** the hand-back, not after it.
 - **It does not fail a step.** A step that stopped because the machine did has not attempted anything, and reporting a failure against it makes the item look defective on every machine.
 - **It does not move a baseline.** `gates-and-commands.md` already requires that a run which measured less than usual must not move one. A run on an unfit machine measured less than usual by definition.
 

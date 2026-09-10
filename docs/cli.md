@@ -74,7 +74,13 @@ The mode is decided by **stdout**, never by stderr. Bare `resolve 2>/dev/null` o
 
 JSON-mode stdout is a stable interface. Its bytes are consumed by other programs.
 
-Each `InvocationResult` object may carry `duration_seconds` (the step's active time as the ledger records it — waits on declared exclusions excluded) and `cost_usd` (what the invocation spent, as a sum of agent turns). Both fields are optional with `omitempty`: a consumer that does not know them is unaffected, and JSON output for a run that reports neither is byte-identical to before these fields existed. `cost_usd` is a pointer type: `null`/absent means unknown (the step never dispatched), while `0` means the step ran but spent nothing.
+Each `InvocationResult` object may carry `duration_seconds` (the step's active time as the ledger records it — waits on declared exclusions excluded) and `cost_usd` (what the invocation spent, as a sum of agent prompts). Both fields are optional with `omitempty`: a consumer that does not know them is unaffected, and JSON output for a run that reports neither is byte-identical to before these fields existed. `cost_usd` is a pointer type: `null`/absent means unknown (the step never dispatched), while `0` means the step ran but spent nothing.
+
+A result may also carry **`next_step`** and **`next_mechanical`**, describing the lifecycle item the route now points at: `next_step` names it, and `next_mechanical` reports whether dispatching it invokes no agent — `true` for a step declared `mechanical`, and `true` for a signal wait, which dispatches nothing at all. Both are absent when nothing is pending, which is what a finalized item reports.
+
+**They exist because pacing has two callers and only one of them is inside this binary.** `resolve` drives the whole route itself, so it reads the pending step's declaration directly and does not wait before a dispatch that cannot spend. A driver calling `run-step` one step at a time cannot: it must decide whether to wait *before* the invocation that would tell it, and the only invocation that knows is the one that already finished. So the fact travels out on the result of the previous step, which is the one place it is both known and already going to the caller.
+
+A signal wait declares no `Prompts` — it is not a step, holds no role, and elects nothing ([flow-registration.md](flow-registration.md) § Step configuration) — but it satisfies the property the caller is asking about, so it reports `true`. The field is the operational fact, not a copy of the declaration: **absent means nothing is pending, never that the answer is unknown.**
 
 ## Invocation errors
 
@@ -347,7 +353,7 @@ It checks exactly these things:
 | Check | Failure it prevents |
 |---|---|
 | The orchestrator is reachable and usable | Work is claimed against a store that cannot be read or written |
-| The agent can be invoked — established **without spending a turn** | Every step dies on its first turn, reported as an agent fault rather than a broken environment |
+| The agent can be invoked — established **without sending a prompt** | Every step dies on its first prompt, reported as an agent fault rather than a broken environment |
 | The verify command is available — the orchestrator declares it in `SupportedCommands()` | A step finishes its work, goes to verify it, and fails on a missing command |
 | The gates are available — the orchestrator declares them in `SupportedGates()`, `fit` and `integration` included | Every gate reports `could not start`, on every retry, after the budget is spent |
 | Normative documentation is present — `docs/` exists **in the arena's checkout** (`Orchestrator.ArenaRoot()`) and holds at least one document; an orchestrator with no local checkout reports this row as **skipped** | An agent works without access to what the project defines as correct, and produces something plausible instead of something right |
@@ -357,11 +363,11 @@ The set is closed. A check is added only when its failure is one an operator wou
 
 **`fit` is the seam, and it is why the set stays closed.** A project extends what fitness means for it by extending its own `fit` gate and its own thresholds — never by adding a check here, which every other project would then have to understand. Whether the machine is *currently* fit is measured where it matters, immediately before a claim: `resolve` runs the gate and waits while the answer is no (§ Resolving). `doctor` reports that the gate is there to be run.
 
-**`doctor` spends nothing.** Not a capped turn, not a tool-free one-word turn — nothing. It is mechanical: it runs before every item, in CI, and on every machine an operator touches, with nobody asking for work, so a turn on that path is a standing charge. And the charge is not the worst of it — a preflight that bills the account is one an operator turns off, and a preflight nobody runs prevents nothing. This is [agent.md](agent.md) § Nothing mechanical may spend, and it is enforced by the commit gate, not by convention.
+**`doctor` spends nothing.** Not a capped prompt, not a tool-free one-word prompt — nothing. It is mechanical: it runs before every item, in CI, and on every machine an operator touches, with nobody asking for work, so a prompt on that path is a standing charge. And the charge is not the worst of it — a preflight that bills the account is one an operator turns off, and a preflight nobody runs prevents nothing. This is [agent.md](agent.md) § Nothing mechanical may spend, and it is enforced by the commit gate, not by convention.
 
 **So the agent check is what can be established for free**, through the agent's own `AgentDoctor` capability: that this SDK can start the binary. The reference implementation spawns it and asks its version, which catches an absent, unexecutable, wrong-architecture or too-old install — the cases that would otherwise surface mid-item as an empty result stream, read as a model failure, and be diagnosed from the wrong end.
 
-**It is not a lookup on `PATH`,** which would prove only that a file exists. It is also not a full invocation: whether a turn would *succeed* — credentials, quota, model availability — is answered only by spending, and the report says what it checked rather than implying the rest. An agent that offers no free check is reported as **skipped**, not failed: the SDK cannot check a black-box `Agent` without spending, which is a fact about that interface and not about this machine.
+**It is not a lookup on `PATH`,** which would prove only that a file exists. It is also not a full invocation: whether a prompt would *succeed* — credentials, quota, model availability — is answered only by spending, and the report says what it checked rather than implying the rest. An agent that offers no free check is reported as **skipped**, not failed: the SDK cannot check a black-box `Agent` without spending, which is a fact about that interface and not about this machine.
 
 `doctor` reports what it found — every check, and which failed — rather than stopping at the first failure. An operator fixing an unfit machine wants the whole list in one pass.
 

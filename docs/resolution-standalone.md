@@ -59,7 +59,7 @@ That last license is the one worth stating plainly, because it is the surprising
 
 Leaving a concern unmet is therefore an exception rather than an outcome, and an exception is justified specifically: what resisted, why, and what would have to change. A reason is accountable to the reader; a list of gaps is a handoff to a step that does not exist.
 
-A step that could only report a fault costs a further agent turn to fix what it had already diagnosed, with everything it needed in front of it. One that fixes it spends the turn it is already paying for.
+A step that could only report a fault costs a further agent prompt to fix what it had already diagnosed, with everything it needed in front of it. One that fixes it spends the prompt it is already paying for.
 
 Nothing is lost by allowing this, because **the gate runs after every producing step and before the proposal**. Whatever any of them changed is verified before anything is proposed. The pipeline establishes correctness; restricting the steps would only restrict usefulness.
 

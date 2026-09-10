@@ -20,7 +20,7 @@ Four, and a flow cannot run without them.
 
 **The judge is what turns a measurement into an answer.** A gate has no verdict to give and neither has a runner: `measured` says a measurement exists, not that it is acceptable. The SDK does not compute one either, because the thresholds are the project's — so it hands the measurement back to the project and asks. Where the judge lives, how it is invoked and what it must print is [below](#where-the-verdict-is-made).
 
-**`verify` is what a producing step works with.** It is run by steps, by agents mid-turn, and by people at a terminal, and it does the same thing for all three. A step should not fail over something `verify` would have fixed.
+**`verify` is what a producing step works with.** It is run by steps, by agents while they work, and by people at a terminal, and it does the same thing for all three. A step should not fail over something `verify` would have fixed.
 
 **`integration` is what a decision rests on.** It runs before a change is proposed and again before it lands, and nothing reaches the mainline without it. It modifies nothing, so its measurement is reproducible by whoever asks — which is the entire reason a decision may rest on it and not on `verify`. The decision itself is still made by the layer holding the thresholds; the gate supplies the numbers it is made from.
 
@@ -441,7 +441,7 @@ The default is worth more than its exceptions. Widening it is a decision to make
 
 This one *is* the flow's — the only gate a flow supplies. A project cannot own it: the contract being measured is the step's, and a project knows nothing about steps.
 
-It exists because the two gates above **fail open**: they are enforced by the agent, and an agent that reaches a shell, or runs somewhere they are not configured, goes straight past them. They are worth having because they are cheap and immediate — the agent learns the constraint mid-turn and adapts, rather than losing a whole turn to a rejection after the fact. They are not the guarantee. This is.
+It exists because the two gates above **fail open**: they are enforced by the agent, and an agent that reaches a shell, or runs somewhere they are not configured, goes straight past them. They are worth having because they are cheap and immediate — the agent learns the constraint while it works and adapts, rather than losing a whole prompt to a rejection after the fact. They are not the guarantee. This is.
 
 ## Rules
 

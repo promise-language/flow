@@ -38,7 +38,7 @@ Each step produces exactly one result, and the result is the step's identity. **
 | review the filing | contributor | Do the intended items close the gap | the `filing-review` briefing — nothing in the worktree | file the items · plan |
 | **file the items** | contributor | File what the plan decided | the filed items on the backend, the `filed-items` list naming them — nothing in the worktree | **finalize: resolved** · plan *(refused text)* |
 
-Steps in **bold** are mechanical — no agent turn. Implement, review and coverage are the producing phase; the properties governing producing steps are in `resolution-standalone.md` and are not repeated here.
+Steps in **bold** are mechanical — no agent prompt. Implement, review and coverage are the producing phase; the properties governing producing steps are in `resolution-standalone.md` and are not repeated here.
 
 ### The work has a shape, and plan elects it
 
@@ -107,13 +107,13 @@ What it keeps is a draft, not a result: it completes nothing, only the step that
 
 The **Writes** column is a contract, and every step is held to it after it runs.
 
-Prevention comes first — each step's declaration is a layer of the action guard, so a plan dispatch has a file write refused as it is attempted: the union of the general rules, the contributor role's restrictions, and plan's own layer ([resolution.md](resolution.md) § Guards), refusing a forbidden action before it runs and letting the agent adapt mid-turn rather than losing the whole turn.
+Prevention comes first — each step's declaration is a layer of the action guard, so a plan dispatch has a file write refused as it is attempted: the union of the general rules, the contributor role's restrictions, and plan's own layer ([resolution.md](resolution.md) § Guards), refusing a forbidden action before it runs and letting the agent adapt while it works rather than losing the whole prompt.
 
 But prevention is enforced **by the agent**, not by this flow, which passes a configuration and trusts the outcome. A shell, a tool that shells out, or a mode that does not apply cleanly goes straight through it. So prevention is worth having, is the cheapest place to catch a violation, and is not the guarantee.
 
-**The two layers are a guard and a gate**, in the senses `resolution.md` defines. Neither substitutes for the other, and the reason is what each can and cannot see: a guard refuses an action before it happens and is bypassed by any route that does not pass through it, while a gate measures the result however it came about and cannot speak until the turn is over.
+**The two layers are a guard and a gate**, in the senses `resolution.md` defines. Neither substitutes for the other, and the reason is what each can and cannot see: a guard refuses an action before it happens and is bypassed by any route that does not pass through it, while a gate measures the result however it came about and cannot speak until the agent has finished.
 
-**The guarantee is the check afterwards.** Each step records the branch, the commit, and the tree state before its agent turn, and verifies against them after:
+**The guarantee is the check afterwards.** Each step records the branch, the commit, and the tree state before its agent prompt, and verifies against them after:
 
 | Violation | Means |
 |---|---|
@@ -121,7 +121,7 @@ But prevention is enforced **by the agent**, not by this flow, which passes a co
 | The commit moved | The agent committed |
 | The tree is dirty where the step writes nothing | The agent edited what it was not there to edit |
 
-A violation **blocks the resolution and names what happened.** It is not a failure to retry: the same prompt against the same state will very likely do the same thing, so retrying spends a turn to arrive back here.
+A violation **blocks the resolution and names what happened.** It is not a failure to retry: the same prompt against the same state will very likely do the same thing, so retrying spends a prompt to arrive back here.
 
 **The changes are not discarded.** Reverting would restore the invariant by destroying work nobody has seen — the same silent loss this flow spends three steps preventing elsewhere. What an agent did outside its contract may be worthless or may be the most valuable thing in the run, and the flow is not in a position to tell. It stops, leaves the evidence in place, and says precisely what was violated so a person can look at it and decide.
 
@@ -147,9 +147,9 @@ Implement, review and coverage refuse to run anywhere but the item's branch, and
 
 This is a restriction on the agent-driven steps, and it is deliberate. An agent given a shell and a goal will reach for git when it seems expedient — cutting a branch of its own, committing directly to the base, resetting to escape a state it does not understand. Each of those is locally reasonable and globally wrong: a ghost branch strands the work where nothing will find it, and a commit on the base defeats the entire proposal model, which exists so that nothing reaches the mainline unreviewed.
 
-Telling the agent not to is necessary and not sufficient. The prompts say so, and an agent that decides otherwise mid-turn leaves no trace that anything unusual happened.
+Telling the agent not to is necessary and not sufficient. The prompts say so, and an agent that decides otherwise while it works leaves no trace that anything unusual happened.
 
-So the producing steps **check**. Each records the branch and the commit it is on before its agent turn, and refuses to continue if either moved: a changed branch means the agent switched away, and a moved commit means it committed. Both are failures of the step, reported as what they are rather than discovered later as a branch nobody expected or a mainline nobody meant to touch.
+So the producing steps **check**. Each records the branch and the commit it is on before its agent prompt, and refuses to continue if either moved: a changed branch means the agent switched away, and a moved commit means it committed. Both are failures of the step, reported as what they are rather than discovered later as a branch nobody expected or a mainline nobody meant to touch.
 
 The check costs two reads and turns an unenforceable instruction into an invariant.
 
@@ -171,15 +171,15 @@ So the question of whether the work exists is answered by the branch: **does thi
 
 ### Every step writes something
 
-No step is purely an inspection. Plan touches no file and still produces the plan, which is its whole output: a plan existing only inside an agent's turn would be a decision nobody could review, revisit, or hold the change against.
+No step is purely an inspection. Plan touches no file and still produces the plan, which is its whole output: a plan existing only inside a prompt would be a decision nobody could review, revisit, or hold the change against.
 
 Where a result is stored is the backend's business, not this flow's. What this flow requires is that it **is** stored, and that it reaches a reader.
 
 ### Where judgement lives, and why it is worth knowing
 
-Plan, implement, review, coverage, review the proposal and review the filing spend an agent turn on a decision. Open branch, open request, close branch, verify merge result, merge, record merge commit and file the items spend none.
+Plan, implement, review, coverage, review the proposal and review the filing spend an agent prompt on a decision. Open branch, open request, close branch, verify merge result, merge, record merge commit and file the items spend none.
 
-That distinction is not bookkeeping. A step whose outcome an agent decides is **neither cheap nor reproducible**: it costs a turn, and running it twice on the same input can produce different work. A mechanical step is both — it costs nothing beyond the operations it performs, and it does the same thing every time. File the items is mechanical for exactly that reason: *what* to file was the plan's decision and *whether it closes the gap* was the filing review's; executing the filing decides nothing.
+That distinction is not bookkeeping. A step whose outcome an agent decides is **neither cheap nor reproducible**: it costs a prompt, and running it twice on the same input can produce different work. A mechanical step is both — it costs nothing beyond the operations it performs, and it does the same thing every time. File the items is mechanical for exactly that reason: *what* to file was the plan's decision and *whether it closes the gap* was the filing review's; executing the filing decides nothing.
 
 **Deliverable and record are not the same thing**, and the difference matters most where they diverge. Implement's deliverable is a working change; what is recorded is the commit carrying it. Review's deliverable is the corrections themselves — already in the tree — and what is recorded is prose *about* them. A step is not finished when its entry is journaled; it is finished when its deliverable exists.
 
@@ -225,7 +225,7 @@ That is the whole boundary, and it is worth stating because the two steps otherw
 
 **The boundary is physical: two commits.** Implement's work and review's work are separate commits on the branch, so what each step did is visible rather than inferred. A reader asking "what did the review change" reads a commit, not a diff between two states nobody recorded.
 
-**It fixes what it finds.** It has the change and the context loaded; leaving a fault for someone else costs another turn to rediscover what this step already knows.
+**It fixes what it finds.** It has the change and the context loaded; leaving a fault for someone else costs another prompt to rediscover what this step already knows.
 
 Its result is a briefing for the person who will review the proposal — what was looked for, what was changed, what still needs a human decision.
 

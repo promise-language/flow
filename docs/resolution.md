@@ -125,17 +125,17 @@ Blocking is not settled when the item is picked. Between any two steps, from out
 
 > **An item waiting on an unfinished item is `blocked`, kind `waits-on-items`, and the advance stops clean: nothing is dispatched, nothing is spent, nothing is recorded, the claim is kept, and the pending step stays pending.**
 
-Clean means exactly that. No agent turn runs. Nothing is written beside the journal or in it — a park, a skip and a failure append nothing (§ The journal), and neither does this. The claim is not released: it is an arena reservation, not work, and a blocked item still belongs to the arena that holds it. The pending step is still the pending step. When the last blocker lands, the next advance runs it from where the route stood; a blocker reopened blocks the item again at the next read. Both happen without anyone touching the item, which is the whole meaning of a derived fact.
+Clean means exactly that. No agent prompt runs. Nothing is written beside the journal or in it — a park, a skip and a failure append nothing (§ The journal), and neither does this. The claim is not released: it is an arena reservation, not work, and a blocked item still belongs to the arena that holds it. The pending step is still the pending step. When the last blocker lands, the next advance runs it from where the route stood; a blocker reopened blocks the item again at the next read. Both happen without anyone touching the item, which is the whole meaning of a derived fact.
 
 **A step may declare the blockers it finds, and stop on them.** A step whose work turns out to wait on other items — ones that already exist, or ones it filed — records them on the item as blockers and completes by stopping as blocked on them. That stop is the same state the check before dispatch produces: not a park, not a failure, not a refusal. It appends nothing, charges nothing, resolves nothing, and keeps the step's draft for the resume (§ Drafts).
 
-The line between stopping on items and refusing is **who acts**. A refusal says no answer and no change will help, and a person decides. Blocked on items says the work exists elsewhere and will land, and nobody touches this item until it does. A step that used a refusal to say *waits on those items* would turn a self-clearing condition into one a person must clear, and spend the turn it took to do it.
+The line between stopping on items and refusing is **who acts**. A refusal says no answer and no change will help, and a person decides. Blocked on items says the work exists elsewhere and will land, and nobody touches this item until it does. A step that used a refusal to say *waits on those items* would turn a self-clearing condition into one a person must clear, and spend the prompt it took to do it.
 
 What a fleet does with an arena whose claim is held by a blocked item — release it to free the machine, or keep it so the same worktree resumes — is policy above the flow. The flow's rule is only that the stop does not break the claim.
 
 ### Routing
 
-A step's possible routes are **declared at registration**, and the route it elects at runtime must be one of them: its declared successors, and whether it may finalize, with which dispositions. The declaration is what makes the graph a reviewable object — every route an item can take, including every handback and every role boundary, is visible before anything runs — and it is what bounds election at runtime: a handler talked into an arbitrary jump by whatever influenced its turn has no such route to elect.
+A step's possible routes are **declared at registration**, and the route it elects at runtime must be one of them: its declared successors, and whether it may finalize, with which dispositions. The declaration is what makes the graph a reviewable object — every route an item can take, including every handback and every role boundary, is visible before anything runs — and it is what bounds election at runtime: a handler talked into an arbitrary jump by whatever influenced it has no such route to elect.
 
 Startup validates the graph whole: every declared successor exists, every step is reachable from the entry, and finalization is reachable from every step — a step from which no election could ever end the item is refused before any item is claimed.
 
@@ -213,7 +213,7 @@ A step that needs a human decision asks a question and parks. It asks **in the o
 
 Answering does not resume the item. Resumption is a separate deliberate act, because somebody has to judge the answer complete.
 
-Re-running an item with an unanswered question consumes no budget and runs no agent turn. The check happens before dispatch, not inside it.
+Re-running an item with an unanswered question consumes no budget and runs no agent prompt. The check happens before dispatch, not inside it.
 
 ## Gates
 
@@ -277,7 +277,7 @@ Two guards exist in a resolution: one over the actions an agent proposes to take
 
 **A guard decides for itself, where a gate must not.** Judging is kept out of a gate because its measurement is re-judged later, so the comparison has to be recomputable by someone who was not there — which is why thresholds are a separate artifact. A guard has no persistent subject to re-judge, so there is no second judgement for separation to keep honest.
 
-**A guard and a gate over the same concern are complementary, and neither substitutes for the other.** A guard on a proposed command is the cheapest place to stop a violation — the agent learns the constraint mid-turn and adapts, rather than losing the whole turn. A gate on the result catches it however it happened, including by routes nobody anticipated. The guard fails open when it is absent or bypassed; the gate costs a whole turn before it speaks.
+**A guard and a gate over the same concern are complementary, and neither substitutes for the other.** A guard on a proposed command is the cheapest place to stop a violation — the agent learns the constraint while it works and adapts, rather than losing the whole prompt. A gate on the result catches it however it happened, including by routes nobody anticipated. The guard fails open when it is absent or bypassed; the gate costs a whole prompt before it speaks.
 
 **A guard must not be authored by the party it constrains**, and this holds for every guard rather than only the ones whose refusals are irreversible.
 
@@ -285,7 +285,7 @@ The reason is that a guard leaves no review window. A weakened gate is caught by
 
 So a guard's rules come from outside the tree it constrains. Where a resolution runs under an orchestrator, that is the arena applying rules from a companion repository; where it runs standalone, the guard is part of the flow, which is delivered from outside the tree it resolves. A guard configured from inside the worktree is one an `implement` step can edit, and an agent that can edit its own bounds has none.
 
-**The action guard's refusals are layered, and layers only narrow.** What it refuses during a dispatch is the union of every layer that applies: the general rules binding any resolution here, the acting role's restrictions, and the running step's own — a step declared to write no files has a file write refused as it is attempted, in that step's name, not merely caught after the turn. No layer widens another: a step's declaration cannot grant what the general rules forbid, and a role's cannot lift a step's. The step and role layers are derived from the flow's declarations, which are legitimate guard sources under the authorship rule above — the flow arrives from outside the tree it resolves, and no step can edit its own registration mid-run.
+**The action guard's refusals are layered, and layers only narrow.** What it refuses during a dispatch is the union of every layer that applies: the general rules binding any resolution here, the acting role's restrictions, and the running step's own — a step declared to write no files has a file write refused as it is attempted, in that step's name, not merely caught after the prompt. No layer widens another: a step's declaration cannot grant what the general rules forbid, and a role's cannot lift a step's. The step and role layers are derived from the flow's declarations, which are legitimate guard sources under the authorship rule above — the flow arrives from outside the tree it resolves, and no step can edit its own registration mid-run.
 
 **This is a property, not a machinery.** What defines the gates, schedules them, records their measurements, holds the thresholds those measurements are judged against and decides what a failure means for the work queue belongs to whatever schedules work — not to this SDK. What is stated here is what any of them must be.
 
@@ -293,7 +293,7 @@ So a guard's rules come from outside the tree it constrains. Where a resolution 
 
 A **command** does work. It may modify anything it is pointed at, and it **may run gates as part of doing its job**.
 
-**Anyone runs them.** A step invokes a command mechanically; an agent runs one mid-turn to see whether what it has written holds together; a person runs one at a terminal. The same command does the same thing for all three, which is what lets an agent check its own work exactly the way the developer reviewing it will — and what makes a project's own tooling the flow's tooling, rather than the flow needing a parallel set of its own.
+**Anyone runs them.** A step invokes a command mechanically; an agent runs one while it works to see whether what it has written holds together; a person runs one at a terminal. The same command does the same thing for all three, which is what lets an agent check its own work exactly the way the developer reviewing it will — and what makes a project's own tooling the flow's tooling, rather than the flow needing a parallel set of its own.
 
 The same is true of gates, and there it is the point rather than a convenience: a gate that gave a different answer to the person who ran it than to the step that ran it would not be reproducible, and reproducibility is most of what a gate is for.
 

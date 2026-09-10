@@ -68,7 +68,7 @@ The first two are what any change looks like from outside when no planning step 
 
 The sequence runs on the maintainer's side, after the handoff and before the proposal is judged. It is elected when the contributor principal is untrusted; where both roles are the same principal, or the contributor holds write, `review the proposal` reads a journal of records and the sequence is not elected.
 
-Steps in **bold** are mechanical — no agent turn.
+Steps in **bold** are mechanical — no agent prompt.
 
 | Step | Role | Concern | Writes | Routes to |
 |---|---|---|---|---|
@@ -128,9 +128,9 @@ A measuring step's record carries findings, each of one kind. The set is closed;
 
 ### Where judgement lives
 
-Situate the branch, establish provenance and verify doc references spend no agent turn: they are git plumbing, path and section existence, and counts. They run first because they are cheap and because their output is the context every later step reads.
+Situate the branch, establish provenance and verify doc references spend no agent prompt: they are git plumbing, path and section existence, and counts. They run first because they are cheap and because their output is the context every later step reads.
 
-The remaining steps spend a turn on a decision, and the mechanical checks they rely on are **instruments, not steps**, for the reason [issue-flow.md](../issue-flow.md) gives for the verify command: an instrument used inside a step does not earn a place in the graph. Check conformance runs the formatter and counts annotations before it judges; run the acceptance program builds and executes before it decides whose defect a failure is. Making either half its own step would put a checkpoint where there is no decision.
+The remaining steps spend a prompt on a decision, and the mechanical checks they rely on are **instruments, not steps**, for the reason [issue-flow.md](../issue-flow.md) gives for the verify command: an instrument used inside a step does not earn a place in the graph. Check conformance runs the formatter and counts annotations before it judges; run the acceptance program builds and executes before it decides whose defect a failure is. Making either half its own step would put a checkpoint where there is no decision.
 
 The split is visible in the result types. The mechanical steps produce `ArtifactJSON`, whose shape is declared with the artifact ([artifacts-and-signals.md](../artifacts-and-signals.md) § A JSON artifact's id names one shape) and read by the steps after them. The judging steps produce `ArtifactMarkdown`, because what they produce is prose for a reader.
 

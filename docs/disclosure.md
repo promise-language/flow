@@ -65,7 +65,7 @@ That is not an implementation preference; it is what the authorship rule require
 
 Three things about the signature carry the rest of the design.
 
-**The caller supplies the origin. The guard never infers it.** This is what makes a definitive answer possible without a model and without guesswork. Provenance is not a property of text — a paragraph about another project's architecture reads exactly like a paragraph about this one — but it *is* known to whoever is about to publish. An orchestrator writing an artifact knows it came from an agent turn in this worktree. A pre-tool hook knows which repository the command is running in. The party that has the fact states it, and the guard decides from it.
+**The caller supplies the origin. The guard never infers it.** This is what makes a definitive answer possible without a model and without guesswork. Provenance is not a property of text — a paragraph about another project's architecture reads exactly like a paragraph about this one — but it *is* known to whoever is about to publish. An orchestrator writing an artifact knows it came from an agent prompt in this worktree. A pre-tool hook knows which repository the command is running in. The party that has the fact states it, and the guard decides from it.
 
 **The set of origins is closed.**
 

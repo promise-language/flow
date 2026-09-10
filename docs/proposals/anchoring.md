@@ -58,7 +58,7 @@ A middle form is probably right: the grant is per-aspect and lasts the session, 
 
 The two positions `docs/resolution.md` already defines, doing what they are respectively good at.
 
-**A guard, at the edit.** The agent proposes to modify an anchored aspect and is refused before it happens, with the reason and the way to ask. Cheap, immediate, and the agent adapts mid-turn rather than losing the work. It **fails open**: an agent that reaches a shell, or runs somewhere the guard is not configured, goes straight past it.
+**A guard, at the edit.** The agent proposes to modify an anchored aspect and is refused before it happens, with the reason and the way to ask. Cheap, immediate, and the agent adapts while it works rather than losing the work. It **fails open**: an agent that reaches a shell, or runs somewhere the guard is not configured, goes straight past it.
 
 **A gate, at integration.** Compares the anchored aspects as they stand against **the state the resolution started from**, and refuses the change if any differ without a recorded approval. Catches the modification however it happened, including by routes nobody anticipated.
 
