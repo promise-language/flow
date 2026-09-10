@@ -271,21 +271,42 @@ func (b *builder) addContributorSteps(f *flow.Flow) {
 			Writes:  flow.WriteContract{MayCommit: true, MayEditTree: true},
 			Leaves:  flow.LeavesItemBranch,
 		})
-	// The method, not a closure over a successor: the request has ONE successor
-	// now, so there is nothing left for a closure to carry. Close branch is
-	// where the contributor's part ends whoever is running it.
+	// Two successors, and the second is a failure route rather than a decision:
+	// close branch is where the contributor's part ends whoever is running it,
+	// and repair disclosure is what the step elects instead of prompting when
+	// what the branch carries is refused.
 	f.AddSignalStep("create pull request", flow.SignalId(StepOpenPR), b.stepOpenPR,
 		flow.StepConfig{
 			Role: contributorRole,
-			Next: []flow.StepId{flow.StepId(StepCloseBranch)},
-			// Declared as the step BEHAVES, not as docs/issue-flow.md § The
-			// graph bolds it for the end state: stepOpenPR prompts on its
-			// disclosure-repair path, and a step that prompts on any path is
-			// an agent step. Splitting the repair out so the request becomes
-			// mechanical is #321, which flips this one value.
-			Prompts: flow.PromptsAgent,
+			Next: []flow.StepId{
+				flow.StepId(StepCloseBranch),
+				flow.StepId(StepRepairDisclosure),
+			},
+			// Mechanical, and the declaration is the deliverable: this is the
+			// longest cheap step in the flow — the gate suite, the commit and
+			// the push — and what it earns by declaring none is what the whole
+			// split was for (docs/flow-registration.md § Step configuration).
+			Prompts: flow.PromptsNone,
 			Needs:   flow.NeedsItemBranch,
 			Writes:  flow.WriteContract{MayBranch: true, MayCommit: true},
+			Leaves:  flow.LeavesItemBranch,
+		})
+	// The back edge, and it is legal: ValidateGraph has no acyclicity
+	// constraint, and finalization stays reachable from both — open request
+	// keeps its route to close branch (flow/graph.go
+	// validateFinalizationReachable).
+	//
+	// No MayBranch: a rebase neither creates, switches nor publishes a branch,
+	// which is what keeps docs/issue-flow.md § Branches are moved only by
+	// mechanical steps literally true with an agent-driven step in the graph.
+	// MayEditTree, because the agent edits files as it rewrites the history.
+	f.AddStep("repair disclosure", flow.ArtifactId(StepRepairDisclosure), b.stepRepairDisclosure,
+		flow.StepConfig{
+			Role:    contributorRole,
+			Next:    []flow.StepId{flow.StepId(StepOpenPR)},
+			Prompts: flow.PromptsAgent,
+			Needs:   flow.NeedsItemBranch,
+			Writes:  flow.WriteContract{MayCommit: true, MayEditTree: true},
 			Leaves:  flow.LeavesItemBranch,
 		})
 }
@@ -417,6 +438,11 @@ func resolveArtifacts() []flow.ArtifactDef {
 		// A flag: closing the branch restores rather than produces, and every
 		// step still owes exactly one result.
 		flow.Artifact(flow.ArtifactId(StepCloseBranch), flow.ArtifactFlag),
+		// A flag too, and for the same reason: the repair's deliverable is the
+		// rewritten history on the branch, and the record says it happened —
+		// which is the half of this route that a resolution rewriting its own
+		// history to get a push out used to have no trace of.
+		flow.Artifact(flow.ArtifactId(StepRepairDisclosure), flow.ArtifactFlag),
 		flow.Artifact(flow.ArtifactId(StepReviewProposal), flow.ArtifactMarkdown),
 		flow.Artifact(flow.ArtifactId(StepVerifyMerge), flow.ArtifactMarkdown),
 		flow.Artifact(flow.ArtifactId(StepRecordMerge), flow.ArtifactCommitHash),

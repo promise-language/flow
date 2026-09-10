@@ -82,6 +82,14 @@ func (w *worktree) Push(ctx context.Context) error {
 	return w.b.out.Push(ctx)
 }
 
+// ExaminePush asks the guard what the push would carry and performs no push —
+// flow.PushExaminer, the optional capability a repair step reaches through
+// flow.ExaminePush. It is the SAME assembly Push shows the guard, which is what
+// makes the answer about the push it predicts.
+func (w *worktree) ExaminePush(ctx context.Context) error {
+	return w.b.out.ExaminePush(ctx)
+}
+
 // Drift measures how far the world has moved under the branch: what HEAD
 // carries past the recorded cut point, and what the mainline has taken since.
 //

@@ -364,13 +364,50 @@ func (o *outward) MergePullRequest(ctx context.Context, prURL string) error {
 // through git rather than through an API call. The guard therefore has to see
 // what the push would carry, which is what PushMaterial computes.
 func (o *outward) Push(ctx context.Context) error {
-	branch, err := o.git.CurrentBranch(ctx)
+	d, err := o.pushDisclosure(ctx)
 	if err != nil {
 		return err
 	}
-	messages, patch, err := o.git.PushMaterial(ctx, branch)
+	branch := d.Ref
+	return o.publish(ctx, d, func(ctx context.Context) error {
+		_, stderr, err := o.git.run(ctx, "push", "-u", "origin", branch)
+		if err != nil {
+			return fmt.Errorf("git push -u origin %s: %w (%s)", branch, err, string(stderr))
+		}
+		return nil
+	})
+}
+
+// ExaminePush asks the guard what a push would carry, and pushes nothing —
+// flow.PushExaminer, for a step that must act on a refusal it was not handed
+// (docs/disclosure.md § A refusal does not travel).
+//
+// It goes through the same funnel with a no-op act, rather than calling the
+// guard directly: act validation, origin validation, the missing-guard refusal
+// and the ErrDisclosureRefused wrapping all live in publish, and an examine
+// that reimplemented them would be a second policy answering about the first
+// one's write.
+func (o *outward) ExaminePush(ctx context.Context) error {
+	d, err := o.pushDisclosure(ctx)
 	if err != nil {
 		return err
+	}
+	return o.publish(ctx, d, func(context.Context) error { return nil })
+}
+
+// pushDisclosure assembles what pushing the current branch would publish.
+//
+// ONE ASSEMBLY, TWO CALLERS — Push publishes it, ExaminePush only asks about
+// it. An examine that built its own copy could disagree with the push it
+// predicts, which is the one way asking is worse than not asking.
+func (o *outward) pushDisclosure(ctx context.Context) (flow.Disclosure, error) {
+	branch, err := o.git.CurrentBranch(ctx)
+	if err != nil {
+		return flow.Disclosure{}, err
+	}
+	messages, patch, err := o.git.PushMaterial(ctx, branch)
+	if err != nil {
+		return flow.Disclosure{}, err
 	}
 	// Three origins in one write, which is why a disclosure states them per
 	// string: the branch name the flow constructed, commit messages an agent
@@ -379,14 +416,7 @@ func (o *outward) Push(ctx context.Context) error {
 	text := stated(flow.OriginFlow, branch)
 	text = append(text, stated(flow.OriginAgent, messages...)...)
 	text = append(text, stated(flow.OriginWorktree, patch)...)
-	d := flow.Disclosure{Act: flow.ActPush, Ref: branch, Text: text}
-	return o.publish(ctx, d, func(ctx context.Context) error {
-		_, stderr, err := o.git.run(ctx, "push", "-u", "origin", branch)
-		if err != nil {
-			return fmt.Errorf("git push -u origin %s: %w (%s)", branch, err, string(stderr))
-		}
-		return nil
-	})
+	return flow.Disclosure{Act: flow.ActPush, Ref: branch, Text: text}, nil
 }
 
 // EditIssue applies a title / body / labels change in one PATCH.

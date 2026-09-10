@@ -142,6 +142,7 @@ var githubSupportedArtifacts = []flow.ArtifactDef{
 	flow.Artifact("coverage", flow.ArtifactMarkdown).WithDoc("Test-coverage analysis."),
 	flow.Artifact("summary", flow.ArtifactMarkdown).WithDoc("Resolution summary for the issue."),
 	flow.Artifact("branch-closed", flow.ArtifactFlag).WithDoc("The worktree was returned to the base branch after the resolution completed."),
+	flow.Artifact("disclosure-repair", flow.ArtifactFlag).WithDoc("The branch was repaired so it could be committed and pushed."),
 	// github/PR-specific artifacts — the contributor→maintainer pull-request
 	// lifecycle this backend is built around.
 	flow.Artifact("proposal-review", flow.ArtifactMarkdown).WithDoc("Maintainer-side judgement of the proposal as what will land."),

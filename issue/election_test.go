@@ -92,24 +92,41 @@ func TestElection_TheRequestRoutesToCloseBranch(t *testing.T) {
 	}
 }
 
-// The request opens on the RETRY after a push repair, and that path elects the
-// same route as the first. Returning the zero result here instead would park
-// the step as "did not complete" with the pull request already open — a park
-// the next dispatch cannot clear, because opening it again is not what the
-// step would do.
-func TestElection_TheRequestElectsAfterAPushRepair(t *testing.T) {
+// The repair round is a pair of elections rather than a retry inside one
+// dispatch, and each half is asserted: the request electing the repair on a
+// refusal, and the repair electing the request back. Either half missing is a
+// route that dead-ends with the work done and nothing saying so.
+func TestElection_TheRequestElectsTheRepairOnARefusal(t *testing.T) {
 	wt := resumedWorktree()
-	refusal := flow.ErrDisclosureRefused{
+	wt.openErrs = []error{flow.ErrDisclosureRefused{
 		Act:    flow.ActPush,
 		Reason: errors.New("an absolute home path names the machine's user"),
-	}
-	wt.openErrs = []error{refusal, nil}
+	}}
 
-	res, err := testBuilder(t).stepOpenPR(ctxWithPlan(wt, &scriptedAgent{}))
+	res, err := testBuilder(t).stepOpenPR(routedFrom(ctxWithPlan(wt, &scriptedAgent{}), StepCoverage))
 	if err != nil {
 		t.Fatalf("stepOpenPR: %v", err)
 	}
-	wantNext(t, res, flow.StepId(StepCloseBranch))
+	wantNext(t, res, flow.StepId(StepRepairDisclosure))
+}
+
+func TestElection_TheRepairElectsTheRequestBack(t *testing.T) {
+	wt := resumedWorktree()
+	wt.examineErrs = []error{flow.ErrDisclosureRefused{
+		Act:    flow.ActPush,
+		Reason: errors.New("an absolute home path names the machine's user"),
+	}}
+
+	res, err := testBuilder(t).stepRepairDisclosure(routedFrom(ctxWithPlan(wt, &scriptedAgent{}), StepOpenPR))
+	if err != nil {
+		t.Fatalf("stepRepairDisclosure: %v", err)
+	}
+	wantNext(t, res, flow.StepId(StepOpenPR))
+	// A flag: the deliverable is the rewritten history on the branch, and the
+	// record says it happened.
+	if res.Payload == nil {
+		t.Error("payload = nil — the repair resolves a flag, and every step owes exactly one result")
+	}
 }
 
 // The integration phase's edges. They are declared by the one graph

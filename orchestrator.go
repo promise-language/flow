@@ -1178,6 +1178,35 @@ type Worktree interface {
 	Request() RequestManager
 }
 
+// PushExaminer is a worktree that can ask the disclosure guard WHAT A PUSH
+// WOULD CARRY, without pushing.
+//
+// Optional, and reached through ExaminePush rather than named in Worktree: an
+// orchestrator that cannot answer is not a defect, and probing by type
+// assertion is the shape Worktree.Request() already uses for a capability only
+// some backends have.
+//
+// It exists because a refusal does not travel (docs/disclosure.md § A refusal
+// does not travel). A step that must act on a push refusal it did not receive
+// cannot be handed the refusal — every hand-off is published, through the same
+// guard that refused it — so it asks the guard itself, about an act it does not
+// perform. The answer never leaves the dispatch, and a re-derived refusal is
+// the current one where a copied one can be stale.
+type PushExaminer interface {
+	// ExaminePush shows the guard exactly what Push would show it and returns
+	// the guard's answer: nil when the push would be permitted, an
+	// ErrDisclosureRefused carrying ActPush when it would not.
+	//
+	// IT PUBLISHES NOTHING. The answer is the whole product, and performing the
+	// act would defeat the reason for asking.
+	//
+	// The disclosure it asks about must be the one Push would send, assembled
+	// once and used by both: an examine that built its own copy could disagree
+	// with the push it predicts, which is the one way this surface is worse
+	// than not asking.
+	ExaminePush(ctx context.Context) error
+}
+
 // RequestManager is the pull-request surface exposed via Worktree.Request().
 //
 // It is ONE CAPABILITY, NOT SIX: proposing a change, finding it, measuring the
@@ -1268,6 +1297,22 @@ func FindPR(ctx context.Context, wt Worktree) (PRInfo, error) {
 		return PRInfo{}, ErrUnsupported
 	}
 	return rq.FindPR(ctx)
+}
+
+// ExaminePush is the nil-safe reach for PushExaminer, in the shape Open is:
+// a worktree that does not implement it returns ErrUnsupported, so a caller can
+// tell "never here" from "the guard refused".
+//
+// Typed rather than nil, because the two answers lead opposite ways: a refusal
+// is work for a repair step, and an unsupported examine is a capability the
+// arena does not have — a step that read one as the other would either prompt
+// blind or treat a refused push as permitted.
+func ExaminePush(ctx context.Context, wt Worktree) error {
+	ex, ok := wt.(PushExaminer)
+	if !ok {
+		return ErrUnsupported
+	}
+	return ex.ExaminePush(ctx)
 }
 
 // isNilRequest catches both untyped-nil interfaces and the typed-nil pitfall

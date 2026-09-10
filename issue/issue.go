@@ -58,6 +58,14 @@ const (
 	StepOpenPR      StepID = "pr-open" // signal step
 	StepCloseBranch StepID = "branch-closed"
 
+	// StepRepairDisclosure is the repair the request elects instead of
+	// prompting in place: it rewrites the history that names what may not leave
+	// the machine, and elects the request back. Its own step so that open
+	// request is mechanical on every path — free, deterministic and cheap to
+	// retry — and so that a rewritten history leaves a journal entry naming why
+	// (docs/issue-flow.md § Repair disclosure).
+	StepRepairDisclosure StepID = "disclosure-repair"
+
 	// Maintainer step set, in the order docs/issue-flow.md § The graph defines.
 	// One vocabulary with the contributor's above, because there is one graph:
 	// the roles differ in which steps they perform, never in which steps exist.
@@ -72,9 +80,11 @@ const (
 // more than one prompt. The implement step re-prompts the agent with failing
 // verify output, and that re-prompt is a slot, not a step of its own.
 //
-// Every AGENT-DRIVEN step's id is a valid PromptID; PromptImplementFix is the
-// extra. The mechanical steps — the two branch steps and the pull request —
-// have none, because they run no agent and so have nothing to prompt.
+// Most AGENT-DRIVEN steps' ids are valid PromptIDs, and the mechanical steps —
+// the two branch steps and the pull request — have none, because they run no
+// agent and so have nothing to prompt. The repair step is the one agent step
+// whose id is no slot: every prompt it renders is one of the repair slots
+// below, which are refusals it answers rather than work it was sent to do.
 type PromptID string
 
 const (

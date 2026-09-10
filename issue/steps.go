@@ -690,7 +690,10 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) (flow.StepResult, error) {
 	// "implement" then "what review changed", because that is what happened.
 	ctx.Notify("", "recording post-implement changes")
 	if err := b.recordOutstanding(ctx, wt); err != nil {
-		return flow.StepResult{}, err
+		// A hook refusal here used to be repaired in place, which is the second
+		// prompt this step had and the second reason it could not declare
+		// Prompts: none. It parks instead — see electRepairOrPark.
+		return b.electRepairOrPark(ctx, err)
 	}
 
 	// The gate, after recording and before the push. After, because it must
@@ -713,57 +716,213 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) (flow.StepResult, error) {
 	if err == nil {
 		return b.requestOpened(ctx), nil
 	}
+	return b.electRepairOrPark(ctx, err)
+}
 
-	// Only recover ActPush refusals. An ActPullRequest refusal (PR body/title)
-	// is a different surface — return it as-is.
+// electRepairOrPark is what stepOpenPR does when something refuses what the
+// branch carries, and it is the whole reason this step can declare
+// Prompts: none — every answer here is a route or a park, never a prompt.
+//
+// The three answers, and why they differ:
+//
+//   - A PUSH the guard refused elects the repair step. The tree is committed
+//     and clean at that point, so the step completes into its declared state
+//     and the repair takes it from there.
+//   - A COMMIT or STAGE the pre-commit hook refused parks. It cannot elect
+//     anything: the refused work is still in the tree, and "a step that ends
+//     over a dirty tree has not completed" (docs/resolution.md § Steps and the
+//     worktree) — a flow does not leave one step's changes uncommitted for a
+//     later step to sweep up. The producing steps repair their own hook
+//     refusals as they commit, so uncommittable content arriving here is the
+//     anomaly the park exists to show.
+//   - Anything else is returned unchanged: an ActPullRequest refusal is a
+//     different surface — the title and body this step composed, which no
+//     history rewrite touches — and an infrastructure error says nothing about
+//     what the branch carries.
+//
+// The bound on the repair is the transfer: the repair answers the refusal in
+// one dispatch, so a branch arriving back from it still refused has had its
+// round, and electing the same round again is how a loop is built. A rework
+// round arrives from coverage instead, so a fresh refusal there still gets a
+// repair. After a round, anything else parks too — the history the repair
+// rewrote is in the branch, and failing would report a transient push failure
+// as though the round had never happened.
+//
+// A park record is PUBLISHED, so it carries an infrastructure failure's words
+// and never a guard's. The refusal that reaches that last branch is the
+// ActPullRequest one — the push went out and the title and body did not — and
+// copying it into the record is a second attempt to publish exactly the text
+// that was just refused (docs/disclosure.md § A refusal does not travel). It
+// goes where every other refusal here goes: with the step, unpublished.
+func (b *builder) electRepairOrPark(ctx flow.StepCtx, err error) (flow.StepResult, error) {
+	// Stashed unpublished, and never quoted into the park record — that record
+	// is published, through the same guard (docs/disclosure.md § A refusal does
+	// not travel).
+	stash := func(what string) {
+		ctx.RecordWorkInProgress(fmt.Sprintf("%s\n\nThe refusal:\n\n%s", what, err))
+	}
+	switch {
+	case errors.Is(err, errBranchRefused):
+		// The stash is what this branch is really for: the SDK's own
+		// write-contract check parks the dispatch first, over the tree this
+		// step could not commit, so the kind an operator sees is that one. It
+		// is the same stop for the same reason, and it cannot carry the hook's
+		// words — those go here, unpublished, where the next run reads them.
+		stash("What the checking steps left cannot be committed.")
+		return flow.StepResult{}, ctx.Park(flow.ParkRequest{
+			Kind: flow.ParkBlocked,
+			Reason: "the tree carries work that cannot be committed, so this branch cannot be " +
+				"proposed and nothing may be pushed; what was refused is kept with the step " +
+				"for the next run",
+		})
+	case isPushRefusal(err):
+		if repairedJustNow(ctx) {
+			stash("What this branch carries was refused again, after a repair round.")
+			return flow.StepResult{}, ctx.Park(flow.ParkRequest{
+				Kind: flow.ParkBlocked,
+				Reason: "this branch was repaired once and what it carries is still refused; " +
+					"what was refused is kept with the step for the next run",
+			})
+		}
+		// The election names the ACT and carries nothing the guard refused: the
+		// repair step re-derives that locally, by asking the guard about a push
+		// it does not perform.
+		return ctx.Next(flow.StepId(StepRepairDisclosure),
+			"the disclosure guard refused the push of this branch; repair the history that "+
+				"names what may not leave the machine, and the request is opened after it"), nil
+	case repairedJustNow(ctx):
+		var refused flow.ErrDisclosureRefused
+		if errors.As(err, &refused) {
+			stash("The proposal was refused after a repair round.")
+			return flow.StepResult{}, ctx.Park(flow.ParkRequest{
+				Kind: flow.ParkBlocked,
+				Reason: "the proposal was refused after a repair round, so the repair's work stays " +
+					"in the branch rather than being discarded; what was refused is kept with " +
+					"the step for the next run",
+			})
+		}
+		return flow.StepResult{}, ctx.Park(flow.ParkRequest{
+			Kind: flow.ParkBlocked,
+			Reason: fmt.Sprintf("the proposal failed after a repair round, so the repair's work "+
+				"stays in the branch rather than being discarded: %s", err),
+		})
+	}
+	return flow.StepResult{}, err
+}
+
+// repairedJustNow reports whether this dispatch was routed here by the repair
+// step. It is the bound on the repair round, and it reads the journal rather
+// than a counter because the journal is where the route is: the repair answers
+// the refusal in one dispatch, so a branch that comes back still refused has
+// had its round, while a later rework round arrives from coverage and earns a
+// fresh one.
+func repairedJustNow(ctx flow.StepCtx) bool {
+	transfer := ctx.Transfer()
+	return transfer != nil && transfer.Step == flow.StepId(StepRepairDisclosure)
+}
+
+// isPushRefusal reports whether err is the disclosure guard refusing the push —
+// the one refusal a history rewrite answers, and the only one this step can
+// elect a route for.
+func isPushRefusal(err error) bool {
 	var refused flow.ErrDisclosureRefused
-	if !errors.As(err, &refused) || refused.Act != flow.ActPush {
+	return errors.As(err, &refused) && refused.Act == flow.ActPush
+}
+
+// errBranchRefused marks a stage or commit the pre-commit hook refused, so
+// stepOpenPR can tell it from an infrastructure failure. A marker rather than a
+// look at the message because the hook's wording is the project's: what makes
+// this a refusal is WHERE it happened — staging or committing what the
+// producing steps left, after CheckFit has ruled out an unfit machine.
+var errBranchRefused = errors.New("what this branch carries was refused")
+
+// stepRepairDisclosure rewrites the history that names what may not leave the
+// machine, so the branch can be pushed, and elects the request back.
+//
+// It is the agent half of what open request used to do in place, and splitting
+// it out is what lets the request declare Prompts: none — the request's
+// deliverable is the mechanical part, and the repair is a rare answer to a
+// refusal on its failure path (docs/flow-registration.md § Step configuration).
+//
+// It is NOT handed the refusal. A published election message goes through the
+// same guard that refused it, and the unpublished store belongs to the step
+// that wrote it, so a refusal is never copied into a hand-off
+// (docs/disclosure.md § A refusal does not travel). It re-derives what was
+// refused by asking the guard about a push it does not perform — which is also
+// the current answer, where a copied one could be stale.
+//
+// It commits before it asks, through commitWithRepair — the same repair every
+// producing step commits through. The tree it is handed is normally clean, so
+// that is a no-op; it is not dead code, because what the guard is asked about
+// must be the branch as the commit left it, and a repair round that arrives
+// over a tree carrying work would otherwise ask about a state nobody proposes.
+func (b *builder) stepRepairDisclosure(ctx flow.StepCtx) (flow.StepResult, error) {
+	if err := b.onClaimBranch(ctx); err != nil {
+		return flow.StepResult{}, err
+	}
+	wt, err := ctx.Worktree()
+	if err != nil {
 		return flow.StepResult{}, err
 	}
 
-	// Stash before anything else can fail.
+	// Reused unchanged, and the same message open request would have used: only
+	// the implement commit carries the closes-reference, whichever step records
+	// the rest.
+	if err := b.commitWithRepair(ctx, wt, b.followUpCommitMessage(ctx)); err != nil {
+		return flow.StepResult{}, err
+	}
+
+	ctx.Notify("", "asking the disclosure guard what the push would carry")
+	err = flow.ExaminePush(ctx.Context(), wt)
+	switch {
+	case err == nil:
+		// Nothing left to repair: the commit half was the whole refusal, or a
+		// previous run already rewrote the history. Electing the request is
+		// still right — it is the step that pushes.
+		return b.repaired(ctx, "what the checking steps left is committed, and a push of it is not refused"), nil
+	case errors.Is(err, flow.ErrUnsupported):
+		// No answer, so no prompt: an agent asked to rewrite history without
+		// being told what was refused has nothing to work from, and would
+		// spend a turn guessing.
+		return flow.StepResult{}, ctx.Park(flow.ParkRequest{
+			Kind: flow.ParkBlocked,
+			Reason: "this arena's worktree cannot report what a push would disclose, so what " +
+				"the guard refused cannot be re-derived here and there is nothing to repair from",
+		})
+	}
+	var refused flow.ErrDisclosureRefused
+	if !errors.As(err, &refused) || refused.Act != flow.ActPush {
+		return flow.StepResult{}, err // infrastructure, not a judgement about the branch
+	}
+
+	// Stash before anything can fail, and locally: the guard's words are what
+	// the next run needs and the one thing that may not be published.
 	ctx.RecordWorkInProgress(fmt.Sprintf(
-		"The disclosure guard refused the push.\n\nThe refusal:\n\n%s",
-		refused.Error()))
+		"The disclosure guard refused the push.\n\nThe refusal:\n\n%s", refused.Error()))
 
 	ctx.Notify("", "disclosure refused the push — asking the agent to rewrite history")
-
-	pc := PromptContext{PushRefusal: refused.Error()}
-	prompt, rerr := renderPrompt(b.cfg, PromptPushRepair, pc)
-	if rerr != nil {
-		return flow.StepResult{}, rerr
+	prompt, err := renderPrompt(b.cfg, PromptPushRepair, PromptContext{PushRefusal: refused.Error()})
+	if err != nil {
+		return flow.StepResult{}, err
 	}
-	_, rerr = b.runAgent(ctx, flow.AgentRequest{
+	if _, err := b.runAgent(ctx, flow.AgentRequest{
 		Prompt:         prompt,
 		PermissionMode: "acceptEdits",
-	})
-	if rerr != nil {
-		return flow.StepResult{}, rerr
+	}); err != nil {
+		return flow.StepResult{}, err // infrastructure failure, NOT a refusal
 	}
+	return b.repaired(ctx, "the history that named what may not leave the machine was rewritten"), nil
+}
 
-	// One retry.
-	ctx.Notify("", "retrying push after history rewrite")
-	_, err = flow.Open(ctx.Context(), wt, flow.BranchName(base), title, body)
-	if err == nil {
-		return b.requestOpened(ctx), nil
-	}
-
-	// Second failure: park, don't fail.
-	// Infrastructure errors on retry are also parked — the work is done,
-	// and a transient push failure after a successful rebase should not
-	// discard the rebase.
-	var refused2 flow.ErrDisclosureRefused
-	if errors.As(err, &refused2) {
-		ctx.RecordWorkInProgress(fmt.Sprintf(
-			"The disclosure guard refused the push a second time.\n\nThe refusal:\n\n%s",
-			refused2.Error()))
-	}
-
-	return flow.StepResult{}, ctx.Park(flow.ParkRequest{
-		Kind: flow.ParkBlocked,
-		Reason: "the disclosure guard refused this step's push twice; " +
-			"what it refused and why are kept with the step for the next run",
-	})
+// repaired is the repair step's election, and the reason it is one function is
+// the reason requestOpened is: two call sites telling the successor two
+// different things about the same fact would be two stories about one step.
+//
+// The message names the branch and what was done to it, and QUOTES NOTHING the
+// guard refused — the election is published, through the guard that refused it.
+func (b *builder) repaired(ctx flow.StepCtx, what string) flow.StepResult {
+	return ctx.Next(flow.StepId(StepOpenPR), fmt.Sprintf(
+		"branch %q is repaired — %s; propose the change", b.branchName(ctx), what)).Flag()
 }
 
 // requestOpened is the election the pull request step makes once the request is
@@ -843,12 +1002,18 @@ func detailSuffix(detail string) string {
 // One commit for all of them, not one per step: a commit per step would record
 // steps that changed nothing, and the unit an operator reads is "what happened
 // after the change was written", singular.
+//
+// It stages and commits and does NOT repair: a refusal is marked and routed to
+// the repair step, because a prompt from here is a prompt from open request,
+// which declares none (docs/issue-flow.md § Open request). The repair step runs
+// commitWithRepair over the same tree with the same message, so what is
+// repaired is what was refused.
 func (b *builder) recordOutstanding(ctx flow.StepCtx, wt flow.Worktree) error {
 	before, err := wt.RevParse(ctx.Context(), "HEAD")
 	if err != nil {
 		return err
 	}
-	if err := b.commitWithRepair(ctx, wt, b.followUpCommitMessage(ctx)); err != nil {
+	if err := b.stageAndCommit(ctx, wt, b.followUpCommitMessage(ctx)); err != nil {
 		return err
 	}
 	after, err := wt.RevParse(ctx.Context(), "HEAD")
@@ -873,6 +1038,26 @@ func (b *builder) recordOutstanding(ctx flow.StepCtx, wt flow.Worktree) error {
 				"pull request would describe a branch that does not contain the work "+
 				"(%d bytes of diff remain); resolve the worktree by hand before retrying",
 			len(patch))
+	}
+	return nil
+}
+
+// stageAndCommit is commitWithRepair's mechanical half: it stages, commits, and
+// marks a refusal instead of answering it.
+//
+// The marker is errBranchRefused, and the classification is by POSITION rather
+// than by the message: staging that failed on an unfit machine is ENOSPC and
+// not a judgement about the branch, which is why CheckFit is asked first — the
+// same order commitWithRepair uses, for the same reason.
+func (b *builder) stageAndCommit(ctx flow.StepCtx, wt flow.Worktree, msg string) error {
+	if err := wt.Stage(ctx.Context()); err != nil {
+		if fitErr := flow.CheckFit(ctx.Context(), wt); fitErr != nil {
+			return fitErr
+		}
+		return fmt.Errorf("staging what the checking steps left was refused: %w: %w", err, errBranchRefused)
+	}
+	if err := wt.Commit(ctx.Context(), msg); err != nil {
+		return fmt.Errorf("committing what the checking steps left was refused: %w: %w", err, errBranchRefused)
 	}
 	return nil
 }

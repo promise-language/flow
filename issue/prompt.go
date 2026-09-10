@@ -567,7 +567,8 @@ You must rewrite the commits that introduced the text:
 3. Stage and amend each commit the exec visits — the rebase ` + "`--exec`" + ` flag does
    this naturally.
 
-Do NOT push — the step retries the push itself after your repair.
+Do NOT push — the step that proposes the change pushes, and the route reaches it
+as soon as this repair completes.
 Do NOT re-run the integration gate — it already passed on the branch content,
 and the fix is cosmetic (placeholder substitution), not structural.`,
 
