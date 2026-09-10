@@ -184,16 +184,21 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// invocation bump, no park, no running record. The claim is kept — an
 	// arena reservation, not work — and the pending step stays pending, so
 	// when the last blocker lands the next advance runs it from here.
+	//
+	// The pending step is resolved once, here, and feeds every report from this
+	// point on: the two stops below and the base result the dispatch builds on.
+	// Each names the step itself as what the route still points at, because
+	// nothing a stop does moves the route.
+	li, err := lifecycleItemOf(f, nextName)
+	if err != nil {
+		return flow.InvocationResult{}, err
+	}
 	if blockedFromAdvancing(state) {
-		li, err := lifecycleItemOf(f, nextName)
-		if err != nil {
-			return flow.InvocationResult{}, err
-		}
-		return blockedOnItems(state, flow.InvocationResult{
+		return blockedOnItems(state, stampNext(flow.InvocationResult{
 			Flow: f.Name(),
 			Item: claim.ItemRef.Display,
 			Step: string(li.Result()),
-		}), nil
+		}, li)), nil
 	}
 
 	// Cross-flow preflight gate. Runs AFTER LoadState (fresh state) and
@@ -209,25 +214,24 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 			if errors.Is(perr, flow.ErrBlocked) {
 				status = string(flow.StatusBlocked)
 			}
-			return flow.InvocationResult{
+			return stampNext(flow.InvocationResult{
 				Item:   claim.ItemRef.Display,
+				Step:   string(li.Result()),
 				Status: status,
 				Reason: "preflight: " + perr.Error(),
-			}, nil
+			}, li), nil
 		}
 	}
 
-	li, err := lifecycleItemOf(f, nextName)
-	if err != nil {
-		return flow.InvocationResult{}, err
-	}
-
-	result := flow.InvocationResult{
+	// Every later path builds on this by value, so a park, a failure, an await
+	// skip and a blocked stop all report the step itself as still pending. Only
+	// a completion overwrites it, with the successor the route elected.
+	result := stampNext(flow.InvocationResult{
 		Flow:         f.Name(),
 		InvocationID: invocationID(),
 		Item:         claim.ItemRef.Display,
 		Step:         string(li.Result()),
-	}
+	}, li)
 
 	// AwaitSignal items have no handler: the item sits here, nobody's move,
 	// until the orchestrator observes the signal. Skip without consuming
@@ -321,6 +325,28 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// only on the completion path (translateHandlerError's nil-error branch),
 	// because every other way a dispatch ends is one where nothing was elected.
 	res, handlerErr := li.Handler(sctx)
+
+	// A prompt refused because the step declared Prompts: none. First among the
+	// post-handler branches, and read off the chokepoint rather than off
+	// handlerErr: a handler that swallowed the refusal, re-wrapped it without
+	// %w, or turned it into ErrTransient would otherwise complete, fail as
+	// charged, or park as infra-transient and be re-dispatched forever. The
+	// declaration holds whatever the handler did with the error.
+	//
+	// The step PARKS rather than fails, so journal position and the claim
+	// survive for whoever corrects it, and it parks ParkRefused — the kind that
+	// classifies itself as not clearing by re-dispatch, because a mis-declared
+	// step answers identically every time. No chargeDispatch: nothing was sent,
+	// so nothing is billed for the violation, which is the guarantee the
+	// declaration exists to give (docs/flow-registration.md § Step
+	// configuration).
+	if err := sctx.agent.refusedPrompt; err != nil {
+		return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
+			Kind:   flow.ParkRefused,
+			Step:   li.Result(),
+			Reason: err.Error(),
+		}))
+	}
 
 	// Timeout (deadline reached during handler). Counts as an invocation —
 	// the handler ran, it just didn't finish in time.
@@ -639,7 +665,39 @@ func completeStep(
 		return flow.InvocationResult{}, cerr
 	}
 	result.Status = string(flow.StatusDone)
-	return result, nil
+	// The route moved: what is pending now is the elected successor, or nothing
+	// on a finalizing route.
+	return stampNextAfter(result, sctx.flow, res.Route), nil
+}
+
+// stampNext reports li as the lifecycle item the route now points at: its
+// name, and whether dispatching it invokes no agent. Both fields come from the
+// item's own declaration (LifecycleItem.Mechanical), so the envelope and the
+// chokepoint that enforces the declaration cannot disagree.
+func stampNext(r flow.InvocationResult, li flow.LifecycleItem) flow.InvocationResult {
+	mechanical := li.Mechanical()
+	r.NextStep = string(li.Result())
+	r.NextMechanical = &mechanical
+	return r
+}
+
+// stampNextAfter is stampNext for a route just journaled: the successor it
+// elected, looked up on the flow the way AwaitsAfter looks it up, or nothing
+// when the route finalizes — absent means nothing is pending, which is what a
+// finalized item reports (docs/cli.md § Output).
+//
+// The lookup cannot miss on a validated flow: Elect refused any route outside
+// the step's declared successors, and ValidateGraph refused any declared
+// successor naming nothing registered.
+func stampNextAfter(r flow.InvocationResult, f *flow.Flow, route flow.Route) flow.InvocationResult {
+	r.NextStep, r.NextMechanical = "", nil
+	if route.Finalizes() {
+		return r
+	}
+	if succ, ok := f.ItemByResult(route.Next); ok {
+		r = stampNext(r, succ)
+	}
+	return r
 }
 
 // executionOf is which completed execution of this step the entry about to be
@@ -1356,12 +1414,34 @@ type meteredAgent struct {
 
 	promptsThisInvocation int
 	costThisInvocation    float64
+
+	// refusedPrompt is the first prompt refused because the step declared
+	// Prompts: none — kept so RunOne parks on it whatever the handler did with
+	// the error it was handed. nil until a mechanical step asks.
+	refusedPrompt error
 }
 
 func (m *meteredAgent) Name() string { return m.inner.Name() }
 
 func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.AgentResponse, error) {
 	li := m.stepCtx.li
+	// A mechanical step is refused FIRST — before the unmetered pass-through a
+	// signal step takes, before the cap checks, and before the prompt counter
+	// moves. Any later and a refused prompt would be counted as one, and a
+	// mechanical step whose prompt cap was exhausted would park
+	// treasurer-refused instead of naming the real defect. Nothing is sent, so
+	// nothing is billed for the violation: that is the whole point of refusing
+	// before the request goes out rather than after an answer comes back
+	// (docs/flow-registration.md § Step configuration).
+	//
+	// The site is the frame that called Run — the handler, or the helper it
+	// prompts through — so the park can name what asked.
+	if li.Mechanical() {
+		if m.refusedPrompt == nil {
+			m.refusedPrompt = mechanicalPromptRefusal(li.Result(), callSite(0))
+		}
+		return nil, m.refusedPrompt
+	}
 	// Where the agent edits is not the handler's to choose: it is the arena the
 	// orchestrator was constructed against — the same tree the commit is taken
 	// in and the gates measure. Stamped here rather than at each construction

@@ -37,6 +37,7 @@ func TestRole_DeclarationOrderIsKept(t *testing.T) {
 func TestRole_MayBeDeclaredAfterTheStepsThatCarryIt(t *testing.T) {
 	f := NewFlow("resolve", nil)
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        "contributor",
 		Entry:       true,
 		MayFinalize: []Disposition{DispositionResolved},
@@ -113,7 +114,7 @@ func TestDeclaresRole(t *testing.T) {
 // declaration surface exists for could never fail, wherever it was written.
 func TestDeclaresRole_ATagIsNotADeclaration(t *testing.T) {
 	f := NewFlow("resolve", nil)
-	f.AddStep("write plan", "plan", noopHandler, StepConfig{Role: "contributor"})
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{Prompts: PromptsAgent, Role: "contributor"})
 
 	if f.DeclaresRole("contributor") {
 		t.Error("a role seen only as a step tag must not read as declared — " +
@@ -126,7 +127,7 @@ func TestDeclaresRole_ATagIsNotADeclaration(t *testing.T) {
 
 func TestDeclaresRole_UndeclaredFlowDeclaresNone(t *testing.T) {
 	f := NewFlow("resolve", nil)
-	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{Prompts: PromptsAgent})
 	if f.DeclaresRole("contributor") {
 		t.Error("a flow that declares no roles declares no roles")
 	}
@@ -212,6 +213,7 @@ func TestAssumableRoles_ZeroCapabilityRoleIsAssumableByEveryone(t *testing.T) {
 	f := NewFlow("x", nil)
 	f.Role("ghost")
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        "ghost",
 		Entry:       true,
 		MayFinalize: []Disposition{DispositionResolved},

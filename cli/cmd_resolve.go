@@ -212,9 +212,54 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	enc := json.NewEncoder(app.Out)
 	quotaWarned := false
 	for range maxResolveSteps {
+		// Best-effort peek at the step about to run. RunOne re-derives this
+		// itself; the peek never gates execution (a transient read error just
+		// skips the label and paces as before). It answers two questions: what
+		// to name on the progress line, and whether the step is mechanical —
+		// which decides whether to pace at all, so it is read BEFORE the pacing
+		// block rather than after it.
+		//
+		// We name the step rather than number it: a positional counter ("[step
+		// 1]") collides with the flow's own named steps (plan/implement/…) and
+		// misreads as "flow step 1" when it really means "resolve iteration 1".
+		var (
+			st         *flow.Item
+			acts       bool
+			next       string
+			mechanical bool
+		)
+		if loaded, serr := app.Orchestrator.Load(ctx, claim.ItemRef); serr == nil {
+			st = loaded
+			// In RunOne's own order: the remit first, and only then the step,
+			// because that is the order the advance decides in and this line is
+			// a report of what it is about to do.
+			acts = inRemit(app, st)
+			if acts {
+				// Best-effort, so a Position refusal just leaves the line
+				// unlabelled: RunOne re-derives and reports it properly a
+				// moment later, and narrating it twice would say it first as a
+				// missing step name.
+				if f, n, err := SelectFlow(app, st); err == nil && f != nil {
+					next = n
+					// The declaration, read through the one definition of
+					// mechanical the envelope and the chokepoint also read.
+					if li, err := lifecycleItemOf(f, n); err == nil {
+						mechanical = li.Mechanical()
+					}
+				}
+			}
+		}
+
 		// Pace against subscription quota. The check is before dispatch so the
 		// delay costs nothing that is in flight.
-		if app.Quota != nil && (targets.FiveHour > 0 || targets.SevenDay > 0) {
+		//
+		// A mechanical step skips the wait ENTIRELY, not a shortened one: the
+		// curve measures spend the step cannot make, and holding a free step
+		// for hours under it stalls the resolution against nothing. The check
+		// stays here, before dispatch — moving the wait inside the dispatch
+		// would have a handler hold its claim and worktree while it waited,
+		// withdrawing the arena from the fleet.
+		if !mechanical && app.Quota != nil && (targets.FiveHour > 0 || targets.SevenDay > 0) {
 			if usage, qerr := app.Quota(); qerr == nil {
 				if d := paceDelay(usage, targets, time.Now()); d > 0 {
 					fmt.Fprintf(app.Err, "resolve: pacing — waiting %s for quota headroom\n", formatDurationCompact(d))
@@ -231,27 +276,9 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			}
 		}
 
-		// Best-effort peek so we can name the step we're about to run. RunOne
-		// re-derives this itself; the peek is purely for the progress line and
-		// never gates execution (a transient read error just skips the label).
-		// We name the step rather than number it: a positional counter ("[step
-		// 1]") collides with the flow's own named steps (plan/implement/…) and
-		// misreads as "flow step 1" when it really means "resolve iteration 1".
-		if st, serr := app.Orchestrator.Load(ctx, claim.ItemRef); serr == nil {
-			// In RunOne's own order: the remit first, and only then the step,
-			// because that is the order the advance decides in and this line is
-			// a report of what it is about to do.
-			acts := inRemit(app, st)
-			var next string
-			if acts {
-				// Best-effort, so a Position refusal just leaves the line
-				// unlabelled: RunOne re-derives and reports it properly a
-				// moment later, and narrating it twice would say it first as a
-				// missing step name.
-				if f, n, err := SelectFlow(app, st); err == nil && f != nil {
-					next = n
-				}
-			}
+		// The progress line, after any wait so the long pause is attributed to
+		// pacing and the step's own run is announced when it actually begins.
+		if st != nil {
 			switch {
 			case next != "":
 				fmt.Fprintf(app.Err, "resolve: running %q…\n", next)

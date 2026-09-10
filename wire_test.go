@@ -274,6 +274,61 @@ func TestInvocationResult_RedispatchTrueVsFalseVsAbsent(t *testing.T) {
 	}
 }
 
+// NextMechanical is three-state for the reason RedispatchMayClear is: a present
+// false — "the next step prompts, so wait for headroom" — is what a driver
+// acts on, and a plain bool with omitempty would put it on the wire identically
+// to absent, which docs/cli.md § Output reserves for "nothing is pending". So
+// &true, &false and nil must each serialise distinctly, and a result with
+// nothing pending is byte-for-byte what it was before the fields existed.
+func TestInvocationResult_NextMechanicalTrueVsFalseVsAbsent(t *testing.T) {
+	yes, no := true, false
+	mechanical := InvocationResult{
+		Flow: "f", Item: "i", Step: "s", Status: "done",
+		NextStep: "branch", NextMechanical: &yes,
+	}
+	prompts := InvocationResult{
+		Flow: "f", Item: "i", Step: "s", Status: "done",
+		NextStep: "impl", NextMechanical: &no,
+	}
+	nothingPending := InvocationResult{
+		Flow: "f", Item: "i", Step: "s", Status: "done",
+	}
+	bYes, err := json.Marshal(mechanical)
+	if err != nil {
+		t.Fatalf("Marshal &true: %v", err)
+	}
+	bNo, err := json.Marshal(prompts)
+	if err != nil {
+		t.Fatalf("Marshal &false: %v", err)
+	}
+	bNil, err := json.Marshal(nothingPending)
+	if err != nil {
+		t.Fatalf("Marshal nil: %v", err)
+	}
+	if !strings.Contains(string(bYes), `"next_step":"branch"`) || !strings.Contains(string(bYes), `"next_mechanical":true`) {
+		t.Errorf("a mechanical successor must serialise as next_step:\"branch\",next_mechanical:true; got %s", bYes)
+	}
+	if !strings.Contains(string(bNo), `"next_step":"impl"`) || !strings.Contains(string(bNo), `"next_mechanical":false`) {
+		t.Errorf("a prompting successor must serialise as next_step:\"impl\",next_mechanical:false; got %s", bNo)
+	}
+	if strings.Contains(string(bNil), `"next_step"`) || strings.Contains(string(bNil), `"next_mechanical"`) {
+		t.Errorf("nothing pending must omit both fields; got %s", bNil)
+	}
+	var out InvocationResult
+	if err := json.Unmarshal(bNo, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.NextStep != "impl" || out.NextMechanical == nil || *out.NextMechanical {
+		t.Errorf("round-tripped to next_step %q, next_mechanical %v; want impl and a present false", out.NextStep, out.NextMechanical)
+	}
+	if err := json.Unmarshal(bYes, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.NextStep != "branch" || out.NextMechanical == nil || !*out.NextMechanical {
+		t.Errorf("round-tripped to next_step %q, next_mechanical %v; want branch and a present true", out.NextStep, out.NextMechanical)
+	}
+}
+
 func TestInvocationResult_WithDurationAndCost(t *testing.T) {
 	in := InvocationResult{
 		Flow:            "implement",

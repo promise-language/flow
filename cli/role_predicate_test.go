@@ -60,7 +60,7 @@ func roleApp(t *testing.T) (*App, *recordingRoleBackend) {
 		f.Role("maintainer", flow.CapMerge)
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	be.SetCapabilities("", flow.CapPush)
 	rec := &recordingRoleBackend{Orchestrator: be}

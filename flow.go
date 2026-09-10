@@ -156,6 +156,14 @@ func (f *Flow) AwaitSignal(description string, signal SignalId, cfg StepConfig) 
 		panic(fmt.Sprintf("flow.AwaitSignal: signal wait %q in flow %q declares MayFinalize %v; a wait elects nothing, so it cannot finalize",
 			description, f.name, cfg.MayFinalize))
 	}
+	// Nor does a wait say whether it prompts. It dispatches nothing — there is
+	// no handler to prompt from — so the declaration would describe a call
+	// that cannot happen. Refused for the reason Role is: a declaration nothing
+	// could ever match is a lie written where the truth was expected.
+	if cfg.Prompts != "" {
+		panic(fmt.Sprintf("flow.AwaitSignal: signal wait %q in flow %q declares Prompts %q; a wait dispatches nothing, so it has no prompt policy",
+			description, f.name, cfg.Prompts))
+	}
 	s := f.prepareStep("AwaitSignal", stepAwait, description, cfg)
 	s.signal = signal
 	f.appendStep(s, StepId(signal))
@@ -192,6 +200,22 @@ func (f *Flow) prepareStep(registrar string, kind stepKind, description string, 
 	if !cfg.Leaves.Valid() {
 		panic(fmt.Sprintf("flow.%s: step %q in flow %q has Leaves %q, which is not one of %v",
 			registrar, description, f.name, cfg.Leaves, AllLeavesStates()))
+	}
+	// Prompts is REQUIRED on a step and has no default: PromptsNone as a zero
+	// value would publish a guarantee no author wrote, and PromptsAgent as one
+	// would leave the property carried by accident, which is what makes a
+	// property unreliable (docs/flow-registration.md § Step configuration). So
+	// its absence is a defect of its own, named apart from an unknown value. A
+	// wait carries none — AwaitSignal refuses one before reaching here.
+	if kind != stepAwait {
+		if cfg.Prompts == "" {
+			panic(fmt.Sprintf("flow.%s: step %q in flow %q declares no Prompts; a step says whether it prompts the agent — one of %v — the way it says its Role, and there is no default",
+				registrar, description, f.name, AllPromptPolicies()))
+		}
+		if !cfg.Prompts.Valid() {
+			panic(fmt.Sprintf("flow.%s: step %q in flow %q has Prompts %q, which is not one of %v",
+				registrar, description, f.name, cfg.Prompts, AllPromptPolicies()))
+		}
 	}
 	seenDisposition := map[Disposition]bool{}
 	for _, d := range cfg.MayFinalize {
@@ -237,6 +261,7 @@ func (f *Flow) prepareStep(registrar string, kind stepKind, description string, 
 		writes:      cfg.Writes,
 		needs:       cfg.Needs,
 		leaves:      cfg.Leaves,
+		prompts:     cfg.Prompts,
 	}
 }
 
@@ -479,6 +504,7 @@ type LifecycleItem struct {
 	Needs       NeedsState    // the worktree state established before dispatch
 	Writes      WriteContract // what the step may change in the worktree
 	Leaves      LeavesState   // the worktree state the step must end in
+	Prompts     PromptPolicy  // whether the step may prompt the agent; empty on a wait
 }
 
 // Result returns the step's identity: its ArtifactId when it produces an
@@ -490,6 +516,18 @@ func (li LifecycleItem) Result() StepId {
 		return StepId(li.ArtifactId)
 	}
 	return StepId(li.SignalId)
+}
+
+// Mechanical reports whether dispatching this lifecycle item invokes no agent:
+// a step declaring PromptsNone, or a signal wait, which dispatches nothing at
+// all.
+//
+// THE ONE DEFINITION. The chokepoint that refuses a prompt, the envelope's
+// next_mechanical, and a driver deciding whether to wait for quota all read
+// this and nothing else, so they cannot disagree about which steps are
+// mechanical (docs/cli.md § Output).
+func (li LifecycleItem) Mechanical() bool {
+	return li.Kind == LifecycleAwait || li.Prompts == PromptsNone
 }
 
 // Item returns the LifecycleItem with this description. ok==false if the
@@ -545,6 +583,7 @@ func toLifecycleItem(st *step) LifecycleItem {
 		Needs:       st.needs,
 		Writes:      st.writes,
 		Leaves:      st.leaves,
+		Prompts:     st.prompts,
 	}
 	switch st.kind {
 	case stepArtifact:

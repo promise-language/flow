@@ -15,18 +15,21 @@ func journalFlow(t *testing.T) *Flow {
 	f := NewFlow("implement", []ItemType{"task"})
 	f.Role("contributor", CapPush)
 	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
 		Role:        "contributor",
 		Entry:       true,
 		Next:        []StepId{"impl"},
 		MayFinalize: []Disposition{DispositionRejected},
 	})
 	f.AddStep("implement", "impl", noopHandler, StepConfig{
-		Role: "contributor",
-		Next: []StepId{"plan", "pr-open"},
+		Prompts: PromptsAgent,
+		Role:    "contributor",
+		Next:    []StepId{"plan", "pr-open"},
 	})
 	f.AddSignalStep("open a pull request", "pr-open", noopHandler, StepConfig{
-		Role: "contributor",
-		Next: []StepId{"pr-merged"},
+		Prompts: PromptsAgent,
+		Role:    "contributor",
+		Next:    []StepId{"pr-merged"},
 	})
 	f.AwaitSignal("wait for the merge", "pr-merged", StepConfig{
 		Next: []StepId{"impl"},
@@ -194,7 +197,7 @@ func TestPosition_RouteToASignalWaitPendsTheWaitWhole(t *testing.T) {
 
 func TestPosition_RefusesAnEmptyJournalWhenNoEntryIsDeclared(t *testing.T) {
 	f := NewFlow("implement", nil)
-	f.AddStep("write plan", "plan", noopHandler, StepConfig{})
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{Prompts: PromptsAgent})
 	wantPositionError(t, f, &Item{}, "StepConfig{Entry: true}")
 }
 

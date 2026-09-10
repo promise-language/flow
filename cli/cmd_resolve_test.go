@@ -34,6 +34,13 @@ func resolveTestApp(t *testing.T, be flow.Orchestrator) (*App, *bytes.Buffer, *b
 // fail it).
 func resolveTestAppStep(t *testing.T, be flow.Orchestrator, step func(flow.StepCtx) (flow.StepResult, error)) (*App, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
+	return resolveTestAppPrompts(t, be, step, flow.PromptsAgent)
+}
+
+// resolveTestAppPrompts is resolveTestAppStep with the step's Prompts chosen by
+// the caller — the lever for a test about what a mechanical step is spared.
+func resolveTestAppPrompts(t *testing.T, be flow.Orchestrator, step func(flow.StepCtx) (flow.StepResult, error), prompts flow.PromptPolicy) (*App, *bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
 	// Isolate from real credential discovery (Keychain, claude binary) so
 	// reportQuota's exec calls don't hang or hit the network, and from the
 	// quota cache so one resolve test's recorded failure is not another's
@@ -52,7 +59,7 @@ func resolveTestAppStep(t *testing.T, be flow.Orchestrator, step func(flow.StepC
 	}
 	f := flow.NewFlow("implement", []flow.ItemType{"task"})
 	f.Role("contributor", flow.CapPush)
-	f.AddStep("write plan", "plan", step, flow.StepConfig{Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	f.AddStep("write plan", "plan", step, flow.StepConfig{Prompts: prompts, Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	app.Flow = f
 	if err := app.validate(); err != nil {
@@ -1204,7 +1211,7 @@ func TestCmdResolve_BudgetParkNarratesAxes(t *testing.T) {
 		return flow.StepResult{}, errors.New("boom")
 	}
 	app, be, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", handler, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		f.AddStep("write plan", "plan", handler, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations:          1,
@@ -1920,6 +1927,73 @@ func TestCmdResolve_QuotaUnreadableWarnedOnce(t *testing.T) {
 	count := strings.Count(output, "quota unreadable")
 	if count != 1 {
 		t.Errorf("expected exactly 1 'quota unreadable' warning (dedup); got %d in:\n%s", count, output)
+	}
+}
+
+// A mechanical step skips the quota wait ENTIRELY: the curve measures spend the
+// step cannot make, and a resolution has sat for hours before a free step under
+// a curve it was nowhere near breaching. The declaration is what makes the
+// skip safe — a prompt from such a step is refused before anything is sent —
+// and it is read before dispatch, where the wait would otherwise be. An agent
+// step still waits.
+func TestCmdResolve_AMechanicalStepIsNotPaced(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prompts flow.PromptPolicy
+		paced   bool
+	}{
+		{"agent step waits", flow.PromptsAgent, true},
+		{"mechanical step does not", flow.PromptsNone, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			be := fake.New()
+			be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+			quotaReads := 0
+			readsBeforeStep := -1
+			app, _, errBuf := resolveTestAppPrompts(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+				readsBeforeStep = quotaReads
+				return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+			}, tc.prompts)
+			// A reading that forces a wait: the window is all but spent with
+			// almost none of it elapsed, so the delay is the (short) remainder
+			// of the window. The delay is real, which is what makes the line
+			// print; it is short, which is what keeps the test quick.
+			app.Quota = func() ([]windowUsage, error) {
+				quotaReads++
+				return []windowUsage{{
+					Label:    "5h",
+					Length:   time.Second,
+					Used:     1.0,
+					ResetsAt: time.Now().Add(30 * time.Millisecond),
+				}}, nil
+			}
+
+			code := app.cmdResolve(context.Background(), []string{"1"})
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+			}
+			output := errBuf.String()
+			waited := strings.Index(output, "pacing — waiting")
+			ran := strings.Index(output, `running "write plan"`)
+			if ran < 0 {
+				t.Fatalf("the step was never announced; got:\n%s", output)
+			}
+			if tc.paced {
+				if readsBeforeStep != 1 {
+					t.Errorf("quota read %d times before the agent step ran, want 1 — an agent step is paced", readsBeforeStep)
+				}
+				if waited < 0 || waited > ran {
+					t.Errorf("an agent step must wait for quota headroom before it runs; got:\n%s", output)
+				}
+				return
+			}
+			if readsBeforeStep != 0 {
+				t.Errorf("quota read %d times before the mechanical step ran, want 0 — the wait is skipped entirely, not shortened", readsBeforeStep)
+			}
+			if waited >= 0 && waited < ran {
+				t.Errorf("a mechanical step waited for quota headroom it cannot spend; got:\n%s", output)
+			}
+		})
 	}
 }
 

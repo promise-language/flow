@@ -528,9 +528,11 @@ func TestBackend_Reset_LeavesTheItemPendingItsEntryStep(t *testing.T) {
 	f.Role("contributor", flow.CapPush)
 	noop := func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }
 	f.AddStep("write plan", "plan", noop, flow.StepConfig{
-		Role: "contributor", Entry: true, Next: []flow.StepId{"impl"}})
+		Prompts: flow.PromptsAgent,
+		Role:    "contributor", Entry: true, Next: []flow.StepId{"impl"}})
 	f.AddStep("implement", "impl", noop, flow.StepConfig{
-		Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		Prompts: flow.PromptsAgent,
+		Role:    "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	if err := f.ValidateGraph(); err != nil {
 		t.Fatalf("ValidateGraph: %v", err)
 	}

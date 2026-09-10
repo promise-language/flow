@@ -540,4 +540,23 @@ type InvocationResult struct {
 	// classification that matters most here, and a plain bool with omitempty
 	// would put it on the wire identically to absent.
 	RedispatchMayClear *bool `json:"redispatch_may_clear,omitempty"`
+
+	// NextStep names the lifecycle item the route now points at, and
+	// NextMechanical reports whether dispatching it invokes no agent — true for
+	// a step declaring PromptsNone, and true for a signal wait, which dispatches
+	// nothing at all (docs/cli.md § Output). Both absent when nothing is
+	// pending, which is what a finalized item reports; absent never means the
+	// answer is unknown.
+	//
+	// They exist because pacing has two callers and only one is inside this
+	// binary. `resolve` drives the whole route and reads the pending step's
+	// declaration directly; a driver calling `run-step` one step at a time must
+	// decide whether to wait BEFORE the invocation that would tell it, so the
+	// fact rides out on the result of the previous step.
+	//
+	// NextMechanical is a pointer for the reason RedispatchMayClear is one: a
+	// present false must serialise, and a plain bool with omitempty would put
+	// it on the wire identically to absent.
+	NextStep       string `json:"next_step,omitempty"`
+	NextMechanical *bool  `json:"next_mechanical,omitempty"`
 }

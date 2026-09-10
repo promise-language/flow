@@ -286,7 +286,7 @@ func newDummyFlow(name string) *flow.Flow {
 	f := flow.NewFlow(name, nil)
 	f.Role("contributor", flow.CapPush)
 	f.AddStep("step", "plan", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil },
-		flow.StepConfig{Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		flow.StepConfig{Prompts: flow.PromptsAgent, Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	return f
 }
 

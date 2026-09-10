@@ -32,7 +32,7 @@ func declaringApp(be flow.Orchestrator, gates ...flow.GateName) App {
 	f := flow.NewFlow("x", []flow.ItemType{"task"})
 	f.Role("contributor", flow.CapPush)
 	f.AddStep("plan", "plan", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil },
-		flow.StepConfig{Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		flow.StepConfig{Prompts: flow.PromptsAgent, Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	return App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
@@ -122,6 +122,7 @@ func wantStartupRefusal(t *testing.T, app App, fragments ...string) error {
 func TestApp_Validate_RefusesARouteNamingNoStep(t *testing.T) {
 	app := graphApp(fake.New(), func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
 			Entry:       true,
 			Role:        "contributor",
 			Next:        []flow.StepId{"commit"},
@@ -137,12 +138,13 @@ func TestApp_Validate_RefusesARouteNamingNoStep(t *testing.T) {
 func TestApp_Validate_RefusesAStepThatCannotReachFinalization(t *testing.T) {
 	app := graphApp(fake.New(), func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
 			Entry:       true,
 			Role:        "contributor",
 			Next:        []flow.StepId{"commit"},
 			MayFinalize: []flow.Disposition{flow.DispositionResolved},
 		})
-		f.AddStep("record the commit", "commit", inertStep, flow.StepConfig{Role: "contributor"})
+		f.AddStep("record the commit", "commit", inertStep, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor"})
 	})
 	wantStartupRefusal(t, app, "record the commit", "commit", "cannot reach finalization")
 }
@@ -153,6 +155,7 @@ func TestApp_Validate_RefusesAStepThatCannotReachFinalization(t *testing.T) {
 func TestApp_Validate_RefusesATagNamingNoDeclaredRole(t *testing.T) {
 	app := graphApp(fake.New(), func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
 			Entry:       true,
 			Role:        "reviewer",
 			MayFinalize: []flow.Disposition{flow.DispositionResolved},
@@ -182,6 +185,7 @@ func TestRunWithArgs_ABrokenGraphExitsTwo(t *testing.T) {
 		t.Run(args[0], func(t *testing.T) {
 			app := graphApp(fake.New(), func(f *flow.Flow) {
 				f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+					Prompts:     flow.PromptsAgent,
 					Entry:       true,
 					Role:        "contributor",
 					Next:        []flow.StepId{"commit"},
@@ -215,6 +219,7 @@ func TestRunWithArgs_DoctorReportsABrokenGraph(t *testing.T) {
 	arena(t, be)
 	app := graphApp(be, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
 			Entry:       true,
 			Role:        "contributor",
 			Next:        []flow.StepId{"commit"},
@@ -245,9 +250,10 @@ func TestRunWithArgs_DoctorReportsABrokenGraph(t *testing.T) {
 func TestApp_Validate_RunsTheGraphCheckAfterReferenceChecks(t *testing.T) {
 	app := graphApp(fake.New(), func(f *flow.Flow) {
 		f.AddStep("write plan", "missing-artifact", inertStep, flow.StepConfig{
-			Entry: true,
-			Role:  "contributor",
-			Next:  []flow.StepId{"nowhere"},
+			Prompts: flow.PromptsAgent,
+			Entry:   true,
+			Role:    "contributor",
+			Next:    []flow.StepId{"nowhere"},
 		})
 	})
 	err := wantStartupRefusal(t, app, "unknown artifact", "missing-artifact")
@@ -279,6 +285,7 @@ func TestRunWithArgs_ABrokenGraphRefusesHelpToo(t *testing.T) {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			app := graphApp(fake.New(), func(f *flow.Flow) {
 				f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+					Prompts:     flow.PromptsAgent,
 					Entry:       true,
 					Role:        "contributor",
 					Next:        []flow.StepId{"commit"},
@@ -315,6 +322,7 @@ func TestRunWithArgs_ABrokenGraphOutranksTheGateBoundary(t *testing.T) {
 	be := &declaringOrchestrator{Orchestrator: fake.New()} // declares no gate, no command
 	app := graphApp(be, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
 			Entry:       true,
 			Role:        "contributor",
 			Next:        []flow.StepId{"commit"},

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -38,7 +39,7 @@ func TestWriteContract_BranchViolation(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}}) // zero = writes nothing
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}}) // zero = writes nothing
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -73,7 +74,7 @@ func TestWriteContract_CommitViolation(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -99,7 +100,7 @@ func TestWriteContract_DirtyTreeViolation(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
 	}, &stubAgent{name: "stub"})
 
 	// Dirty the worktree BEFORE dispatch so IsDirty returns true after the
@@ -136,7 +137,7 @@ func TestWriteContract_AllowedCommit(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayCommit: true}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayCommit: true}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -153,7 +154,7 @@ func TestWriteContract_NoWorktreeAcquired(t *testing.T) {
 		f.AddStep("plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			// Handler never calls ctx.Worktree() — no check should run.
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -178,7 +179,7 @@ func TestWriteContract_TransientSkipsCheck(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return flow.StepResult{}, flow.ErrTransient
-		}, flow.StepConfig{Role: "contributor", Entry: true, Writes: flow.WriteContract{}, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, Writes: flow.WriteContract{}, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -205,7 +206,7 @@ func TestWriteContract_ViolationChargesInvocation(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -234,7 +235,7 @@ func TestWriteContract_AllowedBranch(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayBranch: true}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayBranch: true}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -259,7 +260,7 @@ func TestWriteContract_MayBranch_HeadChanges(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayBranch: true}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayBranch: true}})
 	}, &stubAgent{name: "stub"})
 
 	// Start on the claim branch with a different SHA than main, so the
@@ -292,7 +293,7 @@ func TestWriteContract_MayBranch_NoBranchChange_CommitCaught(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayBranch: true}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayBranch: true}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -317,7 +318,7 @@ func TestWriteContract_AllowedDirtyTree(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayEditTree: true}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayEditTree: true}})
 	}, &stubAgent{name: "stub"})
 
 	wt, _ := be.Worktree(context.Background(), claim.ItemRef)
@@ -346,7 +347,7 @@ func TestWriteContract_RefusedSkipsCheck(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return flow.StepResult{}, flow.ErrRefused
-		}, flow.StepConfig{Role: "contributor", Entry: true, Writes: flow.WriteContract{}, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, Writes: flow.WriteContract{}, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -377,7 +378,7 @@ func TestWriteContract_PartialContract_CommitAllowedBranchNot(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayCommit: true}}) // MayBranch defaults false
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{MayCommit: true}}) // MayBranch defaults false
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -528,7 +529,7 @@ func TestRunOne_SeedsAndDispatchesFirstStep(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, a)
 
@@ -571,7 +572,7 @@ func TestRunOne_AutoEmitsStepEntry(t *testing.T) {
 
 			ctx.Notify("write plan", "writing")
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, &stubAgent{name: "stub"})
 	app.Telemetry = tel
@@ -595,7 +596,7 @@ func TestRunOne_AutoEmitSkipsWhenTelemetryNil(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("noop", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("ok"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, &stubAgent{name: "stub"})
 	if app.Telemetry != nil {
@@ -631,7 +632,7 @@ func TestRunOne_WritesAndClearsRunningRecord(t *testing.T) {
 				return flow.StepResult{}, fmt.Errorf("LoadRunning inside handler: %w", err)
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	if _, err := RunOne(context.Background(), app, claim); err != nil {
@@ -668,7 +669,7 @@ func TestRunOne_PreflightSkipsBeforeFlowSelection(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			handlerCalled = true
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("should not run"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, &stubAgent{name: "stub"})
 
@@ -703,7 +704,7 @@ func TestRunOne_PreflightPassThrough(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, &stubAgent{name: "stub"})
 
@@ -757,7 +758,7 @@ func TestRunOne_ParksOnInvocationsExhaustion(t *testing.T) {
 		// max 1 invocation, but handler returns error each time
 		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, errors.New("boom")
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxInvocations: 1}}
 
@@ -802,7 +803,7 @@ func TestRunOne_RespectsPromptsBudget(t *testing.T) {
 
 			_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p2"})
 			return flow.StepResult{}, err
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, a)
 	// Explicit cap: this test is about the gate firing, not about whatever the
@@ -844,7 +845,7 @@ func TestRunOne_AgentRequestCarriesRemainingCostHeadroom(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxCostUSD: 5}}
 
@@ -889,7 +890,7 @@ func TestRunOne_HandlerCostCeilingIsNarrowedNotWidened(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxCostUSD: 5}}
 
@@ -929,7 +930,7 @@ func TestRunOne_CostCapFailureParksOnCost(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("never reached"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxCostUSD: 20}}
 
@@ -983,7 +984,7 @@ func TestRunOne_CostCapUnderTheDefaultPolicyStillParks(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("never reached"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 	// No StepBudgets entry: the defaults are the whole policy.
 	_ = be
@@ -1022,7 +1023,7 @@ func TestRunOne_HandlerCeilingTighterThanTheCapSurvives(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 	// The step's own cap is the package default ($20), so the handler's $3 is
 	// the tighter of the two on both turns.
@@ -1067,7 +1068,7 @@ func TestRunOne_SpentGrantParksInsteadOfDispatchingAnUncappedTurn(t *testing.T) 
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("never reached"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, a)
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxCostUSD: 5}}
 
@@ -1094,7 +1095,7 @@ func TestRunOne_ParksOnTimeout(t *testing.T) {
 		f.AddStep("slow", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			<-ctx.Context().Done()
 			return flow.StepResult{}, ctx.Context().Err()
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {Timeout: 50 * time.Millisecond}}
 
@@ -1152,7 +1153,7 @@ func TestRunOne_TimeoutParkDoesNotCapturePatch(t *testing.T) {
 			}
 			<-ctx.Context().Done()
 			return flow.StepResult{}, ctx.Context().Err()
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {Timeout: 50 * time.Millisecond}}
 
@@ -1182,7 +1183,7 @@ func TestRunOne_SignalStepAwaitsSignal(t *testing.T) {
 		// handler's to write.
 		f.AddSignalStep("create pr", "pr-open", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, &stubAgent{name: "stub"})
 
@@ -1228,7 +1229,7 @@ func TestRunOne_AwaitSignalSkipsHandlerless(t *testing.T) {
 		f.AwaitSignal("await merge", "pr-open", flow.StepConfig{Entry: true, Next: []flow.StepId{"commit"}})
 		f.AddStep("record the commit", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("abc"), nil
-		}, flow.StepConfig{Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -1263,7 +1264,7 @@ func TestRunOne_QuestionsPersistedAndPark(t *testing.T) {
 				flow.AskYesNo("ship", "Ship it?"),
 				flow.AskChoice("lib", "Which?", "a", "b"),
 			)
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, &stubAgent{name: "stub"})
 
@@ -1285,7 +1286,7 @@ func TestRunOne_WrongResolveReturnsTypeMismatch(t *testing.T) {
 		// Declared markdown, handler calls ResolveCommitHash.
 		f.AddStep("wrong", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("deadbeef"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, &stubAgent{name: "stub"})
 
@@ -1302,7 +1303,7 @@ func TestRunOne_NilReturnWithoutResolveParks(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("forgetful", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, &stubAgent{name: "stub"})
 
@@ -1324,7 +1325,7 @@ func TestRunOne_NilReturnWithoutResolveParks(t *testing.T) {
 func TestApp_Validate_RejectsUnknownArtifact(t *testing.T) {
 	be := fake.New()
 	f := flow.NewFlow("x", nil)
-	f.AddStep("step", "missing-artifact", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{Entry: true})
+	f.AddStep("step", "missing-artifact", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{Prompts: flow.PromptsAgent, Entry: true})
 	app := App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
@@ -1341,8 +1342,8 @@ func TestApp_Validate_RejectsUnsupportedArtifact(t *testing.T) {
 	// Restrict the fake to only "plan" — "report" is then unrecordable.
 	be.SetSupportedArtifacts(flow.Artifact("plan", flow.ArtifactMarkdown))
 	f := flow.NewFlow("x", []flow.ItemType{"task"})
-	f.AddStep("plan", "plan", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{Entry: true})
-	f.AddStep("report", "report", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{})
+	f.AddStep("plan", "plan", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{Prompts: flow.PromptsAgent, Entry: true})
+	f.AddStep("report", "report", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{Prompts: flow.PromptsAgent})
 	app := App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
@@ -1364,7 +1365,7 @@ func TestApp_Validate_RejectsArtifactTypeMismatch(t *testing.T) {
 	// resolve-time.
 	be.SetSupportedArtifacts(flow.Artifact("plan", flow.ArtifactMarkdown))
 	f := flow.NewFlow("x", []flow.ItemType{"task"})
-	f.AddStep("plan", "plan", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{Entry: true})
+	f.AddStep("plan", "plan", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{Prompts: flow.PromptsAgent, Entry: true})
 	app := App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
@@ -1379,7 +1380,7 @@ func TestApp_Validate_RejectsArtifactTypeMismatch(t *testing.T) {
 func TestApp_Validate_RejectsUnsupportedSignal(t *testing.T) {
 	be := fake.New() // no signals supported
 	f := flow.NewFlow("x", nil)
-	f.AddSignalStep("sig", "pr-open", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{Entry: true})
+	f.AddSignalStep("sig", "pr-open", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{Prompts: flow.PromptsAgent, Entry: true})
 	app := App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
@@ -1406,7 +1407,7 @@ func TestSelectFlow_RequireSignalGate(t *testing.T) {
 		// Entry, because position is derived from the journal: an empty journal
 		// pends the DECLARED entry step, and a flow declaring none is a refusal
 		// rather than an item with nothing to do.
-		flow.StepConfig{Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		flow.StepConfig{Prompts: flow.PromptsAgent, Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	app := &App{
 		Orchestrator: be,
@@ -1468,7 +1469,7 @@ func unmatchedTypeApp(t *testing.T, item flow.Item) (*App, *fake.Orchestrator, f
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("step handler ran for an item outside the remit — must not happen")
 			return flow.StepResult{}, nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 }
 
@@ -1531,7 +1532,7 @@ func TestRunOne_RemitIsNotConsultedOnceTheJournalHasEntries(t *testing.T) {
 			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 				ran = true
 				return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-			}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+			}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 		}, &stubAgent{name: "stub"})
 	wrapped := &finalizingBackend{Orchestrator: be}
 	app.Orchestrator = wrapped
@@ -1610,7 +1611,7 @@ func TestRunOne_UniversalFlowIsNotATypeMismatch(t *testing.T) {
 			f.RequireSignal("pr-open")
 			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 				return ctx.Finalize(flow.DispositionResolved, "done").Markdown("ignored"), nil
-			}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+			}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 		}, &stubAgent{name: "stub"})
 	wrapped := &finalizingBackend{Orchestrator: be}
 	app.Orchestrator = wrapped
@@ -1666,7 +1667,7 @@ func TestRunOne_FinalizesWhenAllRequiredArtifactsResolved(t *testing.T) {
 		f.RequireSignal("pr-open")
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("ignored"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 
 	}, a)
 	// Backend with Finalize implemented, no pending artifacts injected.
@@ -1700,7 +1701,7 @@ func TestRunOne_FinalizeCarriesTheElectedDisposition(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionRejected, "not worth doing").Markdown("why not"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionRejected}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionRejected}})
 	}, &stubAgent{name: "stub"})
 	wrapped := &finalizingBackend{Orchestrator: be}
 	app.Orchestrator = wrapped
@@ -1802,7 +1803,7 @@ func TestRunOne_GrantedTimeoutOverridesStepBudget(t *testing.T) {
 			case <-time.After(150 * time.Millisecond):
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {Timeout: 50 * time.Millisecond}}
 
@@ -1850,7 +1851,7 @@ func TestRunOne_BareGrantRecoversAStepOutOfTimeAndInvocations(t *testing.T) {
 			case <-time.After(150 * time.Millisecond):
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations: 1,
@@ -1954,7 +1955,7 @@ func TestResolvePatch_EmptyBodyResolvesForOutOfBandBackend(t *testing.T) {
 				t.Errorf("CapturePatch returned %d bytes, want 0 for an out-of-band backend", len(patch))
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Patch(flow.PatchBody{}), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Orchestrator = &outOfBandPatchBackend{Orchestrator: be, evidence: true}
 
@@ -1977,7 +1978,7 @@ func TestResolvePatch_BackendRejectsMissingEvidence(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("attach", "implementation", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Patch(flow.PatchBody{}), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Orchestrator = &outOfBandPatchBackend{Orchestrator: be, evidence: false}
 
@@ -1999,7 +2000,7 @@ func TestResolvePatch_AcceptsNonEmptyDiff(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("attach", "implementation", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Patch(flow.PatchBody{Diff: []byte("diff --git a/x b/x\n"), BaseBranch: "main"}), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -2015,6 +2016,185 @@ func TestResolvePatch_AcceptsNonEmptyDiff(t *testing.T) {
 	}
 }
 
+// --- next_step / next_mechanical: what the route now points at ---
+
+// assertNext pins both fields together: the name, and a PRESENT mechanical
+// flag — a nil pointer would serialise as absent, which docs/cli.md § Output
+// reserves for "nothing is pending", never for "unknown".
+func assertNext(t *testing.T, res flow.InvocationResult, step string, mechanical bool) {
+	t.Helper()
+	if res.NextStep != step {
+		t.Errorf("next_step = %q, want %q", res.NextStep, step)
+	}
+	if res.NextMechanical == nil {
+		t.Fatalf("next_mechanical absent, want a present %v — absent means nothing is pending, and %q is", mechanical, step)
+	}
+	if *res.NextMechanical != mechanical {
+		t.Errorf("next_mechanical = %v, want %v", *res.NextMechanical, mechanical)
+	}
+}
+
+// assertNothingPending pins the absence of both: what a finalized item reports.
+func assertNothingPending(t *testing.T, res flow.InvocationResult) {
+	t.Helper()
+	if res.NextStep != "" || res.NextMechanical != nil {
+		t.Errorf("next_step = %q, next_mechanical = %v; want both absent — nothing is pending", res.NextStep, res.NextMechanical)
+	}
+}
+
+// A completed step reports the successor the route elected, and whether
+// dispatching it invokes no agent: false for a step declaring agent, true for
+// one declaring none, and true for a signal wait, which dispatches nothing at
+// all. This is the placement a driver calling run-step one step at a time
+// needs — it must decide whether to wait for quota BEFORE the invocation that
+// would otherwise tell it (docs/cli.md § Output).
+func TestRunOne_CompletionReportsTheElectedSuccessor(t *testing.T) {
+	recordCommit := func(prompts flow.PromptPolicy) func(f *flow.Flow) {
+		return func(f *flow.Flow) {
+			f.AddStep("record the commit", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+				return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("abc"), nil
+			}, flow.StepConfig{Prompts: prompts, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}
+	}
+	cases := []struct {
+		name       string
+		next       flow.StepId // what plan elects
+		successor  func(f *flow.Flow)
+		mechanical bool
+	}{
+		{"agent step", "commit", recordCommit(flow.PromptsAgent), false},
+		{"mechanical step", "commit", recordCommit(flow.PromptsNone), true},
+		{"signal wait", "pr-open", func(f *flow.Flow) {
+			// pr-open is the one signal the fixture declares. The wait's own
+			// successor is registered too, so the graph still finalizes.
+			f.AwaitSignal("await merge", "pr-open", flow.StepConfig{Next: []flow.StepId{"commit"}})
+			recordCommit(flow.PromptsAgent)(f)
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app, _, claim := testApp(t, func(f *flow.Flow) {
+				f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+					return ctx.Next(tc.next, "planned").Markdown("the plan"), nil
+				}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, Next: []flow.StepId{tc.next}})
+				tc.successor(f)
+			}, &stubAgent{name: "stub"})
+
+			res, err := RunOne(context.Background(), app, claim)
+			if err != nil {
+				t.Fatalf("RunOne: %v", err)
+			}
+			if res.Status != "done" || res.Step != "plan" {
+				t.Fatalf("res = %+v, want plan done", res)
+			}
+			assertNext(t, res, string(tc.next), tc.mechanical)
+			// The key itself is on the wire: a caller that never links the SDK
+			// reads a present false as "wait", and absent as "nothing pending".
+			b, err := json.Marshal(res)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			wantStep := fmt.Sprintf(`"next_step":%q`, tc.next)
+			wantMechanical := fmt.Sprintf(`"next_mechanical":%v`, tc.mechanical)
+			if !strings.Contains(string(b), wantStep) || !strings.Contains(string(b), wantMechanical) {
+				t.Errorf("wire = %s, want it to carry %s and %s", b, wantStep, wantMechanical)
+			}
+		})
+	}
+}
+
+// A finalizing route points at nothing, and so does the no-flow finalize path
+// an already-finalized item takes: both report neither field. Absent is
+// "nothing pending", the one meaning docs/cli.md § Output gives it.
+func TestRunOne_FinalizationReportsNothingPending(t *testing.T) {
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "done" || res.Step != "plan" {
+		t.Fatalf("res = %+v, want plan done", res)
+	}
+	assertNothingPending(t, res)
+
+	// The next advance finds the journal finalized, selects no step, and takes
+	// the finalize path — with nothing pending to report.
+	res, err = RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("second RunOne: %v", err)
+	}
+	if res.Status != "done" || res.Step != "" || res.Flow != "" {
+		t.Fatalf("second res = %+v, want the no-flow finalize path", res)
+	}
+	assertNothingPending(t, res)
+}
+
+// Every way a dispatch ends WITHOUT moving the route reports the step itself as
+// what is still pending — a park, a failure, a preflight stop, a stop on the
+// item's own blockers, and a wait the advance skips over. The route did not
+// move, so what it points at is unchanged.
+func TestRunOne_AStopThatMovesNothingReportsTheStepItself(t *testing.T) {
+	agentStep := func(handler func(flow.StepCtx) (flow.StepResult, error)) func(*flow.Flow) {
+		return func(f *flow.Flow) {
+			f.AddStep("write plan", "plan", handler, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}
+	}
+	finalize := func(ctx flow.StepCtx) (flow.StepResult, error) {
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+	}
+	cases := []struct {
+		name       string
+		configure  func(*flow.Flow)
+		arrange    func(t *testing.T, app *App, be *fake.Orchestrator, claim flow.Claim)
+		status     string
+		step       string
+		mechanical bool
+	}{
+		{"parked", agentStep(func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, fmt.Errorf("guard refused: %w", flow.ErrRefused)
+		}), nil, "parked", "plan", false},
+		{"failed", agentStep(func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, errors.New("the tree is on fire")
+		}), nil, "failed", "plan", false},
+		{"preflight stop", agentStep(finalize), func(t *testing.T, app *App, _ *fake.Orchestrator, _ flow.Claim) {
+			app.Preflight = func(context.Context, *flow.Item) error {
+				return fmt.Errorf("answer needed: %w", flow.ErrBlocked)
+			}
+		}, "blocked", "plan", false},
+		{"blocked on items", agentStep(finalize), func(t *testing.T, _ *App, be *fake.Orchestrator, claim flow.Claim) {
+			be.AddItem("3", flow.Item{Ref: itemRefFor("3"), Type: "task", Title: "still open"})
+			blockOn(t, be, claim.ItemRef, itemRefFor("3"))
+		}, "blocked", "plan", false},
+		{"await skip", func(f *flow.Flow) {
+			f.AwaitSignal("await merge", "pr-open", flow.StepConfig{Entry: true, Next: []flow.StepId{"commit"}})
+			f.AddStep("record the commit", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+				return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("abc"), nil
+			}, flow.StepConfig{Prompts: flow.PromptsNone, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, nil, "skipped", "pr-open", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app, be, claim := testApp(t, tc.configure, &stubAgent{name: "stub"})
+			if tc.arrange != nil {
+				tc.arrange(t, app, be, claim)
+			}
+			res, err := RunOne(context.Background(), app, claim)
+			if err != nil {
+				t.Fatalf("RunOne: %v", err)
+			}
+			if res.Status != tc.status || res.Step != tc.step {
+				t.Fatalf("res = %+v, want step %q status %q", res, tc.step, tc.status)
+			}
+			assertNext(t, res, tc.step, tc.mechanical)
+		})
+	}
+}
+
 // A preflight that wraps flow.ErrBlocked reports "blocked", not "skipped".
 // The distinction is the whole point: a skip claims the next cycle might pass,
 // and exits 0, so a caller waiting on the flow reads "nothing to do" and
@@ -2024,7 +2204,7 @@ func TestRunOne_PreflightErrBlockedReportsBlocked(t *testing.T) {
 		f.AddStep("never runs", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("handler must not run when preflight refuses")
 			return flow.StepResult{}, nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Preflight = func(context.Context, *flow.Item) error {
 		return fmt.Errorf("answer needed on %q: %w", "plan", flow.ErrBlocked)
@@ -2046,7 +2226,7 @@ func TestRunOne_PreflightErrBlockedReportsBlocked(t *testing.T) {
 // verdict must not reclassify every gate.
 func TestRunOne_PlainPreflightErrorStillSkips(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
-		f.AddStep("never runs", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		f.AddStep("never runs", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Preflight = func(context.Context, *flow.Item) error {
 		return errors.New("operator set the manual flag")
@@ -2111,7 +2291,7 @@ func TestRunOne_AskQuestionWithoutAnIdFailsInsteadOfParking(t *testing.T) {
 		f.AddStep("asks", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			handlerErr = ctx.AskQuestions(flow.AskText("base", "which base branch?"))
 			return flow.StepResult{}, handlerErr
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	backend := &emptyAskBackend{Orchestrator: be}
 	app.Orchestrator = backend
@@ -2152,7 +2332,7 @@ func TestRunOne_HandlerQuestionParkFailsTheStep(t *testing.T) {
 				Kind:   flow.ParkQuestion,
 				Reason: "which database?",
 			})
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -2172,7 +2352,7 @@ func TestRunOne_HandBuiltQuestionParkSentinelFailsTheStep(t *testing.T) {
 				Kind:   flow.ParkQuestion,
 				Reason: "which database?",
 			}}
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -2195,7 +2375,7 @@ func TestRunOne_QuestionParkStampedByTheHandlerIsStillRefused(t *testing.T) {
 				Reason:  "which database?",
 				Details: flow.MarkQuestionAsked(time.Now()),
 			})
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -2242,7 +2422,7 @@ func TestRunOne_NonQuestionParkStillParks(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("blocks", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, ctx.Park(flow.ParkRequest{Kind: flow.ParkBlocked, Reason: "waiting on infra"})
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -2280,7 +2460,7 @@ func TestRunOne_HandlerParkCarriesTheKindsClassification(t *testing.T) {
 			app, _, claim := testApp(t, func(f *flow.Flow) {
 				f.AddStep("parks", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 					return flow.StepResult{}, ctx.Park(flow.ParkRequest{Kind: kind, Reason: "handler parked under " + string(kind)})
-				}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+				}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 			}, &stubAgent{name: "stub"})
 
 			res, err := RunOne(context.Background(), app, claim)
@@ -2342,7 +2522,7 @@ func TestRunOne_AskRouteParkCarriesTheBackendsAskTime(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("asks", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, ctx.AskQuestions(flow.AskText("base", "which base branch?"))
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Orchestrator = &askedAtBackend{Orchestrator: be, askedAt: askedAt}
 
@@ -2371,7 +2551,7 @@ func TestRunOne_AskRouteWithoutABackendAskTimeStampsTheLocalClock(t *testing.T) 
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("asks", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, ctx.AskQuestions(flow.AskText("base", "which base branch?"))
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Orchestrator = &askedAtBackend{Orchestrator: be}
 
@@ -2398,7 +2578,7 @@ func TestRunOne_ErrRefusedParksWithoutBurningBudget(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("guarded", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, fmt.Errorf("guard refused staged file main.go: %w", flow.ErrRefused)
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxInvocations: 1}}
 
@@ -2445,7 +2625,7 @@ func TestRunOne_PlainErrorStillBumpsInvocations(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("broken", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, errors.New("something went wrong")
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -2467,7 +2647,7 @@ func TestRunOne_ErrTransientStillParksInfraTransient(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("flaky", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, fmt.Errorf("runner offline: %w", flow.ErrTransient)
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -2520,7 +2700,7 @@ func TestRunOne_BudgetParkDoesNotClearQuestionMarker(t *testing.T) {
 				return flow.StepResult{}, flow.ErrBudgetExhausted{Axis: flow.AxisInvocations}
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	// First dispatch seeds the artifact and parks on budget.
@@ -2563,7 +2743,7 @@ func TestRunOne_NotifyDefaultUsesResultID(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			ctx.Notify("", "drafting") // empty step → default
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.Telemetry = tel
 
@@ -2593,7 +2773,7 @@ func TestRunOne_TimeoutParkReasonUsesResultID(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			<-ctx.Context().Done()
 			return flow.StepResult{}, ctx.Context().Err()
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {Timeout: 50 * time.Millisecond}}
 
@@ -2620,7 +2800,7 @@ func TestRunOne_ErrUnfitBlocksWithoutParkOrBudget(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("broken", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, fmt.Errorf("12 MB free, floor 2 GB: %w", flow.ErrUnfit)
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -2650,7 +2830,7 @@ func TestRunOne_PlainErrorOnUnfitMachineReportsBlocked(t *testing.T) {
 		f.AddStep("broken", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			ctx.Worktree() // acquire worktree so post-handler fitness check runs
 			return flow.StepResult{}, errors.New("no space left on device")
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	be.SetGateVerdict(false)
@@ -2705,7 +2885,7 @@ func TestRunOne_BlockedOnItemsStopsBeforeDispatch(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			handlerRan = true
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
 	blockOn(t, be, claim.ItemRef, be.Ref("2"))
@@ -2766,11 +2946,11 @@ func TestRunOne_BlockerLandingAndReopeningIsSymmetric(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			planRuns++
 			return ctx.Next("commit", "the plan is written").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, Next: []flow.StepId{"commit"}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, Next: []flow.StepId{"commit"}})
 		f.AddStep("record commit", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("the commit step must not run while the item is blocked")
 			return flow.StepResult{}, nil
-		}, flow.StepConfig{Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
 	blockOn(t, be, claim.ItemRef, be.Ref("2"))
@@ -2817,7 +2997,7 @@ func TestRunOne_BlockedOnItemsOutranksAnUnansweredQuestion(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			t.Fatal("handler must not run")
 			return flow.StepResult{}, nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	preflightRan := false
 	app.Preflight = func(context.Context, *flow.Item) error {
@@ -2849,7 +3029,7 @@ func TestRunOne_BlockedItemWithNoPendingStepStillFinalizes(t *testing.T) {
 		f.RequireSignal("pr-open") // never set, so no step is ever pending
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("ignored"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
 	blockOn(t, be, claim.ItemRef, be.Ref("2"))
@@ -2882,7 +3062,7 @@ func TestRunOne_HandlerWaitsOnItemsRecordsTheBlockerAndStopsClean(t *testing.T) 
 				return flow.StepResult{}, err
 			}
 			return flow.StepResult{}, ctx.WaitOnItems(itemRefFor("2"))
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
 
@@ -2946,7 +3126,7 @@ func TestRunOne_HandlerWaitsOnFinishedItemsFailsAndTheNextAdvanceRuns(t *testing
 				return flow.StepResult{}, ctx.WaitOnItems(itemRefFor("2"))
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "already landed"})
 	be.SetStatus("2", flow.StatusTerminal, "done")
@@ -2988,7 +3168,7 @@ func TestRunOne_WaitOnItemsUnresolvableRefFailsNamingIt(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, ctx.WaitOnItems(itemRefFor("nope"))
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -3016,7 +3196,7 @@ func TestRunOne_WaitOnItemsKeepsBlockersRecordedBeforeARefusedOne(t *testing.T) 
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, ctx.WaitOnItems(itemRefFor("2"), itemRefFor("nope"))
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
 
@@ -3069,7 +3249,7 @@ func TestRunOne_WaitOnItemsCommitsOneEditPerRef(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, ctx.WaitOnItems(itemRefFor("2"), itemRefFor("3"))
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "first"})
 	be.AddItem("3", flow.Item{Type: "task", Title: "second"})
@@ -3101,7 +3281,7 @@ func TestRunOne_WaitOnItemsWithNoRefsIsAnError(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return flow.StepResult{}, ctx.WaitOnItems()
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -3132,7 +3312,7 @@ func TestRunOne_PersonKindBlockIsNotStoppedBeforeDispatch(t *testing.T) {
 				return flow.StepResult{}, ctx.AskQuestions(flow.AskYesNo("ship", "Ship it?"))
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "parked" {
@@ -3189,7 +3369,7 @@ func TestRunOne_ReloadFailureAfterDeclaringBlockersIsAnError(t *testing.T) {
 			handlerRuns++
 			wrapped.armed = true
 			return flow.StepResult{}, ctx.WaitOnItems(itemRefFor("2"))
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
 	wrapped = &armedLoadFailureBackend{Orchestrator: be}
@@ -3225,7 +3405,7 @@ func TestRunOne_PlainErrorOnFitMachineStillFails(t *testing.T) {
 		f.AddStep("broken", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			ctx.Worktree() // acquire worktree so post-handler fitness check runs
 			return flow.StepResult{}, errors.New("something went wrong")
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -3249,7 +3429,7 @@ func TestRunOne_PlainErrorNoWorktreeOnUnfitMachineStillFails(t *testing.T) {
 		f.AddStep("broken", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			// Do NOT call ctx.Worktree() — the catch-all checks sctx.worktree != nil.
 			return flow.StepResult{}, errors.New("no space left on device")
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 
 	be.SetGateVerdict(false)
@@ -3285,7 +3465,7 @@ func TestAgentTurn_RunsInTheArenaNotTheProcessCwd(t *testing.T) {
 		f.AddStep("spend", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"})
 			return flow.StepResult{}, err
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, agent)
 	root := t.TempDir()
 	be.SetArenaRoot(root)
@@ -3319,7 +3499,7 @@ func TestAgentTurn_HandlerCannotRedirectTheWorktree(t *testing.T) {
 		f.AddStep("spend", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work", Worktree: elsewhere})
 			return flow.StepResult{}, err
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, agent)
 	root := t.TempDir()
 	be.SetArenaRoot(root)
@@ -3346,7 +3526,7 @@ func TestAgentTurn_SignalStepIsStampedToo(t *testing.T) {
 				return flow.StepResult{}, err
 			}
 			return ctx.Finalize(flow.DispositionResolved, "done"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, agent)
 	root := t.TempDir()
 	be.SetArenaRoot(root)
@@ -3372,7 +3552,7 @@ func TestAgentTurn_NoArenaRootLeavesTheFieldEmpty(t *testing.T) {
 		f.AddStep("spend", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"})
 			return flow.StepResult{}, err
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, agent)
 	be.SetArenaRoot("")
 
@@ -3398,7 +3578,7 @@ func TestAgentTurn_NoArenaRootClearsAHandlersDirectory(t *testing.T) {
 		f.AddStep("spend", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work", Worktree: elsewhere})
 			return flow.StepResult{}, err
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, agent)
 	be.SetArenaRoot("")
 
@@ -3423,11 +3603,11 @@ func TestRunOne_AnEmptyJournalDispatchesTheEntryStep(t *testing.T) {
 	app, _, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("record the commit", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("abc"), nil
-		}, flow.StepConfig{Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 		// Declared second and entered first: registration order means nothing.
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Next("commit", "the plan is written").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, Next: []flow.StepId{"commit"}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, Next: []flow.StepId{"commit"}})
 	}, &stubAgent{name: "stub"})
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -3450,7 +3630,8 @@ func TestRunOne_ARouteToAnAlreadyCompletedStepDispatchesItAgain(t *testing.T) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			runs++
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the second plan"), nil
-		}, flow.StepConfig{Role: "contributor",
+		}, flow.StepConfig{
+			Prompts: flow.PromptsAgent, Role: "contributor",
 			Entry:       true,
 			Next:        []flow.StepId{"plan"},
 			MayFinalize: []flow.Disposition{flow.DispositionResolved},
@@ -3487,7 +3668,8 @@ func TestRunOne_AFinalizingEntryFinalizesWithItsOwnDisposition(t *testing.T) {
 				f.AddStep("write plan", "plan", func(flow.StepCtx) (flow.StepResult, error) {
 					t.Fatal("nothing is dispatched once the route has finalized")
 					return flow.StepResult{}, nil
-				}, flow.StepConfig{Role: "contributor",
+				}, flow.StepConfig{
+					Prompts: flow.PromptsAgent, Role: "contributor",
 					Entry:       true,
 					MayFinalize: []flow.Disposition{flow.DispositionResolved, flow.DispositionRejected},
 				})
@@ -3524,7 +3706,7 @@ func TestRunOne_ARouteToAnUnregisteredStepSurfacesTheRefusal(t *testing.T) {
 	app, be, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
-		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}, &stubAgent{name: "stub"})
 	wrapped := &finalizingBackend{Orchestrator: be}
 	app.Orchestrator = wrapped
