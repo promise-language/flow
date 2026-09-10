@@ -177,6 +177,7 @@ func main() {
     }, flow.StepConfig{
         Entry:       true,
         MayFinalize: []flow.Disposition{flow.DispositionResolved},
+        Prompts:     flow.PromptsAgent,
     })
 
     os.Exit(cli.Run(cli.App{

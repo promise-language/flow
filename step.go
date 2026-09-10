@@ -171,8 +171,8 @@ func AllPromptPolicies() []PromptPolicy {
 
 // Valid reports whether p is one of the two. The empty policy is not one, and
 // unlike the vocabularies above nothing resolves it: a step must declare which,
-// because every default would be wrong (docs/flow-registration.md § Required,
-// because every default would be wrong).
+// because every default would be wrong (docs/flow-registration.md § Step
+// configuration).
 func (p PromptPolicy) Valid() bool { return slices.Contains(AllPromptPolicies(), p) }
 
 // StepHandler is the function dispatched by the SDK for AddStep/AddSignalStep
