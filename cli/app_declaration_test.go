@@ -7,6 +7,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -849,6 +850,81 @@ func TestPerCommandUsage_IsTheDispatchSet(t *testing.T) {
 	for cmd := range perCommandUsage {
 		if !dispatched[cmd] {
 			t.Errorf("perCommandUsage lists %q, which RunWithArgs does not dispatch", cmd)
+		}
+	}
+}
+
+// Every parked result is built in parkAndReturn, and that is what lets a park's
+// retry classification (flow.ParkKind.RedispatchMayClear) be carried outward
+// once and forgotten by no site. A second place that set a result parked would
+// report a park without it, and a driver reads the absence as false — stopping
+// on a transient park that exists to be retried, silently. So the invariant the
+// funnel rests on is pinned here: within this package, a status of parked is
+// WRITTEN in one function only. Reads — the switch in resolve that stops on one
+// — are not writes and are left alone.
+func TestParkedResult_HasOneWriteSite(t *testing.T) {
+	const funnel = "parkAndReturn"
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	fset := token.NewFileSet()
+	var writers []string
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			// Positions of StatusParked that are reads: the expression list of
+			// a case clause compares a status, it does not set one.
+			reads := map[token.Pos]bool{}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				cc, ok := n.(*ast.CaseClause)
+				if !ok {
+					return true
+				}
+				for _, e := range cc.List {
+					ast.Inspect(e, func(m ast.Node) bool {
+						if id, ok := m.(*ast.Ident); ok && id.Name == "StatusParked" {
+							reads[id.Pos()] = true
+						}
+						return true
+					})
+				}
+				return true
+			})
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.Ident:
+					if x.Name == "StatusParked" && !reads[x.Pos()] {
+						writers = append(writers, fmt.Sprintf("%s (%s)", fn.Name.Name, fset.Position(x.Pos())))
+					}
+				case *ast.BasicLit:
+					// The spelled-out status, which would bypass the constant
+					// and the funnel alike.
+					if x.Kind == token.STRING && x.Value == `"parked"` {
+						writers = append(writers, fmt.Sprintf("%s (%s)", fn.Name.Name, fset.Position(x.Pos())))
+					}
+				}
+				return true
+			})
+		}
+	}
+
+	if len(writers) == 0 {
+		t.Fatalf("no function in package cli sets a result parked; the funnel %s should", funnel)
+	}
+	for _, w := range writers {
+		if !strings.HasPrefix(w, funnel+" ") {
+			t.Errorf("a parked status is written outside %s: %s — a parked result built there carries no redispatch_may_clear, and a driver reads absent as false", funnel, w)
 		}
 	}
 }

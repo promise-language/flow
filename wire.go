@@ -65,6 +65,59 @@ func AllParkKinds() []ParkKind {
 	}
 }
 
+// RedispatchMayClear reports whether dispatching the parked item again could
+// possibly do anything. True means the condition may differ next time; false
+// means the answer is the same until a person or a grant acts, so a driver
+// that re-dispatches on false is looping.
+//
+// The classification is a property of WHY the item parked, so it lives on the
+// kind and not on the ParkRequest (docs/environment.md § The classification
+// is two questions, not one: retryability is derived, never declared beside
+// the condition). It is its own table rather than a reading of BlockKind
+// because the two disagree on exactly one member: a step that did not complete
+// waits on nobody and clears on nothing, yet a re-dispatch is precisely what
+// cures it — the `waits-on-condition` arm would promise a scheduler the park
+// heals itself, and `waits-on-person` would say re-dispatch is pointless.
+//
+// An unrecognised kind — a park written by a newer binary — returns false:
+// stopping a scheduler is the safe direction, the same one
+// ErrClaimRefused.ItemScoped takes.
+func (k ParkKind) RedispatchMayClear() bool {
+	switch k {
+	case ParkBlocked:
+		// A refusal a person must decide on, or a condition only a person can
+		// lift (docs/resolution.md § Parking). A site whose condition the next
+		// dispatch cures is under the wrong kind, not an exception here — the
+		// disclosure refusal at capture is one such site (#325).
+		return false
+	case ParkQuestion:
+		// An answer must arrive.
+		return false
+	case ParkTreasurerRefused:
+		// Only a Grant clears it (GrantClearsPark); the cap is still exceeded
+		// on re-dispatch.
+		return false
+	case ParkStepDidNotComplete:
+		// A re-dispatch can still do the job, and the dispatch IS charged, so
+		// the treasurer bounds the loop.
+		return true
+	case ParkInfraTransient:
+		// Against a healthy runner.
+		return true
+	case ParkRemoteUnreachable:
+		// Once the remote returns.
+		return true
+	case ParkRefused:
+		// Deterministic: the identical handler against the identical worktree
+		// returns the identical answer.
+		return false
+	case ParkWriteContract:
+		// Same prompt, same result; a human widens the contract or reverts.
+		return false
+	}
+	return false
+}
+
 // Disposition is how a step ENDS THE FLOW when it elects finalization —
 // docs/resolution.md § Finalizing. Closed at two.
 //
@@ -473,4 +526,18 @@ type InvocationResult struct {
 	// (docs/org/cli-guide.md § 6). With omitempty every result that classifies
 	// nothing serialises byte-for-byte as it did.
 	ItemScoped *bool `json:"item_scoped,omitempty"`
+
+	// RedispatchMayClear reports whether dispatching this item again could
+	// possibly do anything: true → the condition may differ next time; false →
+	// the answer is the same until a person or a grant acts, so a driver that
+	// re-dispatches is looping. Set on a parked result from
+	// ParkKind.RedispatchMayClear, so a caller that never links the SDK can
+	// read it. nil means the result classified nothing, and a caller reads nil
+	// as false — stopping on an unclassified stop is the safe direction, as
+	// with ItemScoped.
+	//
+	// A pointer for the reason ItemScoped is one: a present false is the
+	// classification that matters most here, and a plain bool with omitempty
+	// would put it on the wire identically to absent.
+	RedispatchMayClear *bool `json:"redispatch_may_clear,omitempty"`
 }

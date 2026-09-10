@@ -54,6 +54,11 @@ func TestWriteContract_BranchViolation(t *testing.T) {
 	if !strings.Contains(res.Park.Reason, "branch moved") {
 		t.Errorf("reason = %q, want contains 'branch moved'", res.Park.Reason)
 	}
+	// Same prompt, same result: the result tells a driver that re-dispatching
+	// is a loop, not a retry.
+	if res.RedispatchMayClear == nil || *res.RedispatchMayClear {
+		t.Errorf("RedispatchMayClear = %v, want a present false on a write-contract park", res.RedispatchMayClear)
+	}
 }
 
 func TestWriteContract_CommitViolation(t *testing.T) {
@@ -1308,6 +1313,12 @@ func TestRunOne_NilReturnWithoutResolveParks(t *testing.T) {
 	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkStepDidNotComplete {
 		t.Errorf("res = %+v, want parked step-did-not-resolve", res)
 	}
+	// The member on which "can re-dispatch help" and "who must act" disagree:
+	// nobody acts and nothing clears it, yet a re-dispatch is exactly what does
+	// the job. The result must say so end to end, not only in the table.
+	if res.RedispatchMayClear == nil || !*res.RedispatchMayClear {
+		t.Errorf("RedispatchMayClear = %v, want a present true on a step-did-not-complete park", res.RedispatchMayClear)
+	}
 }
 
 func TestApp_Validate_RejectsUnknownArtifact(t *testing.T) {
@@ -2246,6 +2257,60 @@ func TestRunOne_NonQuestionParkStillParks(t *testing.T) {
 	}
 }
 
+// A park's retry classification is a function of its kind
+// (flow.ParkKind.RedispatchMayClear), carried outward on every parked result so
+// a driver that never links the SDK can tell "try again later" from "this is a
+// loop". wire_enum_test.go owns what each kind classifies as; what is asserted
+// here is the CARRYING, through the handler door — ctx.Park takes the handler's
+// kind as given, so it is the one site that can park under any member of the
+// vocabulary, including remote-unreachable, which nothing in this package parks
+// under itself. The table runs the whole of AllParkKinds so a kind that joins
+// the vocabulary is exercised end to end and not only in the classification
+// table: the result must carry a present classification, and the kind's own.
+//
+// The question kind is the member this door refuses (translateHandlerError: a
+// park that registers no question is one `answer` cannot clear), and the refusal
+// is a failed result, not a park. It carries no classification — the field is a
+// park's, and a driver reading one on a failure would branch on a stop that has
+// nothing to re-dispatch.
+func TestRunOne_HandlerParkCarriesTheKindsClassification(t *testing.T) {
+	for _, kind := range flow.AllParkKinds() {
+		kind := kind
+		t.Run(string(kind), func(t *testing.T) {
+			app, _, claim := testApp(t, func(f *flow.Flow) {
+				f.AddStep("parks", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+					return flow.StepResult{}, ctx.Park(flow.ParkRequest{Kind: kind, Reason: "handler parked under " + string(kind)})
+				}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+			}, &stubAgent{name: "stub"})
+
+			res, err := RunOne(context.Background(), app, claim)
+			if err != nil {
+				t.Fatalf("RunOne: %v", err)
+			}
+
+			if kind == flow.ParkQuestion {
+				if res.Status != string(flow.StatusFailed) {
+					t.Fatalf("status = %q, want failed: ctx.Park cannot raise a question park", res.Status)
+				}
+				if res.RedispatchMayClear != nil {
+					t.Errorf("RedispatchMayClear = %v on a failed result, want absent: the classification belongs to a park, and this stop is not one", *res.RedispatchMayClear)
+				}
+				return
+			}
+
+			if res.Status != string(flow.StatusParked) || res.Park == nil || res.Park.Kind != kind {
+				t.Fatalf("res = %+v, want parked under %q", res, kind)
+			}
+			if res.RedispatchMayClear == nil {
+				t.Fatalf("RedispatchMayClear absent on a %q park: a driver reads absent as false and stops, including on a park that exists to be retried", kind)
+			}
+			if want := kind.RedispatchMayClear(); *res.RedispatchMayClear != want {
+				t.Errorf("RedispatchMayClear = %v on a %q park, want %v — the kind's own classification", *res.RedispatchMayClear, kind, want)
+			}
+		})
+	}
+}
+
 // askedAtBackend answers AskQuestion with a stamp of its own choosing, so a
 // test can tell the ask time the SDK took from the backend apart from one it
 // read off the local clock. A zero askedAt is the backend that registered the
@@ -2350,6 +2415,12 @@ func TestRunOne_ErrRefusedParksWithoutBurningBudget(t *testing.T) {
 	if !strings.Contains(res.Park.Reason, "guard refused staged file") {
 		t.Errorf("Park.Reason = %q, want the refusal's own message", res.Park.Reason)
 	}
+	// The refusal is deterministic and consumes no invocation, so nothing in
+	// flow would ever stop a scheduler that re-dispatches it. The result is
+	// what tells the scheduler to stop.
+	if res.RedispatchMayClear == nil || *res.RedispatchMayClear {
+		t.Errorf("RedispatchMayClear = %v, want a present false on a refused park", res.RedispatchMayClear)
+	}
 
 	// The invocation must NOT have been counted.
 	state, _ := be.Load(context.Background(), claim.ItemRef)
@@ -2405,6 +2476,10 @@ func TestRunOne_ErrTransientStillParksInfraTransient(t *testing.T) {
 	}
 	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkInfraTransient {
 		t.Fatalf("res = %+v, want parked/infra-transient", res)
+	}
+	// A transient park exists to be retried against a healthy runner.
+	if res.RedispatchMayClear == nil || !*res.RedispatchMayClear {
+		t.Errorf("RedispatchMayClear = %v, want a present true on an infra-transient park", res.RedispatchMayClear)
 	}
 	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {

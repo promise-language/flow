@@ -912,6 +912,10 @@ func parkAndReturn(
 	result.Reason = req.Reason
 	cp := req
 	result.Park = &cp
+	// Every park site routes through here, so the classification is carried
+	// outward once and no site can forget it.
+	mayClear := req.Kind.RedispatchMayClear()
+	result.RedispatchMayClear = &mayClear
 	return result, nil
 }
 

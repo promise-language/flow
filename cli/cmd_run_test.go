@@ -192,6 +192,35 @@ func TestCmdRun_RunOneErrorIsArenaScoped(t *testing.T) {
 	}
 }
 
+// A park exits 0 — the same code as a step that advanced — so a scheduler
+// driving run-step has nothing but the report to tell a park it should stop on
+// from one it should retry. The classification is read by callers that never
+// link the SDK, so what is pinned is the KEY on the wire, on the output of the
+// command itself, and the present false that a plain bool with omitempty would
+// have dropped. A refused park is the case that matters most: it consumes no
+// invocation, so nothing else in flow would ever stop a scheduler that loops on
+// it.
+func TestCmdRun_ParkedResultCarriesRedispatchMayClearOnTheWire(t *testing.T) {
+	app, _, _ := testApp(t, func(f *flow.Flow) {
+		f.AddStep("guarded", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, fmt.Errorf("guard refused staged file main.go: %w", flow.ErrRefused)
+		}, flow.StepConfig{Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, &stubAgent{name: "stub"})
+	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+	app.Out, app.Err = out, errBuf
+
+	if code := app.cmdRun(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdRun = %d, want 0 — a park is not a failure of the run, which is exactly why the exit code cannot carry this; stderr=%q", code, errBuf.String())
+	}
+	got := decodeResultStream(t, out.String())
+	if len(got) != 1 || got[0].Park == nil || got[0].Park.Kind != flow.ParkRefused {
+		t.Fatalf("stdout = %q, want exactly one refused park", out.String())
+	}
+	if !strings.Contains(out.String(), `"redispatch_may_clear":false`) {
+		t.Errorf("stdout = %q, want the key redispatch_may_clear with a present false — the one thing that tells a scheduler this park is a loop", out.String())
+	}
+}
+
 // Running a single step is not an act of takeover. `run-step` is the primitive
 // an external scheduler calls in a loop, and marking the item manual there
 // flags every item it touches for a person who is not there — and silently
