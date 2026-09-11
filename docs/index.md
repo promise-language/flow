@@ -80,6 +80,8 @@ their tags is its own compliance gaps.
   projects.
 - [proposals/outside-contribution.md](proposals/outside-contribution.md) — Resolving an item
   when the contributor is a principal the project does not trust.
+- [proposals/permission-layers.md](proposals/permission-layers.md) — The contexts an action
+  guard runs in, and how its layers compose in each.
 - [proposals/reusable-flows-and-leases.md](proposals/reusable-flows-and-leases.md) — Flows as
   reusable definitions, and leases.
 - [proposals/untrusted-sources.md](proposals/untrusted-sources.md) — Item text is executable
