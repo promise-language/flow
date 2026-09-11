@@ -149,21 +149,44 @@ func (app *App) stepBudget(id flow.StepId) flow.StepBudget {
 // assumesRole is the role predicate the orchestrator borrows: whether this
 // arena's account can take an item's next move.
 //
-// CAPABILITY IS THE CEILING, and only that. The account's detected capabilities
-// decide which of the flow's declared roles it could assume at all; narrowing
-// further by what this binary actually covers is #250's.
-//
 // An orchestrator that cannot answer the capability question returns NIL, which
 // filters nothing — the same convention acceptsType uses. Filtering on a ceiling
 // nobody could measure would hide every item behind a backend that cannot ask,
 // which is a worse answer than not filtering.
 func (app *App) assumesRole(ctx context.Context) func(flow.RoleName) bool {
-	caps, err := app.Orchestrator.DetectCapabilities(ctx, "")
-	if err != nil {
+	assumable, known := app.assumableRoles(ctx)
+	if !known {
 		return nil
 	}
-	assumable := flow.AssumableRoles(app.Flow.Roles(), caps)
 	return func(role flow.RoleName) bool { return slices.Contains(assumable, role) }
+}
+
+// assumableRoles is the derivation itself: the flow's declared roles this
+// arena's account can assume, in declaration order.
+//
+// It is ONE derivation with two readers — the predicate above, which filters
+// what may be selected, and the standing `resolve` announces and re-reports on
+// a handoff. One RULE rather than one call: each reader asks when it needs the
+// answer, and what this function fixes is that they cannot read the same
+// capabilities into different roles, nor disagree about what an unanswerable
+// question means.
+//
+// CAPABILITY IS THE CEILING, and only that. The account's detected capabilities
+// decide which of the flow's declared roles it could assume at all; narrowing
+// further by what this binary actually covers is #250's. Both readers inherit
+// that: the selectable set is filtered on the ceiling, and so is the handoff
+// `resolve` decides from the awaited role (cli/cmd_resolve.go).
+//
+// The bool reports whether the question could be ANSWERED at all. False is not
+// "no roles": an orchestrator that cannot detect capabilities has said nothing
+// about the account, and the two readings must not be collapsed — one filters
+// nothing (the nil predicate above), the other would hand every item off.
+func (app *App) assumableRoles(ctx context.Context) ([]flow.RoleName, bool) {
+	caps, err := app.Orchestrator.DetectCapabilities(ctx, "")
+	if err != nil {
+		return nil, false
+	}
+	return flow.AssumableRoles(app.Flow.Roles(), caps), true
 }
 
 // Run is the binary's entry point. Parses argv, dispatches the matching

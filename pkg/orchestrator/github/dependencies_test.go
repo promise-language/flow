@@ -38,6 +38,10 @@ func dependingOrchestrator(t *testing.T, labels []string, status int, deps []map
 	issue := func() map[string]any {
 		return map[string]any{
 			"number": 42, "title": "A task", "state": "open",
+			// carol filed it; alice is the operator. A fixture where the two
+			// agree could not tell a read of the filer from a read of the
+			// account acting.
+			"user":       map[string]any{"login": "carol"},
 			"labels":     toLabelObjs(labels),
 			"assignees":  toLoginObjs(mock.assignees),
 			"html_url":   "https://github.com/o/r/issues/42",
@@ -324,6 +328,10 @@ func TestBackend_LoadAgreesWithGetWhereTheyOverlap(t *testing.T) {
 	if item.Type != info.Type || item.Status != info.Status || item.Disposition != info.Disposition {
 		t.Errorf("Load(type %q status %q disposition %q) disagrees with Get(type %q status %q disposition %q)",
 			item.Type, item.Status, item.Disposition, info.Type, info.Status, info.Disposition)
+	}
+	if item.Creator != info.Creator || item.Creator == "" {
+		t.Errorf("Load(creator %q) disagrees with Get(creator %q), or neither read the filer",
+			item.Creator, info.Creator)
 	}
 	if item.Holder != info.Holder || item.Manual != info.Manual {
 		t.Errorf("Load(holder %+v manual %v) disagrees with Get(holder %+v manual %v)",

@@ -68,8 +68,12 @@ func resolveTestAppFlow(t *testing.T, be flow.Orchestrator, configure func(*flow
 			flow.Artifact("plan", flow.ArtifactMarkdown),
 			flow.Artifact("commit", flow.ArtifactCommitHash),
 		},
-		Out: out,
-		Err: errBuf,
+		// Whatever the backend can observe, so a graph the caller registers may
+		// include a wait. A backend with no signals declares none, which is
+		// what every existing caller of this fixture already had.
+		Signals: be.SupportedSignals(),
+		Out:     out,
+		Err:     errBuf,
 	}
 	f := flow.NewFlow("implement", []flow.ItemType{"task"})
 	f.Role("contributor", flow.CapPush)
@@ -276,9 +280,11 @@ func TestCmdResolve_ItemWithAJournalIsNarratedPastTheRemit(t *testing.T) {
 		t.Errorf("peek did not name the step about to run; got %q", errBuf.String())
 	}
 	// And the run agreed with the narration: it ran the step through to the
-	// finalize rather than stopping on the type.
-	if !strings.Contains(errBuf.String(), "finalized ✓") {
-		t.Errorf("expected the run to reach the finalize; got %q", errBuf.String())
+	// finalize pass rather than stopping on the type. The pass itself, not the
+	// tick — the fake's item is still open, so Finalize refuses and nothing is
+	// recorded complete.
+	if !strings.Contains(errBuf.String(), "(finalize) → done") {
+		t.Errorf("expected the run to reach the finalize pass; got %q", errBuf.String())
 	}
 }
 
@@ -289,6 +295,10 @@ func TestCmdResolve_ItemWithAJournalIsNarratedPastTheRemit(t *testing.T) {
 func TestCmdResolve_FinalizedUnmatchedTypeNarratesFinalize(t *testing.T) {
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "chore", Title: "1", Finalized: true})
+	// Terminal on the tracker as well, so the finalize pass actually records
+	// the run complete: the tick asserted below is gated on that, and an item
+	// the orchestrator still reads as open would refuse it.
+	be.SetStatus("1", flow.StatusTerminal, "completed")
 	app, _, errBuf := resolveTestApp(t, be) // flow accepts "task" only
 
 	code := app.cmdResolve(context.Background(), []string{"1"})
@@ -641,7 +651,7 @@ func TestCmdResolve_JSONFlagStreamsResultsAndStillNarrates(t *testing.T) {
 	if !strings.Contains(errBuf.String(), `resolve: plan → done`) {
 		t.Errorf("JSON mode must still narrate to stderr; got %q", errBuf.String())
 	}
-	if !strings.Contains(errBuf.String(), "finalized ✓") {
+	if !strings.Contains(errBuf.String(), "(finalize) → done") {
 		t.Errorf("JSON mode must still narrate the finalize line; got %q", errBuf.String())
 	}
 }

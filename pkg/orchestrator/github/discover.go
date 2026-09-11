@@ -250,6 +250,7 @@ func (b *Orchestrator) itemInfoFor(ctx context.Context, iss *github.Issue, binar
 		Ref:         b.refFromIssue(iss.GetNumber()),
 		Type:        itemType,
 		Title:       iss.GetTitle(),
+		Creator:     flow.AccountId(iss.GetUser().GetLogin()),
 		Body:        iss.GetBody(),
 		URL:         iss.GetHTMLURL(),
 		Status:      itemStatusFromIssue(iss),

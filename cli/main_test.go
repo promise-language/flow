@@ -36,10 +36,26 @@ func TestMain(m *testing.M) {
 	}
 	quotaCacheDir = func() (string, bool) { return dir, true }
 	quotaCredential = func() (string, string) { return "cli-test-credential", "" }
+	// The agent account (cli/quota.go) is redirected here for the same reason
+	// and one step further: its discovery reads $HOME, which no CLAUDE_CONFIG_DIR
+	// a test sets can shadow, so an unstubbed read would print the developer's
+	// own account into a test's expected output. A test about discovery itself
+	// restores it with useStubAgentAccount.
+	agentAccount = func() string { return "" }
 	code := m.Run()
 	// os.Exit skips deferred calls, so the cleanup is explicit.
 	os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+// useStubAgentAccount points the agent-account seam at a fixed answer for one
+// test, restoring TestMain's empty one afterwards. Tests that assert on the
+// account line take it; everything else keeps the package-wide silence.
+func useStubAgentAccount(t *testing.T, account string) {
+	t.Helper()
+	prev := agentAccount
+	agentAccount = func() string { return account }
+	t.Cleanup(func() { agentAccount = prev })
 }
 
 // useTempQuotaCache gives one test its own quota cache directory, so a record
