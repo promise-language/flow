@@ -3,11 +3,13 @@ package cli
 import (
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 )
 
 // TestMain points the machine-wide quota cache (cli/quota_cache.go) at a
-// throwaway directory for the whole package, before any test runs.
+// throwaway directory for the whole package, and its credential discovery at a
+// fixed token, before any test runs.
 //
 // This is the same doctrine App.Quota's own comment carries, one layer down: a
 // test must never reach live account state, and now that a reading is SHARED
@@ -17,8 +19,15 @@ import (
 // the developer's account happened to be doing. Redirecting it here rather than
 // per test is what makes it unforgettable: a test added later cannot omit it.
 //
+// The credential seam is redirected for the same reason and one more: the
+// record is named after a digest of the credential, so discovery now runs on
+// the path every test takes, and the real one reads the developer's
+// credentials.json — or forks `security` to interrogate the macOS Keychain,
+// which on a locked machine prompts.
+//
 // Individual tests that care about cache CONTENT take a fresh directory of
-// their own with useTempQuotaCache.
+// their own with useTempQuotaCache; tests that care about WHICH account is
+// reading take a credential of their own with installCredential.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "flow-cli-quota-cache-")
 	if err != nil {
@@ -26,6 +35,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	quotaCacheDir = func() (string, bool) { return dir, true }
+	quotaCredential = func() (string, string) { return "cli-test-credential", "" }
 	code := m.Run()
 	// os.Exit skips deferred calls, so the cleanup is explicit.
 	os.RemoveAll(dir)
@@ -41,4 +51,13 @@ func useTempQuotaCache(t *testing.T) string {
 	quotaCacheDir = func() (string, bool) { return dir, true }
 	t.Cleanup(func() { quotaCacheDir = prev })
 	return dir
+}
+
+// resetQuotaAccountKey clears the once-per-process memo of the account key, so
+// the next read discovers the credential again. Only a test has any business
+// calling it: within a process the key is a constant, and re-discovering it is
+// the per-call subprocess the memo exists to avoid.
+func resetQuotaAccountKey() {
+	quotaAccountOnce = sync.Once{}
+	quotaAccountKeyed = ""
 }
