@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -31,6 +34,22 @@ import (
 // Nothing here may ever fail a run. Every filesystem error degrades to the
 // behaviour flow has today: fetch, and if that fails, say so once and proceed
 // unpaced.
+//
+// The record is per credential, and the credential is in its NAME. One OS user
+// may drive more than one agent account — switching CLAUDE_CONFIG_DIR, or
+// re-authenticating between runs — and a single record shared between them
+// serves whichever was read last: the run against an account at 91% reads the
+// other's 5% and proceeds unpaced, which is the failure this file exists to
+// close, reached by a different route. Naming the file after a digest of the
+// credential makes a different account a different FILE — a miss by
+// construction, with no record either account can overwrite with the other's
+// numbers, and no mismatch to detect on a hit. The lock and the backoff are
+// keyed with it for the same reason: A's in-flight refresh must not suppress
+// B's, and a 401 for an expired A credential must not silence B.
+//
+// The digest is read ONCE per process (quotaAccountKey), because reading it is
+// the cost the cache exists to remove: discoverOAuthToken forks `security` on a
+// Keychain machine, and a resolve reads quota once per step.
 
 const (
 	// quotaRefreshInterval is how old a reading may be before the next caller
@@ -63,22 +82,81 @@ const (
 	// refreshing for good.
 	quotaRefreshLockTTL = 30 * time.Second
 
-	quotaCacheFile = "quota.json"
-	quotaLockFile  = "quota.json.lock"
+	// quotaRecordKeepFor is how long a record no process is writing any more is
+	// kept. Keying the record by credential means a rotated token orphans the
+	// file it was reading, so something has to retire them. The bound is the
+	// retry cap rather than quotaStaleBound: past 30 minutes a record's READING
+	// is unservable, but the refusal recorded against it can still be in force,
+	// and deleting it would put the machine back on an endpoint that asked to be
+	// left alone.
+	quotaRecordKeepFor = quotaRetryAfterCap
+
+	// The record is named after the credential it was read with:
+	// quota-<key>.json. quotaRecordGlob matches those and the unkeyed quota.json
+	// left behind by the cache's first version, and neither the .quota-* temp
+	// files nor the .lock beside each record.
+	quotaCacheFilePrefix = "quota-"
+	quotaCacheFileExt    = ".json"
+	quotaRecordGlob      = "quota*" + quotaCacheFileExt
+
+	// quotaKeyUnknown names the record for a machine whose credential cannot be
+	// read at all. Such a machine cannot fetch either, so its record holds a
+	// failure and a backoff — which is the whole reason it gets one: without a
+	// name it could not back off, and would ask once per step.
+	quotaKeyUnknown = "none"
+
+	quotaLockSuffix = ".lock"
 )
 
-// quotaCacheDir and quotaFetch are the two seams this file is tested through.
+// quotaCacheDir, quotaFetch and quotaCredential are the three seams this file
+// is tested through.
 //
 // They are package vars — the fitnessWaitInterval pattern — and deliberately
 // NOT environment variables: an environment variable is never an input
-// (docs/org/cli-guide.md § 2). The location seam is not a convenience. A test
-// that read or wrote the developer's real cache would pace the next real run
-// against numbers a test made up, and cli's TestMain redirects it for the whole
-// package so no test in it can.
+// (docs/org/cli-guide.md § 2). Neither the location nor the credential seam is
+// a convenience. A test that read or wrote the developer's real cache would
+// pace the next real run against numbers a test made up, and a test that
+// discovered the real credential would read the developer's account — and fork
+// `security` to do it. cli's TestMain redirects both for the whole package so
+// no test in it can.
 var (
-	quotaCacheDir = userQuotaCacheDir
-	quotaFetch    = readQuota
+	quotaCacheDir   = userQuotaCacheDir
+	quotaFetch      = readQuota
+	quotaCredential = discoverOAuthToken
 )
+
+// quotaAccountOnce and quotaAccountKeyed memoise the process's account key.
+//
+// The FAILURE is memoised with the success. Re-discovering after one would
+// restore exactly the per-call subprocess the cache exists to avoid, on the one
+// machine where every one of those calls also fails.
+var (
+	quotaAccountOnce  sync.Once
+	quotaAccountKeyed string
+)
+
+// quotaAccountKey names the account this process reads quota for: sixteen hex
+// digits of a SHA-256 of the credential, the truncated-digest idiom
+// fingerprintArena uses, and quotaKeyUnknown when no credential can be read.
+//
+// Of the CREDENTIAL, not of an account name: it is readable without decoding
+// anything or pinning any part of the credential schema in flow's source, it
+// identifies nobody, and equality — the only operation a cache key needs — is
+// exactly what a digest supports. A token rotation makes a new key, so the
+// account's next reading lands in a new file; that costs one fetch, and the
+// orphan is pruned within the hour.
+func quotaAccountKey() string {
+	quotaAccountOnce.Do(func() {
+		token, reason := quotaCredential()
+		if reason != "" || token == "" {
+			quotaAccountKeyed = quotaKeyUnknown
+			return
+		}
+		sum := sha256.Sum256([]byte(token))
+		quotaAccountKeyed = hex.EncodeToString(sum[:])[:16]
+	})
+	return quotaAccountKeyed
+}
 
 // quotaRecord is the shared record on disk: the last reading that succeeded,
 // when it was taken, and the refusal still in force. A failure NEVER clears the
@@ -305,9 +383,14 @@ func userQuotaCacheDir() (string, bool) {
 	return filepath.Join(dir, "flow"), true
 }
 
-// quotaCachePath resolves the record's path, creating the directory. Reports
-// false when there is nowhere to cache — the caller then behaves as flow does
-// with no cache at all.
+// quotaCachePath resolves this account's record path, creating the directory.
+// Reports false when there is nowhere to cache — the caller then behaves as
+// flow does with no cache at all.
+//
+// The account key lives in the file name and nowhere else: there is no Account
+// field on quotaRecord, so no second copy of it to keep in sync, and nothing
+// downstream of here — quotaNow, refreshQuota, quotaFailureRecord,
+// servableReading — has to know an account exists. They take the path.
 func quotaCachePath() (string, bool) {
 	dir, ok := quotaCacheDir()
 	if !ok {
@@ -318,7 +401,7 @@ func quotaCachePath() (string, bool) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", false
 	}
-	return filepath.Join(dir, quotaCacheFile), true
+	return filepath.Join(dir, quotaCacheFilePrefix+quotaAccountKey()+quotaCacheFileExt), true
 }
 
 // loadQuotaRecord reads the record. Absent, torn, or unparseable all read as a
@@ -365,6 +448,37 @@ func storeQuotaRecord(path string, rec quotaRecord) {
 	}
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		os.Remove(tmp.Name())
+		return
+	}
+	pruneQuotaRecords(dir, time.Now())
+}
+
+// pruneQuotaRecords removes the records nothing is reading any more.
+//
+// Naming a record after the credential it was read with is what introduces
+// growth: a token rotation makes a new name and orphans the old file, and so
+// does every account the machine has stopped driving. A record older than
+// quotaRecordKeepFor can hold neither a servable reading nor a live backoff, so
+// removing it takes nothing away from anyone; the same sweep retires the
+// unkeyed quota.json the cache's first version left behind.
+//
+// Silent, like everything else on this path: a prune that cannot run is not a
+// reason to fail the run whose reading was just stored. It runs after a store
+// rather than on a timer of its own because a store is exactly when a new name
+// can have appeared.
+func pruneQuotaRecords(dir string, now time.Time) {
+	matches, err := filepath.Glob(filepath.Join(dir, quotaRecordGlob))
+	if err != nil {
+		return
+	}
+	for _, path := range matches {
+		st, err := os.Stat(path)
+		if err != nil || st.IsDir() {
+			continue
+		}
+		if now.Sub(st.ModTime()) > quotaRecordKeepFor {
+			os.Remove(path)
+		}
 	}
 }
 
@@ -378,8 +492,13 @@ func storeQuotaRecord(path string, rec quotaRecord) {
 // treated as held: single-flight is an optimisation, and one that could stop
 // every process on the machine from ever refreshing would be worse than the
 // duplication it saves.
+//
+// The slot is per RECORD — the lock sits beside the record it guards — because
+// two accounts refreshing are not the same question. A shared lock would let
+// A's in-flight refresh suppress B's, leaving B with nothing to serve and
+// unpaced, which is the defect keying exists to close.
 func acquireRefreshLock(path string, now time.Time) (func(), bool) {
-	lock := filepath.Join(filepath.Dir(path), quotaLockFile)
+	lock := path + quotaLockSuffix
 	take := func() (func(), bool) {
 		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
