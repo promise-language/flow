@@ -270,6 +270,15 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		// An awaited SIGNAL is not a handoff: nobody's move is not somebody
 		// else's, and it reports blocked through the advance like any other
 		// wait.
+		//
+		// What "cannot assume" means here is the CAPABILITY CEILING, which is
+		// what the standing carries (cli/app.go assumableRoles); narrowing it by
+		// the coverage a binary declares is #250's. The ceiling errs toward
+		// continuing, so nothing is handed off that this run could have
+		// advanced — but until #250 lands, a binary declining a role its account
+		// backs (a maintainer-capable account pinned to the contributor's
+		// coverage, examples/issue/main.go) does not reach this branch at its
+		// boundary: it dispatches, and the coverage gate reports blocked.
 		if st != nil && acts && !st.Finalized && st.Awaits.Role != "" && st.Awaits.Signal == "" {
 			role := st.Awaits.Role
 			switch {

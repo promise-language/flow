@@ -149,10 +149,6 @@ func (app *App) stepBudget(id flow.StepId) flow.StepBudget {
 // assumesRole is the role predicate the orchestrator borrows: whether this
 // arena's account can take an item's next move.
 //
-// CAPABILITY IS THE CEILING, and only that. The account's detected capabilities
-// decide which of the flow's declared roles it could assume at all; narrowing
-// further by what this binary actually covers is #250's.
-//
 // An orchestrator that cannot answer the capability question returns NIL, which
 // filters nothing — the same convention acceptsType uses. Filtering on a ceiling
 // nobody could measure would hide every item behind a backend that cannot ask,
@@ -170,9 +166,16 @@ func (app *App) assumesRole(ctx context.Context) func(flow.RoleName) bool {
 //
 // It is ONE derivation with two readers — the predicate above, which filters
 // what may be selected, and the standing `resolve` announces and re-reports on
-// a handoff. A second call to DetectCapabilities for the announcement could
-// answer differently from the one selection ran on, and the operator would be
-// told about a run other than the one happening.
+// a handoff. One RULE rather than one call: each reader asks when it needs the
+// answer, and what this function fixes is that they cannot read the same
+// capabilities into different roles, nor disagree about what an unanswerable
+// question means.
+//
+// CAPABILITY IS THE CEILING, and only that. The account's detected capabilities
+// decide which of the flow's declared roles it could assume at all; narrowing
+// further by what this binary actually covers is #250's. Both readers inherit
+// that: the selectable set is filtered on the ceiling, and so is the handoff
+// `resolve` decides from the awaited role (cli/cmd_resolve.go).
 //
 // The bool reports whether the question could be ANSWERED at all. False is not
 // "no roles": an orchestrator that cannot detect capabilities has said nothing
