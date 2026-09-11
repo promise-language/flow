@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"time"
 
@@ -205,6 +206,13 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	// to a named step) and report the outcome after.
 	fmt.Fprintf(app.Err, "resolve: driving %s to completion (until finalized or parked)…\n", claim.ItemRef.Display)
 
+	// Before the first dispatch AND before the first pacing wait, so an
+	// operator learns how far this run can take the item rather than inferring
+	// it from where it stops (docs/cli.md § The announcement names the run's
+	// standing). The value is kept: the handoff report names the same facts,
+	// and deriving them twice is how the two ends of one run come to disagree.
+	stand := app.announceStanding(ctx, *claim)
+
 	targets := paceTargets{FiveHour: *paceFiveHour / 100, SevenDay: *paceSevenDay / 100}
 
 	reportQuota(app.Err)
@@ -247,6 +255,35 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 						mechanical = li.Mechanical()
 					}
 				}
+			}
+		}
+
+		// A handoff, decided from the item's own awaited marker. It is a CLEAN
+		// END rather than a stop: the roles this account can assume are done
+		// with the item, so the claim goes back and the report names who moves
+		// next (docs/cli.md § Resolving, docs/resolution.md § Whose move it is).
+		//
+		// Decided HERE — before the pacing block and before the dispatch —
+		// because a run that will not advance the item must not first wait
+		// hours for quota headroom it is never going to spend.
+		//
+		// An awaited SIGNAL is not a handoff: nobody's move is not somebody
+		// else's, and it reports blocked through the advance like any other
+		// wait.
+		if st != nil && acts && !st.Finalized && st.Awaits.Role != "" && st.Awaits.Signal == "" {
+			role := st.Awaits.Role
+			switch {
+			case !app.Flow.DeclaresRole(role):
+				// A recorded awaited role outside the declared set matches
+				// nothing and never will, and read as "the runner has not
+				// arrived" it would leave the item unofferable with nothing
+				// naming why. A person fixes the flow or the record.
+				fmt.Fprintf(app.Err, "resolve: %s is blocked — %s\n", claim.ItemRef.Display,
+					flow.ErrUnknownRole{Role: role, Declared: app.Flow.RoleNames()})
+				reportQuota(app.Err)
+				return 1
+			case !stand.assumes(role):
+				return app.handOff(ctx, *claim, st.Awaits, stand)
 			}
 		}
 
@@ -376,8 +413,24 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			return 0
 		case flow.StatusDone:
 			// Finalize case: RunOne ran no step (empty Step) because no eligible
-			// flow remained — the item is fully resolved.
+			// flow remained.
+			//
+			// Reaching the end of the flow is NOT the run being recorded
+			// complete: Finalize refuses an item the orchestrator does not yet
+			// consider finished, and the result says which happened
+			// (flow.InvocationResult.Finalized). Branching on the empty step
+			// alone printed the tick for both, so a reader who trusted the
+			// summary concluded the item was closed while the result object one
+			// line above said it was not.
 			if res.Step == "" {
+				if !res.Finalized {
+					fmt.Fprintf(app.Err, "resolve: %s not finalized — no eligible step remains, and the orchestrator does not yet consider the item finished; nothing finalized, claim kept — run `status %s` to inspect\n",
+						claim.ItemRef.Display, claim.ItemRef.Display)
+					reportQuota(app.Err)
+					// ErrUnavailable means ask again later, not that anything
+					// went wrong here: the flow did everything it can.
+					return 0
+				}
 				suffix := finalTotalSuffix(ctx, app, *claim)
 				fmt.Fprintf(app.Err, "resolve: %s finalized ✓%s\n", claim.ItemRef.Display, suffix)
 				reportQuota(app.Err)
@@ -389,6 +442,129 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	fmt.Fprintf(app.Err, "resolve: stopped after %d step attempts without finalizing (runaway guard); run `status` to inspect\n", maxResolveSteps)
 	reportQuota(app.Err)
 	return 1
+}
+
+// standing is what a run acts with: the repository account, the roles that
+// account can assume, and the account that filed the item.
+//
+// One value, derived once, read at both ends of the run — the announcement
+// before the first dispatch and the handoff report at the end. Re-deriving it
+// at the second site is how the two come to disagree about what the operator
+// was told.
+type standing struct {
+	account flow.AccountId
+	// roles is meaningful only when rolesKnown. An orchestrator that cannot
+	// detect capabilities has said NOTHING about the account, which is not the
+	// same as an account that can assume nothing — the wording distinguishes
+	// them, and so does assumes below.
+	roles      []flow.RoleName
+	rolesKnown bool
+	// creator is the filing account, empty when it could not be read.
+	creator flow.AccountId
+}
+
+// assumes reports whether this run may take a move belonging to role.
+//
+// Undetectable capabilities answer TRUE: a ceiling nobody could measure filters
+// nothing, which is the convention assumesRole's nil predicate already carries
+// into auto-selection. Handing an item off on an unanswered question would end
+// the run on the strength of a fact nobody established.
+func (s standing) assumes(role flow.RoleName) bool {
+	return !s.rolesKnown || slices.Contains(s.roles, role)
+}
+
+// announceStanding derives the run's standing and prints it, before anything is
+// dispatched and before anything is waited on (docs/cli.md § The announcement
+// names the run's standing).
+//
+// The repository account is the CLAIM's: it is the ambient account
+// DetectCapabilities is asked about and the one every write of this run is made
+// by — the same value StepCtx.Runner reports. Nothing is detected for it.
+//
+// The filing account costs one best-effort Load. A read that fails drops that
+// one line and keeps the others: the account and its roles are what the run's
+// reach follows from, and withholding them because an unrelated read failed
+// would trade the whole announcement for part of it.
+func (app *App) announceStanding(ctx context.Context, claim flow.Claim) standing {
+	s := standing{account: claim.Account}
+	s.roles, s.rolesKnown = app.assumableRoles(ctx)
+	if item, err := app.Orchestrator.Load(ctx, claim.ItemRef); err == nil {
+		s.creator = item.Creator
+	}
+	app.reportStanding(s)
+	return s
+}
+
+// reportStanding prints the standing. One writer for the announcement and for
+// the handoff's repeat of it, so the two cannot word the same facts
+// differently.
+func (app *App) reportStanding(s standing) {
+	fmt.Fprintf(app.Err, "resolve: acting as %s — roles it can assume: %s\n", accountName(s.account), s.rolesPhrase())
+	// Only when it differs from the account acting: naming the filer of one's
+	// own item says nothing an operator did not already know.
+	if s.creator != "" && s.creator != s.account {
+		fmt.Fprintf(app.Err, "resolve: filed by %s\n", s.creator)
+	}
+}
+
+// rolesPhrase renders the assumable set for a person. "none" and "unknown" are
+// different answers and read differently: one says the account backs no
+// declared role, the other that nothing could be detected about it.
+func (s standing) rolesPhrase() string {
+	if !s.rolesKnown {
+		return "unknown — this orchestrator cannot detect capabilities"
+	}
+	if len(s.roles) == 0 {
+		return "none"
+	}
+	names := make([]string, 0, len(s.roles))
+	for _, r := range s.roles {
+		names = append(names, string(r))
+	}
+	return strings.Join(names, ", ")
+}
+
+// accountName renders an account for display, naming the one case where there
+// is nothing to render rather than printing an empty gap.
+func accountName(a flow.AccountId) string {
+	if a == "" {
+		return "an account this orchestrator does not name"
+	}
+	return string(a)
+}
+
+// handOff ends the run at a role boundary: the claim is released and the report
+// names the role the item now awaits, together with the standing that finished
+// with it (docs/cli.md § Resolving).
+//
+// Releasing is the promise being kept, not a courtesy — an item held by an
+// arena that is done with it is one the next role cannot pick up — so a Release
+// that fails stops the run at exit 1 rather than reporting a handoff that did
+// not happen.
+//
+// Returns the run's exit code: 0 for the handoff, 1 when the claim could not be
+// given up.
+func (app *App) handOff(ctx context.Context, claim flow.Claim, awaits flow.Awaits, s standing) int {
+	if err := app.Orchestrator.Release(ctx, claim.ItemRef); err != nil {
+		fmt.Fprintf(app.Err, "resolve: %s awaits %s, but the claim could not be released: %s\n",
+			claim.ItemRef.Display, awaits.Role, err)
+		reportQuota(app.Err)
+		return 1
+	}
+	awaited := string(awaits.Role)
+	// The account of record when the role has one — a route that returns to a
+	// role returns to the account that acted in it, and an operator reading the
+	// handoff is being told who to expect, not only what.
+	if awaits.Account != "" {
+		awaited += ", account of record " + string(awaits.Account)
+	}
+	// The SAME suffix the finalization prints, so the two totals cannot
+	// disagree about what the run cost.
+	fmt.Fprintf(app.Err, "resolve: %s handed off — awaits %s%s\n",
+		claim.ItemRef.Display, awaited, finalTotalSuffix(ctx, app, claim))
+	app.reportStanding(s)
+	reportQuota(app.Err)
+	return 0
 }
 
 // finalTotalSuffix loads the item and computes the total duration and cost

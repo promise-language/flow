@@ -158,12 +158,32 @@ func (app *App) stepBudget(id flow.StepId) flow.StepBudget {
 // nobody could measure would hide every item behind a backend that cannot ask,
 // which is a worse answer than not filtering.
 func (app *App) assumesRole(ctx context.Context) func(flow.RoleName) bool {
-	caps, err := app.Orchestrator.DetectCapabilities(ctx, "")
-	if err != nil {
+	assumable, known := app.assumableRoles(ctx)
+	if !known {
 		return nil
 	}
-	assumable := flow.AssumableRoles(app.Flow.Roles(), caps)
 	return func(role flow.RoleName) bool { return slices.Contains(assumable, role) }
+}
+
+// assumableRoles is the derivation itself: the flow's declared roles this
+// arena's account can assume, in declaration order.
+//
+// It is ONE derivation with two readers — the predicate above, which filters
+// what may be selected, and the standing `resolve` announces and re-reports on
+// a handoff. A second call to DetectCapabilities for the announcement could
+// answer differently from the one selection ran on, and the operator would be
+// told about a run other than the one happening.
+//
+// The bool reports whether the question could be ANSWERED at all. False is not
+// "no roles": an orchestrator that cannot detect capabilities has said nothing
+// about the account, and the two readings must not be collapsed — one filters
+// nothing (the nil predicate above), the other would hand every item off.
+func (app *App) assumableRoles(ctx context.Context) ([]flow.RoleName, bool) {
+	caps, err := app.Orchestrator.DetectCapabilities(ctx, "")
+	if err != nil {
+		return nil, false
+	}
+	return flow.AssumableRoles(app.Flow.Roles(), caps), true
 }
 
 // Run is the binary's entry point. Parses argv, dispatches the matching

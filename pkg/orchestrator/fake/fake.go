@@ -609,6 +609,7 @@ func (b *Orchestrator) itemInfoFor(rec *itemRecord, acceptsType func(flow.ItemTy
 		Ref:         b.refFor(rec.id),
 		Type:        rec.item.Type,
 		Title:       rec.item.Title,
+		Creator:     rec.creator,
 		Body:        rec.item.Body,
 		URL:         rec.item.URL,
 		Status:      rec.item.Status,

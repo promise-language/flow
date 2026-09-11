@@ -50,6 +50,17 @@ func reportQuota(w io.Writer) {
 		return
 	}
 
+	// Whose allowance is being spent, above the figures spending it. A machine
+	// may drive more than one agent account, so windows printed without one say
+	// what is being spent without saying whose it is (docs/cli.md § The
+	// announcement names the run's standing). It is reported HERE and not with
+	// the run's standing deliberately: it is detected for no capability, backs
+	// no role, and paying for a run is a different question from being
+	// permitted to perform it.
+	if acct := agentAccount(); acct != "" {
+		fmt.Fprintf(w, "agent account: %s\n", acct)
+	}
+
 	now := time.Now()
 	for _, win := range r.Usage {
 		printWindow(w, win, now)
@@ -161,6 +172,73 @@ func discoverOAuthToken() (string, string) {
 
 	searched := strings.Join(dirs, ", ")
 	return "", fmt.Sprintf("no Claude credentials found (searched %s and macOS Keychain)", searched)
+}
+
+// agentAccount is the seam this file's account discovery is tested through,
+// alongside quotaFetch and quotaCacheDir. A test must never read the
+// developer's own account: redirected in TestMain, so a test added later
+// cannot forget to.
+var agentAccount = discoverAgentAccount
+
+// discoverAgentAccount names the account the agent substrate spends as: the
+// OAuth account object in the installed client's own configuration. Returns ""
+// when nothing on disk says — an unknown account drops the line rather than
+// printing a guess.
+//
+// The shape discoverOAuthToken uses, for the same reasons: nothing is pinned in
+// flow's source, nothing is asked of a subprocess, and nothing touches the
+// network. What cannot be learned by reading is not learned here.
+func discoverAgentAccount() string {
+	for _, path := range agentAccountFiles() {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err != nil {
+			continue
+		}
+		// The key naming the OAuth account is discovered rather than
+		// hardcoded, as the token's is — and a file whose OAuth object carries
+		// no account (the credentials file does not) falls through to the next
+		// candidate instead of answering empty for all of them.
+		for key, val := range raw {
+			if !strings.Contains(strings.ToLower(key), "oauth") {
+				continue
+			}
+			var obj map[string]any
+			if err := json.Unmarshal(val, &obj); err != nil {
+				continue
+			}
+			// The e-mail first: it is what an operator recognises. The account
+			// id is the fallback, because an id names the account exactly even
+			// when nothing human-readable is stored.
+			for _, field := range []string{"emailAddress", "email", "account_email", "accountUuid", "account_id", "accountId"} {
+				if v, ok := obj[field].(string); ok && v != "" {
+					return v
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// agentAccountFiles lists the configuration files that may carry the OAuth
+// account, in priority order.
+//
+// $HOME is searched as well as the config directories, because the client's
+// account lives beside its config directory rather than inside it — and the
+// config directories come first, so a caller pointed at one by
+// CLAUDE_CONFIG_DIR is answered from there.
+func agentAccountFiles() []string {
+	var paths []string
+	for _, dir := range claudeConfigDirs() {
+		paths = append(paths, filepath.Join(dir, ".claude.json"), filepath.Join(dir, "config.json"))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		paths = append(paths, filepath.Join(home, ".claude.json"))
+	}
+	return paths
 }
 
 // claudeConfigDirs returns the directories to search for Claude credentials,

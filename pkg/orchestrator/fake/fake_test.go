@@ -81,6 +81,32 @@ func TestBackend_LoadAgreesWithGetOnBlockedness(t *testing.T) {
 	agree("blocker reopened", true, flow.WaitsOnItems)
 }
 
+// The filing account is one of the fields the two reads overlap on, so the
+// listing projection must report what Load does. A `list` that could not say
+// who filed an item, beside a `status` that could, would be two answers about
+// one item.
+func TestBackend_LoadAgreesWithGetOnTheFilingAccount(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	b.AddItem("item", flow.Item{Type: "task", Title: "a task", Creator: "carol"})
+	ref := b.Ref("item")
+
+	info, err := b.Get(ctx, ref, "binary", nil, nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	item, err := b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if info.Creator != "carol" {
+		t.Errorf("Get(creator %q), want carol — the account that filed the item", info.Creator)
+	}
+	if item.Creator != info.Creator {
+		t.Errorf("Load(creator %q) disagrees with Get(creator %q)", item.Creator, info.Creator)
+	}
+}
+
 func TestBackend_ClaimAndLookup(t *testing.T) {
 	ctx := context.Background()
 	b := fake.New()

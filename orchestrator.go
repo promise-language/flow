@@ -196,6 +196,13 @@ type ItemInfo struct {
 	Body  string
 	URL   string
 
+	// Creator is the account that filed the item, the same fact Item carries
+	// and with the same meaning. A listing projection needs it because the
+	// commands that read it report the run's standing: a run against one's own
+	// item is a different act from a run against a stranger's, and the filer is
+	// the one thing about an item's origin a title cannot say.
+	Creator AccountId
+
 	Status      ItemStatus
 	Disposition string
 
