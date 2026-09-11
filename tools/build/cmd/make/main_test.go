@@ -234,6 +234,167 @@ func TestUpToDate_BinaryReplacedAfterBuild(t *testing.T) {
 	}
 }
 
+// Retiring a tool must not leave the binary ./make built for it in bin/: #199
+// deleted cmd/guard, and every clone that had built it kept a bin/guard — the
+// very "binary under a guard name" guardNames defends against. The sidecar the
+// previous build wrote says what make built; a recorded name no longer in the
+// tool set, whose file is still what was recorded, is make's to remove.
+func TestPruneRetired_RemovesWhatMakeBuiltAndNoLongerBuilds(t *testing.T) {
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	os.MkdirAll(binDir, 0o755)
+
+	verifyHash := writeBin(t, binDir, "verify", "verify-binary-v1")
+	retiredHash := writeBin(t, binDir, "precommit", "precommit-binary-v1")
+
+	hashFile := filepath.Join(binDir, ".tools.hash")
+	writeSidecar(t, hashFile, "abc123", map[string]string{
+		"verify":    verifyHash,
+		"precommit": retiredHash,
+	})
+
+	if err := pruneRetired(hashFile, binDir, []string{"verify"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(binDir, common.BinaryName("precommit"))); !os.IsNotExist(err) {
+		t.Errorf("bin/precommit is still there after its tool was retired (stat: %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(binDir, common.BinaryName("verify"))); err != nil {
+		t.Errorf("bin/verify, still a tool, was removed: %v", err)
+	}
+}
+
+// A binary the sidecar never recorded is not make's to remove. The workspace's
+// guards are hard-linked into bin/ by provisioning and appear on no list this
+// program holds, so "not built here and not on the allowlist" would delete a
+// provisioned guard on its first run — the hazard guardNames describes. The
+// only safe rule is "what make wrote".
+func TestPruneRetired_LeavesABinaryItNeverRecorded(t *testing.T) {
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	os.MkdirAll(binDir, 0o755)
+
+	verifyHash := writeBin(t, binDir, "verify", "verify-binary-v1")
+	writeBin(t, binDir, "tool-guard", "provisioned-by-the-workspace")
+
+	hashFile := filepath.Join(binDir, ".tools.hash")
+	writeSidecar(t, hashFile, "abc123", map[string]string{
+		"verify": verifyHash,
+	})
+
+	if err := pruneRetired(hashFile, binDir, []string{"verify"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(binDir, common.BinaryName("tool-guard"))); err != nil {
+		t.Errorf("bin/tool-guard, which make never recorded, was removed: %v", err)
+	}
+}
+
+// A recorded binary whose content no longer matches was replaced by somebody
+// since make wrote it — copied from another clone, or hard-linked over by
+// provisioning. It is not make's leftover any more, so it stays, and the
+// warning says so: a file silently kept looks exactly like one nobody looked
+// at.
+func TestPruneRetired_LeavesAReplacedBinary(t *testing.T) {
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	os.MkdirAll(binDir, 0o755)
+
+	verifyHash := writeBin(t, binDir, "verify", "verify-binary-v1")
+	builtHash := writeBin(t, binDir, "precommit", "precommit-as-make-built-it")
+
+	hashFile := filepath.Join(binDir, ".tools.hash")
+	writeSidecar(t, hashFile, "abc123", map[string]string{
+		"verify":    verifyHash,
+		"precommit": builtHash,
+	})
+	// Replaced after the build: same name, different content.
+	writeBin(t, binDir, "precommit", "precommit-from-somewhere-else")
+
+	stderr := captureStderr(t)
+	if err := pruneRetired(hashFile, binDir, []string{"verify"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(binDir, common.BinaryName("precommit"))); err != nil {
+		t.Errorf("bin/precommit, replaced since make built it, was removed: %v", err)
+	}
+	if got := stderr(); !strings.Contains(got, "precommit") || !strings.Contains(got, "not the file ./make built") {
+		t.Errorf("stderr = %q, want a warning naming the replaced binary and why it stays", got)
+	}
+}
+
+// Nothing recorded, or nothing left to remove, is nothing to do — not an
+// error. A first build has no sidecar; a sidecar an older make wrote may not
+// parse; a retired binary may already be gone. Each is the state make is about
+// to overwrite anyway, and failing the build on it would block every clone
+// that reaches one.
+func TestPruneRetired_MissingSidecarOrMissingBinaryIsNotAnError(t *testing.T) {
+	t.Run("no sidecar", func(t *testing.T) {
+		dir := t.TempDir()
+		binDir := filepath.Join(dir, "bin")
+		os.MkdirAll(binDir, 0o755)
+		writeBin(t, binDir, "precommit", "precommit-binary-v1")
+
+		if err := pruneRetired(filepath.Join(binDir, ".tools.hash"), binDir, []string{"verify"}); err != nil {
+			t.Fatalf("pruneRetired with no sidecar: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(binDir, common.BinaryName("precommit"))); err != nil {
+			t.Errorf("with no sidecar nothing is recorded, yet bin/precommit was removed: %v", err)
+		}
+	})
+	t.Run("malformed sidecar", func(t *testing.T) {
+		dir := t.TempDir()
+		binDir := filepath.Join(dir, "bin")
+		os.MkdirAll(binDir, 0o755)
+		writeBin(t, binDir, "precommit", "precommit-binary-v1")
+		hashFile := filepath.Join(binDir, ".tools.hash")
+		os.WriteFile(hashFile, []byte("abc123\nprecommit-no-colon\n"), 0o644)
+
+		if err := pruneRetired(hashFile, binDir, []string{"verify"}); err != nil {
+			t.Fatalf("pruneRetired with a malformed sidecar: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(binDir, common.BinaryName("precommit"))); err != nil {
+			t.Errorf("a sidecar that does not parse records nothing, yet bin/precommit was removed: %v", err)
+		}
+	})
+	t.Run("recorded binary already gone", func(t *testing.T) {
+		dir := t.TempDir()
+		binDir := filepath.Join(dir, "bin")
+		os.MkdirAll(binDir, 0o755)
+		hashFile := filepath.Join(binDir, ".tools.hash")
+		writeSidecar(t, hashFile, "abc123", map[string]string{
+			"precommit": "0000000000000000000000000000000000000000000000000000000000000000",
+		})
+
+		if err := pruneRetired(hashFile, binDir, []string{"verify"}); err != nil {
+			t.Fatalf("pruneRetired with the recorded binary already gone: %v", err)
+		}
+	})
+}
+
+// captureStderr redirects os.Stderr for the rest of the test and returns a
+// function that yields what was written so far.
+func captureStderr(t *testing.T) func() string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = f
+	t.Cleanup(func() {
+		os.Stderr = old
+		f.Close()
+	})
+	return func() string {
+		data, err := os.ReadFile(f.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+}
+
 // guardNames are the names this repository must never build into bin/.
 // `guard` is the retired one — #199 deleted tools/build/cmd/guard. The other
 // two are the workspace artifact's, hard-linked into bin/ by provisioning; a

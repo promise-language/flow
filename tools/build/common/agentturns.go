@@ -58,12 +58,12 @@ var approvedAgentTurns = map[string]int{
 // checkApprovedAgentTurns refuses a commit that asks for an agent turn anywhere
 // but an approved call site, and refuses a stale list.
 //
-// The rule is the same one checkNoAgentExec enforces one level down, at the
-// place a turn becomes a process: a turn costs money and takes as long as a
-// model takes, so it belongs only where somebody asked for work. The two checks
-// sit at different levels because the mistake arrives at both — spawning the
-// binary directly, and reaching the SDK's own agent from a command that should
-// have answered by reading.
+// The rule is the same one the workspace precommit-guard's agent-turn check
+// enforces one level down, at the place a turn becomes a process: a turn costs
+// money and takes as long as a model takes, so it belongs only where somebody
+// asked for work. The two checks sit at different levels because the mistake
+// arrives at both — spawning the binary directly, and reaching the SDK's own
+// agent from a command that should have answered by reading.
 //
 // Tests are not scanned. A test cannot reach the real agent — the claude client
 // refuses to spawn from a test process, and every test agent in this repo is a

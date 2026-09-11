@@ -15,18 +15,31 @@ import (
 // a number to a threshold. Both modes come through judge(), so a test of
 // judge() is a test of what a person sees and of what the SDK is told.
 
-// writeManifest writes a thresholds.json into dir and returns the dir.
-func writeManifest(t *testing.T, manifest map[string]Threshold) string {
+// writeManifestBytes writes raw manifest bytes into a fresh temp dir, at the
+// place loadManifest looks — under tools/gates/, not the root — and returns
+// the dir. The layout is known here and nowhere else in these tests.
+func writeManifestBytes(t *testing.T, data []byte) string {
 	t.Helper()
 	dir := t.TempDir()
+	path := filepath.Join(dir, filepath.FromSlash(ManifestFile))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// writeManifest writes a thresholds manifest into a fresh temp dir and returns
+// the dir.
+func writeManifest(t *testing.T, manifest map[string]Threshold) string {
+	t.Helper()
 	data, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ManifestFile), data, 0644); err != nil {
-		t.Fatal(err)
-	}
-	return dir
+	return writeManifestBytes(t, data)
 }
 
 // testedManifest is the manifest shape most tests use: the two metrics the
@@ -588,11 +601,7 @@ func TestLoadManifest_MissingFile(t *testing.T) {
 }
 
 func TestLoadManifest_UnknownDirection(t *testing.T) {
-	dir := t.TempDir()
-	data := []byte(`{"x": {"direction": "around", "cap": 5}}`)
-	if err := os.WriteFile(filepath.Join(dir, ManifestFile), data, 0644); err != nil {
-		t.Fatal(err)
-	}
+	dir := writeManifestBytes(t, []byte(`{"x": {"direction": "around", "cap": 5}}`))
 	_, err := loadManifest(dir)
 	if err == nil {
 		t.Fatal("loadManifest accepted an unknown direction")
@@ -603,12 +612,25 @@ func TestLoadManifest_UnknownDirection(t *testing.T) {
 }
 
 func TestLoadManifest_MalformedJSON(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, ManifestFile), []byte("{not json"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	dir := writeManifestBytes(t, []byte("{not json"))
 	_, err := loadManifest(dir)
 	if err == nil {
 		t.Fatal("loadManifest accepted malformed JSON")
+	}
+}
+
+// The manifest moved from the repo root to tools/gates/ (#342): the
+// workspace's tool-contract.md §3 fixes that prefix so a checker can refuse a
+// change that authors its own thresholds by path alone. A loader that still
+// read the root would let a file outside that prefix judge the tree, so a
+// manifest at the old place is an absent manifest.
+func TestLoadManifest_DoesNotReadTheRepositoryRoot(t *testing.T) {
+	dir := t.TempDir()
+	data := []byte(`{"failed_tests": {"direction": "at_most", "cap": 0}}`)
+	if err := os.WriteFile(filepath.Join(dir, "thresholds.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadManifest(dir); err == nil {
+		t.Fatal("loadManifest read thresholds.json at the repo root; the manifest lives under tools/gates/")
 	}
 }

@@ -52,15 +52,26 @@ type Threshold struct {
 	Cap       float64   `json:"cap"`
 }
 
-// ManifestFile is the name of the thresholds manifest, versioned with the tree
-// it judges. A project with a judge must have one.
-const ManifestFile = "thresholds.json"
+// ManifestFile is where the thresholds manifest lives, relative to the repo
+// root and slash-separated. It is versioned with the tree it judges, and a
+// project with a judge must have one.
+//
+// It sits under tools/gates/, beside baselines.json, because the workspace's
+// tool-contract.md §3 fixes that directory as the committed home for gate
+// terms at the same path in every project. The prefix is what makes "out of
+// reach of whatever the gate is measuring" a checkable property rather than
+// an intention: a checker that refuses a change authoring its own thresholds
+// can be a path rule — a commit touching both tools/gates/** and the code
+// under measurement — only if the terms sit behind a stable prefix. At the
+// repo root, the same check would need a per-project filename allowlist,
+// which is the configuration the fixed path exists to eliminate.
+const ManifestFile = "tools/gates/thresholds.json"
 
 // loadManifest reads the thresholds manifest from a repo root. An absent file
 // is an error — a project with a judge must have a manifest. An unknown
 // direction value is an error — the set is closed.
 func loadManifest(repoRoot string) (map[string]Threshold, error) {
-	data, err := os.ReadFile(filepath.Join(repoRoot, ManifestFile))
+	data, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(ManifestFile)))
 	if err != nil {
 		return nil, fmt.Errorf("loading thresholds manifest: %w", err)
 	}
