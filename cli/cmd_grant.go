@@ -734,7 +734,7 @@ func remedyFor(kind flow.ParkKind) string {
 	case flow.ParkStepDidNotComplete:
 		return "Nothing to grant — the step left its job undone: the handler returned without completing (it elected no route, or elected one and produced no result), or its result was refused at capture by the disclosure guard; the park's reason says which. Re-run the step — a refused result is re-prompted with what was refused and why."
 	case flow.ParkRefused:
-		return "Nothing to grant — the failure is deterministic and consumed no budget. Fix the environment or precondition, then re-run."
+		return "Nothing to grant — the failure is deterministic and consumed no budget, so re-running reproduces it until its cause is changed. The park's reason (`status` prints it) names the cause: a precondition or environment the handler found unmet, or a step declaring Prompts: none whose handler asked for a prompt — which is fixed in the source, not the environment."
 	case flow.ParkWriteContract:
 		return "The step modified the worktree outside its declared contract. Inspect the changes; if they are wanted, widen the step's contract — if not, revert and re-run."
 	}

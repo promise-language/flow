@@ -421,6 +421,26 @@ func TestRemedyFor_StepDidNotComplete_NamesTheCaptureRefusal(t *testing.T) {
 	}
 }
 
+// The refused remedy covers both sites that park under the kind: a handler
+// that returned ErrRefused because a precondition or the environment was
+// unmet, and a step declaring Prompts: none whose handler asked for a prompt.
+// Their fixes differ — the second is a source change, and re-running without
+// one reproduces the park — so the remedy must not prescribe the first's fix
+// for both. It names what the two share (deterministic, nothing consumed),
+// says the reason carries the cause, and names both causes — the second's fix
+// as a change to the source, which is the instruction the old text got wrong.
+func TestRemedyFor_Refused_CoversBothProducers(t *testing.T) {
+	got := remedyFor(flow.ParkRefused)
+	for _, want := range []string{"deterministic", "reason", "Prompts: none", "source"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("remedyFor(ParkRefused) = %q, want it to mention %q", got, want)
+		}
+	}
+	if strings.Contains(got, "Fix the environment") {
+		t.Errorf("remedyFor(ParkRefused) = %q, must not prescribe an environment fix: a mis-declared step is fixed in the source, and the remedy is the only instruction grant prints", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 
 // stubAgent is a fake flow.Agent that returns canned responses and records
