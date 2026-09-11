@@ -290,6 +290,24 @@ Where the two decide what runs, and in what order, is `resolve`.
 
 `resolve` drives one item as far as this runner's part goes, advancing it a step at a time until it finalizes, hands off, parks, is skipped, is blocked, or fails. A handoff is a clean end: this runner's roles are done with the item, the claim is released, and the report names the role the item now awaits.
 
+### The announcement names the run's standing
+
+> **An operator learns how far a run can take an item before it spends anything, rather than from where it stops.**
+
+Before the first dispatch, `resolve` names the **repository account** it acts as, the roles that account can assume, and — when it differs from that one — the account that filed the item.
+
+Each answers a question whose only other answer is to run the command and watch.
+
+- **The repository account.** It is the account capabilities are detected for, and capabilities are what roles are derived from ([resolution.md](resolution.md) § Accounts, capabilities and roles). Everything about how far an item can travel in this run follows from it: an account whose permissions do not back the merge capability cannot assume the maintainer's role, so the run ends at the proposal whatever else is true of the machine.
+- **The assumable roles.** They are the derivation's answer, and printing them turns it into something read beforehand rather than discovered at the stop. A runner holding only the contributor's role ends at the proposal; one whose account backs both crosses to the merge without stopping.
+- **The filing account, when it is not the one acting.** The run is about to spend on text somebody else wrote, and a run against one's own item is a different act from a run against a stranger's. Naming the author is not a verdict on them — it is the one fact about the item's origin that the operator cannot get from the title.
+
+**A role is named only from the declared set** — the vocabulary is the flow's, and a name outside it is refused rather than displayed ([resolution.md](resolution.md) § Whose move it is).
+
+**The same facts are reported on a handoff**, where the awaited role is what the item is now waiting for and the repository account is what has finished with it. A handoff that named neither would report a stop without reporting whose move it now is.
+
+**The agent account is a separate axis, and is reported as one.** What pays for a resolution is the agent substrate's credential, and it settles nothing about the route: it is detected for no capability, backs no role, and stands in no relation to the item. It belongs with the quota figures rather than with the standing above, and it belongs there for one reason — a machine may drive more than one, so figures printed without an account say what is being spent without saying whose allowance is spending it. Keeping the two apart is the point: **paying for a run and being permitted to perform it are different questions, and one account answering the first says nothing about the second.**
+
 It selects the item in one of three ways:
 
 | Invocation | Selection |

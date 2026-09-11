@@ -112,6 +112,35 @@ That self-invalidating property is the argument for a record over the text and a
 
 **The cost of this is real and is accepted deliberately.** Anyone who can comment can return an item to blocked, including one that is mid-resolution — a denial of service available to any account. It is chosen over the alternative because it is loud, visible in the listing with its reason, and cleared by the same act that accepted the item in the first place. The alternative is executing text that nobody approved.
 
+## An item a resolution filed carries where it came from
+
+The flow files items. That is the rule rather than the exception — a fix for an unrelated problem is filed instead of folded in, and a reconciliation pass after an amendment exists to file the items that close every gap. So a resolution's outputs include **new items**, and each of those is resolved in its turn.
+
+That breaks the source test as stated above. An item filed by a resolution has a **trusted** source by that test: the account that wrote it is the operator's, and the operator holds write on the repository. Its text, though, was composed by an agent working on an item somebody else wrote — so the standing of the account that filed it says nothing about the standing of the text it descends from. The probe answers honestly and answers the wrong question.
+
+> **An item filed by a resolution records the item that was being resolved when it was filed.**
+
+Two facts, not one. The account that filed it is already carried and is not enough: on a system-filed item it names the operator every time, which is true and uninformative. What has to join it is the item the filing step was resolving, so that a reader can walk from any item to the text it came from.
+
+**It is not a chain of trust.** That is the tempting name and it is wrong in the direction that matters: in a chain of trust each link vouches for the next, and here nothing vouches for anything. What travels the chain is not trust but **derivation** — and the entire reason to record it is that trust does *not* follow it. The record is the item's **provenance**; the walk from an item back to the text it came from is its **chain of origin**.
+
+**The chain is walked, not copied.** Each item records its immediate parent and nothing further; the chain is derived by following them. A copy would drift from the items it describes, would have to be rewritten on every item whose ancestor was transferred or retyped, and would be a second answer to a question the parents already answer — the same reason a resolution records the commit it produced rather than a patch of it ([issue-flow.md](../issue-flow.md) § The implementation lives in the branch).
+
+**Depth is bounded by nothing, and that is not a problem.** A reconciliation pass files items whose resolutions file more. A chain ten long is a real history, and reading it is a query rather than a burden. What matters is that the walk terminates, and it does: every item was filed while resolving an item that already existed.
+
+**Filing is an outward write, and this record does not change that.** Every item filed passes the disclosure guard like anything else leaving the machine ([disclosure.md](../disclosure.md)), and the provenance record is written by the filing account — so it is exactly as trustworthy as the party that filed, which is the strongest it can be and no stronger.
+
+### Whether acceptance travels the chain is not decided here
+
+Two readings, and they differ in what a person is agreeing to when they accept:
+
+- **Acceptance authorises a resolution**, and everything that resolution files is part of the work authorised. A derived item then needs no acceptance of its own. Cheap, and it means one decision covers a subtree of text nobody read.
+- **Acceptance is a decision about specific bytes** — which is what § Acceptance names the text it accepted requires of it — and a filed item's bytes are new bytes no person has read. It therefore needs its own acceptance. Honest, and it turns a reconciliation pass filing thirty items into thirty decisions.
+
+A middle form exists and deserves evaluating rather than assuming: a derived item is accepted **by derivation** where every ancestor is accepted and the filing account is trusted, recorded as that kind of acceptance so a reader can tell it from one a person made. It keeps the query cheap and the record honest, and it is also the form most likely to be got subtly wrong, because it is the one where a single early acceptance can cover text that arrives much later.
+
+What the chain of origin buys under every one of the three readings is the same, and is why it is worth recording before the question is settled: **without it, an item filed by a resolution is indistinguishable from an item a maintainer wrote by hand.**
+
 ## What the surface does
 
 - **`list`** reports an unaccepted item as `blocked`, with the trust block's kind and a reason. It is not hidden: an item nobody can see is an item nobody can accept.
@@ -127,6 +156,7 @@ That self-invalidating property is the argument for a record over the text and a
 - **What the accepting flow produces**, and whether its verdict may be reached without a person. The vocabulary above deliberately leaves room for both; nothing here specifies the flow's steps.
 - **Whether an untrusted comment blocks the whole item or only itself.** This document takes the whole item, on the grounds that a filter fails silently. The narrower rule is defensible if the filtering is provably total.
 - **What happens to an item accepted, worked, and then edited after its pull request exists.** The proposal stops at dispatch; the request is already published by then.
+- **Whether a transferred item keeps its chain of origin.** An issue filed against the wrong repository is transferred rather than worked where it landed (`org/normative.md` § 7), and its parent may not exist in the repository it arrives in. A chain that dead-ends is readable; one that silently reports no parent is not distinguishable from an item nobody derived.
 
 ## Relationship to other items
 
@@ -141,3 +171,4 @@ That self-invalidating property is the argument for a record over the text and a
 - [orchestrator.md](../orchestrator.md) — where the `BlockKind` member and the acceptance-record contract would land.
 - [cli.md](../cli.md) — where the permit, the refusals, and the listing behaviour would land.
 - [github-schema.md](../github-schema.md) — where the GitHub orchestrator's own acceptance record would be described.
+- [issue-flow.md](../issue-flow.md) — the filing route whose outputs the chain of origin describes, and the filing shape a plan elects.
