@@ -176,39 +176,22 @@ func TestStepVerifyMerge_GatePassesMergeResultAccepted(t *testing.T) {
 	}
 }
 
-// carryThroughCaveat is the sentence a binary covering both sides owes the
-// operator before it reviews its own proposal.
-const carryThroughCaveat = "this binary carries through to merge — this is not independent review"
+// The step says nothing about who is running it. On the one graph it is an
+// independent maintainer's as much as a carrying-through binary's, and what
+// carrying through does not provide is said by `resolve` at the crossing, where
+// the journal shows one account on both sides — never by a step that cannot see
+// the arrangement it runs in.
+func TestStepVerifyMerge_SaysNothingAboutIndependentReview(t *testing.T) {
+	wt := newIntegrationWorktree()
+	wt.envelope = []byte(`{"coverage": 95}`)
+	wt.thresholds = []byte(`{"coverage": 80}`)
+	ctx := newIntegrationCtx(wt)
 
-// It is said by the binary that is carrying through, and only by that one. On
-// the one graph these steps are also an independent maintainer's, and the same
-// sentence there tells a genuinely independent reviewer the opposite of the
-// truth — which is the direction that matters, because it is what someone would
-// act on.
-func TestStepVerifyMerge_TheCarryThroughCaveatIsSaidOnlyWhenItIsTrue(t *testing.T) {
-	for _, tc := range []struct {
-		name         string
-		carryThrough bool
-		want         bool
-	}{
-		{"carrying through", true, true},
-		{"an independent maintainer", false, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			wt := newIntegrationWorktree()
-			wt.envelope = []byte(`{"coverage": 95}`)
-			wt.thresholds = []byte(`{"coverage": 80}`)
-			ctx := newIntegrationCtx(wt)
-
-			b := testBuilder(t)
-			b.cfg.CarryThrough = tc.carryThrough
-			if _, err := b.stepVerifyMerge(ctx); err != nil {
-				t.Fatalf("stepVerifyMerge: %v", err)
-			}
-			if got := slices.Contains(ctx.notices, carryThroughCaveat); got != tc.want {
-				t.Errorf("caveat notified = %t, want %t; notices = %v", got, tc.want, ctx.notices)
-			}
-		})
+	if _, err := testBuilder(t).stepVerifyMerge(ctx); err != nil {
+		t.Fatalf("stepVerifyMerge: %v", err)
+	}
+	if slices.ContainsFunc(ctx.notices, func(n string) bool { return strings.Contains(n, "independent review") }) {
+		t.Errorf("the step spoke about the arrangement it runs in; notices = %v", ctx.notices)
 	}
 }
 

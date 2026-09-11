@@ -18,8 +18,10 @@ import (
 type PromptContext struct {
 	prompt.Context
 
-	// Role is the step set being run, so a body can say something different to
-	// a maintainer than to a contributor without needing two templates.
+	// Role is the role the step being rendered for belongs to — the dispatch's
+	// own tag, never a property of the binary — so a body can say something
+	// different to a maintainer than to a contributor without needing two
+	// templates.
 	Role Role
 
 	// Answers carries human replies to questions this step previously asked.
@@ -106,7 +108,7 @@ func (c PromptContext) PriorJSON(id StepID) ([]byte, bool) {
 }
 
 // newPromptContext builds the context for one prompt render from the live step.
-func newPromptContext(ctx flow.StepCtx, cfg Config, role Role, prior []StepID) (PromptContext, error) {
+func newPromptContext(ctx flow.StepCtx, cfg Config, prior []StepID) (PromptContext, error) {
 	item := ctx.Item()
 	pc := PromptContext{
 		Context: prompt.Context{
@@ -116,7 +118,10 @@ func newPromptContext(ctx flow.StepCtx, cfg Config, role Role, prior []StepID) (
 			ItemDescription: item.Body,
 			VerifyCmd:       strings.Join(cfg.VerifyCmd, " "),
 		},
-		Role:  role,
+		// The dispatch's own role: the step being rendered for carries its tag,
+		// and a binary covering both roles renders a maintainer's prompt as the
+		// maintainer's, whatever else it may perform.
+		Role:  Role(ctx.Role()),
 		Prior: map[StepID]flow.ArtifactRecord{},
 	}
 	for _, id := range prior {

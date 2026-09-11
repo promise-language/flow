@@ -271,14 +271,14 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		// else's, and it reports blocked through the advance like any other
 		// wait.
 		//
-		// What "cannot assume" means here is the CAPABILITY CEILING, which is
-		// what the standing carries (cli/app.go assumableRoles); narrowing it by
-		// the coverage a binary declares is #250's. The ceiling errs toward
-		// continuing, so nothing is handed off that this run could have
-		// advanced — but until #250 lands, a binary declining a role its account
-		// backs (a maintainer-capable account pinned to the contributor's
-		// coverage, examples/issue/main.go) does not reach this branch at its
-		// boundary: it dispatches, and the coverage gate reports blocked.
+		// What "cannot assume" means here is what the standing carries
+		// (cli/app.go roleStandings): a role this binary does not COVER, or one
+		// it covers that the account cannot BACK. Both are handoffs — a binary
+		// declining a role its account could back (a maintainer-capable account
+		// pinned to the contributor's coverage, examples/issue/main.go) ends at
+		// the boundary like one whose account lacks the merge, and the item
+		// records the role it awaits. A run that crosses instead says so before
+		// it does: that is the default branch.
 		if st != nil && acts && !st.Finalized && st.Awaits.Role != "" && st.Awaits.Signal == "" {
 			role := st.Awaits.Role
 			switch {
@@ -293,6 +293,8 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 				return 1
 			case !stand.assumes(role):
 				return app.handOff(ctx, *claim, st.Awaits, stand)
+			default:
+				app.reportCrossing(*claim, st)
 			}
 		}
 
@@ -462,10 +464,12 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 // was told.
 type standing struct {
 	account flow.AccountId
-	// roles is meaningful only when rolesKnown. An orchestrator that cannot
-	// detect capabilities has said NOTHING about the account, which is not the
-	// same as an account that can assume nothing — the wording distinguishes
-	// them, and so does assumes below.
+	// roles is what this run may assume: the roles this binary covers that
+	// the account backs (cli/app.go assumableRoles). rolesKnown is whether the
+	// capability half of that could be detected: an orchestrator that cannot
+	// has said NOTHING about the account, which is not the same as an account
+	// that can assume nothing — the wording distinguishes them, and the
+	// derivation answers with the covered roles as they stand.
 	roles      []flow.RoleName
 	rolesKnown bool
 	// creator is the filing account, empty when it could not be read.
@@ -474,12 +478,12 @@ type standing struct {
 
 // assumes reports whether this run may take a move belonging to role.
 //
-// Undetectable capabilities answer TRUE: a ceiling nobody could measure filters
-// nothing, which is the convention assumesRole's nil predicate already carries
-// into auto-selection. Handing an item off on an unanswered question would end
-// the run on the strength of a fact nobody established.
+// It reads the derived set and nothing else — the one derivation already
+// decided what undetectable capabilities mean (roleStanding.assumable), and
+// deciding it again here is how the announcement and the handoff come to
+// disagree.
 func (s standing) assumes(role flow.RoleName) bool {
-	return !s.rolesKnown || slices.Contains(s.roles, role)
+	return slices.Contains(s.roles, role)
 }
 
 // announceStanding derives the run's standing and prints it, before anything is
@@ -574,6 +578,40 @@ func (app *App) handOff(ctx context.Context, claim flow.Claim, awaits flow.Await
 	app.reportStanding(s)
 	reportQuota(app.Err)
 	return 0
+}
+
+// reportCrossing says, before the dispatch, that this run is about to cross a
+// role boundary it also performed the other side of — the moment the doc names
+// for stating what carrying through does not provide
+// (docs/resolution-standalone.md § Declaring what a binary may do: "a
+// resolution about to cross into the integrating role says so before it
+// crosses").
+//
+// It prints when all three hold: the pending role differs from the role the
+// journal's last entry was performed in; that entry was performed by the
+// account this run acts as; and no entry of the journal has this account in the
+// pending role. The third keeps the line to the crossing the doc names. A
+// rework handback returns to a role the account already held and prints
+// nothing; a boundary reached after another account's entry is a handoff being
+// picked up, and prints nothing either — an independent maintainer is not told
+// their review is not independent.
+//
+// Nothing prints for an orchestrator that records no account. Carrying through
+// is defined by what the journal shows, and a journal that names nobody shows
+// no one principal on both sides.
+func (app *App) reportCrossing(claim flow.Claim, item *flow.Item) {
+	pending := item.Awaits.Role
+	last, ok := item.LastEntry()
+	if !ok || claim.Account == "" || last.By != claim.Account || last.Role == pending {
+		return
+	}
+	for _, e := range item.Journal {
+		if e.By == claim.Account && e.Role == pending {
+			return
+		}
+	}
+	fmt.Fprintf(app.Err, "resolve: crossing from %s into %s — %s performed the %s's part, so this is not independent review\n",
+		last.Role, pending, claim.Account, last.Role)
 }
 
 // finalTotalSuffix loads the item and computes the total duration and cost

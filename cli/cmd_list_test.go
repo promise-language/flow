@@ -40,6 +40,7 @@ func TestCmdList_DefaultScope(t *testing.T) {
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         makeTestFlow(t),
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -257,6 +258,7 @@ func TestCmdList_WithDiscoverer_ScopeOpen(t *testing.T) {
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         makeTestFlow(t),
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -291,6 +293,7 @@ func TestCmdList_WithDiscoverer_ScopeProcessable(t *testing.T) {
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         makeTestFlow(t),
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -328,6 +331,7 @@ func TestCmdList_TagFilter(t *testing.T) {
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         makeTestFlow(t),
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -357,6 +361,7 @@ func TestCmdList_UnknownScope(t *testing.T) {
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         makeTestFlow(t),
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -387,6 +392,7 @@ func TestCmdList_JSON_Availability(t *testing.T) {
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         makeTestFlow(t),
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -440,6 +446,7 @@ func TestCmdList_RemitGatesTheListing(t *testing.T) {
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         makeTestFlow(t), // remit: {"task"}
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -490,6 +497,7 @@ func TestCmdList_EmptyDiscovery(t *testing.T) {
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         makeTestFlow(t),
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)

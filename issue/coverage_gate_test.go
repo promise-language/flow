@@ -3,6 +3,7 @@ package issue
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -10,43 +11,10 @@ import (
 )
 
 // Coverage is what keeps one graph honest. Every step exists on every build, so
-// the only thing that says which of them a binary may perform is the narrowing
+// the only thing that says which of them a binary may perform is the coverage
 // it declares — and without it, collapsing the three old graphs would turn every
-// maintainer-capable operator into a carry-through runner with no way to decline.
-
-// performedRoles is the ONE derivation of that narrowing, and it is where the
-// two config fields acquire their meaning: capability is the ceiling, and
-// carry-through is the only choice available inside it.
-func TestPerformedRoles(t *testing.T) {
-	for _, tc := range []struct {
-		name         string
-		role         Role
-		carryThrough bool
-		want         []flow.RoleName
-	}{
-		{"a contributor performs the contributor's steps", RoleContributor, false,
-			[]flow.RoleName{contributorRole}},
-		{"a maintainer declining to carry through stops at the proposal", RoleMaintainer, false,
-			[]flow.RoleName{maintainerRole}},
-		{"carrying through covers both sides of the boundary", RoleMaintainer, true,
-			[]flow.RoleName{contributorRole, maintainerRole}},
-		// The empty role covers nothing: coverage cannot add a role the account
-		// cannot back, so there is nothing for it to narrow.
-		{"an account backing no role covers none", "", false, nil},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := performedRoles(tc.role, tc.carryThrough)
-			if len(got) != len(tc.want) {
-				t.Fatalf("performedRoles(%q, %t) = %v, want %v", tc.role, tc.carryThrough, got, tc.want)
-			}
-			for i := range got {
-				if got[i] != tc.want[i] {
-					t.Fatalf("performedRoles(%q, %t) = %v, want %v", tc.role, tc.carryThrough, got, tc.want)
-				}
-			}
-		})
-	}
-}
+// maintainer-capable operator into a runner carrying every item through with no
+// way to decline.
 
 // atStep is an item whose journal routes to step: one completed execution
 // electing it. Position reads the journal and nothing else, so this is the only
@@ -60,51 +28,61 @@ func atStep(step flow.StepId) *flow.Item {
 	}}}
 }
 
-// gateFor builds the flow and the gate a binary of this configuration installs.
-func gateFor(t *testing.T, role Role, carryThrough bool) flow.PreflightFunc {
+// gateFor builds the flow and the gate a binary declaring this coverage
+// installs.
+func gateFor(t *testing.T, covered ...flow.RoleName) flow.PreflightFunc {
 	t.Helper()
-	b := &builder{cfg: Config{CarryThrough: carryThrough}, role: role}
-	return coverageGate(b.resolveFlow(Config{}), performedRoles(role, carryThrough))
+	b := &builder{cfg: Config{}}
+	return coverageGate(b.resolveFlow(Config{}), covered)
 }
+
+var (
+	contributorOnly = []flow.RoleName{contributorRole}
+	maintainerOnly  = []flow.RoleName{maintainerRole}
+	bothRoles       = []flow.RoleName{contributorRole, maintainerRole}
+)
 
 func TestCoverageGate(t *testing.T) {
 	for _, tc := range []struct {
-		name         string
-		role         Role
-		carryThrough bool
-		item         *flow.Item
-		blocked      bool
+		name    string
+		covered []flow.RoleName
+		item    *flow.Item
+		blocked bool
 	}{
 		// A contributor binary ends at the proposal, exactly as it did when the
 		// maintainer's steps were a different graph.
-		{"a contributor does not judge the proposal", RoleContributor, false,
+		{"a contributor does not judge the proposal", contributorOnly,
 			atStep(flow.StepId(StepReviewProposal)), true},
-		{"a contributor performs its own steps", RoleContributor, false,
+		{"a contributor performs its own steps", contributorOnly,
 			atStep(flow.StepId(StepImplement)), false},
 		// And a maintainer binary does not do the contributor's work: an empty
 		// journal stands at the entry step, which is the contributor's.
-		{"a maintainer does not implement", RoleMaintainer, false,
+		{"a maintainer does not implement", maintainerOnly,
 			atStep(flow.StepId(StepImplement)), true},
-		{"a maintainer judges the proposal", RoleMaintainer, false,
+		{"a maintainer judges the proposal", maintainerOnly,
 			atStep(flow.StepId(StepReviewProposal)), false},
-		{"an empty journal is gated on the entry step's role", RoleMaintainer, false,
+		{"an empty journal is gated on the entry step's role", maintainerOnly,
 			&flow.Item{}, true},
-		// Carrying through is one principal covering both sides, so neither
-		// half is refused — and that is the whole of what carry-through does.
-		{"carrying through covers the contributor's steps", RoleMaintainer, true,
+		// Covering both roles is one principal covering both sides, so neither
+		// half is refused — and that is the whole of what carrying through is.
+		{"covering both roles covers the contributor's steps", bothRoles,
 			atStep(flow.StepId(StepImplement)), false},
-		{"carrying through covers the maintainer's steps", RoleMaintainer, true,
+		{"covering both roles covers the maintainer's steps", bothRoles,
 			atStep(flow.StepId(StepReviewProposal)), false},
-		{"carrying through starts at the entry step", RoleMaintainer, true,
+		{"covering both roles starts at the entry step", bothRoles,
 			&flow.Item{}, false},
 		// The rework edge lands back on a step whose result is already recorded.
 		// Coverage judges the ROLE the route names, never whether the step has
 		// run before.
-		{"a rework handback is the contributor's move like any other", RoleContributor, false,
+		{"a rework handback is the contributor's move like any other", contributorOnly,
+			atStep(flow.StepId(StepImplement)), false},
+		// Coverage is read as declared: the order the roles are named in
+		// changes nothing.
+		{"coverage order is not a ranking", []flow.RoleName{maintainerRole, contributorRole},
 			atStep(flow.StepId(StepImplement)), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := gateFor(t, tc.role, tc.carryThrough)(context.Background(), tc.item)
+			err := gateFor(t, tc.covered...)(context.Background(), tc.item)
 			if !tc.blocked {
 				if err != nil {
 					t.Fatalf("gate = %v, want the step performed", err)
@@ -128,7 +106,7 @@ func TestCoverageGate(t *testing.T) {
 // that step is, and what this binary performs. Two of the three leaves the
 // operator unable to choose between re-running elsewhere and reconfiguring.
 func TestCoverageGate_RefusalNamesTheStepTheRoleAndTheCoverage(t *testing.T) {
-	err := gateFor(t, RoleContributor, false)(context.Background(), atStep(flow.StepId(StepReviewProposal)))
+	err := gateFor(t, contributorOnly...)(context.Background(), atStep(flow.StepId(StepReviewProposal)))
 	if err == nil {
 		t.Fatal("gate = nil, want the proposal review refused")
 	}
@@ -143,7 +121,7 @@ func TestCoverageGate_RefusalNamesTheStepTheRoleAndTheCoverage(t *testing.T) {
 	}
 }
 
-// A carry-through binary performs two roles, and the refusal it would raise has
+// A binary covering both roles performs two, and the refusal it would raise has
 // to render both — a coverage set printed as a bare slice reads as a bug in the
 // message rather than as the binary's standing.
 func TestPerformedList(t *testing.T) {
@@ -153,9 +131,8 @@ func TestPerformedList(t *testing.T) {
 		want    string
 	}{
 		{"none", nil, "no role this lifecycle declares"},
-		{"one", []flow.RoleName{contributorRole}, `the "contributor" role`},
-		{"both", []flow.RoleName{contributorRole, maintainerRole},
-			`the "contributor" and "maintainer" roles`},
+		{"one", contributorOnly, `the "contributor" role`},
+		{"both", bothRoles, `the "contributor" and "maintainer" roles`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := performedList(tc.covered); got != tc.want {
@@ -175,7 +152,7 @@ func TestCoverageGate_LetsAFinalizedItemThrough(t *testing.T) {
 				Step: flow.StepId(StepRecordMerge), Execution: 1,
 				Route: flow.Route{Finalize: d}, By: "tester",
 			}}}
-			if err := gateFor(t, RoleContributor, false)(context.Background(), item); err != nil {
+			if err := gateFor(t, contributorOnly...)(context.Background(), item); err != nil {
 				t.Errorf("gate = %v on a finalized item, want it through to finalize-and-release", err)
 			}
 		})
@@ -188,29 +165,74 @@ func TestCoverageGate_LetsAFinalizedItemThrough(t *testing.T) {
 // different fix.
 func TestCoverageGate_LetsAPositionRefusalThrough(t *testing.T) {
 	item := atStep("no-such-step")
-	if err := gateFor(t, RoleContributor, false)(context.Background(), item); err != nil {
+	if err := gateFor(t, contributorOnly...)(context.Background(), item); err != nil {
 		t.Errorf("gate = %v, want the refusal left to the branch that owns it", err)
 	}
 }
 
-// The account that backs nothing gets the sentence about the access it is
-// missing, not the one about which role's step the route happens to stand on.
-// Both are true; only one is useful, and gate ORDER is what picks it.
-func TestBuildApp_NoRoleAnswersAheadOfCoverage(t *testing.T) {
-	app, err := BuildApp(context.Background(), Config{
+// ONE declared set, read by both the gate and the app. Config.Coverage is
+// converted once in BuildApp and handed to both, so what the gate refuses at
+// dispatch and what the app announces, selects and hands off on cannot
+// disagree. Each half is asserted from the other side: the App's field is what
+// `resolve` and `doctor` read, and the gate's refusal is what a dispatch meets.
+func TestBuildApp_TheAppAndTheGateReadTheSameCoverage(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		covered []Role
+		want    []flow.RoleName
+		// steps the gate lets through and refuses, at the item the route
+		// stands on
+		performs, refuses *flow.Item
+	}{
+		{"contributor", []Role{RoleContributor}, contributorOnly,
+			atStep(flow.StepId(StepImplement)), atStep(flow.StepId(StepReviewProposal))},
+		{"maintainer", []Role{RoleMaintainer}, maintainerOnly,
+			atStep(flow.StepId(StepReviewProposal)), atStep(flow.StepId(StepImplement))},
+		{"both", []Role{RoleContributor, RoleMaintainer}, bothRoles,
+			atStep(flow.StepId(StepReviewProposal)), nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, err := BuildApp(context.Background(), Config{
+				BinaryName: "issue", VerifyCmd: []string{"bin/verify"}, BaseBranch: "main",
+				Coverage: tc.covered,
+			}, Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
+			if err != nil {
+				t.Fatalf("BuildApp: %v", err)
+			}
+			if !slices.Equal(app.Coverage, tc.want) {
+				t.Errorf("App.Coverage = %v, want %v — the declaration as configured", app.Coverage, tc.want)
+			}
+			if err := app.Preflight(context.Background(), tc.performs); err != nil {
+				t.Errorf("Preflight = %v on a covered role's step, want it performed", err)
+			}
+			if tc.refuses == nil {
+				return
+			}
+			err = app.Preflight(context.Background(), tc.refuses)
+			if err == nil || !errors.Is(err, flow.ErrBlocked) {
+				t.Fatalf("Preflight = %v on an uncovered role's step, want it blocked", err)
+			}
+			if !strings.Contains(err.Error(), performedList(tc.want)) {
+				t.Errorf("err = %q, want it to name the coverage the app carries (%s)", err, performedList(tc.want))
+			}
+		})
+	}
+}
+
+// Nothing is probed to build the app. Capability is the ceiling and coverage
+// is the choice within it, and a covered role the account cannot back is a
+// handoff rather than a misconfiguration — so BuildApp has no reason to ask
+// what the account can do, and a binary starts, and `doctor` runs, on a token
+// the backend would refuse.
+func TestBuildApp_DetectsNothing(t *testing.T) {
+	be := &stubBackend{capsErr: errors.New("the token is expired")}
+	if _, err := BuildApp(context.Background(), Config{
 		BinaryName: "issue", VerifyCmd: []string{"bin/verify"}, BaseBranch: "main",
-	}, Deps{Orchestrator: &stubBackend{caps: nil}, Agent: stubAgent{}})
-	if err != nil {
-		t.Fatalf("BuildApp: %v", err)
+		Coverage: []Role{RoleContributor, RoleMaintainer},
+	}, Deps{Orchestrator: be, Agent: stubAgent{}}); err != nil {
+		t.Fatalf("BuildApp = %v, want an app built without asking the backend anything", err)
 	}
-	err = app.Preflight(context.Background(), &flow.Item{})
-	if err == nil {
-		t.Fatal("Preflight = nil, want every dispatch refused")
-	}
-	if !strings.Contains(err.Error(), noAssumableRole) {
-		t.Errorf("err = %q, want the no-role wording", err)
-	}
-	if strings.Contains(err.Error(), performedList(nil)) {
-		t.Errorf("err = %q, want the coverage gate NOT to answer first", err)
+	if be.capsCalls != 0 {
+		t.Errorf("DetectCapabilities called %d time(s) at build, want none", be.capsCalls)
 	}
 }

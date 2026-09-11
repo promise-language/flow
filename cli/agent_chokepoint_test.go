@@ -22,6 +22,7 @@ func TestAppAgent_RefusesATurnOutsideAStepHandler(t *testing.T) {
 		Agent:        inner,
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         newDummyFlow("x"),
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -55,6 +56,7 @@ func TestAppAgent_StillAnswersName(t *testing.T) {
 		Agent:        &stubAgent{name: "claude"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         newDummyFlow("x"),
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -286,6 +288,7 @@ func TestValidate_DoesNotDoubleWrapTheAgent(t *testing.T) {
 		Agent:        inner,
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         newDummyFlow("x"),
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	for i := 0; i < 3; i++ {
 		if err := app.validate(); err != nil {

@@ -151,6 +151,39 @@ func TestCapability_Valid(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Missing — what a role requires that an account does not hold.
+// ---------------------------------------------------------------------------
+
+// Missing is THE predicate for "can this account back this role", and it
+// answers with the difference: a selection asks whether it is empty, and a
+// report saying a role is out of reach has to name what is missing.
+func TestRoleDecl_Missing(t *testing.T) {
+	maintainer := RoleDecl{Name: "maintainer", Capabilities: []Capability{CapPush, CapMerge}}
+	for _, tc := range []struct {
+		name     string
+		detected []Capability
+		want     []Capability
+	}{
+		{"an exact cover is missing nothing", []Capability{CapPush, CapMerge}, nil},
+		{"a superset is missing nothing", []Capability{CapApprove, CapMerge, CapPush}, nil},
+		{"one held, one missing", []Capability{CapPush}, []Capability{CapMerge}},
+		// In declaration order, so a report lists them as the role declares them.
+		{"nothing detected is missing everything, in order", nil, []Capability{CapPush, CapMerge}},
+		{"a capability no role asks for adds nothing", []Capability{CapApprove}, []Capability{CapPush, CapMerge}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := maintainer.Missing(tc.detected); !slices.Equal(got, tc.want) {
+				t.Errorf("Missing(%v) = %v, want %v", tc.detected, got, tc.want)
+			}
+		})
+	}
+	// A role requiring nothing is missing nothing for every account.
+	if got := (RoleDecl{Name: "ghost"}).Missing(nil); got != nil {
+		t.Errorf("a capability-less role is missing %v, want nothing", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // AssumableRoles — capability is the ceiling.
 // ---------------------------------------------------------------------------
 

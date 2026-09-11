@@ -34,6 +34,7 @@ func TestCmdList_RefusesATagBelowTheFloor(t *testing.T) {
 				Agent:        &stubAgent{name: "stub"},
 				Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 				Flow:         makeTestFlow(t),
+				Coverage:     []flow.RoleName{"contributor"},
 			}
 			if err := app.validate(); err != nil {
 				t.Fatalf("validate: %v", err)
@@ -105,6 +106,7 @@ func TestCmdList_ReportsOnlyTheBlockersStillOpen(t *testing.T) {
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         makeTestFlow(t),
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)

@@ -333,6 +333,7 @@ func TestUnknownFlag_ClaimsNothing(t *testing.T) {
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         newDummyFlow("x"),
+		Coverage:     []flow.RoleName{"contributor"},
 		Out:          &bytes.Buffer{},
 		Err:          &bytes.Buffer{},
 	}

@@ -13,55 +13,6 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// CarryThrough validation.
-// ---------------------------------------------------------------------------
-
-func TestCarryThroughContributorRefused(t *testing.T) {
-	cfg := Config{
-		BinaryName:   "test",
-		VerifyCmd:    []string{"bin/verify"},
-		Role:         RoleContributor,
-		CarryThrough: true,
-	}
-	deps := Deps{
-		Orchestrator: &buildTestBackend{role: RoleContributor},
-		Agent:        &scriptedAgent{},
-	}
-
-	_, err := BuildApp(context.Background(), cfg, deps)
-	if err == nil {
-		t.Fatal("expected error for CarryThrough with RoleContributor")
-	}
-	if !strings.Contains(err.Error(), "CarryThrough") {
-		t.Errorf("error should mention CarryThrough: %s", err)
-	}
-	if !strings.Contains(err.Error(), string(RoleContributor)) {
-		t.Errorf("error should mention the contributor role: %s", err)
-	}
-}
-
-func TestCarryThroughMaintainerAccepted(t *testing.T) {
-	cfg := Config{
-		BinaryName:   "test",
-		VerifyCmd:    []string{"bin/verify"},
-		Role:         RoleMaintainer,
-		CarryThrough: true,
-	}
-	deps := Deps{
-		Orchestrator: &buildTestBackend{role: RoleMaintainer},
-		Agent:        &scriptedAgent{},
-	}
-
-	app, err := BuildApp(context.Background(), cfg, deps)
-	if err != nil {
-		t.Fatalf("BuildApp: %v", err)
-	}
-	if !app.CarryThrough {
-		t.Error("app.CarryThrough should be true")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Budgets are the project's policy, handed to the SDK — not step declarations.
 // ---------------------------------------------------------------------------
 
@@ -73,7 +24,7 @@ func TestBuildApp_BudgetsBecomeAppPolicy(t *testing.T) {
 	app, err := BuildApp(context.Background(), Config{
 		BinaryName: "test",
 		VerifyCmd:  []string{"bin/verify"},
-		Role:       RoleContributor,
+		Coverage:   []Role{RoleContributor},
 		BaseBranch: "main",
 		Budgets: map[StepID]flow.StepBudget{
 			StepImplement: {MaxInvocations: 9, Timeout: 90 * time.Minute},
@@ -119,7 +70,7 @@ func TestMaintainerBinaryBlocksAtTheContributorEntry(t *testing.T) {
 	app, err := BuildApp(context.Background(), Config{
 		BinaryName: "test",
 		VerifyCmd:  []string{"bin/verify"},
-		Role:       RoleMaintainer,
+		Coverage:   []Role{RoleMaintainer},
 		BaseBranch: "main",
 	}, Deps{Orchestrator: be, Agent: &scriptedAgent{}})
 	if err != nil {
@@ -367,7 +318,7 @@ func wantRoles(t *testing.T, f *flow.Flow, declared []Role, tags map[flow.StepId
 // contributor's run to a proposal, the boundary at close branch, and the
 // maintainer's judgement with its three outcomes.
 func TestResolveFlow_DeclaresTheDocumentedGraph(t *testing.T) {
-	b := &builder{cfg: Config{}, role: RoleContributor}
+	b := &builder{cfg: Config{}}
 	wantGraph(t, b.resolveFlow(Config{}), flow.StepId(StepPlan),
 		map[flow.StepId][]flow.StepId{
 			flow.StepId(StepPlan):      {flow.StepId(StepBranch)},
@@ -409,7 +360,7 @@ func TestResolveFlow_DeclaresTheDocumentedGraph(t *testing.T) {
 // Twelve tags, and the boundary is the edge between them: close branch is the
 // contributor's last step, review the proposal the maintainer's first.
 func TestResolveFlow_TagsEveryStepAndDeclaresBothRoles(t *testing.T) {
-	b := &builder{cfg: Config{}, role: RoleContributor}
+	b := &builder{cfg: Config{}}
 	f := b.resolveFlow(Config{})
 	wantRoles(t, f, []Role{RoleContributor, RoleMaintainer}, map[flow.StepId]Role{
 		flow.StepId(StepPlan):      RoleContributor,
@@ -460,8 +411,7 @@ func TestResolveFlow_DeclaresTheBranchingSequence(t *testing.T) {
 		flow.StepId(StepMerge):            {flow.NeedsAny, flow.LeavesAsFound},
 		flow.StepId(StepRecordMerge):      {flow.NeedsAny, flow.LeavesAsFound},
 	}
-	b := &builder{cfg: Config{}, role: RoleContributor}
-	items := (&builder{cfg: b.cfg, role: b.role}).resolveFlow(Config{}).Items()
+	items := (&builder{cfg: Config{}}).resolveFlow(Config{}).Items()
 	if len(items) != len(want) {
 		t.Fatalf("the flow registers %d steps, and the branching sequence covers %d", len(items), len(want))
 	}
@@ -500,7 +450,7 @@ func TestResolveFlow_DeclaresWhichStepsAreMechanical(t *testing.T) {
 		flow.StepId(StepMerge):            flow.PromptsNone,
 		flow.StepId(StepRecordMerge):      flow.PromptsNone,
 	}
-	items := (&builder{cfg: Config{}, role: RoleContributor}).resolveFlow(Config{}).Items()
+	items := (&builder{cfg: Config{}}).resolveFlow(Config{}).Items()
 	if len(items) != len(want) {
 		t.Fatalf("the flow registers %d steps, and the table covers %d", len(items), len(want))
 	}
@@ -519,29 +469,36 @@ func TestResolveFlow_DeclaresWhichStepsAreMechanical(t *testing.T) {
 	}
 }
 
-// The graph does not vary by who is running. Coverage is what narrows a
-// binary's part of it, at dispatch; building a different graph per role would
-// decide the processing before the journal begins, with nothing recording why —
-// and would put the boundary outside the one object that is supposed to show
-// it.
-func TestResolveFlow_IsTheSameGraphForEveryRole(t *testing.T) {
-	shape := func(f *flow.Flow) []flow.LifecycleItem { return f.Items() }
-	base := shape((&builder{cfg: Config{}, role: RoleContributor}).resolveFlow(Config{}))
+// The graph does not vary by what the binary covers. Coverage is what narrows a
+// binary's part of it, at dispatch; building a different graph per coverage
+// would decide the processing before the journal begins, with nothing recording
+// why — and would put the boundary outside the one object that is supposed to
+// show it.
+func TestBuildApp_BuildsTheSameGraphForEveryCoverage(t *testing.T) {
+	shape := func(t *testing.T, covered []Role) []flow.LifecycleItem {
+		t.Helper()
+		app, err := BuildApp(context.Background(), Config{
+			BinaryName: "test", VerifyCmd: []string{"bin/verify"}, BaseBranch: "main",
+			Coverage: covered,
+		}, Deps{Orchestrator: &buildTestBackend{}, Agent: &scriptedAgent{}})
+		if err != nil {
+			t.Fatalf("BuildApp: %v", err)
+		}
+		return app.Flow.Items()
+	}
+	base := shape(t, []Role{RoleContributor})
 	for _, tc := range []struct {
-		name         string
-		role         Role
-		carryThrough bool
+		name    string
+		covered []Role
 	}{
-		{"contributor", RoleContributor, false},
-		{"maintainer", RoleMaintainer, false},
-		{"maintainer carrying through", RoleMaintainer, true},
-		// The account that backs nothing builds the same graph too: the gate
-		// that stops it is a preflight, not a missing step.
-		{"no role", "", false},
+		{"maintainer", []Role{RoleMaintainer}},
+		{"both roles", []Role{RoleContributor, RoleMaintainer}},
+		// A coverage the App will refuse at startup builds the same graph too:
+		// what refuses it is cli.App's validation, not a missing step.
+		{"no role", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := Config{CarryThrough: tc.carryThrough}
-			got := shape((&builder{cfg: cfg, role: tc.role}).resolveFlow(cfg))
+			got := shape(t, tc.covered)
 			if len(got) != len(base) {
 				t.Fatalf("registers %d steps, want the %d every other build registers", len(got), len(base))
 			}

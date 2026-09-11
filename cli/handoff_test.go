@@ -13,13 +13,19 @@ import (
 )
 
 // handoffTestApp builds the two-role fixture the handoff tests turn: a
-// contributor step that elects a maintainer step. What the arena's account can
-// do is the whole lever — push-only ends the run at the boundary, push+merge
-// crosses it without stopping (docs/resolution.md § One principal, several
-// roles).
+// contributor step that elects a maintainer step, with BOTH roles covered so
+// that what the arena's account can do is the lever — push-only ends the run
+// at the boundary, push+merge crosses it without stopping (docs/resolution.md
+// § One principal, several roles). handoffTestAppCovering is the same fixture
+// with the coverage chosen, for a binary declining a role its account backs.
 func handoffTestApp(t *testing.T, be flow.Orchestrator) (*App, *bytes.Buffer) {
 	t.Helper()
-	app, _, errBuf := resolveTestAppFlow(t, be, func(f *flow.Flow) {
+	return handoffTestAppCovering(t, be, "contributor", "maintainer")
+}
+
+func handoffTestAppCovering(t *testing.T, be flow.Orchestrator, covered ...flow.RoleName) (*App, *bytes.Buffer) {
+	t.Helper()
+	app, _, errBuf := resolveTestAppCovering(t, be, covered, func(f *flow.Flow) {
 		f.Role("maintainer", flow.CapMerge)
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			return ctx.Next("commit", "planned").Markdown("the plan"), nil
@@ -29,6 +35,204 @@ func handoffTestApp(t *testing.T, be flow.Orchestrator) (*App, *bytes.Buffer) {
 		}, flow.StepConfig{Prompts: flow.PromptsNone, Role: "maintainer", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	})
 	return app, errBuf
+}
+
+// crossingLine is what a run says before it crosses a boundary it performed
+// the other side of: the two roles, the account, and what carrying through
+// does not provide (docs/cli.md § The announcement names the run's standing).
+const crossingLine = "resolve: crossing from contributor into maintainer — fake-account performed the contributor's part, so this is not independent review"
+
+// Coverage is the choice within the ceiling: a binary declining a role its
+// account could back hands off at the boundary exactly as one whose account
+// lacks the merge does. The ceiling alone would carry every maintainer-capable
+// operator through with no way to decline (docs/resolution-standalone.md
+// § Declaring what a binary may do).
+func TestCmdResolve_ADeclinedRoleHandsOffWhateverTheAccountCanDo(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be.SetCapabilities("", flow.CapPush, flow.CapMerge) // the account could merge
+	app, errBuf := handoffTestAppCovering(t, be, "contributor")
+
+	code := app.cmdResolve(context.Background(), []string{"1"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 — a handoff is a clean end; err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "handed off — awaits maintainer") {
+		t.Errorf("a declined role was not handed off; got %q", errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), `running "close branch"…`) {
+		t.Errorf("the declined role's step was dispatched; got %q", errBuf.String())
+	}
+	// The standing names what this run may assume — the covered role the
+	// account backs — not everything the account could do.
+	if !strings.Contains(errBuf.String(), "roles it can assume: contributor\n") {
+		t.Errorf("the announcement does not name the covered role alone; got %q", errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "crossing") {
+		t.Errorf("a handoff is not a crossing; got %q", errBuf.String())
+	}
+	item, err := be.Load(context.Background(), be.Ref("1"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !item.Holder.Empty() {
+		t.Errorf("the claim is still held by %+v after the handoff", item.Holder)
+	}
+}
+
+// Undetectable capabilities filter nothing WITHIN coverage; they do not widen
+// it. A binary that declined the maintainer's role still hands off at the
+// boundary when the orchestrator cannot say what the account holds, because
+// coverage is configuration and was never in question.
+func TestCmdResolve_UndetectableCapabilitiesStillHandOffADeclinedRole(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be := &undetectableCapabilities{Orchestrator: inner, err: errors.New("the forge will not say")}
+	app, errBuf := handoffTestAppCovering(t, be, "contributor")
+
+	code := app.cmdResolve(context.Background(), []string{"1"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "handed off — awaits maintainer") {
+		t.Errorf("an uncovered role was not handed off on unknown capabilities; got %q", errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), `running "close branch"…`) {
+		t.Errorf("the declined role's step was dispatched; got %q", errBuf.String())
+	}
+}
+
+// A run about to cross into the maintainer's role, having performed the
+// contributor's part itself, says so before it crosses — after the
+// contributor's last step reports and before the maintainer's first is
+// announced, which is the moment someone could still choose otherwise. Once,
+// not on every later maintainer step: the crossing is the boundary, and the
+// steps behind it are the maintainer's like any other.
+func TestCmdResolve_ACrossingIsAnnouncedBeforeTheMaintainersFirstStep(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be.SetCapabilities("", flow.CapPush, flow.CapMerge)
+	app, errBuf := handoffTestApp(t, be)
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	got := errBuf.String()
+	if n := strings.Count(got, crossingLine); n != 1 {
+		t.Fatalf("the crossing line was printed %d time(s), want exactly 1; got %q", n, got)
+	}
+	crossing := strings.Index(got, crossingLine)
+	planned := strings.Index(got, "resolve: plan → done")
+	running := strings.Index(got, `running "close branch"…`)
+	if planned < 0 || running < 0 {
+		t.Fatalf("expected the contributor's outcome and the maintainer's dispatch to be narrated; got %q", got)
+	}
+	if crossing < planned {
+		t.Errorf("the crossing was announced before the contributor's step finished — nothing had been crossed yet; got %q", got)
+	}
+	if crossing > running {
+		t.Errorf("the crossing was announced after the maintainer's step was dispatched; got %q", got)
+	}
+	// Announced before any first dispatch it is not: a fresh item has no side
+	// to have performed.
+	if first := strings.Index(got, `running "write plan"…`); crossing < first {
+		t.Errorf("a fresh item announced a crossing; got %q", got)
+	}
+}
+
+// A run that never leaves its role crosses nothing, and says nothing.
+func TestCmdResolve_NoCrossingIsAnnouncedWithinOneRole(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	app, _, errBuf := resolveTestApp(t, be)
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "crossing") {
+		t.Errorf("a single-role run announced a crossing; got %q", errBuf.String())
+	}
+}
+
+// Picking up another account's proposal is a handoff being completed, not a
+// crossing: the maintainer's review IS independent, and telling that operator
+// otherwise is false in the direction that matters.
+func TestCmdResolve_PickingUpAnotherAccountsProposalIsNotACrossing(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", awaitingMaintainer()) // the contributor's part was bob's
+	be.SetCapabilities("", flow.CapPush, flow.CapMerge)
+	app, errBuf := handoffTestApp(t, be)
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "crossing") {
+		t.Errorf("another account's proposal was reported as this run's own crossing; got %q", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), `running "close branch"…`) {
+		t.Errorf("the maintainer's step never ran; got %q", errBuf.String())
+	}
+}
+
+// A rework handback returns to a role the account already held on this item,
+// and nothing is crossed: the account is back where it was, and it was told
+// about the arrangement when it first crossed.
+func TestCmdResolve_AReworkHandbackIsNotACrossing(t *testing.T) {
+	be := fake.New()
+	// One account performed both sides already: the contributor's plan, then
+	// the maintainer's review, which handed the item back for rework.
+	be.AddItem("1", flow.Item{Type: "task", Title: "1",
+		Awaits: flow.Awaits{Role: "contributor", Account: "fake-account"},
+		Journal: []flow.JournalEntry{
+			{Step: "plan", Execution: 1, Route: flow.Route{Next: "commit"},
+				By: "fake-account", Role: "contributor", Awaits: flow.Awaits{Role: "maintainer"}},
+			{Step: "commit", Execution: 1, Route: flow.Route{Next: "plan"},
+				By: "fake-account", Role: "maintainer", Awaits: flow.Awaits{Role: "contributor"}},
+		}})
+	be.SetCapabilities("", flow.CapPush, flow.CapMerge)
+	app, _, errBuf := resolveTestAppFlow(t, be, func(f *flow.Flow) {
+		f.Role("maintainer", flow.CapMerge)
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Next("commit", "reworked").Markdown("the plan, again"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Entry: true, Role: "contributor", Next: []flow.StepId{"commit"}})
+		f.AddStep("close branch", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "landed").CommitHash("abc"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsNone, Role: "maintainer", Next: []flow.StepId{"plan"},
+			MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	})
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	// Neither the handback into the contributor's role nor the return into the
+	// maintainer's is a crossing: the account held both already.
+	if strings.Contains(errBuf.String(), "crossing") {
+		t.Errorf("a rework handback was reported as a crossing; got %q", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), `running "close branch"…`) {
+		t.Errorf("the run did not return to the maintainer's step; got %q", errBuf.String())
+	}
+}
+
+// An orchestrator that records no account gives the line nothing to say:
+// carrying through is defined by what the journal shows, and a journal that
+// names nobody shows no one principal on both sides.
+func TestCmdResolve_NoCrossingIsAnnouncedWithoutAnAccountOfRecord(t *testing.T) {
+	be := fake.New()
+	be.SetAccount("")
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be.SetCapabilities("", flow.CapPush, flow.CapMerge)
+	app, errBuf := handoffTestApp(t, be)
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "crossing") {
+		t.Errorf("a crossing was announced with no account to attribute either side to; got %q", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), `running "close branch"…`) {
+		t.Errorf("the maintainer's step never ran; got %q", errBuf.String())
+	}
 }
 
 // A step whose role this account cannot assume is a HANDOFF, not the end of the

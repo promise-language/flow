@@ -14,7 +14,6 @@ import (
 // each closure.
 type builder struct {
 	cfg     Config
-	role    Role
 	backend flow.Orchestrator
 	// base is resolved lazily, on the first step that needs it — see
 	// baseBranch. Resolving it in BuildApp would put a network call between
@@ -1265,7 +1264,7 @@ func (b *builder) agentMarkdownStep(ctx flow.StepCtx, id PromptID, next flow.Ste
 func (b *builder) promptContext(ctx flow.StepCtx) (PromptContext, error) {
 	// The branch step is not here: implement reads the commit it recorded
 	// through ctx.CommitHash, and no prompt has anything to say about it.
-	pc, err := newPromptContext(ctx, b.cfg, b.role, []StepID{
+	pc, err := newPromptContext(ctx, b.cfg, []StepID{
 		StepPlan, StepImplement, StepReview, StepCoverage,
 	})
 	if err != nil {
