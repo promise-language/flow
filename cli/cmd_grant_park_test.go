@@ -364,7 +364,8 @@ func TestGrantPark_QuestionRefusalStaysOneLine(t *testing.T) {
 
 // A ParkRefused park is not a budget exhaustion — granting budget would not
 // unpark it. The grant command must refuse and print the refusal-specific
-// remedy so the operator knows to fix the environment, not raise a cap.
+// remedy so the operator knows the park is deterministic and that its reason
+// names the cause to change, not a cap to raise.
 func TestGrantPark_RefusesRefusedPark(t *testing.T) {
 	env := newParkGrantEnv(t)
 	env.park(t, flow.ParkRequest{
@@ -377,7 +378,7 @@ func TestGrantPark_RefusesRefusedPark(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2", code)
 	}
-	for _, want := range []string{"not a budget cap", "deterministic", "Fix the environment"} {
+	for _, want := range []string{"not a budget cap", "deterministic", "reason"} {
 		if !strings.Contains(env.err.String(), want) {
 			t.Errorf("stderr = %q, want %q", env.err.String(), want)
 		}

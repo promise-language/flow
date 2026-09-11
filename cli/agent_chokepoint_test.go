@@ -130,7 +130,9 @@ func assertMechanicalRefusalParked(t *testing.T, res flow.InvocationResult, agen
 	// path is a fact about the machine the binary was built on, and the reason
 	// is published on the item. Wanting "(agent_chokepoint_test.go:" rather than
 	// the bare file name is what makes a regression to the full path visible.
-	for _, want := range []string{`"` + step + `"`, "Prompts: none", "promptFromMechanicalStep", "(agent_chokepoint_test.go:"} {
+	// "should not declare none" is the instruction remedyFor(ParkRefused) sends
+	// the operator to the reason for, so the reason must carry it.
+	for _, want := range []string{`"` + step + `"`, "Prompts: none", "should not declare none", "promptFromMechanicalStep", "(agent_chokepoint_test.go:"} {
 		if !strings.Contains(res.Reason, want) {
 			t.Errorf("park reason does not mention %q — a reader cannot tell whether to fix the handler or the declaration without both the step and the site: %q", want, res.Reason)
 		}
