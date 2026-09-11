@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -385,6 +386,76 @@ func TestGrantPark_RefusesRefusedPark(t *testing.T) {
 	}
 	if got := env.budget(t, "plan").MaxInvocations; got != 3 {
 		t.Errorf("MaxInvocations = %d, want 3 (unchanged — no budget written)", got)
+	}
+}
+
+// The refused remedy does not carry the fix: it sends the operator to the
+// park's reason and names `status` as where that is printed. That is a remedy
+// only if the reason a mis-declared step leaves behind actually reaches
+// `status`, so the journey is run whole — a real step declaring Prompts: none
+// parks, `grant` refuses and points, `status` shows the instruction. The park
+// comes from the chokepoint and not from a hand-written ParkRequest, so the
+// reason `status` prints is the one the dispatch recorded: a park persisted
+// without its reason, or a parked line that drops it, would leave the operator
+// where the old remedy did — told to look somewhere that says nothing.
+func TestGrantPark_RefusedRemedyPointsAtAReasonStatusPrints(t *testing.T) {
+	agent := &stubAgent{name: "stub"}
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("open branch", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, promptFromMechanicalStep(ctx)
+		}, mechanicalStepConfig())
+	}, agent)
+	out, errOut := &bytes.Buffer{}, &bytes.Buffer{}
+	app.Out, app.Err = out, errOut
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusParked) || res.Park == nil || res.Park.Kind != flow.ParkRefused {
+		t.Fatalf("res = %+v, want parked %q", res, flow.ParkRefused)
+	}
+
+	// grant refuses, and the refusal says where the reason is.
+	if code := app.cmdGrant(context.Background(), nil); code != 2 {
+		t.Fatalf("grant exit = %d, want 2; stderr=%q", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "status") {
+		t.Errorf("grant stderr = %q, want it to name `status` as where the park's reason is printed", errOut.String())
+	}
+
+	// The parked line carries the reason, and the reason carries the
+	// instruction the remedy promised.
+	out.Reset()
+	if code := app.cmdStatus(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("status exit = %d, want 0; stderr=%q", code, errOut.String())
+	}
+	var parkedLine string
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.HasPrefix(line, "parked: ") {
+			parkedLine = line
+		}
+	}
+	if parkedLine == "" {
+		t.Fatalf("status printed no parked line:\n%s", out.String())
+	}
+	for _, want := range []string{string(flow.ParkRefused), `"plan"`, "should not declare none"} {
+		if !strings.Contains(parkedLine, want) {
+			t.Errorf("status parked line = %q, want it to carry %q — the remedy sent the operator here for it", parkedLine, want)
+		}
+	}
+
+	// The machine form carries the same reason, unclipped.
+	out.Reset()
+	if code := app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("status --json exit = %d, want 0; stderr=%q", code, errOut.String())
+	}
+	var payload statusPayload
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if payload.Park == nil || payload.Park.Reason != res.Park.Reason {
+		t.Errorf("status --json park = %+v, want reason %q — the one the dispatch parked with", payload.Park, res.Park.Reason)
 	}
 }
 
