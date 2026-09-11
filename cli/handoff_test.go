@@ -174,6 +174,37 @@ func TestCmdResolve_PickingUpAnotherAccountsProposalIsNotACrossing(t *testing.T)
 	}
 }
 
+// The crossing is read off the JOURNAL, not off what this process has done so
+// far: an item a contributor-only binary took to the proposal, picked up now by
+// a run covering both roles on the same account, is one principal on both
+// sides just as much as a single run through both — and the line is owed
+// before the maintainer's first step either way. Keyed on this run's own
+// dispatches instead, re-running with wider coverage would review one's own
+// proposal with no word said.
+func TestCmdResolve_ResumingOnesOwnProposalAcrossTheBoundaryIsACrossing(t *testing.T) {
+	be := fake.New()
+	mine := awaitingMaintainer()
+	mine.Journal[0].By = "fake-account" // the contributor's part was this account's, in an earlier run
+	be.AddItem("1", mine)
+	be.SetCapabilities("", flow.CapPush, flow.CapMerge)
+	app, errBuf := handoffTestApp(t, be)
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	got := errBuf.String()
+	if n := strings.Count(got, crossingLine); n != 1 {
+		t.Fatalf("the crossing line was printed %d time(s), want exactly 1; got %q", n, got)
+	}
+	running := strings.Index(got, `running "close branch"…`)
+	if running < 0 {
+		t.Fatalf("the maintainer's step never ran; got %q", got)
+	}
+	if strings.Index(got, crossingLine) > running {
+		t.Errorf("the crossing was announced after the maintainer's step was dispatched; got %q", got)
+	}
+}
+
 // A rework handback returns to a role the account already held on this item,
 // and nothing is crossed: the account is back where it was, and it was told
 // about the arrangement when it first crossed.

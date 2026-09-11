@@ -1,6 +1,7 @@
 package issue
 
 import (
+	"bytes"
 	"context"
 	"slices"
 	"strings"
@@ -11,6 +12,55 @@ import (
 	"github.com/promise-language/flow/cli"
 	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
+
+// ---------------------------------------------------------------------------
+// Coverage is declared, never defaulted.
+// ---------------------------------------------------------------------------
+
+// Config.Coverage is REQUIRED and handed over as written: BuildApp neither
+// fills in a role for a binary that declares none nor drops a name this
+// lifecycle does not declare. Both are refused at startup, by the binary's own
+// entry point, naming the field and exiting 2 (docs/cli.md § Startup) — the
+// alternatives are a binary started as one that quietly does everything its
+// account permits, and a typo'd coverage that silently covers less than the
+// operator wrote. Role is a string type, so `issue.Role("admin")` compiles.
+//
+// Asserted through cli.RunWithArgs rather than BuildApp's error, because
+// BuildApp is meant to succeed here: the refusal is startup's, and `doctor`
+// has to start on it.
+func TestBuildApp_CoverageIsRefusedAtStartupRatherThanDefaulted(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		covered []Role
+		want    string // what the refusal must name, beyond the field
+	}{
+		{"none declared", nil, "App.Coverage is empty"},
+		{"a role this lifecycle does not declare", []Role{RoleContributor, "admin"}, `"admin"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// An orchestrator startup finds nothing else wrong with, so the
+			// coverage is the refusal reported.
+			be := fake.New(resolveSignals()...)
+			be.SetSupportedArtifacts(resolveArtifacts()...)
+			app, err := BuildApp(context.Background(), Config{
+				BinaryName: "issue", VerifyCmd: []string{"bin/verify"}, BaseBranch: "main",
+				Coverage: tc.covered,
+			}, Deps{Orchestrator: be, Agent: &scriptedAgent{}})
+			if err != nil {
+				t.Fatalf("BuildApp = %v, want the app built — the coverage is refused at startup, where `doctor` still runs", err)
+			}
+			out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+			app.Out, app.Err = out, errBuf
+			if code := cli.RunWithArgs(app, []string{"list"}); code != 2 {
+				t.Fatalf("exit code = %d, want 2 (out=%q err=%q)", code, out.String(), errBuf.String())
+			}
+			got := errBuf.String()
+			if !strings.HasPrefix(got, "startup error:") || !strings.Contains(got, "App.Coverage") || !strings.Contains(got, tc.want) {
+				t.Errorf("stderr = %q, want the startup refusal naming App.Coverage and %s", got, tc.want)
+			}
+		})
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Budgets are the project's policy, handed to the SDK — not step declarations.
