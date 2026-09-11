@@ -372,6 +372,79 @@ func TestPruneRetired_MissingSidecarOrMissingBinaryIsNotAnError(t *testing.T) {
 	})
 }
 
+// A retired binary that cannot be read cannot be shown to be what make built,
+// and the rule is "recorded AND unchanged": unverifiable is not unchanged. It
+// stays, the warning says why, and the build goes on — the same treatment a
+// replaced binary gets, since both are files make can no longer vouch for.
+// Removing it would delete something on the strength of its name alone.
+func TestPruneRetired_LeavesABinaryItCannotRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	os.MkdirAll(binDir, 0o755)
+
+	retiredHash := writeBin(t, binDir, "precommit", "precommit-binary-v1")
+	hashFile := filepath.Join(binDir, ".tools.hash")
+	writeSidecar(t, hashFile, "abc123", map[string]string{
+		"precommit": retiredHash,
+	})
+	path := filepath.Join(binDir, common.BinaryName("precommit"))
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(path, 0o755) })
+
+	stderr := captureStderr(t)
+	if err := pruneRetired(hashFile, binDir, []string{"verify"}); err != nil {
+		t.Fatalf("an unreadable retired binary must not fail the build: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("bin/precommit, which make could not read and so could not vouch for, was removed: %v", err)
+	}
+	if got := stderr(); !strings.Contains(got, "precommit") || !strings.Contains(got, "cannot be read") {
+		t.Errorf("stderr = %q, want a warning naming the unreadable binary and why it stays", got)
+	}
+}
+
+// A retired binary that IS make's and cannot be removed is a failed build, not
+// a warning. This is the one exit that fails: the file is provably make's
+// leftover, and a leftover under a guard name is the hazard guardNames
+// describes, so leaving it behind with a line on stderr would let "removed"
+// and "could not remove" look alike to the next ./make, which finds the name
+// gone from the sidecar it is about to write and never looks again.
+func TestPruneRetired_CannotRemoveIsAnError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	os.MkdirAll(binDir, 0o755)
+
+	retiredHash := writeBin(t, binDir, "precommit", "precommit-binary-v1")
+	hashFile := filepath.Join(binDir, ".tools.hash")
+	writeSidecar(t, hashFile, "abc123", map[string]string{
+		"precommit": retiredHash,
+	})
+	// Readable, so the hash check passes; not writable, so unlink fails.
+	if err := os.Chmod(binDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(binDir, 0o755) })
+
+	err := pruneRetired(hashFile, binDir, []string{"verify"})
+	if err == nil {
+		t.Fatal("pruneRetired reported success with make's own retired binary still in bin/")
+	}
+	if !strings.Contains(err.Error(), "precommit") {
+		t.Errorf("err = %v, want it to name the binary it could not remove", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(binDir, common.BinaryName("precommit"))); statErr != nil {
+		t.Errorf("bin/precommit should still be there after a failed remove: %v", statErr)
+	}
+}
+
 // captureStderr redirects os.Stderr for the rest of the test and returns a
 // function that yields what was written so far.
 func captureStderr(t *testing.T) func() string {

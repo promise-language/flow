@@ -619,6 +619,33 @@ func TestLoadManifest_MalformedJSON(t *testing.T) {
 	}
 }
 
+// tools/gates/thresholds.json is a cross-repository contract, not this
+// package's choice: the workspace's tool-contract.md §3 fixes tools/gates/ as
+// the home for gate terms at the same path in every project, and a checker
+// that refuses a change authoring its own thresholds is a path rule over that
+// prefix. Every other test here writes the manifest wherever ManifestFile
+// points, so they would follow the constant anywhere — this one spells the
+// path out, so a constant that drifts from the contract fails here.
+func TestLoadManifest_ReadsToolsGatesThresholds(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tools", "gates", "thresholds.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(`{"failed_tests": {"direction": "at_most", "cap": 0}}`)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err := loadManifest(dir)
+	if err != nil {
+		t.Fatalf("loadManifest did not read tools/gates/thresholds.json, the path tool-contract.md §3 fixes: %v", err)
+	}
+	if th, ok := manifest["failed_tests"]; !ok || th.Direction != AtMost || th.Cap != 0 {
+		t.Errorf("manifest = %+v, want the failed_tests term read from tools/gates/thresholds.json", manifest)
+	}
+}
+
 // The manifest moved from the repo root to tools/gates/ (#342): the
 // workspace's tool-contract.md §3 fixes that prefix so a checker can refuse a
 // change that authors its own thresholds by path alone. A loader that still
