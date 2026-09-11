@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -837,6 +838,22 @@ func TestQuotaCache_TestsNeverUseTheRealLocation(t *testing.T) {
 	}
 }
 
+func TestQuotaCache_TestsNeverUseTheRealCredential(t *testing.T) {
+	// The same doctrine for the seam keying added. The record is named after a
+	// digest of the credential, so discovery now runs on the path every test
+	// that resolves a record path takes, and the real one reads the operator's
+	// credentials.json — or, on a Keychain machine, forks `security`, which on a
+	// locked machine prompts. TestMain redirects it for the whole package; if
+	// that redirect is ever dropped nothing else here would notice, because a
+	// real token names a record just as well as a stub one does.
+	//
+	// The seam is COMPARED, not called: calling it is the thing this test is
+	// here to say must not happen.
+	if reflect.ValueOf(quotaCredential).Pointer() == reflect.ValueOf(discoverOAuthToken).Pointer() {
+		t.Fatal("the cli tests are pointed at the real credential discovery")
+	}
+}
+
 func TestUserQuotaCacheDir_NoneOnThisMachine(t *testing.T) {
 	// No HOME and no XDG_CACHE_HOME: nowhere to cache is a machine without a
 	// cache, not an error.
@@ -1179,6 +1196,73 @@ func TestPruneQuotaRecords_MissingDirectoryIsSilent(t *testing.T) {
 	// Nothing on this path may fail a run, and a prune has even less business
 	// doing so than a store: it runs after the reading is already safe.
 	pruneQuotaRecords(filepath.Join(t.TempDir(), "nonexistent"), time.Now())
+}
+
+func TestPruneQuotaRecords_RetiresTheNamesThisVersionWrites(t *testing.T) {
+	// The sweep's patterns are written out by hand — quotaRecordGlob is the
+	// literal "quota*", not quotaCacheFilePrefix — so nothing but a test ties
+	// them to the names quotaCachePath and acquireRefreshLock actually create.
+	// Renaming a record and leaving the glob behind costs no test and no error:
+	// the sweep would simply stop matching anything this version wrote, and the
+	// growth keying introduces would go back to being unbounded, silently.
+	//
+	// So the files here are made the way production makes them, not spelled out.
+	dir := useTempQuotaCache(t)
+	installCredential(t, "token-account-A")
+	path := recordPath(t)
+	storeQuotaRecord(path, quotaRecord{Usage: usageAt(0.42), ReadAt: time.Now()})
+	if _, held := acquireRefreshLock(path, time.Now()); !held {
+		t.Fatal("expected the refresh slot")
+	}
+	// Not released: this stands in for the process killed mid-refresh under a
+	// credential the machine has since rotated, whose lock nothing else clears.
+
+	old := time.Now().Add(-quotaRecordKeepFor - time.Minute)
+	for _, p := range []string{path, path + quotaLockSuffix} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pruneQuotaRecords(dir, time.Now())
+
+	for _, gone := range []string{path, path + quotaLockSuffix} {
+		if _, err := os.Stat(gone); !os.IsNotExist(err) {
+			t.Errorf("%s is a name this version writes and the sweep did not match it; stat err = %v",
+				filepath.Base(gone), err)
+		}
+	}
+}
+
+func TestQuotaNow_AHitDoesNotSweepTheDirectory(t *testing.T) {
+	// The sweep is wired to the store, and a hit stays what it was: one file
+	// read. On the read path it would put a directory scan under every one of a
+	// resolve's 52 reads — the per-call cost this file exists to remove — and
+	// would have processes deleting files on a path that is otherwise read-only.
+	dir := useTempQuotaCache(t)
+	installCredential(t, "token-account-A")
+	seedRecord(t, quotaRecord{Usage: usageAt(0.42), ReadAt: time.Now().Add(-1 * time.Minute)})
+	orphan := filepath.Join(dir, "quota-0123456789abcdef"+quotaCacheFileExt)
+	if err := os.WriteFile(orphan, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-quotaRecordKeepFor - time.Minute)
+	if err := os.Chtimes(orphan, old, old); err != nil {
+		t.Fatal(err)
+	}
+	installFetch(t, func() ([]windowUsage, error) {
+		t.Error("a reading inside the refresh interval must not touch the endpoint")
+		return nil, nil
+	})
+
+	for range maxResolveSteps {
+		if _, err := quotaNow(); err != nil {
+			t.Fatalf("quotaNow: %v", err)
+		}
+	}
+	if _, err := os.Stat(orphan); err != nil {
+		t.Errorf("a cache hit swept the directory: %v", err)
+	}
 }
 
 // ---------------------------------------------------------------------------
