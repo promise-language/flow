@@ -116,3 +116,21 @@ func TestDiscoverAgentAccount_SkipsAnUnreadableFile(t *testing.T) {
 		t.Errorf("discoverAgentAccount() = %q, want empty", got)
 	}
 }
+
+// The configured directory is searched FIRST. A caller pointed at one by
+// CLAUDE_CONFIG_DIR is answered from there — a search that fell back to $HOME
+// first would name whichever account that machine's home directory happens to
+// hold, which on a host driving more than one agent account is the wrong one.
+func TestDiscoverAgentAccount_PrefersTheConfiguredDirectoryOverHome(t *testing.T) {
+	dir := isolateAgentAccountDiscovery(t)
+	writeJSON(t, filepath.Join(dir, ".claude.json"), `{"oauthAccount":{"emailAddress":"pat@example.com"}}`)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	writeJSON(t, filepath.Join(home, ".claude.json"), `{"oauthAccount":{"emailAddress":"someone-else@example.com"}}`)
+
+	if got := discoverAgentAccount(); got != "pat@example.com" {
+		t.Errorf("discoverAgentAccount() = %q, want the configured directory's account", got)
+	}
+}

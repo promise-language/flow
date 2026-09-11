@@ -466,3 +466,119 @@ func TestCmdResolve_AFinalizedRunStillReportsTheTick(t *testing.T) {
 		t.Errorf("the two summaries contradict each other; got %q", errBuf.String())
 	}
 }
+
+// awaitingMaintainer is the item the handoff branch meets on its FIRST pass:
+// the contributor has moved and the marker already names the next role, so the
+// run reaches the boundary without dispatching anything.
+func awaitingMaintainer() flow.Item {
+	return flow.Item{Type: "task", Title: "1",
+		Awaits: flow.Awaits{Role: "maintainer"},
+		Journal: []flow.JournalEntry{{
+			Step: "plan", Execution: 1, Route: flow.Route{Next: "commit"},
+			By: "bob", Role: "contributor", Awaits: flow.Awaits{Role: "maintainer"},
+		}}}
+}
+
+// The handoff is decided BEFORE the pacing block, so a run that will not
+// advance the item does not first wait for quota headroom it is never going to
+// spend. The maintainer's step prompts, so the wait would apply to it — a
+// mechanical step is spared the pacing for its own reason and would hide this
+// one.
+func TestCmdResolve_AHandoffIsDecidedBeforeAnyPacingWait(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", awaitingMaintainer())
+	be.SetCapabilities("", flow.CapPush)
+	app, _, errBuf := resolveTestAppFlow(t, be, func(f *flow.Flow) {
+		f.Role("maintainer", flow.CapMerge)
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Next("commit", "planned").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Entry: true, Role: "contributor", Next: []flow.StepId{"commit"}})
+		f.AddStep("close branch", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "landed").CommitHash("abc"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "maintainer", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	})
+	// Saturated, so any run that reaches the pacing block waits and says so.
+	app.Quota = func() ([]windowUsage, error) {
+		return []windowUsage{{
+			Label: "5h", Length: time.Second, Used: 1.0, ResetsAt: time.Now().Add(50 * time.Millisecond),
+		}}, nil
+	}
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "handed off — awaits maintainer") {
+		t.Fatalf("expected the handoff; got %q", errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "resolve: pacing —") {
+		t.Errorf("the run waited for headroom it was never going to spend; got %q", errBuf.String())
+	}
+}
+
+// The handoff carries the run's totals, as the finalization does: a terminal
+// outcome that named no figures would make what an item has cost so far depend
+// on which end the run happened to stop at.
+func TestCmdResolve_AHandoffReportsWhatTheItemHasCost(t *testing.T) {
+	be := fake.New()
+	item := awaitingMaintainer()
+	item.Ledger = flow.Ledger{TotalActive: 90 * time.Second, TotalCostUSD: 1.25}
+	be.AddItem("1", item)
+	be.SetCapabilities("", flow.CapPush)
+	app, errBuf := handoffTestApp(t, be)
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "handed off — awaits maintainer") {
+		t.Fatalf("expected the handoff; got %q", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "$1.25") {
+		t.Errorf("the handoff does not report what the item has cost; got %q", errBuf.String())
+	}
+}
+
+// An item this binary's flow does not accept is not somebody else's move: no
+// flow of this runner's ever derived a step for it, so the awaited marker on it
+// says nothing about who should act. It reports the type, as it did before the
+// handoff branch existed, and keeps the claim.
+func TestCmdResolve_AnItemOutsideTheRemitIsNotHandedOff(t *testing.T) {
+	be := fake.New()
+	item := awaitingMaintainer()
+	item.Type = "chore" // the fixture's flow accepts "task" only
+	item.Journal = nil  // …and a journal would put it back in the remit
+	be.AddItem("1", item)
+	be.SetCapabilities("", flow.CapPush)
+	app, errBuf := handoffTestApp(t, be)
+
+	app.cmdResolve(context.Background(), []string{"1"})
+	if strings.Contains(errBuf.String(), "handed off") {
+		t.Errorf("an item no flow here accepts was handed off; got %q", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "no flow accepts this item's type") {
+		t.Errorf("the run does not report the type; got %q", errBuf.String())
+	}
+	itemState, err := be.Load(context.Background(), be.Ref("1"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if itemState.Holder.Empty() {
+		t.Error("the claim was released on an item nobody was handed")
+	}
+}
+
+// A FINALIZED item is not handed off, whatever marker it still carries: the
+// work is over, and reporting the last role that was awaited as the one to move
+// next would send an operator to wait on somebody with nothing to do.
+func TestCmdResolve_AFinalizedItemIsNotHandedOff(t *testing.T) {
+	be := fake.New()
+	item := awaitingMaintainer()
+	item.Finalized = true
+	be.AddItem("1", item)
+	be.SetCapabilities("", flow.CapPush)
+	app, errBuf := handoffTestApp(t, be)
+
+	app.cmdResolve(context.Background(), []string{"1"})
+	if strings.Contains(errBuf.String(), "handed off") {
+		t.Errorf("an item whose work is over was handed to a role that has nothing to do; got %q", errBuf.String())
+	}
+}
