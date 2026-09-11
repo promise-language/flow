@@ -88,11 +88,13 @@ func verifyPipeline(repoRoot string) []step {
 func verifySteps(repoRoot string) []step {
 	if Exists(filepath.Join(repoRoot, "go.mod")) {
 		return []step{
-			// The spend ratchet runs here as well as in the commit hook: a
-			// commit can be waved through with --no-verify, and this gate is
-			// what a change passes before it is proposed. It costs
-			// milliseconds, and it is the last thing standing between an
-			// unapproved agent turn and trunk.
+			// The spend ratchet runs here and nowhere else. The commit hook
+			// execs the workspace precommit-guard, whose agent-turn check
+			// refuses a turn from a test or from outside an adapter but holds
+			// no approved list — and a commit can be waved through with
+			// --no-verify anyway. This gate is what a change passes before it
+			// is proposed. It costs milliseconds, and it is the last thing
+			// standing between an unapproved agent turn and trunk.
 			{"agent turns", checkApprovedAgentTurns},
 			{"format", checkFormatted},
 			{"vet", func(r string) error { return runAllModules(r, "vet") }},

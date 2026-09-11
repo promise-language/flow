@@ -35,18 +35,22 @@ enforced locally in three layers:
 
 ### 1. Pre-commit hook (primary gate)
 
-The Forge pre-commit hook (`bin/precommit`, wired via `.githooks/pre-commit`)
-rejects any commit whose **author OR committer** email is not a
-`@users.noreply.github.com` address. It reads the impending identity with
-`git var GIT_AUTHOR_IDENT` / `GIT_COMMITTER_IDENT`, so it catches both
-`user.email` config and `GIT_*_EMAIL` env overrides.
+The pre-commit hook (`.githooks/pre-commit`, which execs the
+workspace-provisioned `bin/precommit-guard`) rejects any commit whose
+**author OR committer** email is not a `@users.noreply.github.com` address.
+It reads the impending identity with `git var GIT_AUTHOR_IDENT` /
+`GIT_COMMITTER_IDENT`, so it catches both `user.email` config and
+`GIT_*_EMAIL` env overrides.
 
-The hook is installed automatically — `./make` runs `git config
-core.hooksPath .githooks` on every invocation, so a fresh clone is protected
-after its first bootstrap:
+The hook is wired automatically — `./make` runs `git config
+core.hooksPath .githooks` on every invocation — and the guard binary it execs
+is delivered by `bin/workspace setup`, not built here. Until the guard is
+installed the hook fails closed and refuses every commit, so a fresh clone is
+protected after both:
 
 ```sh
-./make            # builds bin/, wires core.hooksPath -> .githooks
+./make                # builds bin/, wires core.hooksPath -> .githooks
+bin/workspace setup   # installs bin/precommit-guard, which the hook execs
 ```
 
 Verify it is active:
@@ -55,8 +59,8 @@ Verify it is active:
 git config core.hooksPath          # -> .githooks
 ```
 
-The enforcement logic lives in [`tools/build/common/precommit.go`](tools/build/common/precommit.go)
-(`checkNoreplyIdentity`).
+The enforcement logic is the `precommitguard` package of the workspace
+repository (its `commit-identity` check), not a file in this tree.
 
 ### 2. Correct identity in local config
 

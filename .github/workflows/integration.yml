@@ -6,7 +6,8 @@ name: integration
 # that was repaired first is not an answer about the tree anyone proposed
 # (docs/gates-and-commands.md). `bin/run integration` runs the integration
 # gate, which modifies nothing, and judges what it measured against
-# thresholds.json: exit 0 iff every capped measurement is within its cap.
+# tools/gates/thresholds.json: exit 0 iff every capped measurement is within
+# its cap.
 #
 # Contributors still run `bin/verify` locally (CONTRIBUTING.md) — that is
 # where repair belongs, before the tree is proposed.

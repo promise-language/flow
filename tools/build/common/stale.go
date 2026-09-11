@@ -34,9 +34,9 @@ func MakeCmd() string {
 }
 
 // CheckStale aborts a tool whose stale logic would otherwise run: pipeline
-// tools (verify, build, test, …) would produce misleading results, and the
-// commit gate (precommit) must never validate a commit with out-of-date logic.
-// It points the caller at ./make.
+// tools (verify, build, test, …) would produce misleading results, and a
+// commit gate must never validate a commit with out-of-date logic. It points
+// the caller at ./make.
 //
 // It is deliberately NOT a one-way door: the recovery, ./make, runs via 'go
 // run' and has no staleness gate of its own, so it always works no matter how

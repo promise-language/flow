@@ -490,8 +490,8 @@ type resultEvent_ struct {
 
 // spawnable refuses to start the real binary from a test process.
 //
-// The commit gate already refuses a test that names the binary (see
-// tools/build/common/precommit.go), but that is a pattern scan over source: it
+// The commit gate already refuses a test that names the binary (the workspace
+// precommit-guard's agent-turn check), but that is a pattern scan over source: it
 // cannot see a Client value that simply arrived with no stub installed, which
 // is the honest version of the same mistake and reads like every other fixture
 // until the bill arrives. A test that reaches the real agent spends money on
