@@ -50,7 +50,17 @@ func resolveTestAppPrompts(t *testing.T, be flow.Orchestrator, step func(flow.St
 // contributor role declared, and a graph the caller registers — the lever for a
 // test about how the loop treats one step differently from the next. "plan"
 // (markdown) and "commit" (commit hash) are the artifacts a graph may produce.
+// Every role the graph declares is covered; a test about declining one uses
+// resolveTestAppCovering.
 func resolveTestAppFlow(t *testing.T, be flow.Orchestrator, configure func(*flow.Flow)) (*App, *bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
+	return resolveTestAppCovering(t, be, nil, configure)
+}
+
+// resolveTestAppCovering is resolveTestAppFlow with the binary's coverage
+// chosen by the caller — the lever for a test about a role the binary declines
+// though its account could back it. Nil covers every role the graph declares.
+func resolveTestAppCovering(t *testing.T, be flow.Orchestrator, covered []flow.RoleName, configure func(*flow.Flow)) (*App, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	// Isolate from real credential discovery (Keychain, claude binary) so
 	// reportQuota's exec calls don't hang or hit the network, and from the
@@ -80,6 +90,10 @@ func resolveTestAppFlow(t *testing.T, be flow.Orchestrator, configure func(*flow
 	configure(f)
 
 	app.Flow = f
+	app.Coverage = covered
+	if covered == nil {
+		app.Coverage = f.RoleNames()
+	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}

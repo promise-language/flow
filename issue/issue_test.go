@@ -31,12 +31,10 @@ type stubBackend struct {
 	answersErr        error
 	sawSince          time.Time
 	sawSelf           string
-	sawAccount        flow.AccountId
 }
 
-func (s *stubBackend) DetectCapabilities(_ context.Context, account flow.AccountId) ([]flow.Capability, error) {
+func (s *stubBackend) DetectCapabilities(context.Context, flow.AccountId) ([]flow.Capability, error) {
 	s.capsCalls++
-	s.sawAccount = account
 	return s.caps, s.capsErr
 }
 func (s *stubBackend) DefaultBranch(context.Context) (flow.BranchName, error) {
@@ -50,94 +48,9 @@ func (s *stubBackend) ReadAnswers(_ context.Context, _ flow.Item, since time.Tim
 // bareBackend implements none of the optional capabilities.
 type bareBackend struct{ flow.Orchestrator }
 
-func TestResolveRole_ExplicitConfigWins(t *testing.T) {
-	// A maintainer deliberately running their own change through the
-	// contributor set is the case this exists for: detection would say
-	// maintainer, and the operator's choice has to beat it.
-	be := &stubBackend{caps: []flow.Capability{flow.CapPush, flow.CapMerge, flow.CapApprove}}
-	got, err := resolveRole(context.Background(), Config{Role: RoleContributor}, be)
-	if err != nil {
-		t.Fatalf("resolveRole: %v", err)
-	}
-	if got != RoleContributor {
-		t.Errorf("role = %q, want %q — explicit config must beat detection", got, RoleContributor)
-	}
-	// And it beats it by not asking. BuildApp runs before every command, so a
-	// configured role is also what makes `doctor` start with no network.
-	if be.capsCalls != 0 {
-		t.Errorf("DetectCapabilities called %d time(s) with Config.Role set; want none", be.capsCalls)
-	}
-}
-
-// The two capability sets that cover a declared role, each landing on the most
-// privileged one it covers.
-func TestResolveRole_DetectsFromCapabilities(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		caps []flow.Capability
-		want Role
-	}{
-		{"push alone covers the contributor", []flow.Capability{flow.CapPush}, RoleContributor},
-		{"push and merge covers both, and the more privileged wins",
-			[]flow.Capability{flow.CapPush, flow.CapMerge}, RoleMaintainer},
-		// A capability no declared role asks for neither adds nor removes one.
-		{"approve alongside changes nothing",
-			[]flow.Capability{flow.CapPush, flow.CapApprove}, RoleContributor},
-		// merge without push covers neither role: both require push.
-		{"merge without push covers no role", []flow.Capability{flow.CapMerge}, ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			be := &stubBackend{caps: tc.caps}
-			got, err := resolveRole(context.Background(), Config{}, be)
-			if err != nil {
-				t.Fatalf("resolveRole: %v", err)
-			}
-			if got != tc.want {
-				t.Errorf("role = %q, want %q", got, tc.want)
-			}
-			// The ambient account is named by the empty AccountId: the
-			// derivation runs before any claim exists.
-			if be.sawAccount != "" {
-				t.Errorf("DetectCapabilities asked about %q, want the ambient account (empty)", be.sawAccount)
-			}
-		})
-	}
-}
-
-// An account that can assume no declared role is an ANSWER — the empty role —
-// not an error: it is a handoff, not a misconfiguration
-// (docs/resolution-standalone.md § Declaring what a binary may do). What it must
-// not become is a contributor, which is what the old permissions collapse did
-// for a read-only account: that starts a resolution that dies at its first push,
-// several steps from the missing access.
-func TestResolveRole_AnAccountCoveringNoRoleResolvesToNone(t *testing.T) {
-	be := &stubBackend{caps: nil}
-	got, err := resolveRole(context.Background(), Config{}, be)
-	if err != nil {
-		t.Fatalf("resolveRole = %v, want the empty role and no error", err)
-	}
-	if got != "" {
-		t.Errorf("role = %q, want the empty role — nothing was detected", got)
-	}
-	if be.capsCalls != 1 {
-		t.Errorf("DetectCapabilities called %d time(s), want exactly one", be.capsCalls)
-	}
-}
-
-func TestResolveRole_WrapsDetectionFailure(t *testing.T) {
-	boom := errors.New("boom")
-	_, err := resolveRole(context.Background(), Config{}, &stubBackend{capsErr: boom})
-	if !errors.Is(err, boom) {
-		t.Fatalf("err = %v, want it to wrap the backend's error", err)
-	}
-	if !strings.Contains(err.Error(), "detect repository capabilities") {
-		t.Errorf("error = %q, want it to say what failed", err)
-	}
-}
-
-// roleDecls is the one table, so both readers of it agree by construction:
+// roleDecls is the one table, so every reader of it agrees by construction:
 // what a role requires is the same fact whether the flow is being declared or
-// the step set is being chosen.
+// an account's standing in it is being reported.
 func TestRoleDecls_CoverEveryRoleTheFlowsDeclare(t *testing.T) {
 	for _, r := range []Role{RoleContributor, RoleMaintainer} {
 		d := roleDeclFor(r)
@@ -153,14 +66,13 @@ func TestRoleDecls_CoverEveryRoleTheFlowsDeclare(t *testing.T) {
 			}
 		}
 	}
-	// Least privileged first: resolveRole reads that order to pick the most
-	// privileged role an account covers, so a reordering here would silently
-	// hand a maintainer the contributor step set.
+	// Least privileged first: it is the order the flow declares the roles in,
+	// and so the order every report of them lists them.
 	if !slices.Equal(roleDeclFor(RoleMaintainer).Capabilities, []flow.Capability{flow.CapPush, flow.CapMerge}) {
 		t.Errorf("the maintainer requires %v, want push and merge", roleDeclFor(RoleMaintainer).Capabilities)
 	}
 	if len(roleDeclFor(RoleContributor).Capabilities) >= len(roleDeclFor(RoleMaintainer).Capabilities) {
-		t.Error("roleDecls is not ordered least privileged first, which is the order resolveRole reads")
+		t.Error("roleDecls is not ordered least privileged first")
 	}
 }
 
@@ -178,13 +90,6 @@ func TestRoleDeclFor_PanicsOnAnUndeclaredRole(t *testing.T) {
 		}
 	}()
 	roleDeclFor("reviewer")
-}
-
-func TestResolveRole_RejectsUnknownRole(t *testing.T) {
-	_, err := resolveRole(context.Background(), Config{Role: "admin"}, &stubBackend{})
-	if err == nil || !strings.Contains(err.Error(), "unknown Config.Role") {
-		t.Errorf("err = %v, want an unknown-role refusal", err)
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -304,6 +209,28 @@ func TestPromptContext_PriorDiscriminatesType(t *testing.T) {
 	}
 	if p, ok := pc.PriorPatch(StepImplement); !ok || string(p.Diff) != "diff" {
 		t.Errorf("PriorPatch(implementation) = (%v, %v), want the diff", p, ok)
+	}
+}
+
+// The prompt's role is the DISPATCH'S own — the pending step's declared tag —
+// never a property of the binary. A binary covering both roles renders the
+// maintainer's prompt as the maintainer's, and a body that says something
+// different to each is reading the step it is rendered for.
+func TestNewPromptContext_RoleIsTheDispatchsOwn(t *testing.T) {
+	for _, r := range []Role{RoleContributor, RoleMaintainer} {
+		t.Run(string(r), func(t *testing.T) {
+			ctx := &fakeCtx{
+				item: flow.Item{Ref: itemRefFor("42"), Type: "task", Title: "widget is broken"},
+				role: flow.RoleName(r),
+			}
+			pc, err := newPromptContext(ctx, Config{}, nil)
+			if err != nil {
+				t.Fatalf("newPromptContext: %v", err)
+			}
+			if pc.Role != r {
+				t.Errorf("Role = %q, want the dispatch's own %q", pc.Role, r)
+			}
+		})
 	}
 }
 
@@ -539,7 +466,7 @@ func TestVerifyTail_ShortOutputUnchanged(t *testing.T) {
 func TestBuildApp_RequiresVerifyCmd(t *testing.T) {
 	// Without a gate the implement step's loop has nothing to loop against,
 	// which quietly turns it back into a one-shot draft.
-	_, err := BuildApp(context.Background(), Config{Role: RoleContributor, BaseBranch: "main"},
+	_, err := BuildApp(context.Background(), Config{Coverage: []Role{RoleContributor}, BaseBranch: "main"},
 		Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
 	if err == nil || !strings.Contains(err.Error(), "VerifyCmd") {
 		t.Errorf("err = %v, want a refusal naming VerifyCmd", err)
@@ -556,7 +483,7 @@ func TestBuildApp_RequiresVerifyCmd(t *testing.T) {
 // have a maintainer opening a pull request against their own review.
 func TestBuildApp_MaintainerBuildsTheSameGraphAndRefusesTheContributorEntry(t *testing.T) {
 	app, err := BuildApp(context.Background(), Config{
-		Role: RoleMaintainer, BaseBranch: "main", VerifyCmd: []string{"true"},
+		Coverage: []Role{RoleMaintainer}, BaseBranch: "main", VerifyCmd: []string{"true"},
 	}, Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
 	if err != nil {
 		t.Fatalf("BuildApp = %v, want an app that still serves read-only commands", err)
@@ -585,67 +512,33 @@ func TestBuildApp_MaintainerBuildsTheSameGraphAndRefusesTheContributorEntry(t *t
 	}
 }
 
-// An account that backs no declared role builds too, and refuses at DISPATCH
-// for the same reason the maintainer stand-in does. Refusing construction would
-// leave a read-only clone unable to run `list`, `status`, `answer` or `doctor` —
-// and `doctor` is the command that would have named the missing push access.
-func TestBuildApp_NoAssumableRoleBuildsButRefusesOnDispatch(t *testing.T) {
-	// Role UNSET, so it is detected; the backend reports an account with
-	// nothing on the repository.
+// A covered role the account cannot back is a HANDOFF, not a misconfiguration
+// (docs/resolution-standalone.md § Declaring what a binary may do), so an
+// account that backs nothing builds the same app as any other. Refusing
+// construction would leave a read-only clone unable to run `list`, `status`,
+// `answer` or `doctor` — and `doctor` is the command that reports the standing
+// the account is missing.
+func TestBuildApp_AnAccountBackingNothingStillBuilds(t *testing.T) {
 	be := &stubBackend{caps: nil}
 	app, err := BuildApp(context.Background(), Config{
-		BaseBranch: "main", VerifyCmd: []string{"true"},
+		BaseBranch: "main", VerifyCmd: []string{"true"}, Coverage: []Role{RoleContributor},
 	}, Deps{Orchestrator: be, Agent: stubAgent{}})
 	if err != nil {
 		t.Fatalf("BuildApp = %v, want an app that still serves read-only commands", err)
 	}
 	// The graph is the graph: an account that backs nothing does not get a
-	// smaller one, it gets a gate. Building a different graph here would put the
-	// account's standing into the registration, where nothing records why.
+	// smaller one. Building a different graph here would put the account's
+	// standing into the registration, where nothing records why.
 	for _, want := range []string{"write plan", "merge pull request"} {
 		if _, ok := app.Flow.Item(want); !ok {
 			t.Errorf("the flow does not register %q — the graph does not vary by standing", want)
 		}
 	}
-	// And nothing of it can run: every dispatch is refused, blocked rather than
-	// failed, naming what the account needs and where it is reported.
-	err = app.Preflight(context.Background(), &flow.Item{})
-	if err == nil {
-		t.Fatal("Preflight = nil, want every dispatch refused")
-	}
-	if !errors.Is(err, flow.ErrBlocked) {
-		t.Errorf("err = %v, want it to wrap flow.ErrBlocked", err)
-	}
-	for _, want := range []string{string(flow.CapPush), "doctor", "Config.Role"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("err = %q, want it to mention %q", err, want)
-		}
-	}
-}
-
-// CarryThrough is the exception, and it is configuration rather than
-// environment: an operator asking this binary to integrate on an account that
-// backs no role has written something that cannot work, so it is refused at
-// startup naming the field — never dropped on the way to a contributor run.
-func TestBuildApp_CarryThroughOnAnAccountBackingNoRoleIsRefused(t *testing.T) {
-	_, err := BuildApp(context.Background(), Config{
-		BaseBranch: "main", VerifyCmd: []string{"true"}, CarryThrough: true,
-	}, Deps{Orchestrator: &stubBackend{caps: nil}, Agent: stubAgent{}})
-	if err == nil {
-		t.Fatal("BuildApp = nil error, want CarryThrough refused on an account that cannot integrate")
-	}
-	if !strings.Contains(err.Error(), "CarryThrough") {
-		t.Errorf("err = %q, want it to name the field that fixes it", err)
-	}
-	// And it says what the account backs in WORDS. The role that got here is the
-	// empty one, which the obvious %q renders as a bare pair of quotes — an
-	// operator reads that as a bug in the message rather than as the standing
-	// that refused them.
-	if !strings.Contains(err.Error(), roleOrNone("")) {
-		t.Errorf("err = %q, want it to say the account backs %q", err, roleOrNone(""))
-	}
-	if strings.Contains(err.Error(), `""`) {
-		t.Errorf("err = %q, renders the empty role as an empty quoted string", err)
+	// Coverage is what the gate reads, and the account's standing is not its
+	// question: a covered step passes it, and what the account cannot do meets
+	// the backend's own refusal — the enforcement of last resort.
+	if err := app.Preflight(context.Background(), &flow.Item{}); err != nil {
+		t.Errorf("Preflight = %v, want the covered entry step performed", err)
 	}
 }
 
@@ -653,7 +546,7 @@ func TestBuildApp_WiresUp(t *testing.T) {
 	app, err := BuildApp(context.Background(), Config{
 		BinaryName: "issue",
 		VerifyCmd:  []string{"bin/verify", "--wasm"},
-		Role:       RoleContributor,
+		Coverage:   []Role{RoleContributor},
 		BaseBranch: "main",
 	}, Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
 	if err != nil {
@@ -698,13 +591,13 @@ func TestBuildApp_WiresUp(t *testing.T) {
 	}
 }
 
-// Preflight is a chain of three gates, and every one of them fails SILENTLY
-// when it is dropped. Dropping the answer gate leaves a non-nil closure that
-// waves every question park through; dropping the coverage gate turns every
-// maintainer-capable operator into a carry-through runner with no way to
-// decline; and the three are ORDERED, because an item parked for an answer on a
-// step this binary may not perform must be told about the boundary rather than
-// asked to answer for somebody else's move.
+// Preflight is a chain of two gates, and both fail SILENTLY when dropped.
+// Dropping the answer gate leaves a non-nil closure that waves every question
+// park through; dropping the coverage gate turns every maintainer-capable
+// operator into a runner carrying every item through with no way to decline;
+// and the two are ORDERED, because an item parked for an answer on a step this
+// binary may not perform must be told about the boundary rather than asked to
+// answer for somebody else's move.
 //
 // Nothing else can see any of that: the field is non-nil in every case.
 func TestBuildApp_PreflightChain(t *testing.T) {
@@ -726,23 +619,17 @@ func TestBuildApp_PreflightChain(t *testing.T) {
 		want    string // fragment the refusal must carry; "" means it must pass
 		notWant string // fragment the refusal must NOT carry
 	}{
-		{name: "contributor passes a clean item",
-			cfg: Config{Role: RoleContributor}, item: clean},
-		{name: "carry-through passes a clean item",
-			cfg: Config{Role: RoleMaintainer, CarryThrough: true}, item: clean},
+		{name: "a contributor passes a clean item",
+			cfg: Config{Coverage: []Role{RoleContributor}}, item: clean},
+		{name: "covering both roles passes a clean item",
+			cfg: Config{Coverage: []Role{RoleContributor, RoleMaintainer}}, item: clean},
 		{name: "a maintainer does not perform the contributor's entry step",
-			cfg: Config{Role: RoleMaintainer}, item: clean, want: atEntry},
+			cfg: Config{Coverage: []Role{RoleMaintainer}}, item: clean, want: atEntry},
 		{name: "the answer gate is still in the chain",
-			cfg: Config{Role: RoleContributor}, item: asked, want: "which database?"},
+			cfg: Config{Coverage: []Role{RoleContributor}}, item: asked, want: "which database?"},
 		{name: "the coverage gate refuses ahead of the answer gate",
-			cfg: Config{Role: RoleMaintainer}, item: asked,
+			cfg: Config{Coverage: []Role{RoleMaintainer}}, item: asked,
 			want: atEntry, notWant: "which database?"},
-		// Role unset, and stubBackend detects nothing: the account backs no
-		// declared role, so this gate stands in the same slot and answers first
-		// for the same reason.
-		{name: "the no-role gate refuses ahead of the answer gate",
-			cfg: Config{}, item: asked,
-			want: noAssumableRole, notWant: "which database?"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -789,7 +676,7 @@ func TestBuildApp_PreflightChain(t *testing.T) {
 func TestStepGraphMatchesTheDocument(t *testing.T) {
 	app, err := BuildApp(context.Background(), Config{
 		BinaryName: "issue", VerifyCmd: []string{"true"},
-		Role: RoleContributor, BaseBranch: "main",
+		Coverage: []Role{RoleContributor}, BaseBranch: "main",
 	}, Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
 	if err != nil {
 		t.Fatalf("BuildApp: %v", err)
@@ -848,7 +735,7 @@ func TestStepGraphMatchesTheDocument(t *testing.T) {
 func TestEveryPromptSlotBelongsToARegisteredStep(t *testing.T) {
 	app, err := BuildApp(context.Background(), Config{
 		BinaryName: "issue", VerifyCmd: []string{"true"},
-		Role: RoleContributor, BaseBranch: "main",
+		Coverage: []Role{RoleContributor}, BaseBranch: "main",
 	}, Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
 	if err != nil {
 		t.Fatalf("BuildApp: %v", err)
@@ -1723,7 +1610,7 @@ func TestClosesRefUsesGitHubSyntax(t *testing.T) {
 // this package exists to let a project replace.
 func TestBuildApp_RejectsUnknownPromptKey(t *testing.T) {
 	_, err := BuildApp(context.Background(), Config{
-		Role: RoleContributor, BaseBranch: "main", VerifyCmd: []string{"true"},
+		Coverage: []Role{RoleContributor}, BaseBranch: "main", VerifyCmd: []string{"true"},
 		Prompts: map[PromptID]string{"implementaion": "oops"},
 	}, Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}})
 	if err == nil || !strings.Contains(err.Error(), "implementaion") {
@@ -1737,7 +1624,7 @@ func TestBuildApp_AcceptsEveryRealPromptKey(t *testing.T) {
 		prompts[id] = "body"
 	}
 	if _, err := BuildApp(context.Background(), Config{
-		Role: RoleContributor, BaseBranch: "main", VerifyCmd: []string{"true"},
+		Coverage: []Role{RoleContributor}, BaseBranch: "main", VerifyCmd: []string{"true"},
 		Prompts: prompts,
 	}, Deps{Orchestrator: &stubBackend{}, Agent: stubAgent{}}); err != nil {
 		t.Errorf("BuildApp = %v, want every real slot accepted", err)
@@ -2122,7 +2009,7 @@ func TestBuildApp_RejectsOverrideThatBreaksWithFragments(t *testing.T) {
 	// combined source has a real action and the unclosed "{{" becomes a parse
 	// error. Use a body that is unambiguously broken once fragments land.
 	_, err := BuildApp(context.Background(), Config{
-		Role: RoleContributor, BaseBranch: "main", VerifyCmd: []string{"true"},
+		Coverage: []Role{RoleContributor}, BaseBranch: "main", VerifyCmd: []string{"true"},
 		Prompts: map[PromptID]string{
 			PromptImplement: "body with bad template {{ .Nonexistent | bad_func }}",
 		},

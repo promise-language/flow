@@ -112,7 +112,7 @@ func (app *App) cmdDoctor(ctx context.Context, args []string, startupErr error) 
 			failed = true
 		}
 	}
-	app.reportCapabilities()
+	app.reportRoles(ctx)
 	if failed {
 		return 1
 	}
@@ -292,14 +292,55 @@ func checkDocs(root string) check {
 	return check{name: name, detail: fmt.Sprintf("%s holds %d document(s)", docs, count)}
 }
 
-// reportCapabilities prints what does not belong on a check line: a mode this
-// binary was started in, which is neither pass nor fail.
+// reportRoles prints what does not belong on a check line: the standing this
+// binary has here, one line per role the flow declares — assumable, or out of
+// reach and why — which is neither pass nor fail.
+//
+// A REPORT, not a check. docs/cli.md § Doctor closes the check set, and a role
+// out of reach is not an unfit machine: a contributor binary on a contributor
+// account is exactly as it should be, and a maintainer role its account cannot
+// back is a handoff, not a failure. What the line answers is the question
+// docs/resolution-standalone.md § Declaring what a binary may do puts here — a
+// declaration made once in configuration is invisible to whoever invokes the
+// binary later, and a fact derived from two sources is written in neither, so
+// the binary says which roles it can assume, and why the rest are out of
+// reach, when asked whether it is fit to work. It never moves the exit code.
 //
 // The gate and command lists used to be printed here. They are checks now — the
 // same facts, but with a verdict attached — and printing them twice would leave
 // a reader deciding which copy to believe.
-func (app *App) reportCapabilities() {
-	if app.CarryThrough {
-		fmt.Fprintf(app.Out, "  carry-through: enabled — carries to merge (not independent review)\n")
+//
+// Nothing prints on an App missing its orchestrator or its flow: the checks
+// above have already said so, and there is nothing to derive a standing from.
+func (app *App) reportRoles(ctx context.Context) {
+	if app.Orchestrator == nil || app.Flow == nil {
+		return
 	}
+	standings, known := app.roleStandings(ctx)
+	for _, s := range standings {
+		fmt.Fprintf(app.Out, "  role %s: %s\n", s.Role, s.wording(known))
+	}
+}
+
+// wording renders one role's standing for a person. Five sentences: assumable;
+// out of reach for want of coverage, of capability, or of both — each naming
+// what is missing, because "out of reach" alone sends the operator to work out
+// from the declaration what the report already knew — and unknown, which is a
+// covered role on an orchestrator that cannot say what the account holds. An
+// uncovered role is out of reach whatever the account holds, so it never reads
+// as unknown: coverage is configuration, and it is always known.
+func (s roleStanding) wording(known bool) string {
+	if !s.Covered {
+		if known && len(s.Missing) > 0 {
+			return "out of reach — not covered by this binary, and the account lacks " + joinNames(s.Missing)
+		}
+		return "out of reach — not covered by this binary"
+	}
+	switch {
+	case !known:
+		return "unknown — this orchestrator cannot detect capabilities"
+	case len(s.Missing) > 0:
+		return "out of reach — the account lacks " + joinNames(s.Missing)
+	}
+	return "assumable"
 }

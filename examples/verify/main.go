@@ -66,6 +66,9 @@ func main() {
 			flow.Artifact("test-output", flow.ArtifactMarkdown),
 		},
 		Flow: verifyFlow,
+		// The one role the flow declares, covered: coverage is never implied,
+		// and a binary declaring none is refused at startup.
+		Coverage: []flow.RoleName{"contributor"},
 		// What the run may spend is the binary's policy, keyed by step id —
 		// never a step declaration. Everything unnamed takes the defaults.
 		StepBudgets: map[flow.StepId]flow.StepBudget{

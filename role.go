@@ -46,31 +46,43 @@ type RoleDecl struct {
 	Capabilities []Capability
 }
 
-// AssumableRoles returns the roles from decls whose every required capability
-// appears in detected, in declaration order. Capability is the ceiling: a role
-// whose account cannot back it is simply not in the answer.
+// Missing returns the capabilities the role requires that detected does not
+// hold, in declaration order. Empty means the account backs the role.
 //
-// A FREE FUNCTION over []RoleDecl rather than a *Flow method, because its first
-// caller derives assumable roles before a flow exists — a binary reads what its
-// account can do and the flow it then builds is the consequence, so a method
-// hung on *Flow could not be called at the one moment the question is asked.
-// One with no consumer would be a declaration nothing reads.
+// It is THE predicate for "can this account back this role", and it answers
+// with the difference rather than a bool because its readers need both: a
+// selection asks whether the set is empty, and a report that says a role is
+// out of reach has to name what is missing, or it sends the operator to work
+// out from the declaration what the report already knew.
 //
-// A role requiring NO capability is covered by every account, including one
-// with nothing detected. That is the honest reading of "all of its required
-// capabilities are held", and it is why ValidateGraph refuses a capability-less
-// declaration rather than this quietly treating it as unassumable.
+// A role requiring NO capability has nothing missing for every account,
+// including one with nothing detected. That is the honest reading of "all of
+// its required capabilities are held", and it is why ValidateGraph refuses a
+// capability-less declaration rather than this quietly treating it as
+// unbackable.
+func (d RoleDecl) Missing(detected []Capability) []Capability {
+	var missing []Capability
+	for _, need := range d.Capabilities {
+		if !slices.Contains(detected, need) {
+			missing = append(missing, need)
+		}
+	}
+	return missing
+}
+
+// AssumableRoles returns the roles from decls the detected capabilities back,
+// in declaration order — the roles with nothing Missing. Capability is the
+// ceiling: a role whose account cannot back it is simply not in the answer.
+//
+// The SET form of the one predicate, for a caller that wants the roles rather
+// than what each is missing. It is written on top of Missing rather than
+// beside it, so the two cannot disagree about what "backs" means. A FREE
+// FUNCTION over []RoleDecl rather than a *Flow method, so it can be asked of
+// any declaration list, a flow's or a caller's own.
 func AssumableRoles(decls []RoleDecl, detected []Capability) []RoleName {
 	var out []RoleName
 	for _, d := range decls {
-		covered := true
-		for _, need := range d.Capabilities {
-			if !slices.Contains(detected, need) {
-				covered = false
-				break
-			}
-		}
-		if covered {
+		if len(d.Missing(detected)) == 0 {
 			out = append(out, d.Name)
 		}
 	}

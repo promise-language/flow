@@ -18,6 +18,7 @@ func newArgparseApp(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer) {
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         newDummyFlow("x"),
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)

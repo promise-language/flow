@@ -49,7 +49,7 @@ func atTheRequest(t *testing.T, wt *fakeWorktree, agent flow.Agent) (cli.App, *r
 	app, err := BuildApp(ctx, Config{
 		BinaryName: "issue",
 		VerifyCmd:  []string{"make", "check"},
-		Role:       RoleContributor,
+		Coverage:   []Role{RoleContributor},
 		BaseBranch: "main",
 	}, Deps{Orchestrator: arena, Agent: agent})
 	if err != nil {
@@ -312,7 +312,7 @@ func runStep(t *testing.T, app cli.App) flow.InvocationResult {
 // parks ParkRefused. The declaration is read off the real registration rather
 // than restated, so this cannot pass by testing a step nobody ships.
 func TestAPromptFromTheRequestsDeclarationParksRefused(t *testing.T) {
-	shipped, ok := (&builder{cfg: Config{}, role: RoleContributor}).
+	shipped, ok := (&builder{cfg: Config{}}).
 		resolveFlow(Config{}).ItemByResult(flow.StepId(StepOpenPR))
 	if !ok {
 		t.Fatal("the flow does not register open request")
@@ -353,6 +353,7 @@ func TestAPromptFromTheRequestsDeclarationParksRefused(t *testing.T) {
 		Artifacts:    resolveArtifacts(),
 		Signals:      resolveSignals(),
 		Flow:         f,
+		Coverage:     []flow.RoleName{contributorRole},
 		VerifyCmd:    "make check",
 	}
 	claim, err := be.Claim(context.Background(), be.Ref("42"), nil)

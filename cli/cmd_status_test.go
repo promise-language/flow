@@ -338,6 +338,7 @@ func TestCmdStatus_InspectsById(t *testing.T) {
 		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
 	}, flow.StepConfig{Prompts: flow.PromptsAgent, Entry: true, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	app.Flow = f
+	app.Coverage = f.RoleNames()
 	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {
 		MaxInvocations: 3, MaxPromptsPerInvocation: 1, MaxCostUSD: 10,
 		Timeout: 30 * time.Minute,

@@ -119,9 +119,20 @@ type App struct {
 	Out io.Writer
 	Err io.Writer
 
-	// CarryThrough is true when the binary runs both the contributor and
-	// integration phases in one resolution. Reported by doctor.
-	CarryThrough bool
+	// Coverage is the roles this binary may assume: the declaration of what it
+	// intends to perform, named from Flow's own role vocabulary. Required, and
+	// never implied — holding the capability to merge is not the same as
+	// intending to, so a binary that declares no coverage is refused at startup
+	// rather than started as one that quietly does everything its account
+	// permits (docs/resolution-standalone.md § Declaring what a binary may do).
+	//
+	// Capability is the ceiling and coverage is the choice within it. A covered
+	// role the account cannot back is a HANDOFF, not a misconfiguration: the run
+	// ends where that role's steps begin and the item awaits a runner that can
+	// take them. Covering the roles on both sides of a boundary, on an account
+	// that backs both, is what carries an item across it in one run — there is
+	// no carry-through mode, only this coverage.
+	Coverage []flow.RoleName
 
 	// Output selects how command results are rendered. The zero value
 	// (OutputAuto) decides per invocation: JSON when stdout is piped or
@@ -149,44 +160,93 @@ func (app *App) stepBudget(id flow.StepId) flow.StepBudget {
 // assumesRole is the role predicate the orchestrator borrows: whether this
 // arena's account can take an item's next move.
 //
-// An orchestrator that cannot answer the capability question returns NIL, which
-// filters nothing — the same convention acceptsType uses. Filtering on a ceiling
-// nobody could measure would hide every item behind a backend that cannot ask,
-// which is a worse answer than not filtering.
+// Never nil. Coverage is declared and always known, so even an orchestrator
+// that cannot answer the capability question leaves the predicate something to
+// filter on: an item awaiting a role this binary does not cover is somebody
+// else's move whatever the account can do, and offering it would hand a caller
+// work it would only hand straight back. What an unanswered capability question
+// does NOT do is drop a covered role — see roleStanding.assumable.
 func (app *App) assumesRole(ctx context.Context) func(flow.RoleName) bool {
-	assumable, known := app.assumableRoles(ctx)
-	if !known {
-		return nil
-	}
+	assumable, _ := app.assumableRoles(ctx)
 	return func(role flow.RoleName) bool { return slices.Contains(assumable, role) }
 }
 
-// assumableRoles is the derivation itself: the flow's declared roles this
-// arena's account can assume, in declaration order.
+// roleStanding is one declared role's standing for this binary and its
+// account: whether the binary covers it, and what the account is missing to
+// back it.
+type roleStanding struct {
+	Role flow.RoleName
+	// Covered is whether App.Coverage names the role.
+	Covered bool
+	// Missing is what the role requires that the account was not detected to
+	// hold. Meaningful only when the capability question was answered; nil
+	// otherwise, and nil when the account backs the role.
+	Missing []flow.Capability
+}
+
+// assumable reports whether this run may take a move in the role, given
+// whether the capability question could be answered.
 //
-// It is ONE derivation with two readers — the predicate above, which filters
-// what may be selected, and the standing `resolve` announces and re-reports on
-// a handoff. One RULE rather than one call: each reader asks when it needs the
-// answer, and what this function fixes is that they cannot read the same
-// capabilities into different roles, nor disagree about what an unanswerable
-// question means.
+// Coverage is the declaration, so an uncovered role is never assumable. Within
+// coverage, capability is the ceiling — and a ceiling nobody could measure
+// filters nothing: undetectable capabilities answer TRUE for a covered role,
+// because handing an item off on an unanswered question would end the run on
+// the strength of a fact nobody established.
+func (s roleStanding) assumable(known bool) bool {
+	return s.Covered && (!known || len(s.Missing) == 0)
+}
+
+// roleStandings is THE derivation of what this binary may do here: for every
+// role the flow declares, in declaration order, whether this binary covers it
+// and which of its required capabilities the account lacks.
 //
-// CAPABILITY IS THE CEILING, and only that. The account's detected capabilities
-// decide which of the flow's declared roles it could assume at all; narrowing
-// further by what this binary actually covers is #250's. Both readers inherit
-// that: the selectable set is filtered on the ceiling, and so is the handoff
-// `resolve` decides from the awaited role (cli/cmd_resolve.go).
+// One derivation with four readers — the selection predicate, the standing
+// `resolve` announces and re-reports on a handoff, the handoff decision itself,
+// and `doctor`'s report. One RULE rather than one call: each reader asks when
+// it needs the answer, and what this function fixes is that they cannot read
+// the same declaration and the same capabilities into different roles, nor
+// disagree about what an unanswerable question means.
 //
-// The bool reports whether the question could be ANSWERED at all. False is not
-// "no roles": an orchestrator that cannot detect capabilities has said nothing
-// about the account, and the two readings must not be collapsed — one filters
-// nothing (the nil predicate above), the other would hand every item off.
-func (app *App) assumableRoles(ctx context.Context) ([]flow.RoleName, bool) {
+// Coverage is the choice; capability is the ceiling on it. The two are read
+// together and reported together, because a role is assumable only where both
+// hold and an operator told one without the other cannot tell why a run
+// stopped (docs/resolution-standalone.md § Declaring what a binary may do).
+//
+// The bool reports whether the CAPABILITY question could be answered at all.
+// False is not "the account backs nothing": an orchestrator that cannot detect
+// capabilities has said nothing about the account, and the two readings must
+// not be collapsed — one filters within coverage alone, the other would hand
+// every item off. Coverage needs no such bool: it is configuration, and it is
+// always known.
+func (app *App) roleStandings(ctx context.Context) ([]roleStanding, bool) {
 	caps, err := app.Orchestrator.DetectCapabilities(ctx, "")
-	if err != nil {
-		return nil, false
+	known := err == nil
+	decls := app.Flow.Roles()
+	out := make([]roleStanding, 0, len(decls))
+	for _, d := range decls {
+		s := roleStanding{Role: d.Name, Covered: slices.Contains(app.Coverage, d.Name)}
+		if known {
+			s.Missing = d.Missing(caps)
+		}
+		out = append(out, s)
 	}
-	return flow.AssumableRoles(app.Flow.Roles(), caps), true
+	return out, known
+}
+
+// assumableRoles is the roles this run may take a move in, in declaration
+// order: the covered roles the account backs — or, when the capability
+// question could not be answered, the covered roles as they stand. The bool is
+// roleStandings' — whether that question was answered — so a reader can word
+// the two cases apart.
+func (app *App) assumableRoles(ctx context.Context) ([]flow.RoleName, bool) {
+	standings, known := app.roleStandings(ctx)
+	var out []flow.RoleName
+	for _, s := range standings {
+		if s.assumable(known) {
+			out = append(out, s.Role)
+		}
+	}
+	return out, known
 }
 
 // Run is the binary's entry point. Parses argv, dispatches the matching
@@ -432,7 +492,34 @@ func (app *App) validate() error {
 	// in requireRunnable and exits 1. Graph validity is the opposite: pure
 	// configuration, free to check, and named in the exit-2 list. A binary
 	// whose graph does not hang together is misconfigured for every command.
-	return f.ValidateGraph()
+	if err := f.ValidateGraph(); err != nil {
+		return err
+	}
+
+	// Coverage, against the declared roles — after the graph check, because
+	// that is where the declared set is certified whole, and the same rule
+	// every other reference to the role vocabulary is under: a name the flow
+	// does not declare is refused at startup (docs/resolution-standalone.md
+	// § Declaring what a binary may do, docs/flow-registration.md § Roles).
+	//
+	// Empty coverage is refused too, not defaulted. Coverage is never implied:
+	// a binary that declares none assumes no role, and starting one that can
+	// quietly do everything its account permits is the configuration this
+	// declaration exists to make impossible. Configuration, so exit 2 and every
+	// command — a binary that has not said what it may do is misconfigured for
+	// all of them.
+	if len(app.Coverage) == 0 {
+		return fmt.Errorf("App.Coverage is empty — a binary declares the roles it may assume, and one that declares none assumes no role; declare one or more of %v", f.RoleNames())
+	}
+	for i, role := range app.Coverage {
+		if !f.DeclaresRole(role) {
+			return fmt.Errorf("App.Coverage: %w", flow.ErrUnknownRole{Role: role, Declared: f.RoleNames()})
+		}
+		if slices.Contains(app.Coverage[:i], role) {
+			return fmt.Errorf("App.Coverage names role %q twice", role)
+		}
+	}
+	return nil
 }
 
 // repairUnbuiltTools is what a missing declaration tells the reader to run. It

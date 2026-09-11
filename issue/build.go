@@ -12,24 +12,21 @@ import (
 
 // BuildApp assembles the cli.App for a consuming project.
 //
-// Every CONFIGURATION that cannot work fails here, at startup, before any item
-// is claimed: an unknown role, a backend that cannot report what it needs, an
-// undetectable base branch, carrying through on an account that cannot
-// integrate. That matters because the alternative is discovering a
-// misconfiguration partway through a claimed item.
+// Every CONFIGURATION that cannot work fails at startup, before any item is
+// claimed: a prompt key naming no slot here, and — once cli.Run validates the
+// App — a coverage naming no declared role, or none at all. That matters
+// because the alternative is discovering a misconfiguration partway through a
+// claimed item.
 //
 // What this binary may not PERFORM is a different question and is refused at
-// dispatch, by a gate: a binary whose account backs no role, or whose coverage
-// does not reach the step the route stands on, still answers `list`, `status`,
-// `grant`, `answer` and `doctor` — the commands an operator reaches for
-// precisely then.
-//
-// One caveat worth stating plainly: when Config.Role is UNSET, BuildApp makes a
-// live call to detect it, and BuildApp runs before every command — so on an
-// expired token `doctor` cannot start to tell you the token expired. Role has
-// to be known here because it fixes this binary's coverage, and cli.App is
-// fixed once built. Set Config.Role to remove the call entirely; base branch
-// and principal are already lazy and cost nothing at startup.
+// dispatch, by a gate: a binary whose coverage does not reach the step the
+// route stands on still answers `list`, `status`, `grant`, `answer` and
+// `doctor` — the commands an operator reaches for precisely then. An account
+// that cannot back a role it covers is the same handoff, and nothing is probed
+// here to find out: `resolve` announces the standing before its first dispatch
+// and `doctor` reports it, so BuildApp touches nothing — base branch and
+// principal resolve lazily on the steps that need them — and `doctor` starts on
+// a broken token, which is the whole point of `doctor`.
 func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 	if deps.Orchestrator == nil {
 		return cli.App{}, fmt.Errorf("issue: Deps.Backend is required")
@@ -42,12 +39,6 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 			"it is what a producing step works with, and what the prompts tell the agent to satisfy")
 	}
 
-	// Role decides which of the one graph's steps this binary may perform, and
-	// cli.App is fixed once built, so it has to be known here. With Config.Role
-	// set that costs nothing; otherwise it is one probe. Base branch and
-	// principal resolve lazily on the steps that need them, so a binary
-	// configured with an explicit Role starts — and `doctor` runs — with no
-	// network at all.
 	// A typo'd prompt key is invisible at run time: PromptID is a string type,
 	// so `issue.PromptID("implementaion")` compiles, misses every lookup, and
 	// the step silently runs on the generic library default. The project's
@@ -73,56 +64,25 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 		}
 	}
 
-	role, err := resolveRole(ctx, cfg, deps.Orchestrator)
-	if err != nil {
-		return cli.App{}, err
-	}
-
-	// CarryThrough on anything but the maintainer role asks to integrate without
-	// the capability to integrate. That is a configuration that cannot produce
-	// correct behaviour, so it is a startup error naming the field — the empty
-	// role included, where the same sentence is true and the alternative would
-	// be a configuration silently dropped.
-	if cfg.CarryThrough && role != RoleMaintainer {
-		return cli.App{}, fmt.Errorf(
-			"issue: Config.CarryThrough requires maintainer capability, "+
-				"but the account this binary acts as backs %s — a binary that "+
-				"intends to integrate must be able to", roleOrNone(role))
-	}
-
-	// The COVERAGE this binary declares: the roles it may assume here, narrowed
-	// from what its account can back by what it is configured to do. Derived
-	// once, from the two config fields that already mean it, and read only by
-	// the gate below — capability is the ceiling and coverage is the choice
-	// within it (docs/resolution.md § Accounts, capabilities and roles).
+	// The COVERAGE this binary declares — Config.Coverage, converted ONCE to the
+	// flow's role names and handed to both readers below: the gate that refuses
+	// at dispatch and the App that announces, selects and hands off on it. One
+	// slice, so the two cannot disagree about what this binary performs. What
+	// the names mean is checked where every other role reference is, in
+	// cli.App's startup validation: an undeclared name and an empty coverage
+	// are both refused there (docs/resolution-standalone.md § Declaring what a
+	// binary may do).
 	//
-	// Taken BEFORE the contributor fallback below, so it answers about the
-	// account rather than about the fallback.
-	covered := performedRoles(role, cfg.CarryThrough)
-
-	// An account that backs none of the declared roles resolves to the empty
-	// role, and that is a HANDOFF rather than a misconfiguration: "a covered
-	// role the account cannot back is the ordinary split the boundary exists to
-	// produce, not a misconfiguration" (docs/resolution-standalone.md
-	// § Declaring what a binary may do). So this binary starts and refuses at
-	// DISPATCH rather than at construction: refusing construction would take
-	// `list`, `status`, `grant`, `answer` and `doctor` down with it, the
-	// commands an operator reaches for precisely when the credentials are
-	// wrong, and `doctor` is where the missing permission is reported
-	// (docs/cli.md § Doctor).
-	//
-	// The fallback that follows is about the PROMPTS, not the step set: there
-	// is one graph and it is built either way, and nothing of it can run while
-	// the gate stands. What a binary with no standing would tell an agent it is
-	// acting as is the least this lifecycle has.
-	noRole := role == ""
-	var roleGate flow.PreflightFunc
-	if noRole {
-		role = RoleContributor
-		roleGate = noAssumableRoleGate
+	// Nothing here reads what the account can do. Capability is the ceiling
+	// and coverage is the choice within it, and a covered role the account
+	// cannot back is a handoff rather than a misconfiguration
+	// (docs/resolution.md § Accounts, capabilities and roles).
+	covered := make([]flow.RoleName, len(cfg.Coverage))
+	for i, r := range cfg.Coverage {
+		covered[i] = flow.RoleName(r)
 	}
 
-	b := &builder{cfg: cfg, role: role, backend: deps.Orchestrator}
+	b := &builder{cfg: cfg, backend: deps.Orchestrator}
 	if cfg.BaseBranch != "" {
 		b.base.Store(&cfg.BaseBranch)
 	}
@@ -146,19 +106,15 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 		Artifacts:    resolveArtifacts(),
 		Signals:      resolveSignals(),
 		Flow:         f,
-		CarryThrough: cfg.CarryThrough,
+		Coverage:     covered,
 		// cli.App wants the display form (it reaches prompts and messages);
 		// cfg.VerifyCmd is argv because that is what a backend execs.
 		VerifyCmd: strings.Join(cfg.VerifyCmd, " "),
-		// Three gates, in this order, because each answers something the next
-		// one presupposes. The no-role gate first: an account backing nothing
-		// has no coverage to speak of, and telling such an operator which role's
-		// step they stopped at would answer past the access they are missing.
-		// The coverage gate next: what it refuses, it refuses whatever the
-		// item's questions say — an item awaiting a role this binary does not
-		// perform is not this binary's to answer for.
+		// Two gates, in this order, because the first answers something the
+		// second presupposes: what the coverage gate refuses, it refuses
+		// whatever the item's questions say — an item awaiting a role this
+		// binary does not perform is not this binary's to answer for.
 		Preflight: flow.ChainPreflight(
-			roleGate,
 			coverageGate(f, covered),
 			answerGate(deps.Orchestrator, b.principal)),
 	}
@@ -180,9 +136,10 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 //
 // A flow declares the roles its steps are tagged with, and the graph has steps
 // of both — so both are declared, on every build. What a given binary may
-// perform is not this: coverage is a runtime narrowing (issue/role.go), and
-// declaring fewer roles to express it would drop the boundary out of the graph
-// that is supposed to make the boundary reviewable.
+// perform is not this: coverage is declared separately (Config.Coverage) and
+// applied at dispatch (issue/role.go), and declaring fewer roles to express it
+// would drop the boundary out of the graph that is supposed to make the
+// boundary reviewable.
 func declareRoles(f *flow.Flow, roles ...Role) {
 	for _, r := range roles {
 		d := roleDeclFor(r)
@@ -198,8 +155,9 @@ func declareRoles(f *flow.Flow, roles ...Role) {
 // them is an edge in this graph (close branch → review the proposal), which is
 // what makes it reviewable before anything runs: every handback, every role
 // crossing and every way the flow can end is in the declaration. Which of these
-// steps a given binary may PERFORM is a separate question, answered at dispatch
-// by the coverage gate (issue/role.go) — a narrowing, never a different graph.
+// steps a given binary may PERFORM is a separate question — the coverage it
+// declares, applied at dispatch by the coverage gate (issue/role.go) — a
+// narrowing, never a different graph.
 func (b *builder) resolveFlow(cfg Config) *flow.Flow {
 	f := flow.NewFlow("resolve", itemTypes(cfg))
 	declareRoles(f, RoleContributor, RoleMaintainer)

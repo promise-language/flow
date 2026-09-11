@@ -3,8 +3,8 @@
 // It is named after the DATA, not a verb: the issue is where the state lives,
 // and the verb depends on who is running the binary. A contributor resolves the
 // issue; a maintainer reviews, merges, and inspects the result. Same data, same
-// binary, different step sets — selected from the role the authenticated user
-// actually holds on the repository (see Role).
+// binary, one graph — and which of its steps a binary performs is the coverage
+// it declares (see Config.Coverage).
 //
 // # What this package owns, and what it does not
 //
@@ -127,10 +127,9 @@ const (
 	PromptPushRepair PromptID = "push:repair"
 )
 
-// Role is the capability the authenticated principal holds on the repository,
-// collapsed to the two step sets this lifecycle has. It is about capability,
-// not intent: a maintainer working on their own change deliberately runs the
-// contributor set, which is what Config.Role is for.
+// Role is one of the two roles this lifecycle declares, as the flow's step
+// tags name them. What a role REQUIRES of the account is roleDecls' (role.go);
+// which roles a binary intends to perform is Config.Coverage.
 type Role string
 
 const (
@@ -227,21 +226,26 @@ type Config struct {
 	// flow's package defaults.
 	Budgets map[StepID]flow.StepBudget
 
-	// Role forces the step set. Zero value means derive it from the account's
-	// detected capabilities (flow.Orchestrator.DetectCapabilities). Set it when
-	// a maintainer is deliberately working their own change through the
-	// contributor flow.
-	Role Role
-
-	// CarryThrough declares that this binary runs both the contributor and
-	// integration phases in one resolution, ending at a merged change rather
-	// than a proposed one. Requires maintainer capability (Role == RoleMaintainer
-	// or detected as such); refused at construction with RoleContributor.
+	// Coverage is the roles this binary may assume — which of the one graph's
+	// steps it intends to perform. REQUIRED: coverage is never implied from
+	// what the account can do, and a binary that declares none is refused at
+	// startup rather than started as one that quietly does everything its
+	// account permits (docs/resolution-standalone.md § Declaring what a binary
+	// may do).
 	//
-	// This is not independent review. A single principal reviewing its own
+	// Capability is the ceiling and coverage is the choice within it. A
+	// covered role the account cannot back is a HANDOFF, not a
+	// misconfiguration: the run ends where that role's steps begin, and the
+	// item awaits a runner that can take them. Covering both roles, on an
+	// account that backs both, is what carries an item to a merge in one run —
+	// and that is not independent review: a single principal reviewing its own
 	// agent's work buys a second pass with different prompts against a
-	// different target — real value, but not a second opinion.
-	CarryThrough bool
+	// different target, real value but not a second opinion. `resolve` says so
+	// before it crosses.
+	//
+	// A maintainer deliberately working their own change through the
+	// contributor's steps covers the contributor role alone.
+	Coverage []Role
 
 	// BaseBranch overrides the base the working branch is cut from. Zero value
 	// means detect it (see BranchDetector).

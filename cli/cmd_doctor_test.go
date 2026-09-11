@@ -21,6 +21,7 @@ func TestCmdDoctor_OKGlyph(t *testing.T) {
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         newDummyFlow("x"),
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -46,6 +47,7 @@ func TestCmdDoctor_FailGlyph(t *testing.T) {
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         newDummyFlow("x"),
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -220,6 +222,7 @@ func doctorApp(t *testing.T, orch rootedOrchestrator, agent flow.Agent) (*App, *
 		Agent:        agent,
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         newDummyFlow("x"),
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -301,6 +304,7 @@ func TestCmdDoctor_ReportsDeclaredGatesAndCommands(t *testing.T) {
 		Agent:        &stubAgent{name: "stub"},
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Flow:         newDummyFlow("x"),
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -320,59 +324,158 @@ func TestCmdDoctor_ReportsDeclaredGatesAndCommands(t *testing.T) {
 	}
 }
 
-// When CarryThrough is set, doctor should print the carry-through caveat.
-func TestCmdDoctor_ReportsCarryThrough(t *testing.T) {
-	be := fake.New()
+// twoRoleFlow declares the contributor and the maintainer, with the boundary
+// between them: the fixture the standing report is asked about.
+func twoRoleFlow() *flow.Flow {
+	f := flow.NewFlow("x", nil)
+	f.Role("contributor", flow.CapPush)
+	f.Role("maintainer", flow.CapPush, flow.CapMerge)
+	f.AddStep("write plan", "plan", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil },
+		flow.StepConfig{Prompts: flow.PromptsAgent, Entry: true, Role: "contributor", Next: []flow.StepId{"commit"}})
+	f.AddStep("close branch", "commit", func(flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil },
+		flow.StepConfig{Prompts: flow.PromptsNone, Role: "maintainer", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	return f
+}
+
+// standingApp is doctorApp over the two-role flow, with the binary's coverage
+// chosen by the caller and the account's capabilities set on the fake.
+func standingApp(t *testing.T, be rootedOrchestrator, covered ...flow.RoleName) (*App, *bytes.Buffer) {
+	t.Helper()
 	arena(t, be)
-	app := App{
+	app := &App{
 		Orchestrator: be,
 		Agent:        &stubAgent{name: "stub"},
-		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flow:         newDummyFlow("x"),
-		CarryThrough: true,
+		Artifacts: []flow.ArtifactDef{
+			flow.Artifact("plan", flow.ArtifactMarkdown),
+			flow.Artifact("commit", flow.ArtifactCommitHash),
+		},
+		Flow:     twoRoleFlow(),
+		Coverage: covered,
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
 	out := &bytes.Buffer{}
-	app.Out = out
-	app.Err = &bytes.Buffer{}
+	app.Out, app.Err = out, &bytes.Buffer{}
+	return app, out
+}
 
-	code := app.cmdDoctor(context.Background(), nil, nil)
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
+// roleLine returns the standing line for the named role, or "" when there is
+// none.
+func roleLine(report, role string) string {
+	for _, line := range strings.Split(report, "\n") {
+		if rest, found := strings.CutPrefix(strings.TrimSpace(line), "role "+role+": "); found {
+			return rest
+		}
 	}
-	if !strings.Contains(out.String(), "carry-through: enabled") {
-		t.Errorf("doctor output should report carry-through; got %q", out.String())
-	}
-	if !strings.Contains(out.String(), "not independent review") {
-		t.Errorf("doctor output should state the caveat; got %q", out.String())
+	return ""
+}
+
+// Below the checks, doctor reports the binary's standing: one line per role
+// the flow declares, saying whether it is assumable here and, when it is not,
+// why — the question docs/resolution-standalone.md § Declaring what a binary
+// may do puts to the binary when asked whether it is fit to work. A
+// declaration made once in configuration is invisible to whoever invokes the
+// binary later, and a fact derived from coverage AND capabilities is written
+// in neither, so this is where the two are read together.
+//
+// Five wordings, because "out of reach" alone would send the operator to work
+// out from the declaration what the report already knew: not covered, the
+// account lacks a capability, both, and — for a covered role on an orchestrator
+// that cannot say what the account holds — unknown, which is a different answer
+// from any of the others.
+func TestCmdDoctor_ReportsTheStandingOfEveryDeclaredRole(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		covered         []flow.RoleName
+		caps            []flow.Capability
+		wantContributor string
+		wantMaintainer  string
+	}{
+		{"covering both on an account backing both",
+			[]flow.RoleName{"contributor", "maintainer"}, []flow.Capability{flow.CapPush, flow.CapMerge},
+			"assumable", "assumable"},
+		{"declining a role the account could back",
+			[]flow.RoleName{"contributor"}, []flow.Capability{flow.CapPush, flow.CapMerge},
+			"assumable", "out of reach — not covered by this binary"},
+		{"covering a role the account cannot back",
+			[]flow.RoleName{"contributor", "maintainer"}, []flow.Capability{flow.CapPush},
+			"assumable", "out of reach — the account lacks merge"},
+		{"neither covered nor backed",
+			[]flow.RoleName{"contributor"}, []flow.Capability{flow.CapPush},
+			"assumable", "out of reach — not covered by this binary, and the account lacks merge"},
+		// Every missing capability is named, not the first: an operator granting
+		// access should learn the whole of what is missing in one pass.
+		{"an account backing nothing",
+			[]flow.RoleName{"contributor", "maintainer"}, nil,
+			"out of reach — the account lacks push", "out of reach — the account lacks push, merge"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			be := fake.New()
+			be.SetCapabilities("", tc.caps...)
+			app, out := standingApp(t, be, tc.covered...)
+
+			// The standing never moves the exit code: a role out of reach is
+			// not an unfit machine.
+			if code := app.cmdDoctor(context.Background(), nil, nil); code != 0 {
+				t.Fatalf("exit code = %d, want 0 — the standing is a report, not a check; output:\n%s", code, out.String())
+			}
+			if got := roleLine(out.String(), "contributor"); got != tc.wantContributor {
+				t.Errorf("contributor line = %q, want %q; output:\n%s", got, tc.wantContributor, out.String())
+			}
+			if got := roleLine(out.String(), "maintainer"); got != tc.wantMaintainer {
+				t.Errorf("maintainer line = %q, want %q; output:\n%s", got, tc.wantMaintainer, out.String())
+			}
+			// On stdout, with the rest of the report: it is one list on one
+			// stream (docs/cli.md § One-shot reports).
+			if errBuf := app.Err.(*bytes.Buffer); errBuf.Len() != 0 {
+				t.Errorf("the report belongs on one stream; stderr carried %q", errBuf.String())
+			}
+			// Below the checks, not among them: it carries no glyph, so a reader
+			// scanning the scanline for verdicts does not read it as one.
+			for _, line := range strings.Split(out.String(), "\n") {
+				if strings.Contains(line, "role ") && (strings.HasPrefix(line, glyphOK) || strings.HasPrefix(line, glyphFail) || strings.HasPrefix(line, glyphSkip)) {
+					t.Errorf("a standing line carries a check glyph: %q", line)
+				}
+			}
+		})
 	}
 }
 
-// When CarryThrough is not set, doctor should not mention it.
-func TestCmdDoctor_OmitsCarryThroughWhenDisabled(t *testing.T) {
-	be := fake.New()
-	arena(t, be)
-	app := App{
-		Orchestrator: be,
-		Agent:        &stubAgent{name: "stub"},
-		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
-		Flow:         newDummyFlow("x"),
-	}
-	if err := app.validate(); err != nil {
-		t.Fatalf("validate: %v", err)
-	}
-	out := &bytes.Buffer{}
-	app.Out = out
-	app.Err = &bytes.Buffer{}
+// An orchestrator that cannot detect capabilities has said nothing about the
+// account, and a covered role reads as UNKNOWN rather than as out of reach — the
+// two are different answers, and the second would tell an operator to grant
+// access nobody established was missing. An uncovered role is out of reach
+// whatever the account holds: coverage is configuration, and it is always
+// known.
+func TestCmdDoctor_ReportsACoveredRoleUnknownWhenCapabilitiesCannotBeDetected(t *testing.T) {
+	be := &undetectableCapabilities{Orchestrator: fake.New(), err: errors.New("the forge will not say")}
+	app, out := standingApp(t, be, "contributor")
 
-	code := app.cmdDoctor(context.Background(), nil, nil)
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0", code)
+	if code := app.cmdDoctor(context.Background(), nil, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0; output:\n%s", code, out.String())
 	}
-	if strings.Contains(out.String(), "carry-through") {
-		t.Errorf("doctor output should not mention carry-through when disabled; got %q", out.String())
+	if got, want := roleLine(out.String(), "contributor"), "unknown — this orchestrator cannot detect capabilities"; got != want {
+		t.Errorf("contributor line = %q, want %q", got, want)
+	}
+	if got, want := roleLine(out.String(), "maintainer"), "out of reach — not covered by this binary"; got != want {
+		t.Errorf("maintainer line = %q, want %q", got, want)
+	}
+}
+
+// The standing is reported in declaration order — the order the flow's own
+// declaration reads in, and the one every other report of the roles uses.
+func TestCmdDoctor_ReportsRolesInDeclarationOrder(t *testing.T) {
+	be := fake.New()
+	be.SetCapabilities("", flow.CapPush, flow.CapMerge)
+	app, out := standingApp(t, be, "maintainer", "contributor") // coverage order is not report order
+
+	if code := app.cmdDoctor(context.Background(), nil, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0; output:\n%s", code, out.String())
+	}
+	c, m := strings.Index(out.String(), "role contributor:"), strings.Index(out.String(), "role maintainer:")
+	if c < 0 || m < 0 || c > m {
+		t.Errorf("roles reported out of declaration order (contributor at %d, maintainer at %d):\n%s", c, m, out.String())
 	}
 }
 
@@ -420,6 +523,7 @@ func TestCmdDoctor_NormativeDocsMissing(t *testing.T) {
 				Agent:        &stubAgent{name: "stub"},
 				Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 				Flow:         newDummyFlow("x"),
+				Coverage:     []flow.RoleName{"contributor"},
 			}
 			if err := app.validate(); err != nil {
 				t.Fatalf("validate: %v", err)

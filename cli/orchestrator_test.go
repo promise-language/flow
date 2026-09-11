@@ -535,6 +535,9 @@ func testAppItem(t *testing.T, item flow.Item, types []flow.ItemType, configure 
 	f.Role("contributor", flow.CapPush)
 	configure(f)
 	app.Flow = f
+	// Every declared role is covered: what the account can do is the lever
+	// these fixtures turn, and none of them is about declining a role.
+	app.Coverage = f.RoleNames()
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -1453,6 +1456,7 @@ func TestSelectFlow_RequireSignalGate(t *testing.T) {
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("commit", flow.ArtifactCommitHash)},
 		Signals:      []flow.SignalDef{flow.Signal("pr-open", "x")},
 		Flow:         f,
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 	if err := app.validate(); err != nil {
 		t.Fatalf("validate: %v", err)

@@ -3,7 +3,7 @@
 // It is deliberately thin, and that is the whole demonstration: a project
 // adopting this lifecycle supplies configuration and prompt bodies, not step
 // handlers. Everything structural — which steps exist, the implement step's
-// verify-fix loop, role-based step selection, park-for-answer — lives in
+// verify-fix loop, the role coverage gate, park-for-answer — lives in
 // github.com/promise-language/flow/issue and is shared with every other
 // consumer, so a fix there reaches all of them instead of being re-forked.
 //
@@ -66,18 +66,17 @@ func main() {
 			// The other steps take the package defaults.
 			issue.StepImplement: {Timeout: 60 * time.Minute},
 		},
-		// Pinned to the contributor role rather than detected. The graph is the
-		// same either way; what Role decides is this binary's COVERAGE — which
-		// of that graph's steps it may perform. Detection would give anyone with
-		// admin, which is anyone running this on their own repository, the
-		// maintainer's coverage, and the entry step is the contributor's, so
-		// every run would stop at the boundary before writing a plan. Pinning
-		// also means no probe at startup, so `doctor` works with a broken token,
-		// which is the whole point of `doctor`.
-		//
-		// Set CarryThrough alongside a maintainer role to cover both sides and
-		// run an item through to a merge.
-		Role: issue.RoleContributor,
+		// COVERAGE: which of the one graph's steps this binary may perform. It
+		// is declared, never derived from what the account can do — holding
+		// the capability to merge is not the same as intending to, and anyone
+		// running this on their own repository has admin. The contributor's
+		// coverage takes an item to a proposal and hands off; add
+		// issue.RoleMaintainer to cover both sides and carry an item through to
+		// a merge, which `resolve` announces is not independent review before
+		// it crosses. A covered role the account cannot back is a handoff, not
+		// a misconfiguration, and nothing is probed at startup: `doctor` reports
+		// what each role's standing is, and works with a broken token.
+		Coverage: []issue.Role{issue.RoleContributor},
 		// BaseBranch is left unset: it is detected from the repository, which
 		// is right for any repo whose default branch is the merge target. Set
 		// it only when cutting from something else.

@@ -10,8 +10,9 @@ import (
 )
 
 // roleDecls is this lifecycle's role vocabulary, and the ONE place it is
-// written down: the flows are declared from it (BuildApp), and the pre-flow
-// decision about which step set to build is made from it (resolveRole). A
+// written down: the flow is declared from it (BuildApp), and every question
+// about what a role requires of an account — `doctor`'s standing report,
+// `resolve`'s handoff — is answered from the declaration the flow carries. A
 // second table, or a second permissions→role rule beside it, would be a second
 // answer to "what may this account do here" — and the two would disagree the
 // first time either moved.
@@ -21,8 +22,8 @@ import (
 // default branch — which is exactly the configuration a repository with
 // maintainers has.
 //
-// LEAST PRIVILEGED FIRST, and resolveRole reads that order: the last role an
-// account covers is the most privileged one it may assume.
+// Least privileged first, which is the order the flow declares them in and
+// the order every report lists them.
 var roleDecls = []flow.RoleDecl{
 	{Name: flow.RoleName(RoleContributor), Capabilities: []flow.Capability{flow.CapPush}},
 	{Name: flow.RoleName(RoleMaintainer), Capabilities: []flow.Capability{flow.CapPush, flow.CapMerge}},
@@ -51,100 +52,6 @@ func roleDeclFor(r Role) flow.RoleDecl {
 	panic(fmt.Sprintf("issue: role %q has no declaration in roleDecls", r))
 }
 
-// resolveRole decides which step set to run.
-//
-// Config.Role wins outright when set — the roles describe capability, not
-// intent, and a maintainer working their own change legitimately wants the
-// contributor set. Otherwise the account's capabilities are detected and the
-// roles they cover are derived from the same declarations the flow is built
-// from (docs/resolution.md § Accounts, capabilities and roles: the roles a
-// runner could assume are derived from its detected capabilities, never
-// assigned by hand).
-//
-// An account covering NO declared role resolves to the EMPTY role, and the
-// error return is reserved for a question that could not be answered — an
-// unknown Config.Role, a detection that failed. The two readings are not the
-// same: "this account backs no role here" is an answer, and it is a handoff
-// rather than a misconfiguration — "a covered role the account cannot back is
-// the ordinary split the boundary exists to produce, not a misconfiguration"
-// (docs/resolution-standalone.md § Declaring what a binary may do). BuildApp
-// turns it into a gate that refuses every dispatch, so nothing runs on an
-// account that cannot finish it while `list`, `status`, `answer` and `doctor`
-// still work.
-//
-// What it must NOT do is silently call such an account a contributor — which is
-// what a most-privileged-flag-down collapse did: that starts a resolution that
-// cannot get past its first push, with the misconfiguration surfacing as a push
-// failure several steps in.
-func resolveRole(ctx context.Context, cfg Config, backend flow.Orchestrator) (Role, error) {
-	switch cfg.Role {
-	case RoleContributor, RoleMaintainer:
-		return cfg.Role, nil
-	case "":
-		// fall through to detection
-	default:
-		return "", fmt.Errorf("issue: unknown Config.Role %q (want %q or %q)",
-			cfg.Role, RoleContributor, RoleMaintainer)
-	}
-
-	caps, err := backend.DetectCapabilities(ctx, "")
-	if err != nil {
-		return "", fmt.Errorf("issue: detect repository capabilities: %w", err)
-	}
-	assumable := flow.AssumableRoles(roleDecls, caps)
-	if len(assumable) == 0 {
-		return "", nil
-	}
-	// roleDecls is ordered least privileged first, so the last covered role is
-	// the most privileged one this account may assume.
-	return Role(assumable[len(assumable)-1]), nil
-}
-
-// roleOrNone renders a resolved role for a message, including the empty one an
-// account backing nothing resolves to: "%q" on that role would print a pair of
-// quotes around nothing, which reads as a bug in the message rather than as the
-// account's standing.
-func roleOrNone(r Role) string {
-	if r == "" {
-		return "no role this lifecycle declares"
-	}
-	return fmt.Sprintf("the %q role", r)
-}
-
-// performedRoles is the COVERAGE this binary declares: the roles it may assume,
-// derived once from the two config fields that already mean it.
-//
-// "Capability is the ceiling and coverage is the choice within it: a runner may
-// decline a role its account could back, and nothing it declares can add a role
-// its account cannot" (docs/resolution.md § Accounts, capabilities and roles).
-// So `role` — detected, or set by an operator who is deliberately declining —
-// is the ceiling, and CarryThrough is the one choice available inside it: a
-// maintainer-capable binary either continues across the boundary or stops at
-// the proposal like any contributor.
-//
-// It is the ONE derivation. Coverage decides what this binary refuses at
-// dispatch, and a second reading of the same two fields somewhere else would be
-// a second answer to what this binary may do.
-//
-// The empty role covers nothing. That is the honest answer for an account that
-// backs no declared role, and it is a handoff rather than a misconfiguration —
-// BuildApp answers it ahead of this gate with the access the operator is
-// missing, which is the more useful sentence.
-func performedRoles(role Role, carryThrough bool) []flow.RoleName {
-	switch {
-	case role == RoleContributor:
-		return []flow.RoleName{contributorRole}
-	case role == RoleMaintainer && carryThrough:
-		// One principal covering the roles on both sides, crossing without a
-		// handoff (docs/resolution.md § One principal, several roles). Nothing
-		// declares carrying through as such: it is exactly this coverage.
-		return []flow.RoleName{contributorRole, maintainerRole}
-	case role == RoleMaintainer:
-		return []flow.RoleName{maintainerRole}
-	}
-	return nil
-}
-
 // coverageGate refuses, before any dispatch, a pending step whose role this
 // binary does not cover.
 //
@@ -152,8 +59,12 @@ func performedRoles(role Role, carryThrough bool) []flow.RoleName {
 // did not have the steps it may not perform; with one, every step is present
 // and coverage is what says which are this binary's — so without this gate,
 // collapsing the graphs would turn every maintainer-capable operator into a
-// carry-through runner with no way to decline, and a contributor binary would
-// walk straight past the proposal into the merge.
+// runner carrying every item through with no way to decline, and a contributor
+// binary would walk straight past the proposal into the merge.
+//
+// `covered` is Config.Coverage as BuildApp converted it — the SAME slice it
+// hands cli.App, so the gate and the app cannot disagree about what this binary
+// performs.
 //
 // The refusal names the step, the role it belongs to, and what this binary
 // performs, because those three are what an operator needs to decide between
@@ -183,9 +94,9 @@ func coverageGate(f *flow.Flow, covered []flow.RoleName) flow.PreflightFunc {
 }
 
 // performedList renders a coverage set for that refusal. The empty set is a
-// sentence rather than an empty list, for the reason roleOrNone exists: "%v" on
-// nothing prints a pair of brackets, which reads as a bug in the message rather
-// than as the binary's standing.
+// sentence rather than an empty list: "%v" on nothing prints a pair of
+// brackets, which reads as a bug in the message rather than as the binary's
+// standing.
 func performedList(covered []flow.RoleName) string {
 	switch len(covered) {
 	case 0:
@@ -198,39 +109,6 @@ func performedList(covered []flow.RoleName) string {
 		quoted[i] = fmt.Sprintf("%q", r)
 	}
 	return "the " + strings.Join(quoted, " and ") + " roles"
-}
-
-// noAssumableRole is the one wording for "this binary's account backs none of
-// the roles this lifecycle declares", named rather than inlined so the refusal
-// and the test that asserts what an operator is told read the same sentence.
-//
-// It names what the least privileged role needs and sends the reader to
-// `doctor` rather than reciting what was detected: `doctor` is where the missing
-// permission is reported, and docs/cli.md § Doctor requires every condition a
-// boundary refuses on to be one `doctor` reports.
-var noAssumableRole = fmt.Sprintf(
-	"the account this binary acts as backs none of the roles this lifecycle declares — "+
-		"%q needs %v on the repository, which `doctor` reports; grant the account "+
-		"write access, or set Config.Role to run a step set deliberately",
-	RoleContributor, roleDeclFor(RoleContributor).Capabilities)
-
-// noAssumableRoleGate refuses every dispatch when the account backs no declared
-// role.
-//
-// Refusing here rather than at construction is the same judgement coverageGate
-// makes, for the same reason: a binary that cannot perform a step can still
-// answer `list`, `status`, `grant`, `answer` and `doctor`, and those are exactly
-// the commands an operator reaches for on a machine whose credentials are wrong.
-// It wraps flow.ErrBlocked, so the invocation reports `blocked` rather than
-// `failed` — nothing failed, and no later cycle passes until a person grants the
-// access.
-//
-// It runs AHEAD of coverageGate, whose refusal would also be true here and is
-// the less useful of the two: an operator whose account backs nothing needs to
-// be told about the access, not about which role's step the route happens to
-// stand on.
-func noAssumableRoleGate(context.Context, *flow.Item) error {
-	return fmt.Errorf("issue: %s: %w", noAssumableRole, flow.ErrBlocked)
 }
 
 // resolveBaseBranch decides what the working branch is cut from.

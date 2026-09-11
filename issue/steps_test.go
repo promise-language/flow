@@ -349,6 +349,9 @@ type fakeCtx struct {
 	agent flow.Agent
 	park  *flow.ParkRequest
 	asked []flow.AgentQuestion
+	// role is what ctx.Role answers: the pending step's declared role, which
+	// is what the prompt context reports as the role being rendered for.
+	role flow.RoleName
 	// journal is what ctx.Journal and its accessors read. Empty in most tests:
 	// nothing appends entries yet, so a handler reading the journal reads the
 	// one the orchestrator loaded.
@@ -384,7 +387,7 @@ func (c *fakeCtx) Description() string      { return "step" }
 func (c *fakeCtx) Result() flow.ArtifactId  { return "implementation" }
 func (c *fakeCtx) Item() flow.Item          { return c.item }
 func (c *fakeCtx) Runner() flow.AccountId   { return "runner" }
-func (c *fakeCtx) Role() flow.RoleName      { return "" }
+func (c *fakeCtx) Role() flow.RoleName      { return c.role }
 
 // RoleAccount refuses every role, as the real one does for a flow that
 // declares none: no shipped step carries a tag yet.
@@ -544,7 +547,7 @@ func (a *scriptedAgent) Run(_ context.Context, req flow.AgentRequest) (*flow.Age
 
 func testBuilder(t *testing.T) *builder {
 	t.Helper()
-	b := &builder{cfg: Config{VerifyCmd: []string{"make", "check"}}, role: RoleContributor}
+	b := &builder{cfg: Config{VerifyCmd: []string{"make", "check"}}}
 	base := flow.BranchName("main")
 	b.base.Store(&base)
 	return b
@@ -2043,7 +2046,7 @@ func TestStepCloseBranch_BaseBranchLookupFailureWrapsErrTransient(t *testing.T) 
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
 
 	// A builder with no pre-stored base and a backend that cannot resolve it.
-	b := &builder{cfg: Config{}, role: RoleContributor, backend: &bareBackend{}}
+	b := &builder{cfg: Config{}, backend: &bareBackend{}}
 
 	res, err := b.stepCloseBranch(ctx)
 	if err == nil {

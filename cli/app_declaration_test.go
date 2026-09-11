@@ -39,6 +39,7 @@ func declaringApp(be flow.Orchestrator, gates ...flow.GateName) App {
 		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
 		Gates:        gates,
 		Flow:         f,
+		Coverage:     []flow.RoleName{"contributor"},
 	}
 }
 
@@ -172,6 +173,104 @@ func TestApp_Validate_RefusesATagNamingNoDeclaredRole(t *testing.T) {
 	}
 	if !slices.Equal(unknown.Declared, []flow.RoleName{"contributor"}) {
 		t.Errorf("Declared = %v, want the declared set intact", unknown.Declared)
+	}
+}
+
+// --- Coverage ---
+//
+// docs/resolution-standalone.md § Declaring what a binary may do: coverage is
+// declared where the binary is configured, names roles from the flow's own
+// declaration, and is never implied. docs/cli.md § Startup lists the two
+// refusals — a coverage naming an undeclared role, or naming none at all — and
+// they are checked after the graph, where the declared set is certified whole.
+
+// A binary that declares no coverage assumes no role, and is refused rather
+// than started as one that quietly does everything its account permits. The
+// refusal names the declared roles, because that is the set the operator picks
+// from.
+func TestApp_Validate_RefusesEmptyCoverage(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		covered []flow.RoleName
+	}{
+		{"nil", nil},
+		{"empty", []flow.RoleName{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := declaringApp(fake.New())
+			app.Coverage = tc.covered
+			wantStartupRefusal(t, app, "App.Coverage is empty", "contributor")
+		})
+	}
+}
+
+// A coverage naming a role the flow does not declare is refused like every
+// other reference to the role vocabulary: a typed ErrUnknownRole carrying the
+// declared set, recoverable through startup's wrapping.
+func TestApp_Validate_RefusesCoverageNamingAnUndeclaredRole(t *testing.T) {
+	app := declaringApp(fake.New())
+	app.Coverage = []flow.RoleName{"contributor", "reviewer"}
+	err := wantStartupRefusal(t, app, "App.Coverage", "reviewer")
+
+	var unknown flow.ErrUnknownRole
+	if !errors.As(err, &unknown) {
+		t.Fatalf("validate() = %v, want an ErrUnknownRole recoverable through the wrapping", err)
+	}
+	if unknown.Role != "reviewer" {
+		t.Errorf("Role = %q, want the name that names nothing", unknown.Role)
+	}
+	if !slices.Equal(unknown.Declared, []flow.RoleName{"contributor"}) {
+		t.Errorf("Declared = %v, want the declared set intact", unknown.Declared)
+	}
+}
+
+// A role named twice is a declaration that does not know what it says. It is
+// refused rather than deduplicated: the second spelling is most often a typo
+// for the role the operator meant to add.
+func TestApp_Validate_RefusesCoverageNamingARoleTwice(t *testing.T) {
+	app := declaringApp(fake.New())
+	app.Coverage = []flow.RoleName{"contributor", "contributor"}
+	wantStartupRefusal(t, app, "App.Coverage", "contributor", "twice")
+}
+
+// The coverage check runs AFTER the graph check: an App wrong both ways reports
+// the graph, because a coverage cannot be judged against a declared set that
+// has not been certified whole.
+func TestApp_Validate_ChecksCoverageAfterTheGraph(t *testing.T) {
+	app := graphApp(fake.New(), func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
+			Entry:       true,
+			Role:        "contributor",
+			Next:        []flow.StepId{"commit"},
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+		})
+	})
+	app.Coverage = nil
+	err := wantStartupRefusal(t, app, "commit")
+	if strings.Contains(err.Error(), "App.Coverage") {
+		t.Errorf("refusal %q reports the coverage before the graph it also gets wrong", err)
+	}
+}
+
+// And the whole of it is configuration, so it refuses every command at exit 2
+// — `doctor` excepted, which reports it as the startup line.
+func TestRunWithArgs_EmptyCoverageExitsTwo(t *testing.T) {
+	for _, args := range [][]string{{"list"}, {"status", "1"}, {"resolve"}} {
+		t.Run(args[0], func(t *testing.T) {
+			app := declaringApp(fake.New())
+			app.Coverage = nil
+			out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+			app.Out, app.Err = out, errBuf
+			app.Name = "issue"
+
+			if code := RunWithArgs(app, args); code != 2 {
+				t.Errorf("exit code = %d, want 2 (out=%q err=%q)", code, out.String(), errBuf.String())
+			}
+			if got := errBuf.String(); !strings.HasPrefix(got, "startup error:") || !strings.Contains(got, "App.Coverage") {
+				t.Errorf("stderr = %q, want the startup refusal naming App.Coverage", got)
+			}
+		})
 	}
 }
 
