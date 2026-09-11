@@ -1127,21 +1127,26 @@ func TestStoreQuotaRecord_PrunesRetiredRecords(t *testing.T) {
 	orphan := write("quota-0123456789abcdef"+quotaCacheFileExt, old)
 	legacy := write("quota"+quotaCacheFileExt, old) // what the cache's first version left
 	sibling := write("quota-fedcba9876543210"+quotaCacheFileExt, time.Minute)
-	// Not records, and not this sweep's business: a lock is single-flight's, and
-	// its TTL breaker's; a temp file belongs to a store in flight, and removing
-	// one under the process writing it is how two writers land on one name.
-	lock := write("quota-0123456789abcdef"+quotaCacheFileExt+quotaLockSuffix, old)
+	// The locks orphan with the records, and nothing else ever clears them: the
+	// TTL breaker fires only when a process contends for that exact name, and a
+	// retired key's name is one nothing asks for again.
+	orphanLock := write("quota-0123456789abcdef"+quotaCacheFileExt+quotaLockSuffix, old)
+	legacyLock := write("quota"+quotaCacheFileExt+quotaLockSuffix, old)
+	// A lock in use is younger than quotaRefreshLockTTL, two orders of magnitude
+	// below the bound; a temp file belongs to a store in flight, and removing one
+	// under the process writing it is how a store lands on nothing.
+	liveLock := write("quota-fedcba9876543210"+quotaCacheFileExt+quotaLockSuffix, time.Second)
 	tmp := write(".quota-inflight", old)
 
 	path := recordPath(t)
 	storeQuotaRecord(path, quotaRecord{Usage: usageAt(0.42), ReadAt: time.Now()})
 
-	for _, gone := range []string{orphan, legacy} {
+	for _, gone := range []string{orphan, legacy, orphanLock, legacyLock} {
 		if _, err := os.Stat(gone); !os.IsNotExist(err) {
 			t.Errorf("%s should have been pruned; stat err = %v", filepath.Base(gone), err)
 		}
 	}
-	for _, kept := range []string{sibling, lock, tmp, path} {
+	for _, kept := range []string{sibling, liveLock, tmp, path} {
 		if _, err := os.Stat(kept); err != nil {
 			t.Errorf("%s should have been kept: %v", filepath.Base(kept), err)
 		}

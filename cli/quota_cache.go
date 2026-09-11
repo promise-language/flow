@@ -92,12 +92,15 @@ const (
 	quotaRecordKeepFor = quotaRetryAfterCap
 
 	// The record is named after the credential it was read with:
-	// quota-<key>.json. quotaRecordGlob matches those and the unkeyed quota.json
-	// left behind by the cache's first version, and neither the .quota-* temp
-	// files nor the .lock beside each record.
+	// quota-<key>.json, with its single-flight lock beside it at
+	// quota-<key>.json.lock. quotaRecordGlob matches the records — those and the
+	// unkeyed quota.json left behind by the cache's first version — and
+	// quotaLockGlob the locks. Neither matches the .quota-* temp files, which
+	// belong to a store in flight.
 	quotaCacheFilePrefix = "quota-"
 	quotaCacheFileExt    = ".json"
 	quotaRecordGlob      = "quota*" + quotaCacheFileExt
+	quotaLockGlob        = quotaRecordGlob + quotaLockSuffix
 
 	// quotaKeyUnknown names the record for a machine whose credential cannot be
 	// read at all. Such a machine cannot fetch either, so its record holds a
@@ -453,7 +456,8 @@ func storeQuotaRecord(path string, rec quotaRecord) {
 	pruneQuotaRecords(dir, time.Now())
 }
 
-// pruneQuotaRecords removes the records nothing is reading any more.
+// pruneQuotaRecords removes the records — and the locks beside them — that
+// nothing is reading any more.
 //
 // Naming a record after the credential it was read with is what introduces
 // growth: a token rotation makes a new name and orphans the old file, and so
@@ -462,22 +466,34 @@ func storeQuotaRecord(path string, rec quotaRecord) {
 // removing it takes nothing away from anyone; the same sweep retires the
 // unkeyed quota.json the cache's first version left behind.
 //
+// The LOCK is swept with the record, because keying orphans it the same way and
+// nothing else ever will: the TTL breaker in acquireRefreshLock clears a stale
+// lock only when some process contends for that exact name, and a retired key's
+// name is one no process asks for again. That is how a machine killed
+// mid-refresh under a credential it has since rotated keeps a lock file for
+// good — quota.json.lock from the cache's first version included. Sweeping at
+// quotaRecordKeepFor cannot reach a live one: a lock in use is broken at
+// quotaRefreshLockTTL, two orders of magnitude below this bound, so anything
+// this old is a leak by definition.
+//
 // Silent, like everything else on this path: a prune that cannot run is not a
 // reason to fail the run whose reading was just stored. It runs after a store
 // rather than on a timer of its own because a store is exactly when a new name
 // can have appeared.
 func pruneQuotaRecords(dir string, now time.Time) {
-	matches, err := filepath.Glob(filepath.Join(dir, quotaRecordGlob))
-	if err != nil {
-		return
-	}
-	for _, path := range matches {
-		st, err := os.Stat(path)
-		if err != nil || st.IsDir() {
+	for _, glob := range []string{quotaRecordGlob, quotaLockGlob} {
+		matches, err := filepath.Glob(filepath.Join(dir, glob))
+		if err != nil {
 			continue
 		}
-		if now.Sub(st.ModTime()) > quotaRecordKeepFor {
-			os.Remove(path)
+		for _, path := range matches {
+			st, err := os.Stat(path)
+			if err != nil || st.IsDir() {
+				continue
+			}
+			if now.Sub(st.ModTime()) > quotaRecordKeepFor {
+				os.Remove(path)
+			}
 		}
 	}
 }
