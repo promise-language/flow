@@ -10,21 +10,8 @@ import (
 
 func TestRenderStateComment_RoundTrip(t *testing.T) {
 	doc := stateDoc{
-		Flow:     "implement",
-		Schema:   stateSchemaVersion,
-		SeededAt: time.Date(2026, 5, 26, 15, 0, 0, 0, time.UTC),
-		Artifacts: []stateArtifactDoc{
-			{
-				Id:                  "plan",
-				Type:                "markdown",
-				Required:            true,
-				Resolved:            true,
-				ResolvedBy:          "https://github.com/o/r/issues/42#issuecomment-12345",
-				ProducedAt:          time.Date(2026, 5, 26, 15, 10, 0, 0, time.UTC),
-				ResolvedByPrincipal: "claude-opus-4-7",
-				Version:             1,
-			},
-		},
+		Flow:   "implement",
+		Schema: stateSchemaVersion,
 		Signals: []stateSignalDoc{
 			{Id: "pr-open", Set: true, ObservedAt: time.Date(2026, 5, 26, 15, 42, 0, 0, time.UTC), ObservedVia: "side-effect"},
 			{Id: "pr-merged", Set: false},
@@ -35,14 +22,20 @@ func TestRenderStateComment_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderStateComment: %v", err)
 	}
-	if !strings.Contains(body, "<!-- flow:state-v1 begin owner=alice -->") {
+	if !strings.Contains(body, "<!-- flow:state-v2 begin owner=alice -->") {
 		t.Errorf("missing begin marker; body:\n%s", body)
 	}
-	if !strings.Contains(body, "<!-- flow:state-v1 end -->") {
+	if !strings.Contains(body, "<!-- flow:state-v2 end -->") {
 		t.Errorf("missing end marker; body:\n%s", body)
 	}
 	if !strings.Contains(body, "```yaml") {
 		t.Errorf("missing yaml fence; body:\n%s", body)
+	}
+	// The version on the wire, spelled out rather than compared to the constant
+	// it was written from: the schema number is what a reader with no SDK keys
+	// off, so a silent bump must fail here.
+	if !strings.Contains(body, "schema: 2") {
+		t.Errorf("body does not declare schema 2:\n%s", body)
 	}
 
 	got, owner, found, err := extractStateDoc(body)
@@ -55,17 +48,70 @@ func TestRenderStateComment_RoundTrip(t *testing.T) {
 	if owner != "alice" {
 		t.Errorf("owner = %q, want alice", owner)
 	}
-	if got.Flow != "implement" || got.Schema != stateSchemaVersion {
-		t.Errorf("doc top = %+v, want flow=implement schema=1", got)
-	}
-	if len(got.Artifacts) != 1 || got.Artifacts[0].Id != "plan" {
-		t.Errorf("artifacts = %+v, want one entry id=plan", got.Artifacts)
-	}
-	if !got.Artifacts[0].Resolved || got.Artifacts[0].Version != 1 {
-		t.Errorf("artifact = %+v, want resolved at version 1", got.Artifacts[0])
+	if got.Flow != "implement" || got.Schema != 2 {
+		t.Errorf("doc top = %+v, want flow=implement schema=2", got)
 	}
 	if len(got.Signals) != 2 || got.Signals[0].Id != "pr-open" || !got.Signals[0].Set {
 		t.Errorf("signals = %+v, want pr-open set=true first", got.Signals)
+	}
+}
+
+// THE INCOMPATIBILITY, ASSERTED RATHER THAN ASSUMED. Schema v2 drops the
+// `artifacts` checklist a v1 document stores its results in, so a v1 comment is
+// not read at all: the item reads as not started and the next append posts a
+// fresh v2 comment beside the inert one. A reader that accepted both would be a
+// second schema to keep in sync.
+func TestExtractStateDoc_AV1MarkerIsNotFound(t *testing.T) {
+	body := "<!-- flow:state-v1 begin owner=alice -->\n" +
+		"```yaml\nflow: implement\nschema: 1\n```\n" +
+		"<!-- flow:state-v1 end -->\n"
+	doc, owner, found, err := extractStateDoc(body)
+	if err != nil {
+		t.Fatalf("extractStateDoc on a v1 body: %v", err)
+	}
+	if found || doc != nil || owner != "" {
+		t.Errorf("extractStateDoc(v1) = (%+v, %q, %v), want nothing found", doc, owner, found)
+	}
+}
+
+// A v2 begin with a body but no ```yaml fence is malformed, not empty: the
+// markers say a document is here and nothing can be read out of it.
+func TestExtractStateDoc_MissingYAMLFenceIsError(t *testing.T) {
+	body := "<!-- flow:state-v2 begin owner=alice -->\nno fence here\n<!-- flow:state-v2 end -->\n"
+	_, owner, found, err := extractStateDoc(body)
+	if err == nil {
+		t.Fatal("expected an error for a v2 block with no yaml fence")
+	}
+	if !found || owner != "alice" {
+		t.Errorf("found/owner = %v/%q, want true/alice — the markers were there", found, owner)
+	}
+}
+
+// Malformed YAML between the markers is an error rather than a zero document:
+// reading it as "nothing recorded" would re-dispatch a step whose result is
+// sitting right there, unparsed.
+func TestExtractStateDoc_MalformedYAMLIsError(t *testing.T) {
+	body := "<!-- flow:state-v2 begin owner=alice -->\n" +
+		"```yaml\nflow: [unclosed\n```\n" +
+		"<!-- flow:state-v2 end -->\n"
+	if _, _, _, err := extractStateDoc(body); err == nil {
+		t.Fatal("expected an error for malformed YAML between the markers")
+	}
+}
+
+// An `artifacts:` key left by a v1 writer — or hand-edited in — is IGNORED
+// rather than honoured: the field is gone from the document, so yaml.v3 drops
+// it, and the projection comes off the journal alone.
+func TestExtractStateDoc_IgnoresALeftoverArtifactsKey(t *testing.T) {
+	body := "<!-- flow:state-v2 begin owner=alice -->\n" +
+		"```yaml\nflow: implement\nschema: 2\nartifacts:\n  - id: plan\n    type: markdown\n    resolved: true\n```\n" +
+		"<!-- flow:state-v2 end -->\n"
+	doc, _, found, err := extractStateDoc(body)
+	if err != nil || !found {
+		t.Fatalf("extractStateDoc: found=%v err=%v", found, err)
+	}
+	if recs := recordsFromJournal(doc.Journal); len(recs) != 0 {
+		t.Errorf("projection = %+v, want none — the journal is empty", recs)
 	}
 }
 
@@ -84,7 +130,7 @@ func TestExtractStateDoc_NoMarkerReturnsNotFound(t *testing.T) {
 }
 
 func TestExtractStateDoc_MissingEndIsError(t *testing.T) {
-	body := "<!-- flow:state-v1 begin owner=alice -->\n```yaml\nflow: x\n```\n"
+	body := "<!-- flow:state-v2 begin owner=alice -->\n```yaml\nflow: x\n```\n"
 	_, _, _, err := extractStateDoc(body)
 	if err == nil {
 		t.Errorf("expected error for missing end marker")
@@ -109,25 +155,55 @@ func TestArtifactTypeStringSymmetric(t *testing.T) {
 
 // The record is the artifact VALUE and its provenance, and nothing else: the
 // counters are the ledger's, and a projection carrying its own copy of them
-// would be a second answer to what a step has spent.
-func TestRecordFromArtifactDoc(t *testing.T) {
-	d := stateArtifactDoc{
-		Id:                  "plan",
-		Type:                "markdown",
-		Resolved:            true,
-		ResolvedBy:          "url1",
-		ResolvedByPrincipal: "alice",
-		Version:             2,
+// would be a second answer to what a step has spent. It is DERIVED from the
+// journal, so a step run twice reports the later execution's value.
+func TestRecordsFromJournal(t *testing.T) {
+	at := time.Date(2026, 5, 26, 15, 10, 0, 0, time.UTC)
+	entries := []stateJournalEntryDoc{
+		{Step: "plan", Execution: 1, Type: "markdown", By: "ann", At: at},
+		// A signal entry: its result is the observation itself, so it projects
+		// no record at all.
+		{Step: "pr-open", Execution: 1, Type: journalSignalType, By: "ann", At: at},
+		{Step: "plan", Execution: 2, Type: "markdown", By: "bo", At: at.Add(time.Hour)},
+		{Step: "impl", Execution: 1, Type: "commit_hash", CommitHash: "0123abc", By: "bo", At: at},
+		{Step: "shape", Execution: 1, Type: "json", JSONInline: `{"n":1}`, By: "bo", At: at},
 	}
-	rec := recordFromArtifactDoc(d)
-	if rec.Id != "plan" || rec.Type != flow.ArtifactMarkdown {
-		t.Errorf("rec = %+v, want id=plan type=markdown", rec)
+	recs := recordsFromJournal(entries)
+
+	if len(recs) != 3 {
+		t.Fatalf("records = %+v, want three — one per artifact-producing step", recs)
 	}
-	if !rec.Resolved || rec.Version != 2 {
-		t.Errorf("rec = %+v, want resolved at version 2", rec)
+	if _, ok := recs["pr-open"]; ok {
+		t.Errorf("records carry the signal step: %+v", recs)
 	}
-	if rec.ResolvedBy != "alice" {
-		t.Errorf("ResolvedBy = %q, want alice (principal preferred over url)", rec.ResolvedBy)
+	plan := recs["plan"]
+	if plan.Id != "plan" || plan.Type != flow.ArtifactMarkdown || !plan.Resolved {
+		t.Errorf("plan = %+v, want id=plan type=markdown resolved", plan)
+	}
+	// The LATER execution stands as the step's current result.
+	if plan.Version != 2 || plan.ResolvedBy != "bo" || !plan.ProducedAt.Equal(at.Add(time.Hour)) {
+		t.Errorf("plan = %+v, want the second execution's value, version and account", plan)
+	}
+	if got := recs["impl"].CommitHash; got != "0123abc" {
+		t.Errorf("impl commit = %q, want the inline value", got)
+	}
+	if got := string(recs["shape"].JSON); got != `{"n":1}` {
+		t.Errorf("shape json = %q, want the inline value", got)
+	}
+}
+
+// BAD INPUT. `type` discriminates the result kind, and journalEntryDocOf always
+// writes one — so an entry with none came from a hand edit or from a writer this
+// one does not know, and it says nothing about what the step produced. It
+// projects NO record: a record would read as resolved, which is the answer the
+// flow uses to decide the step need not run again.
+func TestRecordsFromJournal_AnEntryWithNoTypeProjectsNoRecord(t *testing.T) {
+	at := time.Date(2026, 5, 26, 15, 10, 0, 0, time.UTC)
+	recs := recordsFromJournal([]stateJournalEntryDoc{
+		{Step: "plan", Execution: 1, By: "ann", At: at},
+	})
+	if rec, ok := recs["plan"]; ok {
+		t.Errorf("plan = %+v, want no record — the entry does not say what it produced", rec)
 	}
 }
 
@@ -135,12 +211,8 @@ func TestRecordFromArtifactDoc(t *testing.T) {
 // survive a render/extract round trip through the state comment.
 func TestRenderStateComment_ParkRoundTrip(t *testing.T) {
 	doc := stateDoc{
-		Flow:     "implement",
-		Schema:   stateSchemaVersion,
-		SeededAt: time.Date(2026, 5, 26, 15, 0, 0, 0, time.UTC),
-		Artifacts: []stateArtifactDoc{
-			{Id: "plan", Type: "markdown", Resolved: true, Version: 1},
-		},
+		Flow:   "implement",
+		Schema: stateSchemaVersion,
 		Park: parkDocFromRequest(flow.ParkRequest{
 			Kind:   flow.ParkTreasurerRefused,
 			Step:   "plan",
@@ -194,9 +266,8 @@ func TestRenderStateComment_NoParkIsNil(t *testing.T) {
 // the same full picture the run recorded, not just the axis that tripped.
 func TestRenderStateComment_ParkAxisReportRoundTrip(t *testing.T) {
 	doc := stateDoc{
-		Flow:     "implement",
-		Schema:   stateSchemaVersion,
-		SeededAt: time.Date(2026, 5, 26, 15, 0, 0, 0, time.UTC),
+		Flow:   "implement",
+		Schema: stateSchemaVersion,
 		Park: parkDocFromRequest(flow.ParkRequest{
 			Kind:   flow.ParkTreasurerRefused,
 			Step:   "push",
@@ -275,7 +346,7 @@ func TestRenderStateComment_JournalRoundTrip(t *testing.T) {
 			By:     "bo", Role: "maintainer", At: at.Add(2 * time.Hour),
 		},
 	}
-	doc := stateDoc{Flow: "implement", Schema: stateSchemaVersion, SeededAt: at}
+	doc := stateDoc{Flow: "implement", Schema: stateSchemaVersion}
 	for _, e := range entries {
 		doc.Journal = append(doc.Journal, journalEntryDocOf(e, ""))
 	}

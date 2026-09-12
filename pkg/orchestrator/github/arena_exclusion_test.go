@@ -564,6 +564,30 @@ func TestBackend_Claim_ArenaLabelIsNotReadAsAnotherBinary(t *testing.T) {
 	})
 }
 
+// THE SAME NEGATIVE FOR THE RETIRED SPELLINGS, which is where the damage of
+// dropping their rows would actually land: live issues carry flow:seeded today,
+// and a parked one carries flow:budget-exhausted:<step>. Read by exclusion,
+// each would be a binary nobody wrote and a standing, permanent claim refusal.
+func TestBackend_Claim_RetiredLabelsAreNotReadAsAnotherBinary(t *testing.T) {
+	for _, retired := range []string{"flow:seeded", "flow:stale:plan", "flow:budget-exhausted:push"} {
+		t.Run(retired, func(t *testing.T) {
+			mock, one, _ := twoArenas(t)
+			mock.mu.Lock()
+			mock.issueLabels = []string{"flow:implement", retired}
+			mock.mu.Unlock()
+
+			if other, wrong := one.b.otherBinaryLabel(mock.labelNames()); wrong {
+				t.Fatalf("otherBinaryLabel read %q as binary %q", retired, other)
+			}
+			one.run(func() {
+				if _, err := one.b.Claim(t.Context(), one.b.refFromIssue(42), nil); err != nil {
+					t.Fatalf("an item carrying only %q is claimable: %v", retired, err)
+				}
+			})
+		})
+	}
+}
+
 // The arena label is a marker Claim maintains, so removing it directly is
 // refused for the same reason the owner label's removal is: a caller able to
 // delete one could make an item report a state no operation put it in — here,

@@ -245,7 +245,7 @@ func TestStageAll_ExcludesNestedFlowSubtree(t *testing.T) {
 	}
 
 	// Create nested work-in-progress records like the real SDK writes.
-	workDir := filepath.Join(g.dir, ".flow", "work", "issue-9")
+	workDir := filepath.Join(g.dir, ".flow", "draft", "issue-9")
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestStageAll_ExcludesNestedFlowSubtree(t *testing.T) {
 		t.Errorf("README should be staged, got: %q", staged)
 	}
 	if strings.Contains(staged, ".flow") {
-		t.Errorf("nested .flow/work/ should NOT be staged, got: %q", staged)
+		t.Errorf("nested .flow/draft/ should NOT be staged, got: %q", staged)
 	}
 }
 

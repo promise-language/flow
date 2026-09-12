@@ -52,6 +52,32 @@ func TestActiveClaimRoundTrip(t *testing.T) {
 	}
 }
 
+// The directory is `.flow/draft`, spelled out rather than derived: it is the
+// name docs/github-schema.md § Drafts publishes, and every other test here goes
+// through WorkDir() and so cannot tell one name from another.
+func TestDraftsLiveUnderTheDraftDirectory(t *testing.T) {
+	dir := t.TempDir()
+	flowDir := filepath.Join(dir, ".flow")
+	t.Setenv("FLOW_DIR", flowDir)
+
+	if got, want := workDir(t), filepath.Join(flowDir, "draft"); got != want {
+		t.Errorf("WorkDir = %q, want %q", got, want)
+	}
+	if err := clistate.SaveWork("42", "plan", "half a plan"); err != nil {
+		t.Fatalf("SaveWork: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(flowDir, "draft", "42", "plan.json")); err != nil {
+		t.Errorf("record is not at .flow/draft/42/plan.json: %v", err)
+	}
+	// And Clear takes the whole tree with it, under the new name.
+	if err := clistate.Clear(); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(flowDir, "draft")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf(".flow/draft survived Clear, stat err = %v", err)
+	}
+}
+
 func TestWorkRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
@@ -343,7 +369,7 @@ func TestLoadWorkTreatsARecordNamingNothingAsAbsent(t *testing.T) {
 
 // The ids are backend-supplied and used as path components, so an id that
 // names a directory rather than a name has to be neutralised. `..` is the one
-// that costs something: `.flow/work/../plan.json` is `.flow/plan.json`, which
+// that costs something: `.flow/draft/../plan.json` is `.flow/plan.json`, which
 // sits beside active.json and survives the work tree's removal — a record that
 // releasing the claim does not take with it.
 func TestWorkKeepsDegenerateIdsInsideTheWorkTree(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 	"github.com/promise-language/flow/pkg/clistate"
 )
 
-// This orchestrator's work-in-progress store is the worktree-local `.flow/work`
+// This orchestrator's work-in-progress store is the worktree-local `.flow/draft`
 // tree, the same per-clone place its claim state lives. See
 // the Orchestrator work-in-progress methods for the contract, and clistate for
 // the files.

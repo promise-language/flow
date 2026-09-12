@@ -9,13 +9,26 @@ import (
 // label vocabulary — keep all string constants in one place so other
 // modules don't sprinkle "flow:" literals around.
 const (
-	labelSuffixSeeded         = "seeded"
+	// labelSuffixAwaitsPrefix is whose move it is: the role the journal's last
+	// entry elected, or `awaits:signal:<id>` for a wait that is nobody's. It is a
+	// cheap index over the journal, maintained at every append — the journal is
+	// still the one source, and the label is what a listing can read without
+	// fetching a state comment per item.
+	labelSuffixAwaitsPrefix = "awaits:"
+	// labelSuffixRequiresPrefix is a placement restriction: only arenas whose
+	// `<axis>` fact is `<value>` qualify (docs/environment.md § Placement).
+	//
+	// NOTHING WRITES IT HERE, and the row exists anyway. The behaviour — the
+	// axes, the arena facts, the selection filter and the claim refusal — is
+	// #251's. What this reserves is the SPELLING, because otherBinaryLabel reads
+	// by exclusion: without the row, `flow:requires:os:windows` reads as a binary
+	// named `requires:os:windows` and every claim on such an item is refused.
+	labelSuffixRequiresPrefix = "requires:"
 	labelSuffixOwnerPrefix    = "owner:"
 	labelSuffixBlocked        = "blocked"
 	labelSuffixNeedsAnswer    = "needs-answer"
 	labelSuffixDisabled       = "disabled"
 	labelSuffixInfraTransient = "infra-transient"
-	labelSuffixStalePrefix    = "stale:"
 	labelSuffixClaimPrefix    = "claim:"
 	// labelSuffixArenaPrefix marks WHICH ARENA holds the claim, as an opaque
 	// digest of its (HostId, ArenaId). It is the other half of
@@ -29,9 +42,9 @@ const (
 	// what an arena is made of — local filesystem paths and host identifiers.
 	// Equality is the only operation the exclusion needs, and a digest supports
 	// exactly that and nothing else.
-	labelSuffixArenaPrefix   = "arena:"
-	labelSuffixBudgetExhPref = "budget-exhausted:"
-	labelSuffixTypePrefix    = "type:"
+	labelSuffixArenaPrefix      = "arena:"
+	labelSuffixTreasurerRefPref = "treasurer-refused:"
+	labelSuffixTypePrefix       = "type:"
 	// The two selection axes. Their NEUTRAL VALUES ARE UNSPELLABLE: `medium`
 	// and `default` have no label, so no state is reachable both by a label and
 	// by that label's absence — an item demoted from `high` to `medium` and an
@@ -50,8 +63,10 @@ const (
 // label prefix that is THIS ORCHESTRATOR'S OWN MARKER rather than a binary's
 // name, and what the two readers of that distinction may do with it.
 type structuralLabel struct {
-	// suffix is a labelSuffix* constant — never a literal, so a row cannot
-	// spell a suffix the vocabulary above does not declare.
+	// suffix is a labelSuffix* constant in structuralLabels — never a literal,
+	// so a live row cannot spell a suffix the vocabulary above does not declare.
+	// The retiredSuffixes rows below are the one exception, and spell literals
+	// precisely because they are no longer vocabulary.
 	suffix string
 	// valued marks a suffix that carries a value after it (owner:<login>,
 	// type:<type>) and so matches a label by prefix; an unvalued suffix is the
@@ -61,6 +76,16 @@ type structuralLabel struct {
 	// ItemEditor.RemoveTag refuses to delete: a caller able to remove it
 	// directly could make an item report a state no operation put it in.
 	maintained bool
+}
+
+// matches reports whether `rest` — a label with the prefix already stripped —
+// falls under this row. THE one matching rule, so the live vocabulary and the
+// retired spellings are recognised by the same test.
+func (s structuralLabel) matches(rest string) bool {
+	if s.valued {
+		return strings.HasPrefix(rest, s.suffix)
+	}
+	return rest == s.suffix
 }
 
 // structuralLabels is THE vocabulary of structural suffixes. Both readers of
@@ -104,20 +129,44 @@ type structuralLabel struct {
 // Until a registry exists, this table plus the completeness test is the
 // containment.
 var structuralLabels = []structuralLabel{
-	{suffix: labelSuffixSeeded, maintained: true},
+	{suffix: labelSuffixAwaitsPrefix, valued: true, maintained: true},
+	{suffix: labelSuffixRequiresPrefix, valued: true, maintained: true},
 	{suffix: labelSuffixOwnerPrefix, valued: true, maintained: true},
 	{suffix: labelSuffixBlocked, maintained: true},
 	{suffix: labelSuffixNeedsAnswer, maintained: true},
 	{suffix: labelSuffixDisabled},
 	{suffix: labelSuffixInfraTransient, maintained: true},
-	{suffix: labelSuffixStalePrefix, valued: true, maintained: true},
 	{suffix: labelSuffixClaimPrefix, valued: true, maintained: true},
 	{suffix: labelSuffixArenaPrefix, valued: true, maintained: true},
-	{suffix: labelSuffixBudgetExhPref, valued: true, maintained: true},
+	{suffix: labelSuffixTreasurerRefPref, valued: true, maintained: true},
 	{suffix: labelSuffixTypePrefix, valued: true},
 	{suffix: labelSuffixPriorityPrefix, valued: true, maintained: true},
 	{suffix: labelSuffixUrgencyPrefix, valued: true, maintained: true},
 	{suffix: labelSuffixManual, maintained: true},
+}
+
+// retiredSuffixes are spellings this vocabulary USED to write and no longer
+// does: `flow:seeded` (superseded by the binary label as the "begun" marker),
+// `flow:stale:<id>` (the checklist's stale bit, which schema v2 drops), and
+// `flow:budget-exhausted:<id>` (renamed `flow:treasurer-refused:<id>`).
+//
+// THEY CANNOT SIMPLY VANISH. Live issues carry them right now, and
+// otherBinaryLabel reads by exclusion — a label under the prefix that nothing
+// recognises is another binary's name. Dropping these rows would turn every item
+// still carrying one into a standing, permanent claim refusal naming a binary
+// nobody wrote, which is exactly the failure the completeness rule above records
+// happening three times (#210, #217, #256).
+//
+// Recognised as STRUCTURAL and NOT MAINTAINED: never read as a binary, never
+// written, and ItemEditor.RemoveTag will clear one by hand.
+//
+// Plain literals rather than labelSuffix* constants, deliberately: they are no
+// longer vocabulary, and a constant for each would put them back in the table
+// the completeness test enforces.
+var retiredSuffixes = []structuralLabel{
+	{suffix: "seeded"},
+	{suffix: "stale:", valued: true},
+	{suffix: "budget-exhausted:", valued: true},
 }
 
 // labels collects the prefixed label names an orchestrator instance uses.
@@ -140,7 +189,6 @@ func newLabels(prefix string) labels {
 func (l labels) named(suffix string) string { return l.prefix + suffix }
 
 // Static labels.
-func (l labels) Seeded() string         { return l.named(labelSuffixSeeded) }
 func (l labels) Blocked() string        { return l.named(labelSuffixBlocked) }
 func (l labels) NeedsAnswer() string    { return l.named(labelSuffixNeedsAnswer) }
 func (l labels) Disabled() string       { return l.named(labelSuffixDisabled) }
@@ -163,12 +211,22 @@ func (l labels) Arena(fingerprint string) string {
 }
 func (l labels) ArenaPrefix() string { return l.prefix + labelSuffixArenaPrefix }
 
-// Artifact lifecycle labels.
-func (l labels) StaleArtifact(id string) string {
-	return l.named(labelSuffixStalePrefix + id)
-}
-func (l labels) BudgetExhausted(id string) string {
-	return l.named(labelSuffixBudgetExhPref + id)
+// Awaited-marker labels. `value` is what awaitsString renders — a role name, or
+// `signal:<id>` — so `flow:awaits:signal:<id>` falls out of the wire's own
+// spelling rather than being composed a second time here.
+func (l labels) Awaits(value string) string { return l.named(labelSuffixAwaitsPrefix + value) }
+func (l labels) AwaitsPrefix() string       { return l.prefix + labelSuffixAwaitsPrefix }
+
+// Placement labels. The PREFIX only: nothing in this package writes one yet, and
+// #251 — which owns the axes and their values — is what adds the formatter that
+// spells `<axis>:<value>` after it. What this reserves is the namespace, so a
+// restriction already on an item is read as this orchestrator's marker rather
+// than as a binary's name.
+func (l labels) RequiresPrefix() string { return l.prefix + labelSuffixRequiresPrefix }
+
+// Step lifecycle labels.
+func (l labels) TreasurerRefused(id string) string {
+	return l.named(labelSuffixTreasurerRefPref + id)
 }
 
 // Type-derivation labels.
@@ -250,7 +308,15 @@ func (l labels) structural(name string) (structuralLabel, bool) {
 		return structuralLabel{}, false
 	}
 	for _, s := range structuralLabels {
-		if (s.valued && strings.HasPrefix(rest, s.suffix)) || (!s.valued && rest == s.suffix) {
+		if s.matches(rest) {
+			return s, true
+		}
+	}
+	// A spelling this vocabulary has retired is still structural — it is this
+	// orchestrator's own marker, just an old one — and never maintained. See
+	// retiredSuffixes for why recognising them is required rather than tidy.
+	for _, s := range retiredSuffixes {
+		if s.matches(rest) {
 			return s, true
 		}
 	}
@@ -259,11 +325,15 @@ func (l labels) structural(name string) (structuralLabel, bool) {
 
 // Maintained reports whether `name` is a marker this orchestrator maintains
 // itself as a consequence of a contract operation — the owner, arena and claim
-// markers from Claim, the seeded and binary markers from seeding, the park
-// markers from Park, the manual marker from the editor, and the two selection
-// axes, which the typed setters own the way SetManual owns flow:manual. Which
-// rows those are is structuralLabels' maintained bit, decided beside the
-// vocabulary rather than restated here.
+// markers from Claim, the binary marker from the first journal entry, the
+// awaited marker from every append, the park markers from Park, the manual
+// marker from the editor, and the two selection axes, which the typed setters
+// own the way SetManual owns flow:manual. Which rows those are is
+// structuralLabels' maintained bit, decided beside the vocabulary rather than
+// restated here.
+//
+// A retired spelling is NOT maintained: nothing writes it, so RemoveTag is the
+// only way one leaves an item that still carries it.
 //
 // ItemEditor.RemoveTag refuses these: a caller able to delete one directly
 // could make an item report a state no operation put it in.

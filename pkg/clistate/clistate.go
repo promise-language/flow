@@ -12,7 +12,7 @@
 //
 // The same directory holds the other per-clone thing a claim owns: the
 // work-in-progress records a step leaves for its own next invocation
-// (`.flow/work/<item>/<step>.json`). See SaveWork and flow.WorkInProgress.
+// (`.flow/draft/<item>/<step>.json`). See SaveWork and flow.WorkInProgress.
 package clistate
 
 import (
@@ -30,7 +30,7 @@ import (
 const (
 	flowDirName   = ".flow"
 	activeJSONRel = "active.json"
-	workDirRel    = "work"
+	workDirRel    = "draft"
 )
 
 // Dir returns the state directory: `.flow` inside the checkout the running
@@ -147,7 +147,7 @@ func Clear() error {
 // same step continues from it rather than re-deriving it. See
 // flow.WorkInProgress for the contract these implement.
 //
-// Records live under `.flow/work/<item>/<step>.json`, beside `active.json`:
+// Records live under `.flow/draft/<item>/<step>.json`, beside `active.json`:
 // per-clone and gitignored, which is where a local backend's claim state
 // already is. They are never published.
 // ---------------------------------------------------------------------------

@@ -21,7 +21,7 @@ import (
 // Encodes the id/type/version + metadata so the backend can locate it later.
 const artifactCommentMarkerPrefix = "<!-- flow:artifact "
 
-// errNoStateComment — the issue carries no state-v1 comment, so there is no
+// errNoStateComment — the issue carries no state-v2 comment, so there is no
 // document to mutate. A sentinel rather than a string so a caller that
 // distinguishes "nothing recorded yet" from a transport failure matches on
 // identity instead of on message text.
@@ -104,7 +104,9 @@ func (b *Orchestrator) AppendEntry(ctx context.Context, ref flow.ItemRef, entry 
 	var (
 		clearedLabel string
 		firstEntry   bool
+		prevAwaits   string
 	)
+	want := b.awaitsLabel(entry.Awaits)
 	if err := b.mutateOrCreateStateDoc(ctx, ref, "AppendEntry", func(doc *stateDoc) error {
 		// The first entry binds the flow. An item with an empty journal is bound
 		// to nothing: the binding is a consequence of work having been recorded,
@@ -113,12 +115,14 @@ func (b *Orchestrator) AppendEntry(ctx context.Context, ref flow.ItemRef, entry 
 			doc.Flow = b.cfg.BinaryName
 			firstEntry = true
 		}
+		// What the item advertises RIGHT NOW, read inside the write that is about
+		// to supersede it: the mutation is replayed against whatever document is
+		// actually there, so reading it here is what keeps the label being moved
+		// off the value that document holds rather than one a lost read saw.
+		prevAwaits = b.awaitsLabel(awaitsFromDoc(doc))
 		// APPEND. An existing entry is never rewritten, so the pending step
 		// derived from the last one cannot change under a reader.
 		doc.Journal = append(doc.Journal, journalEntryDocOf(entry, bodyAt))
-		if entry.Result.Type != 0 {
-			projectArtifactDoc(doc, entry, artifactURL, account)
-		}
 		// A park recorded against this step is obsolete once the step completes
 		// — drop it rather than let Load keep reporting a reason that no longer
 		// holds. The questions stay: they are never removed, and one asked and
@@ -144,17 +148,18 @@ func (b *Orchestrator) AppendEntry(ctx context.Context, ref flow.ItemRef, entry 
 	// for work that is recorded, and send the caller back to append it twice.
 	_ = b.ClearWorkInProgress(ctx, ref, entry.Step)
 	b.removeParkLabel(ctx, ref, clearedLabel)
+	// Every append passes through here — including a finalizing one, whose
+	// Awaits is empty and which therefore removes the label by the same path
+	// that moves it.
+	b.moveAwaitsLabel(ctx, issueNum, prevAwaits, want)
 	if firstEntry {
-		// The markers that say this binary has begun on the item. They used to
-		// go on at seed time; the first entry is where "begun" is now recorded,
-		// and the binary label is what separates `auto` from `available`.
+		// The marker that says this binary has begun on the item. It used to go
+		// on at seed time; the first entry is where "begun" is now recorded, and
+		// the binary label is what separates `auto` from `available`.
 		//
 		// Best-effort: the entry has already landed, and failing the append over
 		// a label would report a failure for work that is recorded.
-		_ = b.out.AddLabels(ctx, issueNum, []string{
-			b.labels.Seeded(),
-			b.labels.Binary(b.cfg.BinaryName),
-		})
+		_ = b.out.AddLabels(ctx, issueNum, []string{b.labels.Binary(b.cfg.BinaryName)})
 	}
 	return nil
 }
@@ -276,39 +281,10 @@ func (b *Orchestrator) publishResult(
 	return c.GetHTMLURL(), spillURL, nil
 }
 
-// projectArtifactDoc derives the artifact projection from the entry being
-// appended. The ONE place the record is written, which is what keeps it from
-// drifting from the journal it projects.
-func projectArtifactDoc(doc *stateDoc, entry flow.JournalEntry, artifactURL string, account flow.AccountId) {
-	id := string(entry.Step)
-	a := findArtifactDoc(doc, id)
-	if a == nil {
-		doc.Artifacts = append(doc.Artifacts, stateArtifactDoc{Id: id})
-		a = &doc.Artifacts[len(doc.Artifacts)-1]
-	}
-	body := entry.Result
-	a.Type = artifactTypeString(body.Type)
-	a.Resolved = true
-	a.Version = entry.Execution
-	a.ProducedAt = entry.At
-	if a.ProducedAt.IsZero() {
-		a.ProducedAt = nowUTC()
-	}
-	a.ResolvedBy = artifactURL
-	a.ResolvedByPrincipal = string(account)
-	a.CommitHash = ""
-	a.JSONInline = ""
-	if body.Type == flow.ArtifactCommitHash {
-		a.CommitHash = body.CommitHash
-	}
-	if body.Type == flow.ArtifactJSON {
-		a.JSONInline = string(body.JSON)
-	}
-}
-
 // Reset clears the flow's whole record on the item so the next resolution starts
-// from an empty journal: journal, ledger, park, the artifact projection, the
-// finalization, and this issue's drafts.
+// from an empty journal: journal, ledger, park, the awaited marker, the
+// finalization, and this issue's drafts. The artifact projection goes with the
+// journal, being derived from it.
 //
 // Operator-initiated only; the SDK never calls it automatically.
 //
@@ -354,19 +330,66 @@ func (b *Orchestrator) Reset(ctx context.Context, ref flow.ItemRef) error {
 		// The marker is absent — the comment exists but is not ours to reset.
 		return nil
 	}
+	// The awaited marker is derived from the journal's last entry, and the
+	// journal is about to go — so the label goes with it, read off the document
+	// before it is cleared.
+	clearedAwaits := b.awaitsLabel(awaitsFromDoc(doc))
 	doc.Journal = nil
 	doc.Ledger = stateLedgerDoc{}
-	doc.Artifacts = nil
 	doc.Finalized = false
 	doc.Disposition = ""
-	doc.SeededAt = nowUTC()
 	clearedLabel := parkLabel(b.labels, parkRequestFromDoc(doc.Park))
 	doc.Park = nil
 	if _, err := b.updateStateComment(ctx, issueNum, stateID, *doc, owner); err != nil {
 		return fmt.Errorf("reset state comment: %w", err)
 	}
 	b.removeParkLabel(ctx, ref, clearedLabel)
+	b.moveAwaitsLabel(ctx, issueNum, clearedAwaits, "")
 	return nil
+}
+
+// awaitsLabel is the label that advertises what an item awaits — a role, or
+// `signal:<id>` for a wait that is nobody's move. Spelled through awaitsString,
+// the SAME rendering the wire's `awaits` field is written with, so the cheap
+// label index and the journal it indexes cannot disagree about the spelling.
+//
+// An item awaiting nothing has no label, which is why the empty Awaits maps to
+// the empty string rather than to a bare `flow:awaits:`.
+func (b *Orchestrator) awaitsLabel(a flow.Awaits) string {
+	s := awaitsString(a)
+	if s == "" {
+		return ""
+	}
+	return b.labels.Awaits(s)
+}
+
+// moveAwaitsLabel moves the awaited marker from what the item advertised to what
+// it now awaits: REMOVE THEN ADD, so an item never carries two at once, and
+// nothing at all when the new value is empty — which is how a finalizing entry
+// clears it.
+//
+// THE ONE WRITER of the marker, and every caller is an operation that CHANGES
+// WHAT awaitsFromDoc ANSWERS: AppendEntry, which appends the entry the answer is
+// read off; Reset, which clears the journal; and Finalize, which sets the flag
+// that makes the answer nobody regardless of the journal. An operation that
+// moved that answer without coming through here would leave the index pointing
+// at a wait the record no longer describes.
+//
+// Best-effort, like the binary label beside it and for the same reason: the
+// entry that elected this wait has already landed, and failing the append over a
+// label would report a failure for work that is recorded, sending the caller
+// back to append it twice. The journal remains the source of truth; this is the
+// index over it.
+func (b *Orchestrator) moveAwaitsLabel(ctx context.Context, issueNum int, prev, want string) {
+	if prev == want {
+		return
+	}
+	if prev != "" {
+		_ = b.out.RemoveLabel(ctx, issueNum, prev)
+	}
+	if want != "" {
+		_ = b.out.AddLabels(ctx, issueNum, []string{want})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -753,9 +776,8 @@ func (b *Orchestrator) withStateDoc(ctx context.Context, ref flow.ItemRef, op st
 			return fmt.Errorf("github: %s: %w", op, errNoStateComment)
 		default:
 			doc = &stateDoc{
-				Flow:     b.cfg.BinaryName,
-				Schema:   stateSchemaVersion,
-				SeededAt: nowUTC(),
+				Flow:   b.cfg.BinaryName,
+				Schema: stateSchemaVersion,
 			}
 		}
 
@@ -836,16 +858,6 @@ const (
 	stateLockWait  = 50 * time.Millisecond
 )
 
-// findArtifactDoc returns a pointer to the doc's entry for key, or nil.
-func findArtifactDoc(doc *stateDoc, key string) *stateArtifactDoc {
-	for i := range doc.Artifacts {
-		if doc.Artifacts[i].Id == key {
-			return &doc.Artifacts[i]
-		}
-	}
-	return nil
-}
-
 // parkLabel returns the label that advertises a park of this kind. Adding and
 // removing go through the same function so a park can never be labelled by one
 // rule and unlabelled by another.
@@ -857,11 +869,7 @@ func parkLabel(l labels, req *flow.ParkRequest) string {
 	case flow.ParkQuestion:
 		return l.NeedsAnswer()
 	case flow.ParkTreasurerRefused:
-		// The label spelling is still `flow:budget-exhausted:<id>`. Renaming the
-		// LABEL is #240's, with the schema bump that goes with it; renaming the
-		// KIND is this change's, and the two are separable because the label is
-		// storage and the kind is vocabulary.
-		return l.BudgetExhausted(string(req.Step))
+		return l.TreasurerRefused(string(req.Step))
 	case flow.ParkInfraTransient:
 		return l.InfraTransient()
 	case flow.ParkRefused:
@@ -879,7 +887,7 @@ func parkLabel(l labels, req *flow.ParkRequest) string {
 
 // Park records a park in the state comment's "park" field — the machine-
 // readable copy LoadState returns — plus a flow:blocked / flow:needs-answer /
-// flow:budget-exhausted:<step-id> label and a timeline comment, so a human
+// flow:treasurer-refused:<step-id> label and a timeline comment, so a human
 // scanning the issue list sees it too.
 func (b *Orchestrator) Park(ctx context.Context, ref flow.ItemRef, req flow.ParkRequest) error {
 	issueNum, err := b.issueNumber(ref)

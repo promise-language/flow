@@ -15,7 +15,7 @@ func TestIsFlowMachineComment(t *testing.T) {
 		body string
 		want bool
 	}{
-		{"state", "<!-- flow:state-v1 begin owner=alice -->\nflow: x", true},
+		{"state", "<!-- flow:state-v2 begin owner=alice -->\nflow: x", true},
 		{"artifact", "<!-- flow:artifact id=plan -->\nbody", true},
 		{"question", "<!-- flow:question ts=2026-08-25T12:00:00Z -->\n### q", true},
 		{"park", "<!-- flow:park -->\n```json\n{}\n```", true},
@@ -56,7 +56,7 @@ func TestArtifactCommentRe(t *testing.T) {
 			"plan", "7", true,
 		},
 		// Only the artifact marker; the others must not be mistaken for one.
-		{"state comment", "<!-- flow:state-v1 begin owner=alice -->\nflow: x", "", "", false},
+		{"state comment", "<!-- flow:state-v2 begin owner=alice -->\nflow: x", "", "", false},
 		{"question comment", "<!-- flow:question ts=2026-08-25T12:00:00Z -->\n### q", "", "", false},
 		{"human prose", "here is my answer", "", "", false},
 		// Must anchor at the start: a quoted reply is not an artifact comment.

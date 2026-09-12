@@ -127,8 +127,8 @@ func (e *editor) Commit(ctx context.Context) error {
 	}
 	for _, t := range e.delTags {
 		// An orchestrator MUST refuse to remove a marker it maintains itself:
-		// the owner, binary, seeded, park and manual markers follow from Claim,
-		// seeding, Park and this editor, and a caller able to delete one
+		// the owner, binary, awaited, park and manual markers follow from Claim,
+		// AppendEntry, Park and this editor, and a caller able to delete one
 		// directly could make an item report a state no operation put it in.
 		if e.b.labels.Maintained(string(t)) {
 			return fmt.Errorf(
@@ -136,7 +136,7 @@ func (e *editor) Commit(ctx context.Context) error {
 					"it follows from the operation that set it", string(t))
 		}
 		if string(t) == e.b.labels.Binary(e.b.cfg.BinaryName) {
-			return fmt.Errorf("github: %q is the binary marker seeding maintains and cannot be removed directly", string(t))
+			return fmt.Errorf("github: %q is the binary marker the first journal entry writes and cannot be removed directly", string(t))
 		}
 	}
 

@@ -367,9 +367,11 @@ func (b *Orchestrator) loadItem(ctx context.Context, issueNum int, cachedComment
 			// One derivation with the listing's, so Load and `list` cannot
 			// disagree about whose move it is.
 			state.Awaits = awaitsFromDoc(doc)
-			for _, ad := range doc.Artifacts {
-				rec := recordFromArtifactDoc(ad)
-				state.Artifacts[rec.Id] = rec
+			// DERIVED from the journal, not read from a stored copy: the
+			// projection is not on the wire at all under schema v2, so it
+			// cannot drift from the entries it projects.
+			for id, rec := range recordsFromJournal(doc.Journal) {
+				state.Artifacts[id] = rec
 			}
 			for _, sd := range doc.Signals {
 				state.Signals[flow.SignalId(sd.Id)] = signalStateFromDoc(sd)

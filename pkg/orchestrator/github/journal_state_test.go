@@ -2,6 +2,7 @@ package github
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,8 +128,11 @@ func TestBackend_AppendEntry_ProjectionAndFlowLandWithTheEntry(t *testing.T) {
 	if doc.Flow != "implement" {
 		t.Errorf("flow = %q, want implement — the first entry binds it", doc.Flow)
 	}
-	if len(doc.Artifacts) != 1 || doc.Artifacts[0].Id != "plan" || !doc.Artifacts[0].Resolved {
-		t.Errorf("artifacts = %+v, want the projection of the entry", doc.Artifacts)
+	// The projection is DERIVED, not stored: the document carries no artifacts
+	// array at all under schema v2, and the record comes off the journal.
+	recs := recordsFromJournal(doc.Journal)
+	if len(recs) != 1 || !recs["plan"].Resolved {
+		t.Errorf("projection = %+v, want the one entry's record", recs)
 	}
 }
 
@@ -163,8 +167,8 @@ func TestBackend_AppendEntry_SignalEntryProjectsNoArtifact(t *testing.T) {
 	if len(doc.Journal) != 1 || doc.Journal[0].Type != journalSignalType {
 		t.Fatalf("journal = %+v, want one entry typed %q", doc.Journal, journalSignalType)
 	}
-	if len(doc.Artifacts) != 0 {
-		t.Errorf("artifacts = %+v, want none — a signal result is the observation", doc.Artifacts)
+	if recs := recordsFromJournal(doc.Journal); len(recs) != 0 {
+		t.Errorf("projection = %+v, want none — a signal result is the observation", recs)
 	}
 	state, err := b.Load(t.Context(), claim.ItemRef)
 	if err != nil {
@@ -466,7 +470,7 @@ func TestBackend_Reset_ClearsTheFlowsRecord(t *testing.T) {
 	}
 	// The document says so too, and the park label went with the record.
 	doc := storedDoc(t, mock)
-	if len(doc.Journal) != 0 || len(doc.Artifacts) != 0 || doc.Park != nil {
+	if len(doc.Journal) != 0 || doc.Park != nil {
 		t.Errorf("state comment after Reset = %+v, want the flow's record gone", doc)
 	}
 }
@@ -514,6 +518,324 @@ func TestBackend_Reset_ClearsTheItemsDrafts(t *testing.T) {
 	}
 	if got, err := b.LoadWorkInProgress(ctx, other, "plan"); got != "issue 43's reasoning" || err != nil {
 		t.Errorf("another issue's draft = (%q, %v), want it untouched", got, err)
+	}
+}
+
+// The projection is derived, but hydration is unchanged and still runs off it:
+// the state comment is an INDEX, and a markdown body lives in its own comment.
+// Without the pass a resolved artifact loads empty and the next step proceeds on
+// nothing with no error to say so.
+func TestBackend_Load_HydratesMarkdownFromTheDerivedProjection(t *testing.T) {
+	_, b, claim := newJournalEnv(t)
+
+	appendMarkdown(t, b, claim.ItemRef, "plan", "the plan")
+	// A second execution of the same step: the projection keeps the later one,
+	// and hydration has to fill THAT body rather than the first comment it meets.
+	appendResult(t, b, claim.ItemRef, "plan", 2,
+		flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the revised plan"})
+
+	state, err := b.Load(t.Context(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rec := state.Artifacts["plan"]
+	if !rec.Resolved || rec.Version != 2 {
+		t.Fatalf("plan = %+v, want resolved at version 2", rec)
+	}
+	if rec.Markdown != "the revised plan" {
+		t.Errorf("plan body = %q, want the later execution's", rec.Markdown)
+	}
+}
+
+// THE SPILLED PATH. A markdown artifact over the comment ceiling keeps only a
+// truncated PREVIEW in its comment; loading the preview as though it were the
+// body hands a step a plan cut off mid-sentence that still reads as complete, so
+// the full text is fetched off the orphan branch instead.
+func TestBackend_Load_HydratesASpilledMarkdownBodyInFull(t *testing.T) {
+	_, b, claim := newJournalEnv(t)
+	b.cfg.MaxCommentBytes = 256
+
+	big := strings.Repeat("verbose output line\n", 400)
+	appendResult(t, b, claim.ItemRef, "plan", 1,
+		flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: big})
+
+	state, err := b.Load(t.Context(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	rec := state.Artifacts["plan"]
+	if rec.Markdown != big {
+		t.Errorf("plan body is %d bytes, want the whole %d — the preview was loaded as the artifact",
+			len(rec.Markdown), len(big))
+	}
+	if strings.Contains(rec.Markdown, spillNoticePrefix) {
+		t.Errorf("the loaded body carries the spill notice, so it is the comment rather than the file")
+	}
+}
+
+// --- The awaited marker ---
+//
+// The label is a cheap index over the journal, maintained at every append: the
+// listing reads it instead of fetching a state comment per item, so an index
+// that disagrees with the entry it indexes sends `list` looking at the wrong
+// items — or at none.
+
+// awaitsLabelOn returns the item's flow:awaits:* labels, however many there are.
+// However many, because "exactly one" is the property under test.
+func awaitsLabelsOn(b *Orchestrator, mock *ghMock) []string {
+	var out []string
+	for _, n := range mock.labelNames() {
+		if strings.HasPrefix(n, b.labels.AwaitsPrefix()) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// The first append adds the marker, a later one MOVES it — removed then added,
+// so the item never advertises two moves at once — and a finalizing append,
+// whose Awaits is empty, removes it through the same one path.
+func TestBackend_AppendEntry_MaintainsTheAwaitedLabel(t *testing.T) {
+	mock, b, claim := newJournalEnv(t)
+	ctx := t.Context()
+
+	first := resultEntry("plan", 1, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"})
+	first.Awaits = flow.Awaits{Role: "contributor"}
+	if err := b.AppendEntry(ctx, claim.ItemRef, first); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	if got := awaitsLabelsOn(b, mock); len(got) != 1 || got[0] != "flow:awaits:contributor" {
+		t.Fatalf("labels = %v, want exactly flow:awaits:contributor", got)
+	}
+	// The retired seeded marker is NOT written beside it any more: the binary
+	// label is what separates `auto` from `available`.
+	if contains(mock.labelNames(), "flow:seeded") {
+		t.Errorf("labels = %v, want no flow:seeded — nothing writes it", mock.labelNames())
+	}
+	if !contains(mock.labelNames(), b.labels.Binary("implement")) {
+		t.Errorf("labels = %v, want the binary marker", mock.labelNames())
+	}
+
+	// Electing a different role moves the marker rather than adding a second.
+	second := resultEntry("impl", 1, flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: "0123456789abcdef0123456789abcdef01234567"})
+	second.Awaits = flow.Awaits{Role: "maintainer"}
+	if err := b.AppendEntry(ctx, claim.ItemRef, second); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	if got := awaitsLabelsOn(b, mock); len(got) != 1 || got[0] != "flow:awaits:maintainer" {
+		t.Errorf("labels = %v, want exactly flow:awaits:maintainer", got)
+	}
+
+	// A signal wait is nobody's move, and the label says which signal.
+	third := flow.JournalEntry{
+		Step: "pr-open", Execution: 1,
+		Route:  flow.Route{Next: "pr-merged"},
+		Awaits: flow.Awaits{Signal: "pr-merged"},
+		By:     "tester", Role: "contributor",
+	}
+	if err := b.AppendEntry(ctx, claim.ItemRef, third); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	if got := awaitsLabelsOn(b, mock); len(got) != 1 || got[0] != "flow:awaits:signal:pr-merged" {
+		t.Errorf("labels = %v, want exactly flow:awaits:signal:pr-merged", got)
+	}
+
+	// A FINALIZING entry awaits nothing, so the same one path removes the
+	// marker and adds none. Finalize itself needs no label code.
+	last := flow.JournalEntry{
+		Step: "merge", Execution: 1,
+		Route: flow.Route{Finalize: flow.DispositionResolved},
+		By:    "tester", Role: "maintainer",
+	}
+	if err := b.AppendEntry(ctx, claim.ItemRef, last); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	if got := awaitsLabelsOn(b, mock); len(got) != 0 {
+		t.Errorf("labels = %v, want the awaited marker gone after a finalizing entry", got)
+	}
+}
+
+// An append electing the SAME role writes no label request at all: the marker
+// already says what the item awaits, and a remove-then-add would be two
+// requests against the secondary rate limit for no change.
+func TestBackend_AppendEntry_LeavesAnUnchangedAwaitedLabelAlone(t *testing.T) {
+	mock, b, claim := newJournalEnv(t)
+
+	appendMarkdown(t, b, claim.ItemRef, "plan", "the plan")
+	mock.resetRequests()
+	appendResult(t, b, claim.ItemRef, "impl", 1,
+		flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: "0123456789abcdef0123456789abcdef01234567"})
+
+	if n := mock.requestCount("DELETE /repos/o/r/issues/42/labels/flow:awaits:contributor"); n != 0 {
+		t.Errorf("the unchanged marker was removed %d times, want 0", n)
+	}
+	if got := awaitsLabelsOn(b, mock); len(got) != 1 || got[0] != "flow:awaits:contributor" {
+		t.Errorf("labels = %v, want the marker still there", got)
+	}
+}
+
+// THE ERROR PATH. The label is best-effort and the entry is not: a label call
+// that fails must not fail the append, because the entry HAS LANDED and
+// reporting a failure sends the caller back to append it twice.
+func TestBackend_AppendEntry_AFailingAwaitedLabelDoesNotFailTheAppend(t *testing.T) {
+	mock, b, claim := newJournalEnv(t)
+	ctx := t.Context()
+
+	appendMarkdown(t, b, claim.ItemRef, "plan", "the plan")
+
+	// GitHub rejects the removal of the marker the next append has to move.
+	mock.mu.Lock()
+	mock.failRemoveLabel = map[string]bool{"flow:awaits:contributor": true}
+	mock.strictLabelRemoval = true
+	mock.mu.Unlock()
+
+	second := resultEntry("impl", 1, flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: "0123456789abcdef0123456789abcdef01234567"})
+	second.Awaits = flow.Awaits{Role: "maintainer"}
+	if err := b.AppendEntry(ctx, claim.ItemRef, second); err != nil {
+		t.Fatalf("AppendEntry failed over a label: %v", err)
+	}
+	// The record — which is the source of truth — carries the new election.
+	doc := storedDoc(t, mock)
+	if len(doc.Journal) != 2 || doc.Journal[1].Awaits != "maintainer" {
+		t.Errorf("journal = %+v, want the second entry recorded awaiting maintainer", doc.Journal)
+	}
+	state, err := b.Load(ctx, claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.Awaits.Role != "maintainer" {
+		t.Errorf("Awaits = %+v, want maintainer — the journal answers, not the label", state.Awaits)
+	}
+}
+
+// Reset clears the journal, so the marker derived from it goes too — a label
+// saying whose move it is on an item with no record is a move nobody can make.
+func TestBackend_Reset_RemovesTheAwaitedLabel(t *testing.T) {
+	mock, b, claim := newJournalEnv(t)
+
+	appendMarkdown(t, b, claim.ItemRef, "plan", "the plan")
+	if got := awaitsLabelsOn(b, mock); len(got) != 1 {
+		t.Fatalf("labels before Reset = %v, want the marker", got)
+	}
+	if err := b.Reset(t.Context(), claim.ItemRef); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if got := awaitsLabelsOn(b, mock); len(got) != 0 {
+		t.Errorf("labels after Reset = %v, want the awaited marker gone", got)
+	}
+}
+
+// Finalization removes the marker too, and not only when the finalizing entry
+// is what got there. Setting the finalized flag makes awaitsFromDoc answer
+// "nobody" WHATEVER the last entry elected, so a run that finalizes with a route
+// still mid-flight — here an item closed on GitHub while its journal awaits
+// contributor — would otherwise leave a marker advertising a move the record no
+// longer describes, which RemoveTag refuses to clear because it is maintained.
+func TestBackend_Finalize_RemovesTheAwaitedLabelOnAMidRouteItem(t *testing.T) {
+	mock, b, claim := newJournalEnv(t)
+	ctx := t.Context()
+
+	appendMarkdown(t, b, claim.ItemRef, "plan", "the plan")
+	if got := awaitsLabelsOn(b, mock); len(got) != 1 || got[0] != "flow:awaits:contributor" {
+		t.Fatalf("labels before Finalize = %v, want flow:awaits:contributor", got)
+	}
+	mock.mu.Lock()
+	mock.issueState = "closed"
+	mock.mu.Unlock()
+
+	if err := b.Finalize(ctx, claim.ItemRef, flow.DispositionResolved); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if got := awaitsLabelsOn(b, mock); len(got) != 0 {
+		t.Errorf("labels after Finalize = %v, want the awaited marker gone", got)
+	}
+	// And the record agrees, which is what the marker indexes.
+	state, err := b.Load(ctx, claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !state.Awaits.Empty() {
+		t.Errorf("Awaits = %+v, want nobody — the item is finalized", state.Awaits)
+	}
+}
+
+// The ordinary route costs NOTHING for that: the finalizing entry's Awaits is
+// empty, so AppendEntry already removed the marker and Finalize has no label
+// request to make.
+func TestBackend_Finalize_MakesNoLabelRequestAfterAFinalizingEntry(t *testing.T) {
+	mock, b, claim := newJournalEnv(t)
+	ctx := t.Context()
+
+	appendMarkdown(t, b, claim.ItemRef, "plan", "the plan")
+	final := flow.JournalEntry{
+		Step: "merge", Execution: 1,
+		Route: flow.Route{Finalize: flow.DispositionResolved},
+		By:    "ann", Role: "maintainer",
+	}
+	if err := b.AppendEntry(ctx, claim.ItemRef, final); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	mock.mu.Lock()
+	mock.issueState = "closed"
+	mock.mu.Unlock()
+	mock.resetRequests()
+
+	if err := b.Finalize(ctx, claim.ItemRef, flow.DispositionResolved); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	for path, n := range mock.snapshotRequests() {
+		if strings.Contains(path, "/labels/"+b.labels.AwaitsPrefix()) {
+			t.Errorf("%s was asked for %d times, want 0 — the marker was already gone", path, n)
+		}
+	}
+}
+
+// THE POINT OF THE LABEL. An item carrying no flow:awaits:* marker awaits
+// nobody, and answering that costs NO state-comment fetch — the listing reads a
+// label it already has in hand. The gate used to be flow:seeded, so an item
+// that had started but awaited nothing still cost a fetch; this is strictly
+// fewer.
+func TestBackend_Get_AwaitsCostsNoFetchWithoutTheLabel(t *testing.T) {
+	mock, b, claim := newJournalEnv(t)
+	ctx := t.Context()
+	mock.resetRequests()
+
+	info, err := b.Get(ctx, claim.ItemRef, "implement", nil, nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !info.Awaits.Empty() {
+		t.Errorf("Awaits = %+v, want the zero value on an item with no marker", info.Awaits)
+	}
+	// No comment read of ANY shape — neither the listing nor a cached id.
+	for path, n := range mock.snapshotRequests() {
+		if strings.Contains(path, "comments") {
+			t.Errorf("%s was asked for %d times, want 0 — the label answers without a state-comment fetch", path, n)
+		}
+	}
+}
+
+// And with the marker, the listing reports the role AND the account of record —
+// which is only in the journal, which is why the label replaces the gate and
+// not the read.
+func TestBackend_Get_AwaitsReadsTheAccountOfRecord(t *testing.T) {
+	mock, b, claim := awaitingRoleEnv(t, "contributor")
+	mock.resetRequests()
+
+	info, err := b.Get(t.Context(), claim.ItemRef, "implement", nil, nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if info.Awaits.Role != "contributor" || info.Awaits.Account != "ann" {
+		t.Errorf("Awaits = %+v, want contributor held by ann", info.Awaits)
+	}
+	// The counterpart of the test above, which asserts the fetch is SKIPPED:
+	// without this, that one would pass on a read that never happens at all.
+	if n := mock.requestCount("GET /repos/o/r/issues/comments/1002"); n == 0 {
+		t.Errorf("the state comment was not fetched; requests = %v", mock.snapshotRequests())
+	}
+	if got := awaitsLabelsOn(b, mock); len(got) != 1 || got[0] != "flow:awaits:contributor" {
+		t.Errorf("labels = %v, want the marker the read was gated on", got)
 	}
 }
 
@@ -624,5 +946,147 @@ func TestBackend_ListAutoSelectable_ExcludesAnUnassumableRole(t *testing.T) {
 	}
 	if len(none) != 1 {
 		t.Errorf("ListAutoSelectable with a nil predicate = %+v, want the item", none)
+	}
+}
+
+// --- The schema bump, where it actually lands ---
+
+// v1StateComment is a state comment as the previous schema wrote one: the v1
+// markers, `schema: 1`, the `seeded_at` stamp v2 drops, and the `artifacts`
+// checklist that is the whole reason the two are not one format with optional
+// fields.
+const v1StateComment = "<!-- flow:state-v1 begin owner=alice -->\n" +
+	"<details><summary>📋 Flow state — implement (machine-managed, do not edit)</summary>\n\n" +
+	"```yaml\n" +
+	"flow: implement\n" +
+	"schema: 1\n" +
+	"seeded_at: 2026-05-26T15:00:00Z\n" +
+	"artifacts:\n" +
+	"    - id: plan\n" +
+	"      type: markdown\n" +
+	"      required: true\n" +
+	"      resolved: true\n" +
+	"      version: 1\n" +
+	"      resolved_by: https://example.test/c/1\n" +
+	"park:\n" +
+	"    kind: blocked\n" +
+	"    reason: waiting on an operator\n" +
+	"```\n\n" +
+	"</details>\n" +
+	"<!-- flow:state-v1 end -->\n"
+
+// THE BUMP, AT THE ORCHESTRATOR RATHER THAN AT THE PARSER. extractStateDoc not
+// finding a v1 document is one assertion (state_comment_test.go); what that
+// means for an item carrying one is another, and it is the one live issues will
+// meet: the record reads as not started — no artifacts, no park — and the next
+// append posts a FRESH comment beside the v1 one rather than editing it.
+//
+// The edit is the failure worth a test. Every write goes through one
+// read-modify-write that PATCHes whatever comment the scan returned, so a reader
+// widened to recognise the v1 marker without reading the v1 schema would
+// overwrite that comment with a v2 document — replacing the only record of what
+// the earlier run did, silently and with no way back.
+func TestBackend_AV1StateCommentIsInertAndIsNotOverwritten(t *testing.T) {
+	mock := newGHMock(t)
+	mock.comments = append(mock.comments, ghMockComment{
+		ID: 900, Body: v1StateComment, User: "alice",
+		CreatedAt: time.Date(2026, 5, 26, 15, 0, 0, 0, time.UTC),
+	})
+	srv := mock.server()
+	t.Cleanup(srv.Close)
+	b := newMockedOrchestrator(t, mock, srv)
+
+	claim, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	state, err := b.Load(t.Context(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.Artifacts) != 0 || len(state.Journal) != 0 {
+		t.Errorf("state = %d artifacts / %d entries, want a v1 document read as nothing",
+			len(state.Artifacts), len(state.Journal))
+	}
+	if state.Parked() {
+		t.Errorf("park = %+v, want none — the v1 document is not read", state.Park)
+	}
+
+	appendMarkdown(t, b, claim.ItemRef, "plan", "the plan")
+
+	// The v1 comment was never edited — not by the append, not by the claim.
+	if n := mock.requestCount("PATCH /repos/o/r/issues/comments/900"); n != 0 {
+		t.Errorf("the v1 comment was edited %d times, want 0 — it is the only copy of that run's record", n)
+	}
+	mock.mu.Lock()
+	bodies := map[int64]string{}
+	for _, c := range mock.comments {
+		bodies[c.ID] = c.Body
+	}
+	mock.mu.Unlock()
+	if bodies[900] != v1StateComment {
+		t.Errorf("the v1 comment was rewritten:\n%s", bodies[900])
+	}
+	// And exactly one v2 document exists, beside it rather than in place of it.
+	var v2IDs []int64
+	for id, body := range bodies {
+		if _, _, found, _ := extractStateDoc(body); found {
+			v2IDs = append(v2IDs, id)
+		}
+	}
+	if len(v2IDs) != 1 || v2IDs[0] == 900 {
+		t.Fatalf("v2 state comments = %v, want exactly one that is not the v1 comment", v2IDs)
+	}
+	// The fresh document carries this run's entry and nothing inherited.
+	doc := storedDoc(t, mock)
+	if doc.Schema != stateSchemaVersion || len(doc.Journal) != 1 || doc.Journal[0].Step != "plan" {
+		t.Errorf("fresh document = %+v, want schema %d carrying only the new entry", doc, stateSchemaVersion)
+	}
+	state, err = b.Load(t.Context(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if rec := state.Artifact("plan"); rec.Version != 1 || rec.Markdown != "the plan" {
+		t.Errorf("plan = %+v, want this run's result — not the v1 checklist's", rec)
+	}
+}
+
+// REMOVE THEN ADD, in that order: the marker says whose move it is, and an item
+// carrying two at once says two different things to every reader that scans for
+// the prefix. The end state cannot tell the orders apart — both leave one label
+// — so the request tape is the only place the invariant is visible.
+func TestBackend_AppendEntry_MovesTheAwaitedLabelRemoveBeforeAdd(t *testing.T) {
+	mock, b, claim := newJournalEnv(t)
+
+	appendMarkdown(t, b, claim.ItemRef, "plan", "the plan")
+	mock.mu.Lock()
+	from := len(mock.mutations)
+	mock.mu.Unlock()
+
+	second := resultEntry("impl", 1, flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: "0123456789abcdef0123456789abcdef01234567"})
+	second.Awaits = flow.Awaits{Role: "maintainer"}
+	if err := b.AppendEntry(t.Context(), claim.ItemRef, second); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+
+	mock.mu.Lock()
+	tape := append([]string(nil), mock.mutations[from:]...)
+	mock.mu.Unlock()
+	removed, added := -1, -1
+	for i, req := range tape {
+		switch req {
+		case "DELETE /repos/o/r/issues/42/labels/flow:awaits:contributor":
+			removed = i
+		case "POST /repos/o/r/issues/42/labels":
+			if added == -1 {
+				added = i
+			}
+		}
+	}
+	if removed == -1 || added == -1 {
+		t.Fatalf("the move is not both halves; tape = %v", tape)
+	}
+	if removed > added {
+		t.Errorf("the new marker went on before the old one came off; tape = %v", tape)
 	}
 }
