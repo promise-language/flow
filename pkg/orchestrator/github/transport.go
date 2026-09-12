@@ -52,6 +52,23 @@ const (
 	// that retried immediately would be the load.
 	seamDefaultBackoff = 60 * time.Second
 
+	// seamLimitCap bounds the window a refusal may put this machine into.
+	//
+	// It is load-bearing rather than tidy. A recorded refusal short-circuits
+	// every request before it is made, so clearLimit — which runs only after a
+	// request gets THROUGH — can never fire early: the clock is the only way
+	// out. An hour is the whole of GitHub's primary window, so nothing honest
+	// asks for longer, and a header that does (a proxy answering milliseconds
+	// where seconds are specified, a clock 400 years out) would otherwise take
+	// every flow process on the host off the air with no way back but deleting
+	// the record by hand. cli/quota_cache.go caps for exactly this reason.
+	seamLimitCap = 1 * time.Hour
+
+	// seamErrorBodyMax bounds what is read from a refusal in order to classify
+	// it. GitHub's error documents are a few hundred bytes; anything past this
+	// is not one, and is handed on unread rather than buffered.
+	seamErrorBodyMax = 1 << 20
+
 	// headerRetryAfter / headerRateRemaining / headerRateReset are the three
 	// facts a refusal carries. go-github reads them for its own error types;
 	// this reads them from the RESPONSE, because the classification has to
@@ -253,7 +270,11 @@ func (t *seamTransport) do(req *http.Request, endpoint string, retry bool) (*htt
 		return nil, err
 	}
 
-	limit, ok := refusalIn(resp, t.now())
+	var body []byte
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+		body = bufferRefusalBody(resp)
+	}
+	limit, ok := refusalIn(resp, body, t.now())
 	if !ok {
 		// A request that got through retires a refusal this machine was still
 		// recording — the window GitHub named is an upper bound, not a promise.
@@ -262,6 +283,12 @@ func (t *seamTransport) do(req *http.Request, endpoint string, retry bool) (*htt
 	}
 	drain(resp)
 
+	// Capped before anything is decided on it, so neither the wait nor the
+	// window this machine records can be longer than a refusal could honestly
+	// ask for. See seamLimitCap.
+	if ceiling := t.now().Add(seamLimitCap); limit.Until.After(ceiling) {
+		limit.Until = ceiling
+	}
 	wait := limit.Until.Sub(t.now())
 	if limit.Until.IsZero() {
 		wait = seamDefaultBackoff
@@ -371,37 +398,105 @@ func cacheKey(u *url.URL) string {
 	return u.Path + "?" + u.RawQuery
 }
 
-// refusalIn recognises a rate limit in a response, by the three shapes GitHub
+// refusalIn recognises a rate limit in a response, by the four shapes GitHub
 // answers one with:
 //
 //   - 429, the documented secondary-limit status;
 //   - 403 carrying Retry-After, which is the secondary limiter asking for a
 //     specific wait;
-//   - 403 with X-RateLimit-Remaining: 0, which is the primary budget spent.
+//   - 403 with X-RateLimit-Remaining: 0, which is the primary budget spent;
+//   - 403 whose BODY names the secondary limit, which is how the secondary
+//     limiter answers when it asks for no specific wait — the primary budget
+//     untouched, no Retry-After, and nothing in the headers to tell it from a
+//     permission refusal. It is the shape this whole change was filed over: a
+//     403 on a read with a full budget. go-github types it by the same fact
+//     (the documentation_url suffix, CheckResponse) and classifying on headers
+//     alone would read it as an ordinary error and lose exactly the case that
+//     provoked the fix.
 //
 // A 403 that is none of those is NOT a rate limit and must not be reclassified:
 // "the token may not read collaborators" is a fact about the caller, and
 // CollaboratorPermission's "detected nothing versus could not ask" distinction
 // depends on it staying an error.
-func refusalIn(resp *http.Response, now time.Time) (seamLimit, bool) {
+func refusalIn(resp *http.Response, body []byte, now time.Time) (seamLimit, bool) {
 	if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode != http.StatusForbidden {
 		return seamLimit{}, false
 	}
 	retryAfter, hasRetryAfter := parseRetryAfter(resp.Header.Get(headerRetryAfter), now)
 	primary := resp.Header.Get(headerRateRemaining) == "0"
-	if resp.StatusCode == http.StatusForbidden && !hasRetryAfter && !primary {
+	secondary := namesSecondaryLimit(body)
+	if resp.StatusCode == http.StatusForbidden && !hasRetryAfter && !primary && !secondary {
 		return seamLimit{}, false
 	}
 	l := seamLimit{Primary: primary}
 	switch {
 	case hasRetryAfter:
 		l.Until = retryAfter
-	default:
+	case primary:
+		// X-RateLimit-Reset describes the PRIMARY window, so it is the answer
+		// only when the primary window is what refused. Reading it for a
+		// secondary refusal would park for up to an hour on a condition that
+		// clears in a minute, because the primary reset is running whether
+		// anything is spending against it or not.
 		if reset, ok := parseRateReset(resp.Header.Get(headerRateReset)); ok {
 			l.Until = reset
 		}
 	}
 	return l, true
+}
+
+// secondaryLimitMarkers are what GitHub puts in the body of a secondary-limit
+// refusal. The documentation_url suffixes are go-github's own discriminator
+// (CheckResponse, *AbuseRateLimitError); the prose is the fallback for a
+// document that carries no link, and is matched case-insensitively because
+// nothing promises its capitalisation.
+var secondaryLimitMarkers = []string{
+	"secondary-rate-limits",
+	"#abuse-rate-limits",
+	"secondary rate limit",
+}
+
+func namesSecondaryLimit(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	lower := strings.ToLower(string(body))
+	for _, m := range secondaryLimitMarkers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// bufferRefusalBody reads the document a refusal carries so it can be
+// classified, and puts it back so the caller still sees it.
+//
+// Putting it back is the whole difficulty. A 403 that turns out NOT to be a
+// rate limit goes on to go-github, which parses this same body for the message
+// AddBlockedBy and CollaboratorPermission discriminate on — so a classifier
+// that consumed it would trade one misread refusal for another. A body past the
+// bound is not an error document at all: nothing is buffered, and the response
+// is handed on with its stream intact.
+func bufferRefusalBody(resp *http.Response) []byte {
+	if resp.Body == nil {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, seamErrorBodyMax))
+	if err != nil {
+		resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), errReader{err}))
+		return nil
+	}
+	if len(body) == seamErrorBodyMax {
+		resp.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(body), resp.Body), resp.Body}
+		return nil
+	}
+	resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	return body
 }
 
 // parseRetryAfter reads the header in both forms the spec allows: a count of
@@ -414,6 +509,13 @@ func parseRetryAfter(v string, now time.Time) (time.Time, bool) {
 	if secs, err := strconv.Atoi(v); err == nil {
 		if secs < 0 {
 			secs = 0
+		}
+		// Capped before the multiplication, not only after it: a delta-seconds
+		// large enough to overflow a Duration wraps into a small or negative
+		// wait, which is the opposite of what it asked for and would have this
+		// seam retrying straight back into the limiter.
+		if secs > int(seamLimitCap/time.Second) {
+			return now.Add(seamLimitCap), true
 		}
 		return now.Add(time.Duration(secs) * time.Second), true
 	}

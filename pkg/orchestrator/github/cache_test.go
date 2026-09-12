@@ -312,6 +312,36 @@ func TestCachePolicy_Table(t *testing.T) {
 	}
 }
 
+// The record is read whole on every request and rewritten whole on every store,
+// so a record that only ever grows turns the cache into the cost it exists to
+// remove. The file sweep cannot retire it — a record something is still writing
+// never reaches its own KeepFor — so the rows are retired inside it.
+func TestCache_RowsNothingReadsAnyMoreAreRetired(t *testing.T) {
+	useTempSeamCache(t)
+	c := newSeamCache("o", "r", "tok")
+	c.storeRow("/repos/o/r/issues/1", seamRow{StoredAt: time.Now(), Body: []byte("fresh")})
+	c.storeRow("/repos/o/r/issues/2", seamRow{StoredAt: time.Now().Add(-2 * seamRecordKeepFor), Body: []byte("cold")})
+	// A row dated in the FUTURE is a machine whose clock jumped, and it is as
+	// unreadable as a cold one: row() reports it stale for good.
+	c.storeRow("/repos/o/r/issues/3", seamRow{StoredAt: time.Now().Add(2 * seamRecordKeepFor), Body: []byte("skewed")})
+
+	// Any store is when the retiring happens; this one is an ordinary write.
+	c.storeRow("/repos/o/r", seamRow{StoredAt: time.Now(), Body: []byte("meta")})
+
+	rec := c.load()
+	if rec == nil {
+		t.Fatal("no record")
+	}
+	if _, ok := rec.Rows["/repos/o/r/issues/1"]; !ok {
+		t.Error("a row inside the horizon was retired")
+	}
+	for _, gone := range []string{"/repos/o/r/issues/2", "/repos/o/r/issues/3"} {
+		if _, ok := rec.Rows[gone]; ok {
+			t.Errorf("%s is still in the record; it is carried into every request this machine makes", gone)
+		}
+	}
+}
+
 // --- helpers ---
 
 func mustParseURL(t *testing.T, raw string) *url.URL {

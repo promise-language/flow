@@ -47,14 +47,27 @@ import (
 // behaviour this package has without a cache — see pkg/machinecache.
 
 const (
-	// repoMetaTTL — GET /repos/{o}/{r}. Default branch, permissions, name:
-	// nothing a run can change under itself.
-	repoMetaTTL = 24 * time.Hour
-
 	// collaboratorTTL — .../collaborators/{login}/permission. Role derivation's
 	// input. A role change is a human act and lands within the hour; holding it
 	// longer would let a revoked maintainer keep carry-through for a day.
 	collaboratorTTL = 1 * time.Hour
+
+	// repoMetaTTL — GET /repos/{o}/{r}. The default branch and the name are
+	// facts nothing a run does changes under itself, and on their own they
+	// would keep for a day.
+	//
+	// They are not on their own. The `permissions` bag rides in the SAME
+	// response, and DetectCapabilities takes it for the ambient account — the
+	// account every write of the run is made with — where a named account takes
+	// the collaborator read above. So this read is bounded by the ROLE rule and
+	// not by the metadata one: holding it longer would let a revoked maintainer
+	// keep carry-through by the ambient path for exactly as long as the
+	// collaborator TTL exists to stop them keeping it by the named one.
+	//
+	// The same shape as the issue read, and settled the same way: what rides
+	// along decides the policy, because a caller cannot ask for half a
+	// response.
+	repoMetaTTL = collaboratorTTL
 
 	// blockerTTL — .../issues/{n}/dependencies/blocked_by. #171's N+1: a wide
 	// listing pays it once per minute per MACHINE instead of once per item per
@@ -71,6 +84,7 @@ const (
 
 	seamCacheFilePrefix = "github-"
 	seamCacheFileExt    = ".json"
+	seamLimitFileExt    = ".limit" + seamCacheFileExt
 	seamRecordGlob      = seamCacheFilePrefix + "*" + seamCacheFileExt
 	seamLockGlob        = seamCacheFilePrefix + "*" + machinecache.LockSuffix
 )
@@ -90,8 +104,11 @@ var cacheDir = machinecache.Dir
 // and every method tolerates a nil receiver so callers need no second branch.
 type seamCache struct {
 	path string
-	dir  string
-	key  string
+	// limitPath is the refusal's own file. Separate from the answers on
+	// purpose — see seamRecord.
+	limitPath string
+	dir       string
+	key       string
 }
 
 // newSeamCache resolves the record for this repository and credential. Returns
@@ -105,25 +122,40 @@ func newSeamCache(owner, repo, token string) *seamCache {
 	sum := sha256.Sum256([]byte(owner + "/" + repo + "\x00" + token))
 	key := hex.EncodeToString(sum[:])[:16]
 	return &seamCache{
-		dir:  dir,
-		key:  key,
-		path: filepath.Join(dir, seamCacheFilePrefix+key+seamCacheFileExt),
+		dir:       dir,
+		key:       key,
+		path:      filepath.Join(dir, seamCacheFilePrefix+key+seamCacheFileExt),
+		limitPath: filepath.Join(dir, seamCacheFilePrefix+key+seamLimitFileExt),
 	}
 }
 
 // seamRecord is what every flow process on the machine shares for one
-// repository and account: the refusal in force, the URL-keyed answers, and the
-// state-comment id per issue.
+// repository and account: the URL-keyed answers, and the state-comment id per
+// issue.
 //
 // One file rather than one per row, because the alternative is a directory that
 // grows a file per URL and a sweep that has to understand them. A store is a
-// read-modify-write and the loser of a race loses a cached ANSWER, which costs
-// one request — the one thing that must not be lost that way is the refusal,
-// and storeLimit merges rather than overwrites.
+// read-modify-write with no lock over it, and the loser of a race loses a cached
+// ANSWER, which costs one request.
+//
+// THE REFUSAL IS NOT IN HERE, and that is the reason for the second file. It is
+// the one thing that must not be lost to that race: a refusal is shared
+// precisely so three arenas on one host do not each earn their own, and an
+// arena that clobbered it while storing an answer would put the other two back
+// on the endpoint that is already refusing. A separate record cannot be
+// overwritten by a row store at all — no lock, no merge, nothing to get right —
+// and it keeps the check every single request makes off the file that holds
+// every body this machine has read.
 type seamRecord struct {
-	Limit         *seamLimit         `json:"limit,omitempty"`
 	Rows          map[string]seamRow `json:"rows,omitempty"`
 	StateComments map[string]int64   `json:"state_comments,omitempty"`
+}
+
+// seamLimitRecord is the refusal's own file. A pointer field rather than a bare
+// seamLimit so "no refusal" is a state the record can hold, which is what
+// clearLimit writes.
+type seamLimitRecord struct {
+	Limit *seamLimit `json:"limit,omitempty"`
 }
 
 // seamLimit is a rate-limit refusal one process earned, recorded so the rest of
@@ -170,12 +202,38 @@ func (c *seamCache) update(mutate func(*seamRecord)) {
 		rec = &seamRecord{}
 	}
 	mutate(rec)
+	pruneSeamRows(rec, time.Now())
 	machinecache.Store(c.path, *rec, seamSweep)
+}
+
+// pruneSeamRows drops the answers nothing will read again.
+//
+// Without it the record only ever grows: every store rewrites it whole and
+// every request reads it whole, so a machine that has listed a repository's
+// issues a few times carries every body it ever read into every request it
+// makes afterwards — which is the cost this file exists to remove, arriving by
+// the other door. The file sweep cannot do it, because a record something is
+// still writing never reaches its own KeepFor.
+//
+// The horizon is the sweep's, not any policy's TTL: a revalidated row has no
+// TTL at all and stays useful as long as it is being asked for, and refreshRow
+// restamps it every time a 304 confirms it. So what this removes is what has
+// not been TOUCHED in a day, which is the same thing the sweep means by a
+// record nothing reads any more.
+func pruneSeamRows(rec *seamRecord, now time.Time) {
+	for k, r := range rec.Rows {
+		if age := now.Sub(r.StoredAt); age > seamRecordKeepFor || age < -seamRecordKeepFor {
+			delete(rec.Rows, k)
+		}
+	}
 }
 
 // limitInForce reports the refusal this machine is still under, if any.
 func (c *seamCache) limitInForce(now time.Time) *seamLimit {
-	rec := c.load()
+	if c == nil {
+		return nil
+	}
+	rec := machinecache.Load[seamLimitRecord](c.limitPath)
 	if rec == nil || rec.Limit == nil || !now.Before(rec.Limit.Until) {
 		return nil
 	}
@@ -187,12 +245,14 @@ func (c *seamCache) limitInForce(now time.Time) *seamLimit {
 // the earlier one would put the machine back on an endpoint that asked for
 // longer.
 func (c *seamCache) recordLimit(l seamLimit) {
-	c.update(func(rec *seamRecord) {
-		if rec.Limit != nil && rec.Limit.Until.After(l.Until) {
-			return
-		}
-		rec.Limit = &l
-	})
+	if c == nil {
+		return
+	}
+	if held := machinecache.Load[seamLimitRecord](c.limitPath); held != nil &&
+		held.Limit != nil && held.Limit.Until.After(l.Until) {
+		return
+	}
+	machinecache.Store(c.limitPath, seamLimitRecord{Limit: &l}, seamSweep)
 }
 
 // clearLimit retires the refusal once a request has succeeded through it.
@@ -200,10 +260,13 @@ func (c *seamCache) recordLimit(l seamLimit) {
 // It reads before it writes because it runs after EVERY successful request, and
 // a store per request would be the cost this file exists to remove.
 func (c *seamCache) clearLimit() {
-	if rec := c.load(); rec == nil || rec.Limit == nil {
+	if c == nil {
 		return
 	}
-	c.update(func(rec *seamRecord) { rec.Limit = nil })
+	if rec := machinecache.Load[seamLimitRecord](c.limitPath); rec == nil || rec.Limit == nil {
+		return
+	}
+	machinecache.Store(c.limitPath, seamLimitRecord{}, seamSweep)
 }
 
 // row returns the cached answer for a key, and whether it is younger than

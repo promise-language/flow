@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/promise-language/flow"
+	"github.com/promise-language/flow/pkg/machinecache"
 )
 
 // A rate limit used to arrive as an opaque 403 and kill the run. Everything
@@ -192,6 +193,102 @@ func TestRateLimit_CancelledContextReturnsPromptly(t *testing.T) {
 	}
 }
 
+// cannedBody is a refusal carrying a specific document, which is how the
+// secondary limiter answers: the headers say nothing, and the body is the only
+// place the condition is named.
+func cannedBody(status int, headers map[string]string, body string) *http.Response {
+	r := canned(status, headers)
+	r.Body = io.NopCloser(strings.NewReader(body))
+	return r
+}
+
+// The shape this whole change was filed over: a 403 on a READ with the primary
+// budget untouched. No Retry-After, X-RateLimit-Remaining well above zero, and
+// nothing in the headers to tell it from a permission refusal — the condition is
+// named in the body, which is where go-github reads it too.
+//
+// Classifying on headers alone lets exactly this one through as an ordinary
+// error, which is the defect, not the fix.
+func TestRateLimit_SecondaryLimitNamedOnlyInTheBodyIsRecognised(t *testing.T) {
+	const doc = `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again.",` +
+		`"documentation_url":"https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#secondary-rate-limits"}`
+	s := newScriptedTransport(t,
+		cannedBody(http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "4321"}, doc),
+		okResponse(),
+	)
+	if _, err := getThrough(t, s); err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	if len(s.slept) != 1 || s.slept[0] != seamDefaultBackoff {
+		t.Fatalf("slept %v, want the default backoff — the refusal named the limit but no instant", s.slept)
+	}
+
+	// And past the point where it can be waited out it is the CONDITION, named
+	// as the secondary limit it is rather than as the primary budget.
+	s2 := newScriptedTransport(t,
+		cannedBody(http.StatusForbidden, map[string]string{"Retry-After": "900"}, doc))
+	_, err := getThrough(t, s2)
+	if !errors.Is(err, flow.ErrUnavailable) {
+		t.Fatalf("error = %v, want flow.ErrUnavailable", err)
+	}
+	if !strings.Contains(err.Error(), "secondary") {
+		t.Errorf("message %q does not name the secondary limit; the distinction is the diagnosis", err)
+	}
+}
+
+// A secondary refusal must not be parked on the PRIMARY window's reset. The
+// primary reset is running whether anything is spending against it or not, so
+// reading it here would hold a machine off for up to an hour on a condition
+// that clears in a minute.
+func TestRateLimit_SecondaryRefusalIgnoresThePrimaryReset(t *testing.T) {
+	s := newScriptedTransport(t)
+	s.script = []*http.Response{
+		cannedBody(http.StatusTooManyRequests, map[string]string{
+			"X-RateLimit-Remaining": "4999",
+			"X-RateLimit-Reset":     strconv.FormatInt(s.now.Add(50*time.Minute).Unix(), 10),
+		}, `{"message":"You have exceeded a secondary rate limit."}`),
+		okResponse(),
+	}
+	if _, err := getThrough(t, s); err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	if len(s.slept) != 1 || s.slept[0] != seamDefaultBackoff {
+		t.Errorf("slept %v, want the default backoff rather than the primary window's 50 minutes", s.slept)
+	}
+}
+
+// A refusal cannot take this machine off the air for longer than one could
+// honestly ask for. The recorded window short-circuits every request BEFORE it
+// is made, so clearLimit — which runs only after one gets through — can never
+// fire early: the clock is the only way out, and an uncapped header is a wedge
+// with no way back but deleting the record by hand.
+func TestRateLimit_AnAbsurdWindowIsCapped(t *testing.T) {
+	for name, headers := range map[string]map[string]string{
+		// Milliseconds where seconds are specified — the ordinary way a proxy
+		// gets this wrong.
+		"a reset in the year 57680": {
+			"X-RateLimit-Remaining": "0",
+			"X-RateLimit-Reset":     "1757664000000",
+		},
+		"a Retry-After of a century": {"Retry-After": "3153600000"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newScriptedTransport(t, canned(http.StatusForbidden, headers))
+			_, err := getThrough(t, s)
+			var limited *rateLimited
+			if !errors.As(err, &limited) {
+				t.Fatalf("error = %v, want a *rateLimited", err)
+			}
+			if got := limited.Until.Sub(s.now); got > seamLimitCap {
+				t.Errorf("the machine is held off for %s, want no more than %s", got, seamLimitCap)
+			}
+			if l := s.cache.limitInForce(s.now.Add(seamLimitCap).Add(time.Second)); l != nil {
+				t.Errorf("the shared record still refuses past the cap: %+v", l)
+			}
+		})
+	}
+}
+
 // A 403 that is NOT a rate limit must not be reclassified. The whole
 // distinction CollaboratorPermission rests on is "detected nothing" versus
 // "could not ask", and turning a permission refusal into a retryable condition
@@ -205,6 +302,17 @@ func TestRateLimit_APlainForbiddenIsNotReclassified(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("status = %d, want the 403 as it arrived", resp.StatusCode)
+	}
+	// And with its DOCUMENT intact. Classifying a refusal means reading the
+	// body; a classifier that consumed it would trade one misread refusal for
+	// another, because go-github parses this same body for the message
+	// AddBlockedBy and CollaboratorPermission discriminate on.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading the passed-through body: %v", err)
+	}
+	if !strings.Contains(string(body), "API rate limit exceeded") {
+		t.Errorf("body = %q, want the document the response arrived with", body)
 	}
 }
 
@@ -307,8 +415,30 @@ func TestRateLimit_ASuccessfulRequestClearsTheSharedRefusal(t *testing.T) {
 	if _, err := getThrough(t, s); err != nil {
 		t.Fatalf("RoundTrip: %v", err)
 	}
-	if rec := s.cache.load(); rec != nil && rec.Limit != nil {
-		t.Errorf("the refusal is still recorded after a request got through: %+v", rec.Limit)
+	if l := s.cache.limitInForce(s.now.Add(-2 * time.Minute)); l != nil {
+		t.Errorf("the refusal is still recorded after a request got through: %+v", l)
+	}
+}
+
+// The refusal lives in a record of its own, so an arena storing a cached ANSWER
+// cannot take it out from under the arenas that are honouring it. That race is
+// the one thing this file's read-modify-write must not lose: a refusal is shared
+// precisely so three arenas on one host do not each earn their own.
+func TestRateLimit_ARowStoreCannotClobberTheSharedRefusal(t *testing.T) {
+	useTempSeamCache(t)
+	writer, honourer := newSeamCache("o", "r", "tok"), newSeamCache("o", "r", "tok")
+
+	// The losing shape, exactly: one process READS the record, another records a
+	// refusal, and the first then stores what it read — with its own answer
+	// added — over the top. The store is direct because that is the point: the
+	// writer is acting on a read taken before the refusal existed, which is what
+	// no in-process merge can see.
+	stale := seamRecord{Rows: map[string]seamRow{"/repos/o/r": {StoredAt: time.Now(), Body: []byte("{}")}}}
+	honourer.recordLimit(seamLimit{Until: time.Now().Add(10 * time.Minute), Endpoint: "GET /repos/o/r/issues/1"})
+	machinecache.Store(writer.path, stale, seamSweep)
+
+	if l := honourer.limitInForce(time.Now()); l == nil {
+		t.Fatal("the refusal is gone — a cached answer overwrote it, which puts every sibling back on a refusing endpoint")
 	}
 }
 
