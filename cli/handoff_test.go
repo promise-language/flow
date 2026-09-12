@@ -359,8 +359,10 @@ func TestCmdResolve_AHandoffNamesTheAccountOfRecord(t *testing.T) {
 	}
 }
 
-// An item already awaiting a role this run cannot assume hands off on the first
-// pass: nothing is dispatched, and the claim taken to look at it goes back.
+// An item this arena HOLDS that already awaits a role the run cannot assume
+// hands off on the first pass: nothing is dispatched, and the claim goes back.
+// This is the live path after a park or an interruption at a boundary — the run
+// that resumes is the one that must hand the item on.
 func TestCmdResolve_AnItemAlreadyAwaitingAnotherRoleHandsOffImmediately(t *testing.T) {
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "1",
@@ -369,6 +371,7 @@ func TestCmdResolve_AnItemAlreadyAwaitingAnotherRoleHandsOffImmediately(t *testi
 			Step: "plan", Execution: 1, Route: flow.Route{Next: "commit"},
 			By: "bob", Role: "contributor", Awaits: flow.Awaits{Role: "maintainer"},
 		}}})
+	heldHere(t, be, "1")
 	be.SetCapabilities("", flow.CapPush)
 	app, errBuf := handoffTestApp(t, be)
 
@@ -391,6 +394,19 @@ func TestCmdResolve_AnItemAlreadyAwaitingAnotherRoleHandsOffImmediately(t *testi
 	}
 }
 
+// heldHere seeds THIS arena's lease on the item, which is the state a run meets
+// after a park or an interruption at a boundary: the claim is already ours, so
+// `resolve` re-takes it idempotently and reaches the boundary holding the item.
+//
+// An item merely AWAITING a role this run cannot assume is a different case and
+// never gets this far: the claim itself is refused (claim_role_test.go).
+func heldHere(t *testing.T, be *fake.Orchestrator, id string) {
+	t.Helper()
+	if _, err := be.Claim(context.Background(), be.Ref(id), nil); err != nil {
+		t.Fatalf("seeding this arena's claim on %s: %v", id, err)
+	}
+}
+
 // A recorded awaited role the flow does not declare matches nothing and never
 // will. Read as "the runner has not arrived" it would leave the item
 // unofferable with nothing naming why, so it reports the item BLOCKED, names
@@ -399,6 +415,10 @@ func TestCmdResolve_AnItemAlreadyAwaitingAnotherRoleHandsOffImmediately(t *testi
 func TestCmdResolve_AnUndeclaredAwaitedRoleIsBlocked(t *testing.T) {
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "1", Awaits: flow.Awaits{Role: "reviewer"}})
+	// Held here already, so the run reaches the advance: an item this arena does
+	// NOT hold is refused the claim on the same unknown role, which
+	// claim_role_test.go covers.
+	heldHere(t, be, "1")
 	be.SetCapabilities("", flow.CapPush)
 	app, errBuf := handoffTestApp(t, be)
 
@@ -618,16 +638,17 @@ func TestCmdResolve_TheAnnouncementOmitsTheFilerWhenItIsTheAccountActing(t *test
 }
 
 // loadFailsOnce fails the Nth Load, so the announcement's best-effort read can
-// be made to fail without breaking the advance that follows it.
+// be made to fail without breaking the claim before it or the advance after it.
 type loadFailsOnce struct {
 	*fake.Orchestrator
-	calls int
-	err   error
+	failCall int
+	calls    int
+	err      error
 }
 
 func (b *loadFailsOnce) Load(ctx context.Context, ref flow.ItemRef) (*flow.Item, error) {
 	b.calls++
-	if b.calls == 1 {
+	if b.calls == b.failCall {
 		return nil, b.err
 	}
 	return b.Orchestrator.Load(ctx, ref)
@@ -640,7 +661,9 @@ func (b *loadFailsOnce) Load(ctx context.Context, ref flow.ItemRef) (*flow.Item,
 func TestCmdResolve_AnUnreadableItemStillAnnouncesTheAccountAndItsRoles(t *testing.T) {
 	inner := fake.New()
 	inner.AddItem("1", flow.Item{Type: "task", Title: "1", Creator: "carol"})
-	be := &loadFailsOnce{Orchestrator: inner, err: errors.New("the tracker timed out")}
+	// The SECOND read: the first is the claim's own — which decides whose move
+	// it is and is not best-effort — and the announcement's follows it.
+	be := &loadFailsOnce{Orchestrator: inner, failCall: 2, err: errors.New("the tracker timed out")}
 	app, _, errBuf := resolveTestApp(t, be)
 
 	app.cmdResolve(context.Background(), []string{"1"})
@@ -722,6 +745,7 @@ func awaitingMaintainer() flow.Item {
 func TestCmdResolve_AHandoffIsDecidedBeforeAnyPacingWait(t *testing.T) {
 	be := fake.New()
 	be.AddItem("1", awaitingMaintainer())
+	heldHere(t, be, "1")
 	be.SetCapabilities("", flow.CapPush)
 	app, _, errBuf := resolveTestAppFlow(t, be, func(f *flow.Flow) {
 		f.Role("maintainer", flow.CapMerge)
@@ -758,6 +782,7 @@ func TestCmdResolve_AHandoffReportsWhatTheItemHasCost(t *testing.T) {
 	item := awaitingMaintainer()
 	item.Ledger = flow.Ledger{TotalActive: 90 * time.Second, TotalCostUSD: 1.25}
 	be.AddItem("1", item)
+	heldHere(t, be, "1")
 	be.SetCapabilities("", flow.CapPush)
 	app, errBuf := handoffTestApp(t, be)
 

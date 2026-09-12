@@ -415,6 +415,10 @@ func (b *conflictThenOkBackend) Claim(ctx context.Context, ref flow.ItemRef, ove
 
 func TestCmdResolve_AutoSelectIteratesOnLeaseConflict(t *testing.T) {
 	inner := fake.New()
+	// All three exist: a ref the eligibility mirror offers is a ref that can be
+	// read, and the claim reads the item before it takes a lease on it.
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	inner.AddItem("2", flow.Item{Type: "task", Title: "2"})
 	inner.AddItem("3", flow.Item{Type: "task", Title: "3"})
 	refs := []flow.ItemRef{
 		{OrchestratorName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
@@ -454,6 +458,8 @@ func TestCmdResolve_AutoSelectIteratesOnLeaseConflict(t *testing.T) {
 
 func TestCmdResolve_AutoSelectAllRefsConflictExitsZero(t *testing.T) {
 	inner := fake.New()
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	inner.AddItem("2", flow.Item{Type: "task", Title: "2"})
 	refs := []flow.ItemRef{
 		{OrchestratorName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
 		{OrchestratorName: "fake", Display: "2", Ref: json.RawMessage(`"2"`)},
@@ -469,13 +475,20 @@ func TestCmdResolve_AutoSelectAllRefsConflictExitsZero(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0 (all-conflict is a clean no-op exit); err=%q", code, errBuf.String())
 	}
-	if !strings.Contains(errBuf.String(), "every eligible item is leased to another arena") {
-		t.Errorf("expected 'every eligible item is leased' message; got %q", errBuf.String())
+	// The closing line reports THAT nothing could be claimed, not why: the per-ref
+	// lines above carry the reasons, and a lease conflict is only one of them.
+	if !strings.Contains(errBuf.String(), "no eligible item could be claimed") {
+		t.Errorf("expected the nothing-claimed message; got %q", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "already leased to arena") {
+		t.Errorf("the per-ref lines do not carry the conflict reason; got %q", errBuf.String())
 	}
 }
 
 func TestCmdResolve_AutoSelectNonConflictErrorExitsOne(t *testing.T) {
 	inner := fake.New()
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	inner.AddItem("2", flow.Item{Type: "task", Title: "2"})
 	refs := []flow.ItemRef{
 		{OrchestratorName: "fake", Display: "1", Ref: json.RawMessage(`"1"`)},
 		{OrchestratorName: "fake", Display: "2", Ref: json.RawMessage(`"2"`)},

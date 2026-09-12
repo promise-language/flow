@@ -286,15 +286,23 @@ const (
 	OverrideStaleBase   ClaimOverride = "stale-base"
 )
 
-// ClaimRefusalCode is the backend's own refusal vocabulary, carried through
-// verbatim. flow deliberately defines NO constants for it: the vocabulary
-// belongs to the backend's protocol (for the tracker backend, workspace/wire),
-// which flow cannot import. Mirroring it here would be a second enum nothing
-// keeps in sync.
+// ClaimRefusalCode is the refusal vocabulary, carried through verbatim. flow
+// deliberately defines NO constants for it: the vocabulary belongs to the
+// backend's protocol (for the tracker backend, workspace/wire), which flow
+// cannot import. Mirroring it here would be a second enum nothing keeps in
+// sync — including for the one code the SDK itself raises, which is named in
+// ErrClaimRefused below and spelled at the single place that raises it.
 type ClaimRefusalCode string
 
-// ErrClaimRefused — Backend.Claim determined the claim cannot proceed. The
-// code is the backend's own vocabulary (opaque to flow); ItemScoped reports
+// ErrClaimRefused — a claim cannot proceed. Raised by the orchestrator's own
+// Claim for its own preconditions, and by the SDK for the one refusal it owns:
+// an item awaiting a role the runner cannot assume, code `awaits-other-role`
+// (docs/resolution.md § Claiming). Which roles exist and who may assume one are
+// the SDK's derivations, and no orchestrator is told about them
+// (docs/orchestrator.md § Identities).
+//
+// Every other code is the refusing backend's own vocabulary (opaque to flow);
+// ItemScoped reports
 // whether a DIFFERENT item might succeed (true → retry the next ref in an
 // auto-select loop; false → stop). ItemScoped MUST default to false for any
 // code the backend does not recognize: false means "stop", and stopping on an

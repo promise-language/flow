@@ -37,11 +37,21 @@ func (app *App) cmdClaim(ctx context.Context, args []string) int {
 		overrides = append(overrides, flow.OverrideUnadmitted)
 	}
 
-	claim, err := app.Orchestrator.Claim(ctx, ref, overrides)
+	claim, err := app.takeClaim(ctx, ref, overrides)
 	if err != nil {
 		var refused flow.ErrClaimRefused
 		if errors.As(err, &refused) {
 			fmt.Fprintln(app.Err, formatClaimRefusal("claim", refused))
+			return 1
+		}
+		// An awaited role the flow does not declare stops the claim too, but it
+		// is reported as ITSELF — the role and the declared set — rather than as
+		// one more unmet precondition: no other account and no other arena would
+		// fare better, and what clears it is a person fixing the flow or the
+		// record (docs/resolution.md § Whose move it is).
+		var unknown flow.ErrUnknownRole
+		if errors.As(err, &unknown) {
+			fmt.Fprintln(app.Err, "claim:", unknown)
 			return 1
 		}
 		fmt.Fprintln(app.Err, "claim:", err)
