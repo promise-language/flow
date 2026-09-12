@@ -16,15 +16,19 @@ func TestLabels_Vocabulary(t *testing.T) {
 	cases := []struct {
 		name, got, want string
 	}{
-		{"Seeded", l.Seeded(), "flow:seeded"},
 		{"Blocked", l.Blocked(), "flow:blocked"},
 		{"NeedsAnswer", l.NeedsAnswer(), "flow:needs-answer"},
 		{"Disabled", l.Disabled(), "flow:disabled"},
 		{"Owner", l.Owner("alice"), "flow:owner:alice"},
 		{"Binary", l.Binary("implement"), "flow:implement"},
 		{"ClaimToken", l.ClaimToken("deadbeef"), "flow:claim:deadbeef"},
-		{"StaleArtifact", l.StaleArtifact("plan"), "flow:stale:plan"},
-		{"BudgetExhausted", l.BudgetExhausted("plan"), "flow:budget-exhausted:plan"},
+		{"TreasurerRefused", l.TreasurerRefused("plan"), "flow:treasurer-refused:plan"},
+		{"Awaits role", l.Awaits("contributor"), "flow:awaits:contributor"},
+		// The signal spelling FALLS OUT of awaitsString's prefix rather than
+		// being composed a second time here.
+		{"Awaits signal", l.Awaits(awaitsString(flow.Awaits{Signal: "pr-merged"})), "flow:awaits:signal:pr-merged"},
+		{"AwaitsPrefix", l.AwaitsPrefix(), "flow:awaits:"},
+		{"RequiresPrefix", l.RequiresPrefix(), "flow:requires:"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -35,8 +39,8 @@ func TestLabels_Vocabulary(t *testing.T) {
 
 func TestLabels_NormalizesMissingColon(t *testing.T) {
 	l := newLabels("custom") // no trailing colon
-	if got := l.Seeded(); got != "custom:seeded" {
-		t.Errorf("Seeded = %q, want custom:seeded (colon added)", got)
+	if got := l.Blocked(); got != "custom:blocked" {
+		t.Errorf("Blocked = %q, want custom:blocked (colon added)", got)
 	}
 }
 
@@ -164,18 +168,65 @@ func TestLabels_Maintained(t *testing.T) {
 			t.Errorf("Maintained(%q) = %v, want %v", label, got, s.maintained)
 		}
 	}
-	for _, label := range []string{"flow:implement", "area:api", "custom:seeded"} {
+	for _, label := range []string{"flow:implement", "area:api", "custom:blocked"} {
 		if l.Maintained(label) {
 			t.Errorf("Maintained(%q) = true, want false", label)
 		}
 	}
 
 	custom := newLabels("custom:")
-	if !custom.Maintained("custom:seeded") {
-		t.Error("Maintained(custom:seeded) under the custom: prefix = false, want true")
+	if !custom.Maintained("custom:blocked") {
+		t.Error("Maintained(custom:blocked) under the custom: prefix = false, want true")
 	}
-	if custom.Maintained("flow:seeded") {
-		t.Error("Maintained(flow:seeded) under the custom: prefix = true, want false")
+	if custom.Maintained("flow:blocked") {
+		t.Error("Maintained(flow:blocked) under the custom: prefix = true, want false")
+	}
+}
+
+// A RETIRED spelling is structural — so otherBinaryLabel never reads it as
+// another binary's name — and NOT maintained, so RemoveTag can clear one by
+// hand. Live issues in this repository carry flow:seeded right now; the row
+// missing would be a standing claim refusal on every one of them.
+func TestLabels_RetiredSuffixesAreStructuralAndNotMaintained(t *testing.T) {
+	l := newLabels("flow:")
+	for _, s := range retiredSuffixes {
+		label := sampleStructuralLabel(l, s)
+		row, ok := l.structural(label)
+		if !ok {
+			t.Errorf("structural(%q) = false — otherBinaryLabel would read it as a binary name", label)
+			continue
+		}
+		if row.maintained {
+			t.Errorf("Maintained(%q) = true, want false — nothing writes a retired spelling", label)
+		}
+	}
+	// The exact spellings that are out there, not just the row shapes.
+	for _, label := range []string{"flow:seeded", "flow:stale:plan", "flow:budget-exhausted:push"} {
+		if _, ok := l.structural(label); !ok {
+			t.Errorf("structural(%q) = false, want true", label)
+		}
+		if l.Maintained(label) {
+			t.Errorf("Maintained(%q) = true, want false", label)
+		}
+	}
+}
+
+// A retired suffix is deliberately NOT a labelSuffix* constant: it is no longer
+// vocabulary, and a constant would put it back in the table the completeness
+// test enforces.
+func TestLabels_RetiredSuffixesAreNotVocabulary(t *testing.T) {
+	declared := labelSuffixConsts(t)
+	for _, s := range retiredSuffixes {
+		for name, value := range declared {
+			if value == s.suffix {
+				t.Errorf("%s = %q is a retired spelling and must not be a labelSuffix* constant", name, value)
+			}
+		}
+		for _, row := range structuralLabels {
+			if row.suffix == s.suffix {
+				t.Errorf("structuralLabels still lists the retired spelling %q", s.suffix)
+			}
+		}
 	}
 }
 

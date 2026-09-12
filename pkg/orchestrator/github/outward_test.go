@@ -792,7 +792,7 @@ func TestGuardSeesConstructedLabelNames(t *testing.T) {
 		t.Fatalf("Park: %v", err)
 	}
 
-	want := b.labels.BudgetExhausted("implement")
+	want := b.labels.TreasurerRefused("implement")
 	if !slices.ContainsFunc(guard.of(flow.ActLabel), func(d flow.Disclosure) bool {
 		return slices.Contains(bodies(d), want)
 	}) {
@@ -992,7 +992,7 @@ func TestEveryActReachesTheGuardWithItsFinalBytes(t *testing.T) {
 		fragments []string
 	}{
 		{flow.ActAssignee, []string{"alice"}},
-		{flow.ActStateComment, []string{"flow:state-v1 begin"}},
+		{flow.ActStateComment, []string{"flow:state-v2 begin"}},
 		{flow.ActQuestion, []string{"<!-- flow:question", "Which base branch?", "main, or the release branch?"}},
 		{flow.ActPullRequest, []string{"a pull request title", "a pull request body", "main", "flow/issue-42"}},
 		{flow.ActMerge, []string{string(prURL)}},
@@ -1074,7 +1074,7 @@ func TestEachWriteStatesWhoStandsBehindIt(t *testing.T) {
 	}{
 		{flow.ActArtifactComment, artifactCommentMarkerPrefix, flow.OriginAgent,
 			"the SDK's marker line wraps an artifact an agent produced, so nobody vouches for the assembled comment"},
-		{flow.ActStateComment, "flow:state-v1 begin", flow.OriginAgent,
+		{flow.ActStateComment, "flow:state-v2 begin", flow.OriginAgent,
 			"the YAML frame is the SDK's, but it interpolates values a handler or an agent turn supplied"},
 		{flow.ActParkRecord, "waiting on the base branch", flow.OriginAgent,
 			"the JSON frame is the SDK's; the park reason inside it is not"},

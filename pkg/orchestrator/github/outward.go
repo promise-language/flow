@@ -188,7 +188,7 @@ func (o *outward) EditComment(ctx context.Context, a flow.DisclosureAct, issue i
 
 // AddLabels adds labels to an issue. Label names are the case that looks
 // exempt and is not: the flow CONSTRUCTS them — flow:owner:<login>,
-// flow:budget-exhausted:<step-id> — so a name is text the flow chose to
+// flow:treasurer-refused:<step-id> — so a name is text the flow chose to
 // publish.
 //
 // The origin is fixed here rather than taken from the caller because the whole

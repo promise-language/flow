@@ -486,7 +486,7 @@ func TestBackend_AskQuestionsLabelsOnlyAfterRecording(t *testing.T) {
 // Items parked before this field existed must still load: their state comment
 // has no `questions:` key, and an absent key is an empty list, not an error.
 func TestExtractStateDoc_MissingQuestionsKeyLoads(t *testing.T) {
-	body := "<!-- flow:state-v1 begin owner=alice -->\n" +
+	body := "<!-- flow:state-v2 begin owner=alice -->\n" +
 		"```yaml\n" +
 		"flow: implement\n" +
 		"schema: 1\n" +
@@ -495,7 +495,7 @@ func TestExtractStateDoc_MissingQuestionsKeyLoads(t *testing.T) {
 		"    step: plan\n" +
 		"    reason: 'question: should the doc be amended?'\n" +
 		"```\n" +
-		"<!-- flow:state-v1 end -->\n"
+		"<!-- flow:state-v2 end -->\n"
 
 	doc, _, found, err := extractStateDoc(body)
 	if err != nil {

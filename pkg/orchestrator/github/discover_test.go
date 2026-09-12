@@ -312,7 +312,7 @@ func TestBackend_Discover_AvailabilityStates(t *testing.T) {
 		{"blocked label", []string{"flow:implement", "flow:blocked"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailBlocked},
 		{"disabled label", []string{"flow:implement", "flow:disabled"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailBlocked},
 		{"needs-answer label", []string{"flow:implement", "flow:needs-answer"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailBlocked},
-		{"treasurer refused", []string{"flow:implement", "flow:budget-exhausted:plan"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailBlocked},
+		{"treasurer refused", []string{"flow:implement", "flow:treasurer-refused:plan"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailBlocked},
 		{"held by another", []string{"flow:implement", "flow:owner:bob"}, []string{"bob"}, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailHeld},
 		{"available — not assigned", []string{"flow:implement"}, nil, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailAvailable},
 		{"auto — assigned, binary label present", []string{"flow:implement"}, []string{"alice"}, "open", "alice", "implement", acceptsAll, "task", flow.Awaits{}, nil, flow.AvailAuto},
@@ -538,7 +538,7 @@ func TestBackend_BlockednessReason(t *testing.T) {
 		{[]string{"flow:implement", "flow:blocked"}, "blocked pending operator action"},
 		{[]string{"flow:implement", "flow:disabled"}, "disabled by an operator"},
 		{[]string{"flow:implement", "flow:needs-answer"}, "waiting for an answer"},
-		{[]string{"flow:implement", "flow:budget-exhausted:plan"}, "budget exhausted on a step"},
+		{[]string{"flow:implement", "flow:treasurer-refused:plan"}, "budget exhausted on a step"},
 	}
 	for _, tt := range tests {
 		blocked, kind, got := b.blockedness(nil, tt.labels)
@@ -692,7 +692,7 @@ func TestBackend_ListAutoSelectable_RefusesAnInvalidTag(t *testing.T) {
 // — the SDK does not filter afterwards, because a rule enforced in two places
 // is a rule with two owners and one of them wrong.
 func TestBackend_ListAutoSelectable_OmitsBlockedItems(t *testing.T) {
-	for _, blocking := range []string{"flow:disabled", "flow:needs-answer", "flow:blocked", "flow:budget-exhausted:plan"} {
+	for _, blocking := range []string{"flow:disabled", "flow:needs-answer", "flow:blocked", "flow:treasurer-refused:plan"} {
 		t.Run(blocking, func(t *testing.T) {
 			var query string
 			b := searchingOrchestrator(t, newGHMock(t), []string{"flow:implement", blocking}, &query)

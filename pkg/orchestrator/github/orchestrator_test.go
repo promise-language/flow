@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -108,9 +109,16 @@ type ghMock struct {
 	// orphan branch state for the artifacts spillover
 	orphanBranchSHA string                // commit SHA at heads/flow-artifacts
 	orphanFiles     map[string]ghMockFile // path → file
-	nextBlobID      int
-	nextTreeID      int
-	nextCommitID    int
+	// blobContents holds every blob the git-data API was given, by sha, so the
+	// tree entry that names one can serve its bytes back.
+	blobContents map[string][]byte
+	// rawURL is where this mock serves orphan-branch bytes, set once the test
+	// server is up. The contents API hands out an ABSOLUTE download_url, so
+	// without it a spilled artifact could only be read from the real internet.
+	rawURL       string
+	nextBlobID   int
+	nextTreeID   int
+	nextCommitID int
 
 	// observation tape: callers can inspect putArtifactFile interactions.
 	branchCreated    bool
@@ -222,6 +230,18 @@ func (m *ghMock) requestCount(methodAndPath string) int {
 	return m.requests[methodAndPath]
 }
 
+// snapshotRequests copies the tape, for a failure message that says what WAS
+// asked for rather than only what was not.
+func (m *ghMock) snapshotRequests() map[string]int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]int, len(m.requests))
+	for k, v := range m.requests {
+		out[k] = v
+	}
+	return out
+}
+
 // resetRequests clears the tape, so a test can count what a SECOND call makes
 // without subtracting what the setup did.
 func (m *ghMock) resetRequests() {
@@ -265,6 +285,7 @@ func newGHMock(t *testing.T) *ghMock {
 		commentClock:      time.Now().UTC().Truncate(time.Second),
 		perms:             map[string]bool{"push": true, "pull": true, "admin": false},
 		orphanFiles:       map[string]ghMockFile{},
+		blobContents:      map[string][]byte{},
 		collaboratorPerms: map[string]string{},
 		collaboratorBase:  map[string]string{},
 	}
@@ -473,8 +494,33 @@ func (m *ghMock) server() *httptest.Server {
 		writeJSON(w, map[string]any{"login": "alice"})
 	})
 
-	return httptest.NewServer(m.recordMutations(mux))
+	// The raw-content host, standing in for raw.githubusercontent.com. A spilled
+	// artifact is read back by FOLLOWING the download_url the contents API
+	// returns — an absolute URL to a different host — so without this the read
+	// path is only reachable over the real internet and cannot be tested at all.
+	mux.HandleFunc(rawContentPrefix, func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, rawContentPrefix)
+		m.mu.Lock()
+		file, ok := m.orphanFiles[path]
+		m.mu.Unlock()
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write(file.Content)
+	})
+
+	srv := httptest.NewServer(m.recordMutations(mux))
+	m.mu.Lock()
+	m.rawURL = srv.URL + rawContentPrefix
+	m.mu.Unlock()
+	return srv
 }
+
+// rawContentPrefix is where the mock serves orphan-branch bytes, standing in
+// for raw.githubusercontent.com.
+const rawContentPrefix = "/raw/"
 
 func (m *ghMock) handleIssue(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
@@ -891,6 +937,16 @@ func (m *ghMock) handleGitBlobCreate(w http.ResponseWriter, r *http.Request) {
 	defer m.mu.Unlock()
 	m.nextBlobID++
 	sha := fmt.Sprintf("blob%06d", m.nextBlobID)
+	// KEEP THE BYTES. The tree entry that follows names only this sha, so a mock
+	// that discards the content here can record that a file was spilled and
+	// never serve it back — and the read half of spilling is untestable.
+	content := []byte(req.Content)
+	if req.Encoding == "base64" {
+		if raw, err := base64.StdEncoding.DecodeString(req.Content); err == nil {
+			content = raw
+		}
+	}
+	m.blobContents[sha] = content
 	writeJSON(w, map[string]string{"sha": sha})
 }
 
@@ -914,7 +970,7 @@ func (m *ghMock) handleGitTreeCreate(w http.ResponseWriter, r *http.Request) {
 	sha := fmt.Sprintf("tree%06d", m.nextTreeID)
 	// Record the file in our virtual filesystem under each tree-entry path.
 	for _, e := range req.Tree {
-		m.orphanFiles[e.Path] = ghMockFile{SHA: e.SHA}
+		m.orphanFiles[e.Path] = ghMockFile{SHA: e.SHA, Content: m.blobContents[e.SHA]}
 	}
 	writeJSON(w, map[string]string{"sha": sha})
 }
@@ -938,6 +994,26 @@ func (m *ghMock) handleGitCommitCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"sha": sha})
 }
 
+// contentsDirEntries returns the files directly under `dir`, or nil when the
+// path names no directory this mock holds.
+func (m *ghMock) contentsDirEntries(dir string) []map[string]any {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	prefix := strings.TrimSuffix(dir, "/") + "/"
+	var out []map[string]any
+	for path, file := range m.orphanFiles {
+		rest, ok := strings.CutPrefix(path, prefix)
+		if !ok || strings.Contains(rest, "/") {
+			continue
+		}
+		out = append(out, map[string]any{
+			"name": rest, "path": path, "sha": file.SHA, "type": "file",
+			"size": len(file.Content), "download_url": m.rawURL + path,
+		})
+	}
+	return out
+}
+
 // handleContents serves GET (get-contents) and PUT (create/update file)
 // against /repos/o/r/contents/<path>.
 func (m *ghMock) handleContents(w http.ResponseWriter, r *http.Request) {
@@ -946,10 +1022,21 @@ func (m *ghMock) handleContents(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		m.mu.Lock()
 		file, ok := m.orphanFiles[path]
+		download := m.rawURL + path
 		m.mu.Unlock()
 		if !ok {
+			// A DIRECTORY listing. go-github's DownloadContents asks for the
+			// parent directory first and picks the entry by name, so serving
+			// only files makes every spilled artifact unreadable.
+			if entries := m.contentsDirEntries(path); entries != nil {
+				writeJSON(w, entries)
+				return
+			}
 			http.NotFound(w, r)
 			return
+		}
+		if download == path {
+			download = "https://raw.githubusercontent.com/" + m.owner + "/" + m.repo + "/" + artifactsBranch + "/" + path
 		}
 		writeJSON(w, map[string]any{
 			"name":         path,
@@ -957,7 +1044,7 @@ func (m *ghMock) handleContents(w http.ResponseWriter, r *http.Request) {
 			"sha":          file.SHA,
 			"type":         "file",
 			"size":         len(file.Content),
-			"download_url": "https://raw.githubusercontent.com/" + m.owner + "/" + m.repo + "/" + artifactsBranch + "/" + path,
+			"download_url": download,
 		})
 	case http.MethodPut:
 		var req struct {
@@ -973,7 +1060,13 @@ func (m *ghMock) handleContents(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
 		m.nextBlobID++
 		newSHA := fmt.Sprintf("blob%06d", m.nextBlobID)
-		m.orphanFiles[path] = ghMockFile{Content: []byte(req.Content), SHA: newSHA}
+		// Stored DECODED, the same as the git-data path stores a blob, so the
+		// raw-content handler has one representation to serve rather than two.
+		content, err := base64.StdEncoding.DecodeString(req.Content)
+		if err != nil {
+			content = []byte(req.Content)
+		}
+		m.orphanFiles[path] = ghMockFile{Content: content, SHA: newSHA}
 		m.updateCalls++
 		m.mu.Unlock()
 		writeJSON(w, map[string]any{
@@ -1581,7 +1674,7 @@ func TestBackend_ParkSurvivesLoadAndClearsOnGrant(t *testing.T) {
 	if state.Park.Step != "plan" || state.Park.Axis != flow.AxisInvocations {
 		t.Errorf("park = %+v, want plan/invocations", state.Park)
 	}
-	parkLabelName := b.labels.BudgetExhausted("plan")
+	parkLabelName := b.labels.TreasurerRefused("plan")
 	if !hasLabel(mock.labelNames(), parkLabelName) {
 		t.Errorf("labels = %v, want %q", mock.labelNames(), parkLabelName)
 	}

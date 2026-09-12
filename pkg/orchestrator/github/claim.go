@@ -345,7 +345,7 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 			// Different author — post a fresh state comment authored by us,
 			// empty: nothing seeds an item, so the next entry, ledger row,
 			// park or question is what brings its record back into being.
-			newDoc := stateDoc{Flow: b.cfg.BinaryName, Schema: stateSchemaVersion, SeededAt: nowUTC()}
+			newDoc := stateDoc{Flow: b.cfg.BinaryName, Schema: stateSchemaVersion}
 			id, _, postErr := b.postStateComment(ctx, issueNum, newDoc, owner)
 			if postErr != nil {
 				return flow.Claim{}, fmt.Errorf("supersede state comment: %w", postErr)
@@ -679,6 +679,17 @@ func (b *Orchestrator) otherBinaryLabel(names []string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// hasLabelPrefix is hasLabel for a VALUED suffix, whose label carries a value
+// after the prefix and so cannot be matched exactly.
+func hasLabelPrefix(names []string, want string) bool {
+	for _, n := range names {
+		if strings.HasPrefix(n, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasLabel(names []string, want string) bool {

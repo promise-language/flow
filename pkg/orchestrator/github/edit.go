@@ -127,8 +127,8 @@ func (e *editor) Commit(ctx context.Context) error {
 	}
 	for _, t := range e.delTags {
 		// An orchestrator MUST refuse to remove a marker it maintains itself:
-		// the owner, binary, seeded, park and manual markers follow from Claim,
-		// seeding, Park and this editor, and a caller able to delete one
+		// the owner, binary, awaited, park and manual markers follow from Claim,
+		// AppendEntry, Park and this editor, and a caller able to delete one
 		// directly could make an item report a state no operation put it in.
 		if e.b.labels.Maintained(string(t)) {
 			return fmt.Errorf(

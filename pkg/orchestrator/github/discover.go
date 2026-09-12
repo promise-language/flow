@@ -276,13 +276,17 @@ func (b *Orchestrator) itemInfoFor(ctx context.Context, iss *github.Issue, binar
 // the account of record beside it.
 //
 // It reads the STATE COMMENT, which costs a fetch per item — and it skips the
-// fetch for an item this binary has not begun, whose journal is empty by
-// construction and which therefore awaits nobody. The seeded marker is what
-// says so without reading anything. #240 replaces the read outright with the
-// `flow:awaits:<…>` label it maintains, at which point this is a label scan like
-// every other rung.
+// fetch for an item carrying no `flow:awaits:<…>` label, which awaits nobody:
+// the label is maintained at every append, so its absence is the cheap answer
+// and no item needs reading to produce it.
+//
+// The label is an INDEX, not the answer. Only the journal carries
+// Awaits.Account — the account of record for the awaited role — and the label
+// has no room for it, so replacing the fetch outright would drop Account from
+// every listing. The derivation stays awaitsFromDoc, shared with Load, so the
+// two cannot disagree about whose move it is.
 func (b *Orchestrator) awaitsOfIssue(ctx context.Context, issueNum int, lblNames []string) (flow.Awaits, error) {
-	if !hasLabel(lblNames, b.labels.Seeded()) {
+	if !hasLabelPrefix(lblNames, b.labels.AwaitsPrefix()) {
 		return flow.Awaits{}, nil
 	}
 	body, stateID, _, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
@@ -595,7 +599,7 @@ func (b *Orchestrator) blockedness(blockers []flow.Blocker, lblNames []string) (
 		case b.labels.Blocked():
 			return true, flow.WaitsOnPerson, "blocked pending operator action"
 		}
-		if strings.HasPrefix(lbl, b.labels.named(labelSuffixBudgetExhPref)) {
+		if strings.HasPrefix(lbl, b.labels.named(labelSuffixTreasurerRefPref)) {
 			return true, flow.WaitsOnPerson, "budget exhausted on a step"
 		}
 	}

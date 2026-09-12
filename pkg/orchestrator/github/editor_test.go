@@ -126,9 +126,9 @@ func TestEditor_ALabelTheEditDoesNotTouchMayMove(t *testing.T) {
 }
 
 // AN ORCHESTRATOR MUST REFUSE TO REMOVE A MARKER IT MAINTAINS ITSELF. The
-// owner, binary, seeded, park and manual markers follow from Claim, seeding,
-// Park and this editor; a caller able to delete one directly could make an item
-// report a state no operation put it in.
+// owner, binary, awaited, park and manual markers follow from Claim,
+// AppendEntry, Park and this editor; a caller able to delete one directly could
+// make an item report a state no operation put it in.
 func TestEditor_RefusesToRemoveAMarkerItMaintains(t *testing.T) {
 	for _, marker := range []string{
 		"flow:owner:alice",
@@ -139,14 +139,21 @@ func TestEditor_RefusesToRemoveAMarkerItMaintains(t *testing.T) {
 		// TestLabels_Maintained compares Maintained to the bit itself.
 		"flow:claim:0123456789abcdef",
 		"flow:arena:0123456789abcdef",
-		"flow:seeded",
 		"flow:needs-answer",
 		"flow:blocked",
 		"flow:manual",
 		"flow:infra-transient",
-		"flow:budget-exhausted:plan",
-		"flow:stale:plan",
-		"flow:implement", // the binary marker seeding maintains
+		"flow:treasurer-refused:plan",
+		// The awaited marker: AppendEntry moves it at every append, so a caller
+		// deleting it directly makes the listing report nobody's move on an item
+		// whose journal says otherwise.
+		"flow:awaits:contributor",
+		"flow:awaits:signal:pr-merged",
+		// Reserved for #251's writer, and maintained from the day the row
+		// exists: a placement restriction an editor could delete by hand is one
+		// no arena has to honour.
+		"flow:requires:os:linux",
+		"flow:implement", // the binary marker the first journal entry writes
 		// The two selection axes: the typed setters own these labels the way
 		// SetManual owns flow:manual, so removing one directly is refused.
 		"flow:priority:high",
@@ -191,7 +198,13 @@ func TestEditor_RefusesToRemoveAMarkerItMaintains(t *testing.T) {
 // name — and neither is maintained, which is the disabled and type: rows'
 // decision beside structuralLabels.
 func TestEditor_RemovesOperatorOwnedStructuralLabels(t *testing.T) {
-	for _, label := range []string{"flow:disabled", "flow:type:bug"} {
+	// The RETIRED spellings belong here too, and for a stronger reason: nothing
+	// writes them any more, so RemoveTag is the only way one leaves an item that
+	// still carries it. Live issues in this repository carry flow:seeded today.
+	for _, label := range []string{
+		"flow:disabled", "flow:type:bug",
+		"flow:seeded", "flow:stale:plan", "flow:budget-exhausted:push",
+	} {
 		t.Run(label, func(t *testing.T) {
 			mock, b := editingOrchestrator(t, "flow:implement", label)
 			ed, err := b.Edit(t.Context(), b.refFromIssue(42))

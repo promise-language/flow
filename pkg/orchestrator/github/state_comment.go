@@ -1,7 +1,6 @@
 package github
 
 import (
-	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -11,24 +10,30 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// stateSchemaVersion is the int written into state-v1 documents. Bumped only
-// on incompatible schema changes.
-const stateSchemaVersion = 1
+// stateSchemaVersion is the int written into state documents. Bumped only on
+// incompatible schema changes — v2 drops the `artifacts` checklist, whose
+// entries a v1 reader requires, so a v1 document is not read at all.
+const stateSchemaVersion = 2
+
+// stateMarkerName is the marker the state comment is wrapped in, and the ONE
+// place its spelling lives: the two regexes below and the three literals
+// renderStateComment writes all derive from it, so a version bump cannot move
+// the reader and leave the writer behind.
+const stateMarkerName = "flow:state-v2"
 
 // stateBegin / stateEnd are the HTML-comment markers wrapping the YAML. The
 // regex pulls the YAML out of the comment body.
 var (
-	stateBeginRe = regexp.MustCompile(`(?m)^<!--\s*flow:state-v1\s+begin(?:\s+owner=(\S+))?\s*-->`)
-	stateEndRe   = regexp.MustCompile(`(?m)^<!--\s*flow:state-v1\s+end\s*-->`)
+	stateBeginRe = regexp.MustCompile(`(?m)^<!--\s*` + regexp.QuoteMeta(stateMarkerName) + `\s+begin(?:\s+owner=(\S+))?\s*-->`)
+	stateEndRe   = regexp.MustCompile(`(?m)^<!--\s*` + regexp.QuoteMeta(stateMarkerName) + `\s+end\s*-->`)
 	yamlFenceRe  = regexp.MustCompile("(?s)```yaml\\s*\\n(.*?)\\n```")
 )
 
 // stateDoc is the on-wire YAML schema. Keep field names stable across
 // versions; add new fields as optional rather than renaming.
 type stateDoc struct {
-	Flow     string    `yaml:"flow"`
-	Schema   int       `yaml:"schema"`
-	SeededAt time.Time `yaml:"seeded_at"`
+	Flow   string `yaml:"flow"`
+	Schema int    `yaml:"schema"`
 	// Journal is the durable route: one entry per completed step execution, in
 	// order (docs/github-schema.md § Journal entries). APPEND-ONLY — entries are
 	// never rewritten, reordered or removed, and the last entry's `next` (or
@@ -36,9 +41,8 @@ type stateDoc struct {
 	Journal []stateJournalEntryDoc `yaml:"journal,omitempty"`
 	// Ledger is the treasurer's record: a row per step id, plus item-level
 	// totals (docs/github-schema.md § Ledger).
-	Ledger    stateLedgerDoc     `yaml:"ledger,omitempty"`
-	Artifacts []stateArtifactDoc `yaml:"artifacts,omitempty"`
-	Signals   []stateSignalDoc   `yaml:"signals,omitempty"`
+	Ledger  stateLedgerDoc   `yaml:"ledger,omitempty"`
+	Signals []stateSignalDoc `yaml:"signals,omitempty"`
 	// Park is the item's current park, or nil when it is not parked. The
 	// park label and the timeline comment Park() also writes are for humans
 	// and for history; THIS is the machine-readable copy LoadState returns,
@@ -422,36 +426,6 @@ func questionsFromDocs(docs []stateQuestionDoc) []flow.Question {
 	return qs
 }
 
-type stateArtifactDoc struct {
-	Id                  string    `yaml:"id"`
-	Type                string    `yaml:"type"`
-	Required            bool      `yaml:"required,omitempty"`
-	Stale               bool      `yaml:"stale,omitempty"`
-	Resolved            bool      `yaml:"resolved,omitempty"`
-	ResolvedBy          string    `yaml:"resolved_by,omitempty"`
-	ProducedAt          time.Time `yaml:"produced_at,omitempty"`
-	Version             int       `yaml:"version,omitempty"`
-	ResolvedByPrincipal string    `yaml:"resolved_by_principal,omitempty"`
-
-	// inline value (small types) — large types (file/patch) live as
-	// follow-up comments / orphan-branch files referenced by ResolvedBy.
-	CommitHash string `yaml:"commit_hash,omitempty"`
-	JSONInline string `yaml:"json,omitempty"`
-
-	// budget caps
-	GrantedInvocations          int           `yaml:"granted_invocations,omitempty"`
-	GrantedPromptsPerInvocation int           `yaml:"granted_prompts_per_invocation,omitempty"`
-	GrantedCostUSD              float64       `yaml:"granted_cost_usd,omitempty"`
-	GrantedTimeout              time.Duration `yaml:"granted_timeout,omitempty"`
-
-	// usage counters
-	Invocations           int           `yaml:"invocations,omitempty"`
-	PromptsThisInvocation int           `yaml:"prompts_this_invocation,omitempty"`
-	CostUSDSpent          float64       `yaml:"cost_usd_spent,omitempty"`
-	DurationWorked        time.Duration `yaml:"duration_worked,omitempty"`
-	LastRunAt             time.Time     `yaml:"last_run_at,omitempty"`
-}
-
 type stateSignalDoc struct {
 	Id          string    `yaml:"id"`
 	Set         bool      `yaml:"set"`
@@ -459,9 +433,15 @@ type stateSignalDoc struct {
 	ObservedVia string    `yaml:"observed_via,omitempty"` // side-effect | poll
 }
 
-// extractStateDoc scans a comment body for the state-v1 markers and parses
-// the YAML between them. Returns (doc, owner, true) on success. The owner
-// is parsed from the `begin owner=<login>` attribute.
+// extractStateDoc scans a comment body for the state markers and parses the
+// YAML between them. Returns (doc, owner, true) on success. The owner is parsed
+// from the `begin owner=<login>` attribute.
+//
+// A document of an EARLIER SCHEMA is not found here, and that is the bump's
+// meaning: v2 drops the `artifacts` checklist a v1 document stores its results
+// in, so the two are not one format with optional fields. An item still carrying
+// a v1 comment reads as not started, and the next append posts a fresh v2 comment
+// beside the inert one.
 func extractStateDoc(body string) (*stateDoc, string, bool, error) {
 	beginMatch := stateBeginRe.FindStringSubmatchIndex(body)
 	if beginMatch == nil {
@@ -469,7 +449,7 @@ func extractStateDoc(body string) (*stateDoc, string, bool, error) {
 	}
 	endMatch := stateEndRe.FindStringIndex(body[beginMatch[1]:])
 	if endMatch == nil {
-		return nil, "", true, errors.New("found state-v1 begin without matching end marker")
+		return nil, "", true, fmt.Errorf("found %s begin without matching end marker", stateMarkerName)
 	}
 	owner := ""
 	if beginMatch[2] >= 0 {
@@ -480,11 +460,11 @@ func extractStateDoc(body string) (*stateDoc, string, bool, error) {
 	// Grab the YAML inside the ```yaml ... ``` fence.
 	yamlMatch := yamlFenceRe.FindStringSubmatch(inner)
 	if yamlMatch == nil {
-		return nil, owner, true, errors.New("state-v1 block missing ```yaml fence")
+		return nil, owner, true, fmt.Errorf("%s block missing ```yaml fence", stateMarkerName)
 	}
 	var doc stateDoc
 	if err := yaml.Unmarshal([]byte(yamlMatch[1]), &doc); err != nil {
-		return nil, owner, true, fmt.Errorf("state-v1 YAML: %w", err)
+		return nil, owner, true, fmt.Errorf("%s YAML: %w", stateMarkerName, err)
 	}
 	return &doc, owner, true, nil
 }
@@ -499,16 +479,16 @@ func renderStateComment(owner string, doc stateDoc) (string, error) {
 	binary := doc.Flow
 	var sb strings.Builder
 	if owner == "" {
-		sb.WriteString("<!-- flow:state-v1 begin -->\n")
+		fmt.Fprintf(&sb, "<!-- %s begin -->\n", stateMarkerName)
 	} else {
-		fmt.Fprintf(&sb, "<!-- flow:state-v1 begin owner=%s -->\n", owner)
+		fmt.Fprintf(&sb, "<!-- %s begin owner=%s -->\n", stateMarkerName, owner)
 	}
 	fmt.Fprintf(&sb, "<details><summary>📋 Flow state — %s (machine-managed, do not edit)</summary>\n\n", binary)
 	sb.WriteString("```yaml\n")
 	sb.Write(body)
 	sb.WriteString("```\n\n")
 	sb.WriteString("</details>\n")
-	sb.WriteString("<!-- flow:state-v1 end -->\n")
+	fmt.Fprintf(&sb, "<!-- %s end -->\n", stateMarkerName)
 	return sb.String(), nil
 }
 
@@ -517,30 +497,39 @@ func renderStateComment(owner string, doc stateDoc) (string, error) {
 // models and silently drops the rest — the park record most importantly — so
 // every write path edits the loaded document in place via mutateStateDoc.
 
-// recordFromArtifactDoc inflates an ArtifactRecord from the YAML doc. The
-// File / Patch payloads aren't inlined; the backend fetches them on demand
+// recordsFromJournal DERIVES the artifact projection from the journal rather
+// than reading a stored copy of it. The projection used to be a second `artifacts`
+// array written beside every append, which is one record of what a step produced
+// too many: the journal already carries it, and the copy could only ever agree or
+// drift. Schema v2 drops the array, so this is the whole of it.
+//
+// Walked in order, LAST ENTRY PER STEP WINS: a route that returns to a step
+// appends again, and the later execution's value is the step's current one.
+// A signal entry produces no record — its result is the observation itself.
+//
+// The File / Patch payloads aren't inlined; the backend fetches them on demand
 // from the comment / orphan branch.
-func recordFromArtifactDoc(d stateArtifactDoc) flow.ArtifactRecord {
-	rec := flow.ArtifactRecord{
-		Id:         flow.ArtifactId(d.Id),
-		Type:       artifactTypeFromString(d.Type),
-		Resolved:   d.Resolved,
-		ResolvedBy: pickResolvedBy(d),
-		ProducedAt: d.ProducedAt,
-		Version:    d.Version,
-		CommitHash: d.CommitHash,
+func recordsFromJournal(entries []stateJournalEntryDoc) map[flow.ArtifactId]flow.ArtifactRecord {
+	out := make(map[flow.ArtifactId]flow.ArtifactRecord, len(entries))
+	for _, d := range entries {
+		if d.Type == "" || d.Type == journalSignalType {
+			continue
+		}
+		rec := flow.ArtifactRecord{
+			Id:         flow.ArtifactId(d.Step),
+			Type:       artifactTypeFromString(d.Type),
+			Resolved:   true,
+			ResolvedBy: d.By,
+			ProducedAt: d.At,
+			Version:    d.Execution,
+			CommitHash: d.CommitHash,
+		}
+		if d.JSONInline != "" {
+			rec.JSON = []byte(d.JSONInline)
+		}
+		out[rec.Id] = rec
 	}
-	if d.JSONInline != "" {
-		rec.JSON = []byte(d.JSONInline)
-	}
-	return rec
-}
-
-func pickResolvedBy(d stateArtifactDoc) string {
-	if d.ResolvedByPrincipal != "" {
-		return d.ResolvedByPrincipal
-	}
-	return d.ResolvedBy
+	return out
 }
 
 // signalStateFromDoc inflates a SignalState from the doc.
