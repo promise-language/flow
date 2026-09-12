@@ -185,11 +185,27 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 					fmt.Fprintln(app.Err, formatClaimRefusal("resolve", refused))
 					return 1
 				}
+				// An awaited role outside the declared set is THIS item's record
+				// being wrong, and the next item's may well be sound: the item is
+				// reported blocked — a person fixes the flow or the record — and
+				// the run goes on to the next ref, exactly as the role refusal
+				// above does. Stopping here would let one corrupt marker in a
+				// stale offer withhold every other item from an unattended run.
+				var unknown flow.ErrUnknownRole
+				if errors.As(err, &unknown) {
+					fmt.Fprintf(app.Err, "resolve: %s is blocked — %s — trying next\n", ref.Display, unknown)
+					continue
+				}
 				fmt.Fprintln(app.Err, conditionOrError("resolve", err))
 				return 1
 			}
 			if !claimed {
-				fmt.Fprintln(app.Err, "resolve: every eligible item is leased to another arena — nothing to do")
+				// The reasons are the per-ref lines above, one for each refusal.
+				// A lease lost to another arena is only one of them now that a
+				// stale offer is skipped the same way — an item whose marker moved
+				// to a role this run cannot assume, or names a role the flow does
+				// not declare — and naming a cause here would name the wrong one.
+				fmt.Fprintln(app.Err, "resolve: no eligible item could be claimed — each was refused above — nothing to do")
 				return 0
 			}
 			claim = &newClaim

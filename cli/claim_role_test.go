@@ -106,12 +106,7 @@ func TestCmdClaim_AnItemAwaitingASignalIsClaimed(t *testing.T) {
 // move it is).
 func TestCmdClaim_AnUndeclaredAwaitedRoleIsRefusedAsUnknown(t *testing.T) {
 	inner := fake.New()
-	inner.AddItem("1", flow.Item{Type: "task", Title: "1",
-		Awaits: flow.Awaits{Role: "reviewer"},
-		Journal: []flow.JournalEntry{{
-			Step: "plan", Execution: 1, Route: flow.Route{Next: "commit"},
-			By: "bob", Role: "contributor", Awaits: flow.Awaits{Role: "reviewer"},
-		}}})
+	inner.AddItem("1", awaitingAnUndeclaredRole())
 	inner.SetCapabilities("", flow.CapPush)
 	be := &recordingClaimBackend{Orchestrator: inner}
 	app, errBuf := handoffTestApp(t, be)
@@ -298,6 +293,112 @@ func TestCmdResolve_AutoSelectSkipsAnItemAwaitingAnotherRole(t *testing.T) {
 	if !strings.Contains(got, "resolve: driving 2 to completion") {
 		t.Errorf("the run did not go on to the next ref; got %q", got)
 	}
+}
+
+// `resolve <id>` takes its claim through the same route, so the same read
+// decides: an item that cannot be read is not claimed and the run stops, rather
+// than a lease being taken on an item whose pending move nobody could see.
+func TestCmdResolve_AnUnreadableItemIsNotClaimed(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be := &recordingClaimBackend{Orchestrator: inner}
+	app, errBuf := handoffTestApp(t, unloadableBackend{Orchestrator: be})
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "orchestrator unreachable") {
+		t.Errorf("the stop does not say what could not be read; got %q", errBuf.String())
+	}
+	if be.claims != 0 {
+		t.Errorf("Backend.Claim was called %d time(s) with the item unread", be.claims)
+	}
+	item, err := inner.Load(context.Background(), inner.Ref("1"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !item.Holder.Empty() {
+		t.Errorf("the item was claimed though it could not be read; held by %+v", item.Holder)
+	}
+}
+
+// `resolve <id>` on an item this arena does NOT hold meets the undeclared
+// awaited role at the claim, and reports the item blocked there: the role and
+// the declared set, named against the item, with no lease taken. (The same item
+// held here reaches the advance, which reports the same thing — handoff_test.go
+// TestCmdResolve_AnUndeclaredAwaitedRoleIsBlocked.)
+func TestCmdResolve_AnUndeclaredAwaitedRoleIsBlockedBeforeTheClaim(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem("1", awaitingAnUndeclaredRole())
+	inner.SetCapabilities("", flow.CapPush)
+	be := &recordingClaimBackend{Orchestrator: inner}
+	app, errBuf := handoffTestApp(t, be)
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
+	}
+	got := errBuf.String()
+	if !strings.Contains(got, `1 is blocked — role "reviewer" is not declared by this flow`) {
+		t.Errorf("the report does not name the item and the unknown role; got %q", got)
+	}
+	if strings.Contains(got, "this run can assume") {
+		t.Errorf("an undeclared role was reported as somebody else's move; got %q", got)
+	}
+	if be.claims != 0 {
+		t.Errorf("Backend.Claim was called %d time(s) on a blocked item", be.claims)
+	}
+	item, err := inner.Load(context.Background(), inner.Ref("1"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !item.Holder.Empty() {
+		t.Errorf("a blocked item was left held by %+v", item.Holder)
+	}
+}
+
+// A marker nothing can ever match is THIS item's record being wrong, and the
+// next item's may well be sound: auto-selection reports the item blocked and
+// takes the next ref, exactly as it does for a role somebody else must take.
+// Stopping the run instead would let one corrupt marker in a stale offer
+// withhold every other item from an unattended runner.
+func TestCmdResolve_AutoSelectSkipsAnItemWhoseAwaitedRoleIsUndeclared(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem("1", awaitingAnUndeclaredRole())
+	inner.AddItem("2", flow.Item{Type: "task", Title: "2"})
+	inner.SetCapabilities("", flow.CapPush)
+	// The mirror offers both: the fake's own listing would have filtered #1 out.
+	be := &conflictThenOkBackend{
+		Orchestrator: inner,
+		refs:         []flow.ItemRef{inner.Ref("1"), inner.Ref("2")},
+	}
+	app, errBuf := handoffTestApp(t, be)
+
+	if code := app.cmdResolve(context.Background(), []string{}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	got := errBuf.String()
+	if !strings.Contains(got, `1 is blocked — role "reviewer" is not declared by this flow`) ||
+		!strings.Contains(got, "trying next") {
+		t.Errorf("the unmatchable marker was not reported and skipped; got %q", got)
+	}
+	if len(be.claimAttempts) != 1 || be.claimAttempts[0] != `"2"` {
+		t.Errorf("Claim attempts = %v, want the second ref alone (the first is refused before the backend)", be.claimAttempts)
+	}
+	if !strings.Contains(got, "resolve: driving 2 to completion") {
+		t.Errorf("the run did not go on to the next ref; got %q", got)
+	}
+}
+
+// awaitingAnUndeclaredRole is an item whose recorded awaited role is outside the
+// fixture flow's declared set — a typo in the record, or a flow that dropped the
+// role: a marker nothing can ever match.
+func awaitingAnUndeclaredRole() flow.Item {
+	return flow.Item{Type: "task", Title: "1",
+		Awaits: flow.Awaits{Role: "reviewer"},
+		Journal: []flow.JournalEntry{{
+			Step: "plan", Execution: 1, Route: flow.Route{Next: "commit"},
+			By: "bob", Role: "contributor", Awaits: flow.Awaits{Role: "reviewer"},
+		}}}
 }
 
 // reworkedByAlice is an item awaiting the maintainer whose maintainer role is
