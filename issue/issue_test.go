@@ -1905,18 +1905,32 @@ func TestPlanPromptMustDemandThePlanAsTheResponse(t *testing.T) {
 		if !strings.Contains(got, "nothing is read back from disk") {
 			t.Errorf("override plan prompt does not demand the plan as the response:\n%s", got)
 		}
-		t.Logf("rendered plan prompt with a project override:\n%s", got)
 	})
-	// The producing prompts must not carry it: they are the steps that DO write
-	// files, and this sentence would read as an instruction not to.
-	for _, id := range []PromptID{PromptImplement, PromptReview, PromptCoverage} {
+	// No other slot carries it, on either path. The other producing steps DO
+	// write files, and this sentence would read to them as an instruction not
+	// to. The override path is checked as well as the default one because that
+	// is the path appendFragments runs on — a slot wrongly declaring the
+	// fragment changes nothing in its default body, so the default check alone
+	// would not see it.
+	for id := range defaultPrompts {
+		if id == PromptPlan {
+			continue
+		}
 		t.Run("absent/"+string(id), func(t *testing.T) {
 			got, err := renderPrompt(Config{}, id, pc)
 			if err != nil {
 				t.Fatalf("renderPrompt: %v", err)
 			}
 			if strings.Contains(got, "nothing is read back from disk") {
-				t.Errorf("prompt %q should not carry the plan-is-the-response fragment:\n%s", id, got)
+				t.Errorf("default prompt %q should not carry the plan-is-the-response fragment:\n%s", id, got)
+			}
+			cfg := Config{Prompts: map[PromptID]string{id: "project body"}}
+			got, err = renderPrompt(cfg, id, pc)
+			if err != nil {
+				t.Fatalf("renderPrompt(override): %v", err)
+			}
+			if strings.Contains(got, "nothing is read back from disk") {
+				t.Errorf("override prompt %q should not carry the plan-is-the-response fragment:\n%s", id, got)
 			}
 		})
 	}
