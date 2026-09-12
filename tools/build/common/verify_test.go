@@ -123,10 +123,11 @@ func TestVerifySteps_GoProjectHasExpectedSteps(t *testing.T) {
 	}
 
 	steps := verifySteps(root)
-	// The spend ratchet runs first and costs milliseconds: a commit can be
-	// waved through with --no-verify, so this gate is the last thing between
-	// an unapproved agent turn and trunk. See agentturns.go.
-	want := []string{"agent turns", "format", "vet", "build", "test"}
+	// The two ratchets run first and cost milliseconds: a commit can be waved
+	// through with --no-verify, so this gate is the last thing between an
+	// unapproved agent turn and trunk (agentturns.go), or a second route to
+	// GitHub and trunk (outsideroutes.go).
+	want := []string{"agent turns", "service seams", "format", "vet", "build", "test"}
 	if len(steps) != len(want) {
 		t.Fatalf("got %d steps, want %d", len(steps), len(want))
 	}

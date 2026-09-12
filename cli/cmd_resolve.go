@@ -107,7 +107,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 				fmt.Fprintln(app.Err, formatClaimRefusal("resolve", refused))
 				return 1
 			}
-			fmt.Fprintln(app.Err, "resolve:", err)
+			fmt.Fprintln(app.Err, conditionOrError("resolve", err))
 			return 1
 		}
 		claim = &c
@@ -178,7 +178,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 					fmt.Fprintln(app.Err, formatClaimRefusal("resolve", refused))
 					return 1
 				}
-				fmt.Fprintln(app.Err, "resolve:", err)
+				fmt.Fprintln(app.Err, conditionOrError("resolve", err))
 				return 1
 			}
 			if !claimed {
@@ -215,7 +215,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 
 	targets := paceTargets{FiveHour: *paceFiveHour / 100, SevenDay: *paceSevenDay / 100}
 
-	reportQuota(app.Err)
+	app.reportSpend()
 
 	enc := json.NewEncoder(app.Out)
 	quotaWarned := false
@@ -289,7 +289,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 				// naming why. A person fixes the flow or the record.
 				fmt.Fprintf(app.Err, "resolve: %s is blocked — %s\n", claim.ItemRef.Display,
 					flow.ErrUnknownRole{Role: role, Declared: app.Flow.RoleNames()})
-				reportQuota(app.Err)
+				app.reportSpend()
 				return 1
 			case !stand.assumes(role):
 				return app.handOff(ctx, *claim, st.Awaits, stand)
@@ -346,7 +346,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 
 		res, err := RunOne(ctx, app, *claim)
 		if err != nil {
-			fmt.Fprintln(app.Err, "resolve:", err)
+			fmt.Fprintln(app.Err, conditionOrError("resolve", err))
 			return 1
 		}
 		if mode == OutputJSON {
@@ -388,7 +388,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		switch flow.InvocationStatus(res.Status) {
 		case flow.StatusFailed:
 			fmt.Fprintf(app.Err, "resolve: %s stopped on a failed step\n", claim.ItemRef.Display)
-			reportQuota(app.Err)
+			app.reportSpend()
 			return 1
 		case flow.StatusBlocked:
 			// An environment condition is re-measured, never assumed to persist
@@ -414,13 +414,13 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			}
 			// A gate only a human can clear, or the fitness wait exhausted.
 			fmt.Fprintf(app.Err, "resolve: %s is blocked — %s\n", claim.ItemRef.Display, res.Reason)
-			reportQuota(app.Err)
+			app.reportSpend()
 			return 1
 		case flow.StatusParked, flow.StatusSkipped:
 			// Parked (question/budget/timeout) or skipped (preflight refusal,
 			// e.g. an already-finalized item). Stop and let the operator act.
 			fmt.Fprintf(app.Err, "resolve: %s %s — run `status %s` to inspect\n", claim.ItemRef.Display, res.Status, claim.ItemRef.Display)
-			reportQuota(app.Err)
+			app.reportSpend()
 			return 0
 		case flow.StatusDone:
 			// Finalize case: RunOne ran no step (empty Step) because no eligible
@@ -437,21 +437,21 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 				if !res.Finalized {
 					fmt.Fprintf(app.Err, "resolve: %s not finalized — no eligible step remains, and the orchestrator does not yet consider the item finished; nothing finalized, claim kept — run `status %s` to inspect\n",
 						claim.ItemRef.Display, claim.ItemRef.Display)
-					reportQuota(app.Err)
+					app.reportSpend()
 					// ErrUnavailable means ask again later, not that anything
 					// went wrong here: the flow did everything it can.
 					return 0
 				}
 				suffix := finalTotalSuffix(ctx, app, *claim)
 				fmt.Fprintf(app.Err, "resolve: %s finalized ✓%s\n", claim.ItemRef.Display, suffix)
-				reportQuota(app.Err)
+				app.reportSpend()
 				return 0
 			}
 			// Otherwise a step advanced; loop to run the next one.
 		}
 	}
 	fmt.Fprintf(app.Err, "resolve: stopped after %d step attempts without finalizing (runaway guard); run `status` to inspect\n", maxResolveSteps)
-	reportQuota(app.Err)
+	app.reportSpend()
 	return 1
 }
 
@@ -561,7 +561,7 @@ func (app *App) handOff(ctx context.Context, claim flow.Claim, awaits flow.Await
 	if err := app.Orchestrator.Release(ctx, claim.ItemRef); err != nil {
 		fmt.Fprintf(app.Err, "resolve: %s awaits %s, but the claim could not be released: %s\n",
 			claim.ItemRef.Display, awaits.Role, err)
-		reportQuota(app.Err)
+		app.reportSpend()
 		return 1
 	}
 	awaited := string(awaits.Role)
@@ -576,7 +576,7 @@ func (app *App) handOff(ctx context.Context, claim flow.Claim, awaits flow.Await
 	fmt.Fprintf(app.Err, "resolve: %s handed off — awaits %s%s\n",
 		claim.ItemRef.Display, awaited, finalTotalSuffix(ctx, app, claim))
 	app.reportStanding(s)
-	reportQuota(app.Err)
+	app.reportSpend()
 	return 0
 }
 

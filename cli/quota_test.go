@@ -12,6 +12,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/promise-language/flow"
+	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
 
 func TestReportQuota_PrintsOnFailure(t *testing.T) {
@@ -772,5 +775,48 @@ func TestDiscoverAPIBase_FromSettings(t *testing.T) {
 	// Trailing slash should be stripped.
 	if base != "https://custom.example.com/v1" {
 		t.Errorf("base = %q, want https://custom.example.com/v1", base)
+	}
+}
+
+// meteringBackend is a fake.Orchestrator that also reports what it spent at its
+// outside seam — the cli.ServiceMeter half of the hook.
+type meteringBackend struct {
+	*fake.Orchestrator
+	line string
+}
+
+func (m meteringBackend) ServiceSpend() string { return m.line }
+
+// docs/resolution.md § One seam per outside service requires a seam to meter.
+// reportSpend is where the metering becomes visible, and a cost nobody sees is
+// a cost nobody fixes.
+func TestReportSpend_PrintsTheOrchestratorsSeamBesideTheQuota(t *testing.T) {
+	useTempQuotaCache(t)
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+
+	var buf bytes.Buffer
+	app := &App{Err: &buf, Orchestrator: meteringBackend{fake.New(), "github: 41 request(s), 12 served from cache"}}
+	app.reportSpend()
+	if !strings.Contains(buf.String(), "github: 41 request(s)") {
+		t.Errorf("the seam's own meter was not printed: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "quota:") {
+		t.Errorf("the agent's quota stopped being printed: %q", buf.String())
+	}
+
+	// An orchestrator that meters nothing prints no line, and one that does not
+	// implement the hook at all is not asked.
+	for name, o := range map[string]flow.Orchestrator{
+		"nothing to report": meteringBackend{fake.New(), ""},
+		"no hook":           fake.New(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var b2 bytes.Buffer
+			(&App{Err: &b2, Orchestrator: o}).reportSpend()
+			if strings.Contains(b2.String(), "github:") {
+				t.Errorf("a line was printed for %s: %q", name, b2.String())
+			}
+		})
 	}
 }

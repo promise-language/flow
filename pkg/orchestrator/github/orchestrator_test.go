@@ -3,6 +3,7 @@ package github
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -128,19 +129,106 @@ type ghMock struct {
 	// reader of the record decides differently (docs/github-schema.md § Claim
 	// protocol, step 6).
 	labelAdds [][]string
+
+	// The pull-request endpoints. Open and Merge used to shell out to `gh`, so
+	// the mock never had to answer them; now they are ordinary API calls and a
+	// test asserting the command line has nothing left to assert against.
+	//
+	// prCreates and prMerges are the tape — the decoded request bodies — and
+	// mergeRefusal is how a merge that GitHub will not perform is expressed. A
+	// refused merge is an ORDINARY outcome (the base moved), and the signal the
+	// backend writes has to follow it.
+	nextPRNumber  int
+	prCreates     []map[string]any
+	prMerges      []map[string]any
+	mergeRefusal  string
+	mergedNumbers []int
+
+	// requests counts every request that reached the server, keyed
+	// "<METHOD> <path>". The cache's whole claim is that a request is NOT made,
+	// which is a claim only the server can answer: a test asserting on the
+	// caller's return value cannot tell a cached answer from a fetched one.
+	requests map[string]int
+	// conditionalIssueGets counts the issue reads answered 304, which is the
+	// revalidate policy working rather than the TTL one.
+	conditionalIssueGets int
+
+	// refusals, when non-empty, is served to the next request instead of
+	// routing it — the rate-limit shapes the seam has to recognise. Each entry
+	// is consumed once, so a test can say "refuse, then succeed".
+	refusals []ghMockRefusal
+
+	// beforeConditionalComment runs just before a CONDITIONAL comment read is
+	// answered — the revalidation the state document's compare-and-set turns
+	// on. It is the only place a test can land a foreign write in the window
+	// the compare-and-set exists to close, because the window is between two
+	// requests and nothing else in the process is inside it.
+	beforeConditionalComment func()
+}
+
+// setBeforeConditionalComment installs the hook under the lock, because the
+// handler goroutine reads it while the test goroutine writes it.
+func (m *ghMock) setBeforeConditionalComment(f func()) {
+	m.mu.Lock()
+	m.beforeConditionalComment = f
+	m.mu.Unlock()
+}
+
+// ghMockRefusal is one canned refusal: a status and the headers that carry the
+// facts a seam must read out of it.
+type ghMockRefusal struct {
+	Status  int
+	Headers map[string]string
 }
 
 // recordMutations counts the requests that change something, so a test can
 // assert that a refused disclosure sent nothing at all.
 func (m *ghMock) recordMutations(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m.mu.Lock()
+		if m.requests == nil {
+			m.requests = map[string]int{}
+		}
+		m.requests[r.Method+" "+r.URL.Path]++
 		if r.Method != http.MethodGet {
-			m.mu.Lock()
 			m.mutations = append(m.mutations, r.Method+" "+r.URL.Path)
-			m.mu.Unlock()
+		}
+		// A canned refusal is served before routing, because a rate limit is
+		// about the account and not about the endpoint: GitHub refuses the
+		// request it would otherwise have answered, reads included.
+		var refusal *ghMockRefusal
+		if len(m.refusals) > 0 {
+			refusal = &m.refusals[0]
+			m.refusals = m.refusals[1:]
+		}
+		m.mu.Unlock()
+		if refusal != nil {
+			for k, v := range refusal.Headers {
+				w.Header().Set(k, v)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(refusal.Status)
+			fmt.Fprint(w, `{"message":"API rate limit exceeded"}`)
+			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// requestCount reports how many times a path was asked for.
+func (m *ghMock) requestCount(methodAndPath string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.requests[methodAndPath]
+}
+
+// resetRequests clears the tape, so a test can count what a SECOND call makes
+// without subtracting what the setup did.
+func (m *ghMock) resetRequests() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.requests = map[string]int{}
+	m.conditionalIssueGets = 0
 }
 
 // ghMockBlocker is one entry the dependency endpoint returns.
@@ -328,10 +416,25 @@ func (m *ghMock) server() *httptest.Server {
 		})
 	})
 
-	// GET /repos/{o}/{r}/pulls
+	// GET /repos/{o}/{r}/pulls — the listing; POST — OpenPullRequest.
 	mux.HandleFunc(prefix+"/pulls", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			m.handleCreatePR(w, r)
+			return
+		}
 		// No PRs in default mock state.
 		writeJSON(w, []any{})
+	})
+
+	// PUT /repos/{o}/{r}/pulls/{n}/merge — MergePullRequest.
+	mux.HandleFunc(prefix+"/pulls/", func(w http.ResponseWriter, r *http.Request) {
+		rest := strings.TrimPrefix(r.URL.Path, prefix+"/pulls/")
+		num, ok := strings.CutSuffix(rest, "/merge")
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		m.handleMergePR(w, r, num)
 	})
 
 	// git data API — used for orphan-branch creation.
@@ -417,7 +520,7 @@ func (m *ghMock) handleIssue(w http.ResponseWriter, r *http.Request) {
 		}
 		served = filtered
 	}
-	writeJSON(w, map[string]any{
+	issue := map[string]any{
 		"number":     m.issueNum,
 		"title":      m.issueTitle,
 		"body":       m.issueBody,
@@ -426,8 +529,23 @@ func (m *ghMock) handleIssue(w http.ResponseWriter, r *http.Request) {
 		"html_url":   fmt.Sprintf("https://github.com/%s/%s/issues/%d", m.owner, m.repo, m.issueNum),
 		"labels":     toLabelObjs(served),
 		"assignees":  toLoginObjs(m.assignees),
-		"updated_at": time.Now().UTC().Format(time.RFC3339),
-	})
+		"updated_at": "2026-01-01T00:00:00Z",
+	}
+	// The issue read is the one the seam REVALIDATES rather than ages: its
+	// labels ride in the same response and the claim protocol requires them
+	// live, so the cache is only worth anything if the mock answers 304 to a
+	// tag it still matches. The tag digests exactly what is served — labels
+	// included — so a label added between two loads changes it.
+	body, _ := json.Marshal(issue)
+	etag := ghMockETag(string(body))
+	if r.Method == http.MethodGet && r.Header.Get("If-None-Match") == etag {
+		m.conditionalIssueGets++
+		w.Header().Set("ETag", etag)
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("ETag", etag)
+	writeJSON(w, issue)
 }
 
 // withoutClaimTokens returns names with every flow:claim:* label dropped, in a
@@ -473,6 +591,54 @@ func (m *ghMock) handleBlockedBy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+// handleCreatePR answers POST /repos/{o}/{r}/pulls, recording what was asked
+// for and issuing the html_url the caller carries from then on.
+func (m *ghMock) handleCreatePR(w http.ResponseWriter, r *http.Request) {
+	var doc map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&doc); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	m.mu.Lock()
+	m.nextPRNumber++
+	num := m.nextPRNumber
+	m.prCreates = append(m.prCreates, doc)
+	m.mu.Unlock()
+	writeJSON(w, map[string]any{
+		"number":   num,
+		"html_url": fmt.Sprintf("https://github.com/%s/%s/pull/%d", m.owner, m.repo, num),
+	})
+}
+
+// handleMergePR answers PUT /repos/{o}/{r}/pulls/{n}/merge.
+//
+// mergeRefusal is served as a 405, which is what GitHub answers for a request
+// it will not merge — "Pull Request is not mergeable". Not a 403, so the
+// transport's rate-limit classification is not involved in a test about merging.
+func (m *ghMock) handleMergePR(w http.ResponseWriter, r *http.Request, num string) {
+	n, err := strconv.Atoi(num)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	var doc map[string]any
+	json.NewDecoder(r.Body).Decode(&doc)
+	m.mu.Lock()
+	m.prMerges = append(m.prMerges, doc)
+	refusal := m.mergeRefusal
+	if refusal == "" {
+		m.mergedNumbers = append(m.mergedNumbers, n)
+	}
+	m.mu.Unlock()
+	if refusal != "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		fmt.Fprintf(w, `{"message":%q}`, refusal)
+		return
+	}
+	writeJSON(w, map[string]any{"merged": true, "sha": "deadbeef"})
+}
+
 func (m *ghMock) handleIssueComments(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -499,7 +665,26 @@ func (m *ghMock) handleIssueComments(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+// handleSingleComment answers GET and PATCH on one comment, and it CARRIES AN
+// ETAG, because that tag is the state document's compare-and-set: the seam
+// revalidates it immediately before every PATCH, and a mock that issued none
+// would exercise the unguarded path and call it tested.
+//
+// The tag is a digest of the body, which is what GitHub's is in effect — a
+// foreign write changes the body and therefore the tag, and a conditional GET
+// naming the old tag gets 304 only while nobody has written.
 func (m *ghMock) handleSingleComment(w http.ResponseWriter, r *http.Request, id string) {
+	// BEFORE the lock, and before the answer: the hook writes through this same
+	// server, so holding the mock's lock across it would deadlock rather than
+	// model a concurrent writer.
+	if r.Header.Get("If-None-Match") != "" {
+		m.mu.Lock()
+		hook := m.beforeConditionalComment
+		m.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i := range m.comments {
@@ -512,11 +697,26 @@ func (m *ghMock) handleSingleComment(w http.ResponseWriter, r *http.Request, id 
 					m.comments[i].Body = doc.Body
 				}
 			}
+			etag := ghMockETag(m.comments[i].Body)
+			if r.Method == http.MethodGet && r.Header.Get("If-None-Match") == etag {
+				w.Header().Set("ETag", etag)
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("ETag", etag)
 			writeJSON(w, ghCommentJSON(m.comments[i]))
 			return
 		}
 	}
 	http.NotFound(w, r)
+}
+
+// ghMockETag is the mock's entity tag: a quoted digest of the bytes it stands
+// for, which is the property every conditional request in this package depends
+// on — the same content answers the same tag, and any change answers another.
+func ghMockETag(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return `"` + hex.EncodeToString(sum[:])[:16] + `"`
 }
 
 func (m *ghMock) handleIssueLabels(w http.ResponseWriter, r *http.Request) {
@@ -857,6 +1057,13 @@ func appendMarkdown(t *testing.T, b *Orchestrator, ref flow.ItemRef, step flow.S
 func newMockedOrchestrator(t *testing.T, mock *ghMock, srv *httptest.Server) *Orchestrator {
 	t.Helper()
 	t.Setenv("FLOW_DIR", t.TempDir())
+	// A cache of its own, taken BEFORE the seam is built because the record's
+	// path is resolved at construction. Every mocked orchestrator uses the same
+	// owner, repo and token, so they all key the same record — and the whole
+	// point of that record is that a second process reads the first's answers.
+	// Without this, a test asserting a request was made would pass or fail on
+	// which test ran before it.
+	useTempSeamCache(t)
 	// An ABSOLUTE per-test worktree, which is what New produces for a real
 	// binary: the arena identity IS this path, so a harness leaving it empty
 	// would give every orchestrator in the package one empty ArenaId and the

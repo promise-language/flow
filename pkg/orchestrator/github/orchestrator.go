@@ -22,8 +22,9 @@ import (
 // one its credentials act as.
 type Orchestrator struct {
 	cfg Config
-	// out is the only route from this orchestrator to GitHub — API, `gh`, and
-	// the push alike. See outward.
+	// out is the only route from this orchestrator to GitHub — the API and the
+	// push alike — and it meters, classifies and caches what goes through it.
+	// See outward.
 	out    *outward
 	git    *gitOps
 	labels labels
@@ -249,10 +250,40 @@ func (b *Orchestrator) saveClaimToken(t claimToken) (json.RawMessage, error) {
 // or 0. It is a cache and not an authority: fetchStateComment falls back to a
 // newest-first scan whenever it is empty or stale, which is what lets every
 // method address by ref alone.
+//
+// It reads THROUGH to the machine-wide record on a memo miss. A fresh process
+// — the next step of the same resolution, or a sibling arena on this host —
+// otherwise pays a full newest-first comment scan to rediscover an id another
+// process on the same machine learnt a second earlier. Since the id is not an
+// authority, a wrong answer here costs one request and never a wrong document.
 func (b *Orchestrator) cachedStateCommentID(issueNum int) int64 {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.stateCommentCache[issueNum]
+	if id := b.stateCommentCache[issueNum]; id != 0 {
+		b.mu.Unlock()
+		return id
+	}
+	b.mu.Unlock()
+	id := b.out.cache.stateCommentID(issueNum)
+	if id != 0 {
+		b.mu.Lock()
+		b.stateCommentCache[issueNum] = id
+		b.mu.Unlock()
+	}
+	return id
+}
+
+// rememberStateCommentID records an observed id in the in-process memo and the
+// machine-wide record TOGETHER.
+//
+// One write path, because two cannot drift: three sites used to assign
+// b.stateCommentCache directly, and a fourth added later would have updated the
+// memo and not the disk, leaving a fresh process to rescan for an id this one
+// already knew.
+func (b *Orchestrator) rememberStateCommentID(issueNum int, id int64) {
+	b.mu.Lock()
+	b.stateCommentCache[issueNum] = id
+	b.mu.Unlock()
+	b.out.cache.rememberStateCommentID(issueNum, id)
 }
 
 // Load returns the item and everything the flow has recorded on it, addressed
@@ -314,7 +345,7 @@ func (b *Orchestrator) loadItem(ctx context.Context, issueNum int, cachedComment
 	state.Blocked, state.BlockKind, state.BlockReason = b.blockedness(blockers, lbls)
 
 	// State comment.
-	stateBody, stateID, err := b.fetchStateComment(ctx, issueNum, cachedCommentID)
+	stateBody, stateID, _, err := b.fetchStateComment(ctx, issueNum, cachedCommentID)
 	if err != nil {
 		return nil, err
 	}
@@ -356,9 +387,7 @@ func (b *Orchestrator) loadItem(ctx context.Context, issueNum int, cachedComment
 			state.FinalizedAs = flow.Disposition(doc.Disposition)
 		}
 	}
-	b.mu.Lock()
-	b.stateCommentCache[issueNum] = stateID
-	b.mu.Unlock()
+	b.rememberStateCommentID(issueNum, stateID)
 
 	// The state comment is an index, not a store: markdown bodies live in
 	// their own comments. Without this a resolved artifact loads with an empty
@@ -383,17 +412,24 @@ func (b *Orchestrator) loadItem(ctx context.Context, issueNum int, cachedComment
 }
 
 // fetchStateComment looks up the state comment, either by cached id or by
-// scanning newest-first for the begin marker. Returns ("", 0, nil) if
+// scanning newest-first for the begin marker. Returns ("", 0, "", nil) if
 // nothing matched (item not yet seeded).
-func (b *Orchestrator) fetchStateComment(ctx context.Context, issueNum int, cachedID int64) (body string, id int64, err error) {
+//
+// The ETag travels with the id and the body because it is about THAT read: a
+// caller holding the document and the tag it was served with can ask whether
+// anybody wrote in between (CommentUnchanged), which is the compare-and-set
+// withStateDoc is built on. A scan finds the comment in a LIST, and a list
+// carries one tag for the page rather than one per comment — so that path
+// returns no tag, and its caller re-reads by id when it needs one.
+func (b *Orchestrator) fetchStateComment(ctx context.Context, issueNum int, cachedID int64) (body string, id int64, etag string, err error) {
 	if cachedID != 0 {
-		c, err := b.out.GetComment(ctx, cachedID)
+		c, tag, err := b.out.GetComment(ctx, cachedID)
 		if err == nil {
-			return c.GetBody(), cachedID, nil
+			return c.GetBody(), cachedID, tag, nil
 		}
 		// If the cached comment was deleted (404), fall through to scan.
 		if !isNotFound(err) {
-			return "", 0, fmt.Errorf("get state comment %d: %w", cachedID, err)
+			return "", 0, "", fmt.Errorf("get state comment %d: %w", cachedID, err)
 		}
 	}
 	// Scan all comments newest-first.
@@ -405,11 +441,11 @@ func (b *Orchestrator) fetchStateComment(ctx context.Context, issueNum int, cach
 	for {
 		comments, resp, err := b.out.ListCommentsPage(ctx, issueNum, opt)
 		if err != nil {
-			return "", 0, fmt.Errorf("list comments: %w", err)
+			return "", 0, "", fmt.Errorf("list comments: %w", err)
 		}
 		for _, c := range comments {
 			if stateBeginRe.MatchString(c.GetBody()) {
-				return c.GetBody(), c.GetID(), nil
+				return c.GetBody(), c.GetID(), "", nil
 			}
 		}
 		if resp.NextPage == 0 {
@@ -417,7 +453,7 @@ func (b *Orchestrator) fetchStateComment(ctx context.Context, issueNum int, cach
 		}
 		opt.Page = resp.NextPage
 	}
-	return "", 0, nil
+	return "", 0, "", nil
 }
 
 func isNotFound(err error) bool {

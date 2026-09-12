@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/promise-language/flow"
@@ -66,5 +69,29 @@ func TestFormatClaimRefusal(t *testing.T) {
 				t.Errorf("formatClaimRefusal(%q, ...):\n got: %q\nwant: %q", c.prefix, got, c.want)
 			}
 		})
+	}
+}
+
+// A rate limit used to reach an operator as `resolve: add claim label: POST
+// …/labels: 403 API rate limit exceeded` — a status code, with no name for what
+// happened and no instant for when it clears. The seam names both now; this is
+// what stops the naming being thrown away one layer up.
+func TestConditionOrError(t *testing.T) {
+	limited := fmt.Errorf("get issue 42: GitHub secondary rate limit in force; clears at 10:20Z: %w", flow.ErrUnavailable)
+	got := conditionOrError("resolve", limited)
+	if !strings.Contains(got, "waiting on a condition") {
+		t.Errorf("%q does not name the stop as a condition", got)
+	}
+	for _, want := range []string{"resolve:", "rate limit", "clears at 10:20Z"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q does not carry %q", got, want)
+		}
+	}
+
+	// Everything else is unchanged: saying what a stop was must not restate
+	// stops that were something else.
+	plain := errors.New("dial tcp: connection refused")
+	if got := conditionOrError("resolve", plain); got != "resolve: dial tcp: connection refused" {
+		t.Errorf("an ordinary error was reworded: %q", got)
 	}
 }

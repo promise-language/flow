@@ -3,14 +3,14 @@ package cli
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/promise-language/flow/pkg/machinecache"
 )
 
 // The machine-wide quota cache.
@@ -102,14 +102,25 @@ const (
 	quotaRecordGlob      = "quota*" + quotaCacheFileExt
 	quotaLockGlob        = quotaRecordGlob + quotaLockSuffix
 
+	// quotaLockSuffix is machinecache's, not this file's: the lock sits beside
+	// the record it guards, and the sweep glob above has to match the name the
+	// lock is actually created under.
+	quotaLockSuffix = machinecache.LockSuffix
+
 	// quotaKeyUnknown names the record for a machine whose credential cannot be
 	// read at all. Such a machine cannot fetch either, so its record holds a
 	// failure and a backoff — which is the whole reason it gets one: without a
 	// name it could not back off, and would ask once per step.
 	quotaKeyUnknown = "none"
-
-	quotaLockSuffix = ".lock"
 )
+
+// quotaSweep is what a store retires: the records this file's keying orphans,
+// and the locks beside them. Passed to machinecache.Store so the sweep runs
+// where a new name can have appeared.
+var quotaSweep = machinecache.Sweep{
+	Globs:   []string{quotaRecordGlob, quotaLockGlob},
+	KeepFor: quotaRecordKeepFor,
+}
 
 // quotaCacheDir, quotaFetch and quotaCredential are the three seams this file
 // is tested through.
@@ -378,13 +389,12 @@ func quotaUnknown(rec *quotaRecord) error {
 //
 // Reports false when the machine has no such directory, which is a machine
 // without a cache, not an error.
-func userQuotaCacheDir() (string, bool) {
-	dir, err := os.UserCacheDir()
-	if err != nil || dir == "" {
-		return "", false
-	}
-	return filepath.Join(dir, "flow"), true
-}
+//
+// The mechanics are machinecache's, here and in the four functions below. They
+// were this file's first, and the GitHub seam needs every one of them with a
+// different policy on top — see pkg/machinecache. What stays here is the
+// policy: the constants above, the record shape, and when a reading is servable.
+func userQuotaCacheDir() (string, bool) { return machinecache.Dir() }
 
 // quotaCachePath resolves this account's record path, creating the directory.
 // Reports false when there is nowhere to cache — the caller then behaves as
@@ -410,50 +420,14 @@ func quotaCachePath() (string, bool) {
 // loadQuotaRecord reads the record. Absent, torn, or unparseable all read as a
 // miss — nil, no error — so a corrupt cache costs one refresh rather than a
 // run.
-func loadQuotaRecord(path string) *quotaRecord {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	var rec quotaRecord
-	if err := json.Unmarshal(b, &rec); err != nil {
-		return nil
-	}
-	return &rec
-}
+func loadQuotaRecord(path string) *quotaRecord { return machinecache.Load[quotaRecord](path) }
 
 // storeQuotaRecord writes the record via temp file + rename, so a concurrent
 // reader sees either the whole previous record or the whole new one and never
 // half of either. Every failure is silent: not being able to cache a reading is
 // not a reason to fail the run that took it.
 func storeQuotaRecord(path string, rec quotaRecord) {
-	b, err := json.Marshal(rec)
-	if err != nil {
-		return
-	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return
-	}
-	// CreateTemp makes the file 0o600, which the rename carries over.
-	tmp, err := os.CreateTemp(dir, ".quota-*")
-	if err != nil {
-		return
-	}
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		os.Remove(tmp.Name())
-		return
-	}
-	pruneQuotaRecords(dir, time.Now())
+	machinecache.Store(path, rec, quotaSweep)
 }
 
 // pruneQuotaRecords removes the records — and the locks beside them — that
@@ -481,21 +455,7 @@ func storeQuotaRecord(path string, rec quotaRecord) {
 // rather than on a timer of its own because a store is exactly when a new name
 // can have appeared.
 func pruneQuotaRecords(dir string, now time.Time) {
-	for _, glob := range []string{quotaRecordGlob, quotaLockGlob} {
-		matches, err := filepath.Glob(filepath.Join(dir, glob))
-		if err != nil {
-			continue
-		}
-		for _, path := range matches {
-			st, err := os.Stat(path)
-			if err != nil || st.IsDir() {
-				continue
-			}
-			if now.Sub(st.ModTime()) > quotaRecordKeepFor {
-				os.Remove(path)
-			}
-		}
-	}
+	machinecache.Sweeper(dir, quotaSweep, now)
 }
 
 // acquireRefreshLock takes the machine-wide refresh slot, so that of several
@@ -514,30 +474,5 @@ func pruneQuotaRecords(dir string, now time.Time) {
 // A's in-flight refresh suppress B's, leaving B with nothing to serve and
 // unpaced, which is the defect keying exists to close.
 func acquireRefreshLock(path string, now time.Time) (func(), bool) {
-	lock := path + quotaLockSuffix
-	take := func() (func(), bool) {
-		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err == nil {
-			f.Close()
-			return func() { os.Remove(lock) }, true
-		}
-		if !errors.Is(err, fs.ErrExist) {
-			return func() {}, true
-		}
-		return nil, false
-	}
-	if release, ok := take(); ok {
-		return release, true
-	}
-	// Held. Break it once it is older than the TTL — a process killed mid-
-	// refresh leaves the file behind, and a lock nothing can clear would
-	// disable refreshing on this machine permanently.
-	st, err := os.Stat(lock)
-	if err != nil || now.Sub(st.ModTime()) <= quotaRefreshLockTTL {
-		return nil, false
-	}
-	os.Remove(lock)
-	// Re-take rather than assume: if another process broke the same stale lock
-	// first, it is refreshing and this one serves what it has.
-	return take()
+	return machinecache.AcquireLock(path+quotaLockSuffix, quotaRefreshLockTTL, now)
 }

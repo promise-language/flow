@@ -31,6 +31,38 @@ func readQuota() ([]windowUsage, error) {
 	return fetchUsage(apiBase, token)
 }
 
+// ServiceMeter is the optional hook an Orchestrator may implement to say what
+// it spent at its outside seam — the cli.Doctor pattern, for the other end of
+// the same question `reportQuota` answers about the agent.
+//
+// The answer is a rendered LINE rather than a count and a breakdown, because
+// units are the backend's: one orchestrator counts HTTP requests against a rate
+// limit, another counts nothing at all, and a struct here would make this
+// package know which. An empty string means nothing to report, and no line is
+// printed.
+//
+// docs/resolution.md § One seam per outside service requires a seam to meter.
+// This is where the metering becomes visible, because a cost nobody sees is a
+// cost nobody fixes.
+type ServiceMeter interface {
+	ServiceSpend() string
+}
+
+// reportSpend prints what the run has cost so far: the agent's subscription
+// windows, and the orchestrator's own seam if it meters one.
+//
+// Together, at every terminal outcome, because they are two halves of one
+// question. Splitting the call sites is how one of them would stop being
+// printed on a path somebody added later.
+func (app *App) reportSpend() {
+	reportQuota(app.Err)
+	if m, ok := app.Orchestrator.(ServiceMeter); ok {
+		if line := m.ServiceSpend(); line != "" {
+			fmt.Fprintln(app.Err, line)
+		}
+	}
+}
+
 // reportQuota prints Claude subscription window utilisation to w.
 // Failure never blocks the run — prints the reason and returns.
 //

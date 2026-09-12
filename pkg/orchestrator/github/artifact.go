@@ -14,6 +14,7 @@ import (
 	"github.com/google/go-github/v68/github"
 	"github.com/promise-language/flow"
 	"github.com/promise-language/flow/pkg/clistate"
+	"github.com/promise-language/flow/pkg/machinecache"
 )
 
 // artifactCommentMarker is the leading HTML comment on an artifact comment.
@@ -324,7 +325,7 @@ func (b *Orchestrator) Reset(ctx context.Context, ref flow.ItemRef) error {
 	if err != nil {
 		return err
 	}
-	body, stateID, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
+	body, stateID, _, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
 	if err != nil {
 		return err
 	}
@@ -662,50 +663,7 @@ func (b *Orchestrator) requireOwnClaim(ctx context.Context, ref flow.ItemRef, op
 // only where one was recorded, and a grant against an item nothing has
 // dispatched has no row whose cap it could be raising.
 func (b *Orchestrator) mutateOrCreateStateDoc(ctx context.Context, ref flow.ItemRef, op string, mutate func(*stateDoc) error) error {
-	issueNum, err := b.issueNumber(ref)
-	if err != nil {
-		return err
-	}
-	owner, err := b.resolveAccount(ctx)
-	if err != nil {
-		return err
-	}
-	body, stateID, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
-	if err != nil {
-		return err
-	}
-	var doc *stateDoc
-	if body != "" {
-		parsed, _, found, perr := extractStateDoc(body)
-		if perr != nil {
-			return fmt.Errorf("github.%s: parse state comment: %w", op, perr)
-		}
-		if found && parsed != nil {
-			doc = parsed
-		}
-	}
-	if doc == nil {
-		doc = &stateDoc{
-			Flow:     b.cfg.BinaryName,
-			Schema:   stateSchemaVersion,
-			SeededAt: nowUTC(),
-		}
-	}
-	if err := mutate(doc); err != nil {
-		return err
-	}
-	if stateID != 0 {
-		_, err = b.updateStateComment(ctx, issueNum, stateID, *doc, owner)
-		return err
-	}
-	id, _, err := b.postStateComment(ctx, issueNum, *doc, owner)
-	if err != nil {
-		return err
-	}
-	b.mu.Lock()
-	b.stateCommentCache[issueNum] = id
-	b.mu.Unlock()
-	return nil
+	return b.withStateDoc(ctx, ref, op, true, mutate)
 }
 
 // mutateStateDoc loads the state comment, applies mutate to the whole
@@ -714,6 +672,52 @@ func (b *Orchestrator) mutateOrCreateStateDoc(ctx context.Context, ref flow.Item
 // field, and those must land in ONE comment update — two writes would leave a
 // window where the budget is raised but the item still reads as parked.
 func (b *Orchestrator) mutateStateDoc(ctx context.Context, ref flow.ItemRef, op string, mutate func(*stateDoc) error) error {
+	return b.withStateDoc(ctx, ref, op, false, mutate)
+}
+
+// stateWriteLockTTL is how long the machine-wide per-item write lock is
+// believed. Long enough to cover a read-modify-write against a slow API, short
+// enough that a process killed mid-write cannot wedge an item's state for good.
+const stateWriteLockTTL = 2 * time.Minute
+
+// stateWriteAttempts is how many times a mutation is replayed against a
+// document a foreign writer changed underneath it. Three, because a fourth
+// collision is not contention any more — it is something writing continuously,
+// and answering ErrUnavailable lets the caller park rather than spin.
+const stateWriteAttempts = 3
+
+// withStateDoc is the state document's read-modify-write, and the only one.
+//
+// mutateStateDoc and mutateOrCreateStateDoc were two copies of it differing
+// only in whether an absent document is created, which `create` now says.
+//
+// #219: the document had no compare-and-set, so two concurrent writers silently
+// lost each other — "a park recorded by one process and a spend charge recorded
+// by another do not merge; the second PATCH wins entirely and the first is gone
+// with no error and no trace". The same concurrency is what generated the burst
+// of comment edits that trips GitHub's secondary limit, so the two symptoms have
+// one mechanism and one fix:
+//
+//  1. A machine-wide write lock PER ITEM. On one host — the case actually
+//     observed, several arenas on one machine — this closes the window outright
+//     and stops the burst at its source. It is taken briefly and then proceeded
+//     without: a write must not fail because a lock file could not be had.
+//
+//  2. A revalidation of the comment's own ETAG immediately before the PATCH.
+//     GitHub offers no conditional write on a comment; this is the
+//     compare-and-set the API admits, not a way around a missing one. Honest
+//     about the residual: the window narrows from the whole read-modify-write to
+//     the gap between the revalidate and the PATCH, and the lock above closes
+//     that on one host.
+//
+//  3. On a foreign write, the mutation is REPLAYED against the document that is
+//     actually there. Every mutator is an in-place delta — AppendEntry, Grant,
+//     RecordDispatch, AddCost, AddDuration, PostAnswer, Park — so replay is
+//     exactly what they mean, and both changes survive.
+//
+// The comparison is the comment's ETag, so docs/github-schema.md's wire format
+// is untouched: no version field, no new marker, nothing on the surface.
+func (b *Orchestrator) withStateDoc(ctx context.Context, ref flow.ItemRef, op string, create bool, mutate func(*stateDoc) error) error {
 	issueNum, err := b.issueNumber(ref)
 	if err != nil {
 		return err
@@ -722,23 +726,115 @@ func (b *Orchestrator) mutateStateDoc(ctx context.Context, ref flow.ItemRef, op 
 	if err != nil {
 		return err
 	}
-	body, stateID, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
-	if err != nil {
-		return err
+	defer b.holdStateWriteLock(issueNum)()
+
+	for range stateWriteAttempts {
+		body, stateID, etag, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
+		if err != nil {
+			return err
+		}
+
+		var doc *stateDoc
+		if body != "" {
+			parsed, _, found, perr := extractStateDoc(body)
+			if perr != nil {
+				if !create {
+					return perr
+				}
+				return fmt.Errorf("github.%s: parse state comment: %w", op, perr)
+			}
+			if found && parsed != nil {
+				doc = parsed
+			}
+		}
+		switch {
+		case doc != nil:
+		case !create:
+			return fmt.Errorf("github: %s: %w", op, errNoStateComment)
+		default:
+			doc = &stateDoc{
+				Flow:     b.cfg.BinaryName,
+				Schema:   stateSchemaVersion,
+				SeededAt: nowUTC(),
+			}
+		}
+
+		if err := mutate(doc); err != nil {
+			return err
+		}
+
+		// No comment yet: there is nothing to compare against and nothing a
+		// foreign writer could have changed, because the document does not
+		// exist. A racing creator loses to GitHub's own ordering, and the loser
+		// rescans and finds the winner's comment on its next write.
+		if stateID == 0 {
+			id, _, err := b.postStateComment(ctx, issueNum, *doc, owner)
+			if err != nil {
+				return err
+			}
+			b.rememberStateCommentID(issueNum, id)
+			return nil
+		}
+
+		// The read that produced this document may have come from a comment
+		// SCAN, which carries no per-comment tag. Nothing to compare then —
+		// which is the pre-existing behaviour, not a regression — and the next
+		// write through this item has an id and therefore a tag.
+		if etag != "" {
+			unchanged, err := b.out.CommentUnchanged(ctx, stateID, etag)
+			if err != nil {
+				return fmt.Errorf("github.%s: revalidate state comment %d: %w", op, stateID, err)
+			}
+			if !unchanged {
+				// Somebody landed a write between the read and here. The
+				// document just computed describes a state that no longer
+				// exists, so it is DISCARDED rather than written — writing it
+				// is exactly the lost update #219 is about.
+				continue
+			}
+		}
+
+		if _, err := b.updateStateComment(ctx, issueNum, stateID, *doc, owner); err != nil {
+			return err
+		}
+		return nil
 	}
-	if body == "" {
-		return fmt.Errorf("github: %s: %w", op, errNoStateComment)
-	}
-	doc, _, _, err := extractStateDoc(body)
-	if err != nil {
-		return err
-	}
-	if err := mutate(doc); err != nil {
-		return err
-	}
-	_, err = b.updateStateComment(ctx, issueNum, stateID, *doc, owner)
-	return err
+	return fmt.Errorf("github.%s: the state comment on #%d was rewritten by another writer %d times running: %w",
+		op, issueNum, stateWriteAttempts, flow.ErrUnavailable)
 }
+
+// holdStateWriteLock takes the machine-wide write slot for one item's state
+// document, and returns the release.
+//
+// It WAITS briefly and then proceeds without the lock rather than failing. The
+// lock is what turns concurrent writers on one host into sequential ones — it
+// removes the collision instead of detecting it — but the correctness property
+// is the compare-and-set below, which holds with or without it. A write that
+// failed because a lock file could not be created would be a cache outage
+// presenting as a lost park.
+func (b *Orchestrator) holdStateWriteLock(issueNum int) func() {
+	path, ok := b.out.cache.stateLockPath(issueNum)
+	if !ok {
+		return func() {}
+	}
+	for attempt := range stateLockWaits {
+		if release, held := machinecache.AcquireLock(path, stateWriteLockTTL, time.Now()); held {
+			return release
+		}
+		if attempt < stateLockWaits-1 {
+			time.Sleep(stateLockWait)
+		}
+	}
+	return func() {}
+}
+
+// stateLockWaits and stateLockWait bound the wait for the slot: long enough to
+// let a sibling's read-modify-write finish, short enough that a step is never
+// held up noticeably by one.
+const (
+	stateLockWaits = 10
+	stateLockWait  = 50 * time.Millisecond
+)
 
 // findArtifactDoc returns a pointer to the doc's entry for key, or nil.
 func findArtifactDoc(doc *stateDoc, key string) *stateArtifactDoc {

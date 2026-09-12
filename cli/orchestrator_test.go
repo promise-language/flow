@@ -2709,6 +2709,43 @@ func TestRunOne_ErrTransientStillParksInfraTransient(t *testing.T) {
 	}
 }
 
+// A rate limit is flow.ErrUnavailable — errs.go defines the sentinel for "a
+// service is down, a lease is held elsewhere, a rate limit is in force.
+// Retrying is what a caller should do" — and it must park exactly as
+// ErrTransient does.
+//
+// Before, it reached this path as an ordinary failure: the step was BILLED a
+// dispatch to report that nothing could be done, and an unattended runner
+// stopped on a condition that clears itself in minutes. The reset instant rides
+// in the park reason, where docs/orchestrator.md § ParkKind puts it — clears_at
+// belongs to account-exhausted alone.
+func TestRunOne_ErrUnavailableParksInfraTransientWithoutCharging(t *testing.T) {
+	const reason = "GitHub secondary rate limit in force on GET /repos/o/r/issues/42; clears at 2026-09-12T10:20:00Z"
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("limited", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, fmt.Errorf("get issue 42: %s: %w", reason, flow.ErrUnavailable)
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkInfraTransient {
+		t.Fatalf("res = %+v, want parked/infra-transient — a rate limit is the kind a re-dispatch may clear", res)
+	}
+	if !strings.Contains(res.Park.Reason, "clears at 2026-09-12T10:20:00Z") {
+		t.Errorf("park reason = %q, want it to carry the instant the limit clears", res.Park.Reason)
+	}
+	if res.RedispatchMayClear == nil || !*res.RedispatchMayClear {
+		t.Errorf("RedispatchMayClear = %v, want a present true", res.RedispatchMayClear)
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {
+		t.Errorf("Dispatches = %d, want 0 — a rate limit must not spend an invocation to report that nothing could be done", row.Dispatches)
+	}
+}
+
 // clearMarkerBackend wraps a fake.Orchestrator and records ClearQuestionMarker
 // calls so tests can observe the gate-path label clearing.
 type clearMarkerBackend struct {
