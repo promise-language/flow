@@ -285,6 +285,23 @@ const repoRelativePaths = `Cite files by path relative to the repository root, n
 What you write here is published on the item, and no reader shares the
 filesystem you are writing on.`
 
+// planIsTheResponse is carried by the plan prompt, whose deliverable exists
+// only as the step's own output.
+//
+// An agent that reaches for plan mode and finds no submission tool in its
+// session falls back to plan mode's other behaviour — writing the plan to a
+// file under a home directory — and then names that file in good faith. The
+// flow reads the returned text and nothing else, so the finished plan is
+// discarded along with what it cost. No project body rules that route out on
+// its own, which is why the library carries the sentence into every one of
+// them.
+const planIsTheResponse = `The plan must be this response's text. A path, a file written elsewhere, or a
+plan-mode artifact left for someone to open is not a plan this step can read:
+nothing is read back from disk, so a response that names a file delivers
+nothing and the plan inside it is discarded. Where the session offers a
+plan-submission tool, submit through it; where it does not, there is no
+substitute — write the plan here.`
+
 // narrowGateHint is carried by every producing prompt (implement, review,
 // coverage) so the agent knows it can iterate on a single failing area without
 // re-running the whole gate.
@@ -340,6 +357,7 @@ func renderPrompt(cfg Config, id PromptID, pc PromptContext) (string, error) {
 // project overrides a slot, the library appends exactly these fragments so that
 // a project cannot silently end up without them.
 type promptFragments struct {
+	planIsTheResponse bool
 	repoRelativePaths bool
 	deferCommit       bool
 	workInProgress    bool
@@ -354,7 +372,7 @@ type promptFragments struct {
 // appended — they run inside a session whose opening prompt already carried
 // them.
 var requiredFragments = map[PromptID]promptFragments{
-	PromptPlan: {repoRelativePaths: true, workInProgress: true, answers: true},
+	PromptPlan: {planIsTheResponse: true, repoRelativePaths: true, workInProgress: true, answers: true},
 	// The transfer belongs to implement because implement is the step a route
 	// returns to: a rework handback re-runs it with the same plan, and the
 	// message the maintainer's review sent is the only thing distinguishing this
@@ -376,6 +394,9 @@ var requiredFragments = map[PromptID]promptFragments{
 // context blocks.
 func appendFragments(body string, frags promptFragments) string {
 	var parts []string
+	if frags.planIsTheResponse {
+		parts = append(parts, planIsTheResponse)
+	}
 	if frags.repoRelativePaths {
 		parts = append(parts, repoRelativePaths)
 	}
@@ -409,6 +430,8 @@ var defaultPrompts = map[PromptID]string{
 	PromptPlan: `{{.ItemHeader}}
 
 Produce an implementation plan as concise markdown.
+
+` + planIsTheResponse + `
 
 ` + repoRelativePaths + `
 

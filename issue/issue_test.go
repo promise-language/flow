@@ -1875,6 +1875,53 @@ func TestPublishedProsePromptsAskForRepositoryRelativePaths(t *testing.T) {
 	}
 }
 
+// The plan step's deliverable is the returned text and nothing else. An agent
+// that writes its plan to a file elsewhere and names the path has done the work
+// and delivered nothing, which is what happened on workspace#233 — so the plan
+// prompt has to say so, on the default body and on any project override.
+func TestPlanPromptMustDemandThePlanAsTheResponse(t *testing.T) {
+	pc := PromptContext{Prior: map[StepID]flow.ArtifactRecord{}}
+	pc.VerifyCmd = "make check"
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	t.Run("default", func(t *testing.T) {
+		got, err := renderPrompt(Config{}, PromptPlan, pc)
+		if err != nil {
+			t.Fatalf("renderPrompt: %v", err)
+		}
+		if !strings.Contains(got, "nothing is read back from disk") {
+			t.Errorf("default plan prompt does not demand the plan as the response:\n%s", got)
+		}
+	})
+	// The observed failure was a project override, which is the case that
+	// matters: the body in play is not one this library owns.
+	t.Run("override", func(t *testing.T) {
+		cfg := Config{Prompts: map[PromptID]string{PromptPlan: "project body"}}
+		got, err := renderPrompt(cfg, PromptPlan, pc)
+		if err != nil {
+			t.Fatalf("renderPrompt: %v", err)
+		}
+		if !strings.Contains(got, "nothing is read back from disk") {
+			t.Errorf("override plan prompt does not demand the plan as the response:\n%s", got)
+		}
+		t.Logf("rendered plan prompt with a project override:\n%s", got)
+	})
+	// The producing prompts must not carry it: they are the steps that DO write
+	// files, and this sentence would read as an instruction not to.
+	for _, id := range []PromptID{PromptImplement, PromptReview, PromptCoverage} {
+		t.Run("absent/"+string(id), func(t *testing.T) {
+			got, err := renderPrompt(Config{}, id, pc)
+			if err != nil {
+				t.Fatalf("renderPrompt: %v", err)
+			}
+			if strings.Contains(got, "nothing is read back from disk") {
+				t.Errorf("prompt %q should not carry the plan-is-the-response fragment:\n%s", id, got)
+			}
+		})
+	}
+}
+
 // An override for a producing prompt must carry the required fragments, even
 // though the project body does not mention them.
 func TestRenderPrompt_OverrideCarriesRequiredFragments(t *testing.T) {
@@ -1896,6 +1943,9 @@ func TestRenderPrompt_OverrideCarriesRequiredFragments(t *testing.T) {
 			}
 			if !strings.HasPrefix(got, "minimal project body") {
 				t.Errorf("project body not at the start:\n%s", got)
+			}
+			if frags.planIsTheResponse && !strings.Contains(got, "nothing is read back from disk") {
+				t.Errorf("missing planIsTheResponse:\n%s", got)
 			}
 			if frags.repoRelativePaths && !strings.Contains(got, "never by absolute path") {
 				t.Errorf("missing repoRelativePaths:\n%s", got)
@@ -1935,6 +1985,15 @@ func TestRenderPrompt_DefaultDoesNotDoubleAppend(t *testing.T) {
 			}
 		})
 	}
+	t.Run("plan/planIsTheResponse", func(t *testing.T) {
+		got, err := renderPrompt(Config{}, PromptPlan, pc)
+		if err != nil {
+			t.Fatalf("renderPrompt: %v", err)
+		}
+		if n := strings.Count(got, "nothing is read back from disk"); n != 1 {
+			t.Errorf("planIsTheResponse appears %d times in the default plan prompt, want exactly 1", n)
+		}
+	})
 }
 
 // The three producing prompts (implement, review, coverage) must name the
@@ -2032,6 +2091,9 @@ func TestRequiredFragments_DefaultsContainDeclaredFragments(t *testing.T) {
 			continue
 		}
 		t.Run(string(id), func(t *testing.T) {
+			if frags.planIsTheResponse && !strings.Contains(src, planIsTheResponse) {
+				t.Error("default missing planIsTheResponse fragment")
+			}
 			if frags.repoRelativePaths && !strings.Contains(src, repoRelativePaths) {
 				t.Error("default missing repoRelativePaths fragment")
 			}
