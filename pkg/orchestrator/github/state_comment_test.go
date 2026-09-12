@@ -192,6 +192,21 @@ func TestRecordsFromJournal(t *testing.T) {
 	}
 }
 
+// BAD INPUT. `type` discriminates the result kind, and journalEntryDocOf always
+// writes one — so an entry with none came from a hand edit or from a writer this
+// one does not know, and it says nothing about what the step produced. It
+// projects NO record: a record would read as resolved, which is the answer the
+// flow uses to decide the step need not run again.
+func TestRecordsFromJournal_AnEntryWithNoTypeProjectsNoRecord(t *testing.T) {
+	at := time.Date(2026, 5, 26, 15, 10, 0, 0, time.UTC)
+	recs := recordsFromJournal([]stateJournalEntryDoc{
+		{Step: "plan", Execution: 1, By: "ann", At: at},
+	})
+	if rec, ok := recs["plan"]; ok {
+		t.Errorf("plan = %+v, want no record — the entry does not say what it produced", rec)
+	}
+}
+
 // The park field is the machine-readable copy Load returns, so it has to
 // survive a render/extract round trip through the state comment.
 func TestRenderStateComment_ParkRoundTrip(t *testing.T) {

@@ -948,3 +948,145 @@ func TestBackend_ListAutoSelectable_ExcludesAnUnassumableRole(t *testing.T) {
 		t.Errorf("ListAutoSelectable with a nil predicate = %+v, want the item", none)
 	}
 }
+
+// --- The schema bump, where it actually lands ---
+
+// v1StateComment is a state comment as the previous schema wrote one: the v1
+// markers, `schema: 1`, the `seeded_at` stamp v2 drops, and the `artifacts`
+// checklist that is the whole reason the two are not one format with optional
+// fields.
+const v1StateComment = "<!-- flow:state-v1 begin owner=alice -->\n" +
+	"<details><summary>📋 Flow state — implement (machine-managed, do not edit)</summary>\n\n" +
+	"```yaml\n" +
+	"flow: implement\n" +
+	"schema: 1\n" +
+	"seeded_at: 2026-05-26T15:00:00Z\n" +
+	"artifacts:\n" +
+	"    - id: plan\n" +
+	"      type: markdown\n" +
+	"      required: true\n" +
+	"      resolved: true\n" +
+	"      version: 1\n" +
+	"      resolved_by: https://example.test/c/1\n" +
+	"park:\n" +
+	"    kind: blocked\n" +
+	"    reason: waiting on an operator\n" +
+	"```\n\n" +
+	"</details>\n" +
+	"<!-- flow:state-v1 end -->\n"
+
+// THE BUMP, AT THE ORCHESTRATOR RATHER THAN AT THE PARSER. extractStateDoc not
+// finding a v1 document is one assertion (state_comment_test.go); what that
+// means for an item carrying one is another, and it is the one live issues will
+// meet: the record reads as not started — no artifacts, no park — and the next
+// append posts a FRESH comment beside the v1 one rather than editing it.
+//
+// The edit is the failure worth a test. Every write goes through one
+// read-modify-write that PATCHes whatever comment the scan returned, so a reader
+// widened to recognise the v1 marker without reading the v1 schema would
+// overwrite that comment with a v2 document — replacing the only record of what
+// the earlier run did, silently and with no way back.
+func TestBackend_AV1StateCommentIsInertAndIsNotOverwritten(t *testing.T) {
+	mock := newGHMock(t)
+	mock.comments = append(mock.comments, ghMockComment{
+		ID: 900, Body: v1StateComment, User: "alice",
+		CreatedAt: time.Date(2026, 5, 26, 15, 0, 0, 0, time.UTC),
+	})
+	srv := mock.server()
+	t.Cleanup(srv.Close)
+	b := newMockedOrchestrator(t, mock, srv)
+
+	claim, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	state, err := b.Load(t.Context(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.Artifacts) != 0 || len(state.Journal) != 0 {
+		t.Errorf("state = %d artifacts / %d entries, want a v1 document read as nothing",
+			len(state.Artifacts), len(state.Journal))
+	}
+	if state.Parked() {
+		t.Errorf("park = %+v, want none — the v1 document is not read", state.Park)
+	}
+
+	appendMarkdown(t, b, claim.ItemRef, "plan", "the plan")
+
+	// The v1 comment was never edited — not by the append, not by the claim.
+	if n := mock.requestCount("PATCH /repos/o/r/issues/comments/900"); n != 0 {
+		t.Errorf("the v1 comment was edited %d times, want 0 — it is the only copy of that run's record", n)
+	}
+	mock.mu.Lock()
+	bodies := map[int64]string{}
+	for _, c := range mock.comments {
+		bodies[c.ID] = c.Body
+	}
+	mock.mu.Unlock()
+	if bodies[900] != v1StateComment {
+		t.Errorf("the v1 comment was rewritten:\n%s", bodies[900])
+	}
+	// And exactly one v2 document exists, beside it rather than in place of it.
+	var v2IDs []int64
+	for id, body := range bodies {
+		if _, _, found, _ := extractStateDoc(body); found {
+			v2IDs = append(v2IDs, id)
+		}
+	}
+	if len(v2IDs) != 1 || v2IDs[0] == 900 {
+		t.Fatalf("v2 state comments = %v, want exactly one that is not the v1 comment", v2IDs)
+	}
+	// The fresh document carries this run's entry and nothing inherited.
+	doc := storedDoc(t, mock)
+	if doc.Schema != stateSchemaVersion || len(doc.Journal) != 1 || doc.Journal[0].Step != "plan" {
+		t.Errorf("fresh document = %+v, want schema %d carrying only the new entry", doc, stateSchemaVersion)
+	}
+	state, err = b.Load(t.Context(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if rec := state.Artifact("plan"); rec.Version != 1 || rec.Markdown != "the plan" {
+		t.Errorf("plan = %+v, want this run's result — not the v1 checklist's", rec)
+	}
+}
+
+// REMOVE THEN ADD, in that order: the marker says whose move it is, and an item
+// carrying two at once says two different things to every reader that scans for
+// the prefix. The end state cannot tell the orders apart — both leave one label
+// — so the request tape is the only place the invariant is visible.
+func TestBackend_AppendEntry_MovesTheAwaitedLabelRemoveBeforeAdd(t *testing.T) {
+	mock, b, claim := newJournalEnv(t)
+
+	appendMarkdown(t, b, claim.ItemRef, "plan", "the plan")
+	mock.mu.Lock()
+	from := len(mock.mutations)
+	mock.mu.Unlock()
+
+	second := resultEntry("impl", 1, flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: "0123456789abcdef0123456789abcdef01234567"})
+	second.Awaits = flow.Awaits{Role: "maintainer"}
+	if err := b.AppendEntry(t.Context(), claim.ItemRef, second); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+
+	mock.mu.Lock()
+	tape := append([]string(nil), mock.mutations[from:]...)
+	mock.mu.Unlock()
+	removed, added := -1, -1
+	for i, req := range tape {
+		switch req {
+		case "DELETE /repos/o/r/issues/42/labels/flow:awaits:contributor":
+			removed = i
+		case "POST /repos/o/r/issues/42/labels":
+			if added == -1 {
+				added = i
+			}
+		}
+	}
+	if removed == -1 || added == -1 {
+		t.Fatalf("the move is not both halves; tape = %v", tape)
+	}
+	if removed > added {
+		t.Errorf("the new marker went on before the old one came off; tape = %v", tape)
+	}
+}
