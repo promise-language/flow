@@ -46,6 +46,8 @@ under-report and read as nearly done.
   issues.
 - [github-schema.md](github-schema.md) — The on-issue wire format: state comment, artifact
   comments, orphan branch.
+- [tags.md](tags.md) — The label vocabulary for this repository's issues: document tags, the
+  flow's reserved namespace, and the cross-cutting axes.
 
 ## Organization-wide corpus — binding
 
