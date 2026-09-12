@@ -1936,6 +1936,47 @@ func TestPlanPromptMustDemandThePlanAsTheResponse(t *testing.T) {
 	}
 }
 
+// The sentence is worth nothing unless the plan step actually sends it. The
+// renderPrompt tests above pin the library's bodies; this pins the seam between
+// those bodies and the turn — stepPlan renders PromptPlan through the project's
+// Config, so a step that rendered another slot, or one whose Config never
+// reached the fragment path, would leave every prompt test green while the agent
+// saw nothing and wrote its plan to a file again.
+//
+// The override case is the one observed on workspace#233: the body in play was
+// the project's, and it says nothing about where the plan goes.
+func TestStepPlan_BriefsTheAgentThatThePlanIsTheResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prompts map[PromptID]string
+	}{
+		{"default", nil},
+		{"override", map[PromptID]string{PromptPlan: "Produce an implementation plan."}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := &scriptedAgent{replies: []string{planned("do the thing")}}
+			ctx := ctxWithPlan(newFakeWorktree(), agent)
+			b := &builder{cfg: Config{VerifyCmd: []string{"make", "check"}, Prompts: tc.prompts}}
+			base := flow.BranchName("main")
+			b.base.Store(&base)
+
+			if _, err := b.stepPlan(ctx); err != nil {
+				t.Fatalf("stepPlan: %v", err)
+			}
+			if len(agent.prompts) == 0 {
+				t.Fatal("the step spent no turn, so nothing was briefed")
+			}
+			// The whole fragment, not a phrase from it: what the agent has to
+			// read is the instruction, and a truncated copy carrying only the
+			// explanation would pass a substring check while telling it nothing
+			// to do.
+			if !strings.Contains(agent.prompts[0], planIsTheResponse) {
+				t.Errorf("the plan step's prompt does not carry the fragment verbatim:\n%s", agent.prompts[0])
+			}
+		})
+	}
+}
+
 // An override for a producing prompt must carry the required fragments, even
 // though the project body does not mention them.
 func TestRenderPrompt_OverrideCarriesRequiredFragments(t *testing.T) {
