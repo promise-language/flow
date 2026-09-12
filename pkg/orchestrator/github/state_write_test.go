@@ -232,6 +232,83 @@ func TestStateWrite_CreateAndRefuseBothSurviveTheCollapse(t *testing.T) {
 	})
 }
 
+// A document that cannot be parsed stops the write; it is never replaced.
+//
+// That document is the ledger, the journal and the park. A mutation that read
+// an unreadable one and carried on would compute its delta against an EMPTY
+// document and PATCH that over the top — corruption turned into data loss, with
+// the run reporting success. Both halves of the collapsed read-modify-write
+// have to refuse it, and they reach the refusal by different branches: the one
+// that MAY create a document must not read "unparseable" as "absent", and the
+// one that may not must not fall through to errNoStateComment either.
+func TestStateWrite_AnUnparseableDocumentStopsTheWriteRatherThanReplacingIt(t *testing.T) {
+	b, mock, ref := seededItem(t)
+
+	// A truncated comment: the begin marker still finds it, and nothing inside
+	// can be read. The size cap on a comment makes this the realistic shape.
+	var want string
+	mock.mu.Lock()
+	for i := range mock.comments {
+		if stateBeginRe.MatchString(mock.comments[i].Body) {
+			mock.comments[i].Body = stateEndRe.ReplaceAllString(mock.comments[i].Body, "<!-- truncated -->")
+			want = mock.comments[i].Body
+		}
+	}
+	mock.mu.Unlock()
+	if want == "" {
+		t.Fatal("there was no state document to corrupt")
+	}
+
+	if err := b.RecordDispatch(t.Context(), ref, "plan"); err == nil {
+		t.Error("RecordDispatch over an unparseable document reported success — create must not read unreadable as absent")
+	}
+	if err := b.AddCost(t.Context(), ref, "plan", 1); err == nil {
+		t.Error("AddCost over an unparseable document reported success")
+	}
+
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	for _, c := range mock.comments {
+		if stateBeginRe.MatchString(c.Body) && c.Body != want {
+			t.Errorf("the unparseable document was written over, and what it held is gone:\n%s", c.Body)
+		}
+	}
+}
+
+// A document found by a SCAN carries no tag, and the write still lands.
+//
+// A comment list answers one tag for the page rather than one per comment, so
+// the compare-and-set has nothing to compare and the write proceeds — which is
+// the behaviour this package always had, and the case every fresh process hits
+// on its first write to an item somebody else seeded. A seam that treated "no
+// tag" as "somebody wrote" would replay three times and then park, on an item
+// nothing else is touching at all.
+func TestStateWrite_ADocumentFoundByAScanHasNoTagAndStillWrites(t *testing.T) {
+	b, mock, ref := seededItem(t)
+
+	// Forget the id in BOTH places, which is what a fresh process on another
+	// machine has: the memo is empty and the shared record knows nothing.
+	b.mu.Lock()
+	b.stateCommentCache = map[int]int64{}
+	b.mu.Unlock()
+	b.out.cache.update(func(rec *seamRecord) { rec.StateComments = nil })
+	mock.resetRequests()
+
+	if err := b.AddCost(t.Context(), ref, "plan", 1.5); err != nil {
+		t.Fatalf("AddCost over a scan-found document: %v", err)
+	}
+	if n := mock.requestCount("GET /repos/o/r/issues/42/comments"); n == 0 {
+		t.Error("the document was not found by a scan, so this test is not about the scan path any more")
+	}
+	state, err := b.Load(t.Context(), ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if row := state.Ledger.Row("plan"); row.CostUSD < 1.5 {
+		t.Errorf("ledger row = %+v, want the charge — a scan-found document has no tag to compare, not a conflict", row)
+	}
+}
+
 // The compare-and-set is the comment's own ETag, so the WIRE FORMAT is
 // untouched: docs/github-schema.md's document gains no version field and no new
 // marker, and a reader written against the old schema reads the new one.

@@ -35,6 +35,13 @@ import (
 // What is NEVER cached is the state document and the comment lists that find
 // it. Staleness there is not a wasted request, it is a lost write.
 //
+// And a WRITE retires whatever was cached for the path it wrote to (dropPath,
+// called from the transport). Every policy above weighs a stale answer against
+// a request, which is the right trade for a fact this process only reads; the
+// dependency list is the one it also WRITES, and there staleness costs a
+// decision rather than a request — the editor declares a blocker and the very
+// next Load decides whether the item may be dispatched at all.
+//
 // The record is per REPOSITORY AND ACCOUNT, and both are in its NAME — the
 // truncated-digest idiom cli/quota_cache.go's quotaAccountKey and
 // fingerprintArena already use. A different token or a different repository is
@@ -292,6 +299,36 @@ func (c *seamCache) storeRow(key string, r seamRow) {
 			rec.Rows = map[string]seamRow{}
 		}
 		rec.Rows[key] = r
+	})
+}
+
+// dropPath retires every answer cached for one path — the path itself and the
+// paged or filtered questions asked at it.
+//
+// It reads before it writes, like clearLimit and for the same reason: it runs
+// after EVERY write, and a store per write would be the cost this file exists
+// to remove. A write to a path nothing caches finds nothing and stores nothing.
+func (c *seamCache) dropPath(path string) {
+	if c == nil || path == "" {
+		return
+	}
+	rec := c.load()
+	if rec == nil {
+		return
+	}
+	var stale []string
+	for k := range rec.Rows {
+		if k == path || strings.HasPrefix(k, path+"?") {
+			stale = append(stale, k)
+		}
+	}
+	if len(stale) == 0 {
+		return
+	}
+	c.update(func(rec *seamRecord) {
+		for _, k := range stale {
+			delete(rec.Rows, k)
+		}
 	})
 }
 

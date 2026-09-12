@@ -342,6 +342,117 @@ func TestCache_RowsNothingReadsAnyMoreAreRetired(t *testing.T) {
 	}
 }
 
+// A blocker DECLARED through the seam is on the next read of the same issue.
+//
+// This is the one cached endpoint that is also written to, so it is the one
+// place a TTL could answer a question about a write this process has already
+// made — and blockedness is not a saving, it is whether the item may be
+// dispatched at all. The editor declares a blocker and the very next Load
+// decides on it, well inside the minute.
+func TestCache_ABlockerJustDeclaredIsNotAnsweredFromBeforeIt(t *testing.T) {
+	b, mock, _ := newSeamBackend(t)
+	ctx := t.Context()
+
+	// A read first, so there is a row for the write to have to invalidate.
+	if _, err := b.blockersOf(ctx, 42); err != nil {
+		t.Fatalf("blockersOf: %v", err)
+	}
+
+	if err := b.out.AddBlockedBy(ctx, 42, 4300); err != nil {
+		t.Fatalf("AddBlockedBy: %v", err)
+	}
+	mock.mu.Lock()
+	mock.blockedBy = []ghMockBlocker{{Number: 43, ID: 4300, State: "open", Title: "the blocker"}}
+	mock.mu.Unlock()
+
+	got, err := b.blockersOf(ctx, 42)
+	if err != nil {
+		t.Fatalf("blockersOf (after the write): %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("blockers after declaring one = %+v, want the blocker just declared — an item that reads as unblocked is dispatched", got)
+	}
+}
+
+// Two refusals in flight are ONE condition, and the later instant is the one
+// that holds: taking the earlier would put the machine back on an endpoint that
+// asked for longer, which is how a shared refusal turns into a fresh one.
+func TestCache_ARecordedRefusalKeepsTheLaterInstant(t *testing.T) {
+	useTempSeamCache(t)
+	c := newSeamCache("o", "r", "tok")
+	now := time.Now()
+
+	c.recordLimit(seamLimit{Until: now.Add(10 * time.Minute), Endpoint: "GET /the-longer-window"})
+	c.recordLimit(seamLimit{Until: now.Add(1 * time.Minute), Endpoint: "GET /a-shorter-one"})
+	l := c.limitInForce(now)
+	if l == nil {
+		t.Fatal("no refusal in force")
+	}
+	if l.Endpoint != "GET /the-longer-window" {
+		t.Errorf("the record holds %q, want the refusal that asked for longer", l.Endpoint)
+	}
+
+	// A LONGER one does replace it — the window is an upper bound each refusal
+	// states for itself, and the machine honours the longest it has been told.
+	c.recordLimit(seamLimit{Until: now.Add(30 * time.Minute), Endpoint: "GET /longer-still"})
+	if l := c.limitInForce(now); l == nil || l.Endpoint != "GET /longer-still" {
+		t.Errorf("the record holds %+v, want the later refusal", l)
+	}
+}
+
+// A row dated in the FUTURE is a miss rather than maximally fresh. A machine
+// whose clock jumped backwards would otherwise pin every cached answer until
+// the clock caught up — a stale cache with no way out but deleting the file.
+func TestCache_AFutureDatedRowIsAMissRatherThanMaximallyFresh(t *testing.T) {
+	useTempSeamCache(t)
+	c := newSeamCache("o", "r", "tok")
+	c.storeRow("/repos/o/r", seamRow{StoredAt: time.Now().Add(time.Hour), Body: []byte("{}")})
+
+	_, ok, fresh := c.row("/repos/o/r", time.Now(), repoMetaTTL)
+	if !ok {
+		t.Fatal("the row is not in the record at all")
+	}
+	if fresh {
+		t.Error("a row stored in the future reads as fresh; a clock that jumped back would pin the cache")
+	}
+}
+
+// Nothing here may ever fail a call, and the WRITE path is where that is worth
+// asserting: it takes a machine-wide lock, reads an id through the record and
+// writes one back, and every one of those tolerates a nil cache. A machine with
+// nowhere to cache must resolve items exactly as this package did before the
+// cache existed.
+func TestCache_TheWholeWritePathRunsWithNowhereToCache(t *testing.T) {
+	b, mock, _ := newSeamBackend(t)
+	ctx := t.Context()
+	prev := cacheDir
+	cacheDir = func() (string, bool) { return "", false }
+	t.Cleanup(func() { cacheDir = prev })
+	b.out = siblingSeam(t, b, mock, "fake-token")
+	if b.out.cache != nil {
+		t.Fatal("a machine with no cache directory got a cache")
+	}
+
+	ref := b.refFromIssue(mock.issueNum)
+	if _, err := b.Claim(ctx, ref, nil); err != nil {
+		t.Fatalf("Claim with nowhere to cache: %v", err)
+	}
+	if err := b.RecordDispatch(ctx, ref, "plan"); err != nil {
+		t.Fatalf("RecordDispatch with nowhere to cache: %v", err)
+	}
+	if err := b.AddCost(ctx, ref, "plan", 2.5); err != nil {
+		t.Fatalf("AddCost with nowhere to cache: %v", err)
+	}
+	state, err := b.Load(ctx, ref)
+	if err != nil {
+		t.Fatalf("Load with nowhere to cache: %v", err)
+	}
+	row := state.Ledger.Row("plan")
+	if row.Dispatches != 1 || row.CostUSD < 2.5 {
+		t.Errorf("ledger row = %+v, want the dispatch and the charge to have landed anyway", row)
+	}
+}
+
 // --- helpers ---
 
 func mustParseURL(t *testing.T, raw string) *url.URL {

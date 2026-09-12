@@ -252,6 +252,22 @@ func (t *seamTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 
+	// A WRITE retires what this machine cached about the URL it wrote to.
+	//
+	// Every policy above is about a read whose staleness costs a request. One
+	// endpoint is both read and written — the dependency list — and there
+	// staleness costs a decision: the editor declares a blocker and the very
+	// next Load decides whether the item may be dispatched at all, well inside
+	// blockerTTL. A cache that answered that from before the declaration would
+	// report an item runnable that this same process has just blocked.
+	//
+	// By PATH rather than by method, so it needs no table: a request that
+	// changes something invalidates the answers cached for the thing it
+	// changed, and a write to a path nothing caches drops nothing.
+	if req.Method != http.MethodGet && resp.StatusCode < 300 {
+		t.cache.dropPath(req.URL.Path)
+	}
+
 	if policy != freshNever {
 		return t.reconcile(req, resp, key, cached, haveCached), nil
 	}

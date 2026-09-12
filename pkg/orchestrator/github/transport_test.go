@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -87,6 +88,17 @@ func getThrough(t *testing.T, s *scriptedTransport) (*http.Response, error) {
 func getThroughCtx(t *testing.T, s *scriptedTransport, ctx context.Context) (*http.Response, error) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(ctx, "GET", "https://example.test/repos/o/r/issues/42/timeline", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s.RoundTrip(req)
+}
+
+// getPathThrough is getThrough against a chosen path, for the tests whose
+// subject is the cache policy that path falls under rather than the refusal.
+func getPathThrough(t *testing.T, s *scriptedTransport, path string) (*http.Response, error) {
+	t.Helper()
+	req, err := http.NewRequest("GET", "https://example.test"+path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,6 +430,17 @@ func TestRateLimit_ASuccessfulRequestClearsTheSharedRefusal(t *testing.T) {
 	if l := s.cache.limitInForce(s.now.Add(-2 * time.Minute)); l != nil {
 		t.Errorf("the refusal is still recorded after a request got through: %+v", l)
 	}
+
+	// And retiring one nobody recorded writes NOTHING. This runs after every
+	// successful request, so a store per request would be the cost the cache
+	// exists to remove.
+	fresh := newScriptedTransport(t, okResponse())
+	if _, err := getThrough(t, fresh); err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	if _, err := os.Stat(fresh.cache.limitPath); !os.IsNotExist(err) {
+		t.Errorf("a request that met no refusal wrote the refusal record; stat err = %v", err)
+	}
 }
 
 // The refusal lives in a record of its own, so an arena storing a cached ANSWER
@@ -464,6 +487,176 @@ func TestServiceSpend_ReportsWhatTheRunCost(t *testing.T) {
 	}
 	if line := b.ServiceSpend(); !strings.Contains(line, "github:") || !strings.Contains(line, "request") {
 		t.Errorf("ServiceSpend = %q, want a line naming the seam and the count", line)
+	}
+
+	// A wait is part of what the run cost, and the only place an operator sees
+	// that a limit was in force at all on a run that otherwise succeeded.
+	b.out.meter.waited(3 * time.Second)
+	if line := b.ServiceSpend(); !strings.Contains(line, "waited 3s") || !strings.Contains(line, "rate limit") {
+		t.Errorf("ServiceSpend = %q, want it to report the wait a rate limit cost", line)
+	}
+}
+
+// A limit costs at most ONE wait per call. The second refusal is the condition,
+// not a second sleep: a seam that waited on every refusal would hold a claim,
+// an arena and a deadline for as long as the limiter kept saying no, and a
+// retry that recursed with retry=true would do it forever.
+func TestRateLimit_ASecondRefusalIsNotWaitedOnAgain(t *testing.T) {
+	s := newScriptedTransport(t,
+		canned(http.StatusForbidden, map[string]string{"Retry-After": "1"}),
+		canned(http.StatusForbidden, map[string]string{"Retry-After": "1"}),
+	)
+	_, err := getThrough(t, s)
+	if !errors.Is(err, flow.ErrUnavailable) {
+		t.Fatalf("error = %v, want the second refusal returned as the condition", err)
+	}
+	if len(s.slept) != 1 {
+		t.Errorf("slept %v, want one wait — a refusal that survives the retry is a condition to park on", s.slept)
+	}
+	if s.calls != 2 {
+		t.Errorf("made %d request(s), want 2 — the refusal and its one retry", s.calls)
+	}
+}
+
+// A WRITE that is retried after a wait must send the same body again.
+//
+// The first attempt consumed it, so a retry that re-sent nothing would land an
+// empty PATCH on the state document or an empty label set on the issue —
+// success, with the write silently gone. net/http's GetBody is what makes the
+// replay possible, and a request that has a body and no GetBody is one the seam
+// must refuse to replay rather than send empty.
+func TestRateLimit_ARetriedWriteResendsItsBody(t *testing.T) {
+	const body = `{"labels":["flow:seeded"]}`
+	s := newScriptedTransport(t,
+		canned(http.StatusForbidden, map[string]string{"Retry-After": "1"}),
+		okResponse(),
+	)
+	var sent []string
+	scripted := s.seamTransport.base
+	s.seamTransport.base = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		b, _ := io.ReadAll(r.Body)
+		sent = append(sent, string(b))
+		return scripted.RoundTrip(r)
+	})
+
+	req, err := http.NewRequest("POST", "https://example.test/repos/o/r/issues/42/labels", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RoundTrip(req); err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	if len(sent) != 2 {
+		t.Fatalf("the write was sent %d time(s), want the refusal and the retry", len(sent))
+	}
+	if sent[1] != body {
+		t.Errorf("the retry carried %q, want the body the caller wrote (%q)", sent[1], body)
+	}
+
+	// Nothing to replay from: the refusal is the answer, and no second request
+	// goes out at all.
+	s2 := newScriptedTransport(t, canned(http.StatusForbidden, map[string]string{"Retry-After": "1"}))
+	unreplayable := &http.Request{
+		Method: "POST",
+		URL:    mustParseURL(t, "https://example.test/repos/o/r/issues/42/labels"),
+		Header: http.Header{},
+		Body:   io.NopCloser(strings.NewReader(body)),
+	}
+	_, err = s2.RoundTrip(unreplayable)
+	if !errors.Is(err, flow.ErrUnavailable) {
+		t.Errorf("error = %v, want the refusal rather than a replay of a body that cannot be replayed", err)
+	}
+	if s2.calls != 1 {
+		t.Errorf("made %d request(s), want 1 — an empty retry is a lost write reported as a success", s2.calls)
+	}
+}
+
+// A failure answer is neither cached nor replaced by what the cache holds.
+//
+// Caching one would make a transient 500 the answer for the whole TTL; serving
+// the cached body INSTEAD of it would hide the failure behind a stale success,
+// which is worse — the caller would act on an answer nothing confirmed.
+func TestTransport_AnErrorAnswerIsNeitherCachedNorHiddenByTheCachedBody(t *testing.T) {
+	s := newScriptedTransport(t)
+	first := okResponse()
+	first.Body = io.NopCloser(strings.NewReader(`{"full_name":"o/r"}`))
+	failure := canned(http.StatusInternalServerError, nil)
+	failure.Body = io.NopCloser(strings.NewReader(`{"message":"upstream is unwell"}`))
+	s.script = []*http.Response{first, failure}
+
+	if _, err := getPathThrough(t, s, "/repos/o/r"); err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	// Past the TTL, so the failure is what the next read gets.
+	s.now = s.now.Add(repoMetaTTL + time.Minute)
+	resp, err := getPathThrough(t, s, "/repos/o/r")
+	if err != nil {
+		t.Fatalf("RoundTrip (over the failure): %v", err)
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want the 500 — a stale success in its place is an answer nothing confirmed", resp.StatusCode)
+	}
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "upstream is unwell") {
+		t.Errorf("body = %q, want what the server actually said", got)
+	}
+	row, ok, _ := s.cache.row("/repos/o/r", s.now, repoMetaTTL)
+	if !ok || !strings.Contains(string(row.Body), "full_name") {
+		t.Errorf("the record holds %q, want the last SUCCESS — a cached failure is the answer for the whole TTL", row.Body)
+	}
+}
+
+// The test seam is built through the same construction path as the real client,
+// so a swapped HTTP client still carries the metered transport and the SAME
+// meter. A seam whose test path bypassed its own metering would be a seam
+// nothing about it was ever tested.
+func TestWithHTTPClient_KeepsTheMeteredTransportAndTheMeter(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+
+	if _, err := b.out.GetIssue(t.Context(), 42); err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	before := b.ServiceRequests().Requests
+	if before == 0 {
+		t.Fatal("the meter counted nothing before the swap")
+	}
+
+	b.WithHTTPClient(srv.Client())
+	if _, err := b.WithBaseURL(srv.URL+"/", srv.URL+"/"); err != nil {
+		t.Fatalf("WithBaseURL: %v", err)
+	}
+	if _, err := b.out.GetIssue(t.Context(), 42); err != nil {
+		t.Fatalf("GetIssue through the swapped client: %v", err)
+	}
+	if got := b.ServiceRequests().Requests; got != before+1 {
+		t.Errorf("the meter counts %d requests, want %d — a swapped client must keep the transport and the count",
+			got, before+1)
+	}
+}
+
+// A primary refusal whose reset header is not an instant takes the seam's own
+// backoff. Reading "0" as a Unix second would put the window in 1970, and a
+// window already past is a wait of zero — an immediate retry straight back into
+// the limiter that just refused.
+func TestRateLimit_APrimaryRefusalWithNoUsableResetStillBacksOff(t *testing.T) {
+	s := newScriptedTransport(t,
+		canned(http.StatusForbidden, map[string]string{
+			"X-RateLimit-Remaining": "0",
+			"X-RateLimit-Reset":     "0",
+		}),
+		okResponse(),
+	)
+	if _, err := getThrough(t, s); err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	if len(s.slept) != 1 || s.slept[0] != seamDefaultBackoff {
+		t.Errorf("slept %v, want one wait of %s rather than an immediate retry", s.slept, seamDefaultBackoff)
 	}
 }
 
