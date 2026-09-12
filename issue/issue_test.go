@@ -1875,6 +1875,108 @@ func TestPublishedProsePromptsAskForRepositoryRelativePaths(t *testing.T) {
 	}
 }
 
+// The plan step's deliverable is the returned text and nothing else. An agent
+// that writes its plan to a file elsewhere and names the path has done the work
+// and delivered nothing, which is what happened on workspace#233 — so the plan
+// prompt has to say so, on the default body and on any project override.
+func TestPlanPromptMustDemandThePlanAsTheResponse(t *testing.T) {
+	pc := PromptContext{Prior: map[StepID]flow.ArtifactRecord{}}
+	pc.VerifyCmd = "make check"
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	t.Run("default", func(t *testing.T) {
+		got, err := renderPrompt(Config{}, PromptPlan, pc)
+		if err != nil {
+			t.Fatalf("renderPrompt: %v", err)
+		}
+		if !strings.Contains(got, "nothing is read back from disk") {
+			t.Errorf("default plan prompt does not demand the plan as the response:\n%s", got)
+		}
+	})
+	// The observed failure was a project override, which is the case that
+	// matters: the body in play is not one this library owns.
+	t.Run("override", func(t *testing.T) {
+		cfg := Config{Prompts: map[PromptID]string{PromptPlan: "project body"}}
+		got, err := renderPrompt(cfg, PromptPlan, pc)
+		if err != nil {
+			t.Fatalf("renderPrompt: %v", err)
+		}
+		if !strings.Contains(got, "nothing is read back from disk") {
+			t.Errorf("override plan prompt does not demand the plan as the response:\n%s", got)
+		}
+	})
+	// No other slot carries it, on either path. The other producing steps DO
+	// write files, and this sentence would read to them as an instruction not
+	// to. The override path is checked as well as the default one because that
+	// is the path appendFragments runs on — a slot wrongly declaring the
+	// fragment changes nothing in its default body, so the default check alone
+	// would not see it.
+	for id := range defaultPrompts {
+		if id == PromptPlan {
+			continue
+		}
+		t.Run("absent/"+string(id), func(t *testing.T) {
+			got, err := renderPrompt(Config{}, id, pc)
+			if err != nil {
+				t.Fatalf("renderPrompt: %v", err)
+			}
+			if strings.Contains(got, "nothing is read back from disk") {
+				t.Errorf("default prompt %q should not carry the plan-is-the-response fragment:\n%s", id, got)
+			}
+			cfg := Config{Prompts: map[PromptID]string{id: "project body"}}
+			got, err = renderPrompt(cfg, id, pc)
+			if err != nil {
+				t.Fatalf("renderPrompt(override): %v", err)
+			}
+			if strings.Contains(got, "nothing is read back from disk") {
+				t.Errorf("override prompt %q should not carry the plan-is-the-response fragment:\n%s", id, got)
+			}
+		})
+	}
+}
+
+// The sentence is worth nothing unless the plan step actually sends it. The
+// renderPrompt tests above pin the library's bodies; this pins the seam between
+// those bodies and the turn — stepPlan renders PromptPlan through the project's
+// Config, so a step that rendered another slot, or one whose Config never
+// reached the fragment path, would leave every prompt test green while the agent
+// saw nothing and wrote its plan to a file again.
+//
+// The override case is the one observed on workspace#233: the body in play was
+// the project's, and it says nothing about where the plan goes.
+func TestStepPlan_BriefsTheAgentThatThePlanIsTheResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prompts map[PromptID]string
+	}{
+		{"default", nil},
+		{"override", map[PromptID]string{PromptPlan: "Produce an implementation plan."}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := &scriptedAgent{replies: []string{planned("do the thing")}}
+			ctx := ctxWithPlan(newFakeWorktree(), agent)
+			b := &builder{cfg: Config{VerifyCmd: []string{"make", "check"}, Prompts: tc.prompts}}
+			base := flow.BranchName("main")
+			b.base.Store(&base)
+
+			if _, err := b.stepPlan(ctx); err != nil {
+				t.Fatalf("stepPlan: %v", err)
+			}
+			if len(agent.prompts) == 0 {
+				t.Fatal("the step spent no turn, so nothing was briefed")
+			}
+			// The whole fragment, not a phrase from it: what the agent has to
+			// read is the instruction, and a truncated copy carrying only the
+			// explanation would pass a substring check while telling it nothing
+			// to do.
+			if !strings.Contains(agent.prompts[0], planIsTheResponse) {
+				t.Errorf("the plan step's prompt does not carry the fragment verbatim:\n%s", agent.prompts[0])
+			}
+		})
+	}
+}
+
 // An override for a producing prompt must carry the required fragments, even
 // though the project body does not mention them.
 func TestRenderPrompt_OverrideCarriesRequiredFragments(t *testing.T) {
@@ -1896,6 +1998,9 @@ func TestRenderPrompt_OverrideCarriesRequiredFragments(t *testing.T) {
 			}
 			if !strings.HasPrefix(got, "minimal project body") {
 				t.Errorf("project body not at the start:\n%s", got)
+			}
+			if frags.planIsTheResponse && !strings.Contains(got, "nothing is read back from disk") {
+				t.Errorf("missing planIsTheResponse:\n%s", got)
 			}
 			if frags.repoRelativePaths && !strings.Contains(got, "never by absolute path") {
 				t.Errorf("missing repoRelativePaths:\n%s", got)
@@ -1935,6 +2040,15 @@ func TestRenderPrompt_DefaultDoesNotDoubleAppend(t *testing.T) {
 			}
 		})
 	}
+	t.Run("plan/planIsTheResponse", func(t *testing.T) {
+		got, err := renderPrompt(Config{}, PromptPlan, pc)
+		if err != nil {
+			t.Fatalf("renderPrompt: %v", err)
+		}
+		if n := strings.Count(got, "nothing is read back from disk"); n != 1 {
+			t.Errorf("planIsTheResponse appears %d times in the default plan prompt, want exactly 1", n)
+		}
+	})
 }
 
 // The three producing prompts (implement, review, coverage) must name the
@@ -2032,6 +2146,9 @@ func TestRequiredFragments_DefaultsContainDeclaredFragments(t *testing.T) {
 			continue
 		}
 		t.Run(string(id), func(t *testing.T) {
+			if frags.planIsTheResponse && !strings.Contains(src, planIsTheResponse) {
+				t.Error("default missing planIsTheResponse fragment")
+			}
 			if frags.repoRelativePaths && !strings.Contains(src, repoRelativePaths) {
 				t.Error("default missing repoRelativePaths fragment")
 			}
