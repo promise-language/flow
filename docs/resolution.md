@@ -32,6 +32,35 @@ A step cannot be asked to notice that its own work was thrown away between dispa
 
 **The test is not whether a re-derivation is affordable.** It is whether the resolution already had the answer. A dispatch that spends to reproduce something the system was holding has not been inefficient; it has been wrong, and the budget it consumed reports a cost that bought nothing.
 
+## One seam per outside service
+
+> **Every outside service is reached through exactly one seam, and nothing reaches it any other way.**
+
+An **outside service** is one this project does not run: a tracker's API, an agent substrate, a host that answers over a network nobody here controls. The test is **who decides whether a call succeeds** — an outside service may refuse it, charge for it, throttle it, or be unavailable, for reasons of its own and on a schedule nobody here sets.
+
+That is what separates it from the rest of what a resolution invokes. Git in the worktree, a gate, a verify command are **local tools**: deterministic, free, available whenever they are installed, and failing for reasons in the tree rather than reasons at the far end. Nothing in this section applies to them. A tool that cannot throttle you needs no seam to notice that it did.
+
+A **seam** is the single route to one outside service. Not a convenience wrapper and not a layer — the only path, such that a call that did not pass through it did not happen.
+
+**The reason is that the properties a call to an outside service must have cannot be held anywhere else.** Each of them is a property of *every* call, so each can only be guaranteed at a place every call passes:
+
+- **It meters.** What the service cost — money, requests, time — is counted where the spending happens, because a total assembled anywhere else is a guess.
+- **It turns the service's refusals into conditions.** A limit in force, a service down, a lease held elsewhere: these are states that clear, and the seam is where they are recognised as such rather than surfacing as failures. § Guards' sentinels already separate *cannot ever* from *cannot right now*, and a seam that does not classify collapses the two — which turns a rate limit into a permanent verdict and bills a step for the privilege.
+- **It carries what need not be bought again.** § Nothing is bought twice is a rule about one resolution; at a seam it extends past it. What a service answered does not become stale because a different process asked, so a cache at the seam is shared by every process on the machine that uses it, and each of them reads and updates the one cache rather than paying separately for one answer.
+- **It is where an outward write meets its guard.** Everything leaving the machine passes disclosure ([disclosure.md](disclosure.md)), and a write that left by another route left unexamined.
+
+**A second route is not a shortcut, it is an exemption.** Everything above is silently not true of whatever goes around the seam, and nothing reports it: the metering under-counts, the limit arrives unclassified, the cache is not consulted or updated, the guard never sees the bytes. The run looks the same. That is why the rule is about *every* call rather than about most of them — a seam with one bypass provides none of its guarantees, only the appearance of them.
+
+> **The single route is enforced, not observed.**
+
+Convention is worth nothing here for the reason it is worth nothing at the agent's chokepoint: the mistake is easy and quiet. A new call site added later exempts itself from every property above while every test still passes, and the defect surfaces as a bill, a halt, or a leak long after the change that caused it. So the route is checked — a list of what may reach a service, refused at the commit when something new is not on it, in the shape the agent-spend ratchet already takes ([agent.md](agent.md) § Nothing mechanical may spend).
+
+**Exceptions are named, and never categorical.** The list that enforces the route is also where an exception lives: anything permitted to reach a service without passing its seam appears on it, saying what it is for, and **adding an entry is the maintainer's decision rather than the committer's** — the agent-spend list's own rule, for the same reason.
+
+Obtaining a credential is the example this SDK has: reading a store the operator already populated is not a request against the service's interface, it happens once, and the mechanism that does it may differ from the seam it serves. That is an argument for putting it *on the list*, not for exempting it by calling it a credential. A category that exempts itself is a bypass with a justification attached, and whatever claims the category next will not be a credential.
+
+**This is a property, not a machinery.** How a seam meters, where it keeps a cache, what it does about a limit, and whether it is one type or several are its own business; what is stated here is what any of them must be. The seams this SDK has are the agent ([agent.md](agent.md) § The chokepoint) and the orchestrator ([orchestrator.md](orchestrator.md)), and each document defines its own surface.
+
 ## The item and its lifecycle
 
 An **item** is a unit of work owned by a backend. A **flow** is a set of steps that resolves items of a given type — a graph, not a sequence. Each step declares what may run after it, and the route an item actually takes is elected step by step as it is worked.
