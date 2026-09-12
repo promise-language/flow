@@ -14,6 +14,24 @@ Two drive models exist, and they are the only two:
 
 Everything in *this* document is true of both. A statement that is true of only one belongs in that model's document, and a statement true of both belongs **here and nowhere else** — restating it in the model documents is how two copies drift into disagreement.
 
+## Nothing is bought twice
+
+> **A resolution pays for each thing once.** What a dispatch established — reasoning, a conversation, a tree, an answer, a measurement — is carried to whoever needs it next. **Nothing already paid for is discarded while it is still needed, and nothing still held is bought again.**
+
+This is a requirement on the system, not advice to a step author, and it is not a performance concern to be weighed against convenience. **Discarding work the resolution is still holding, and then buying it back, is a defect.** It is the same defect whether the cost lands on the agent's budget, on the operator's time, or on the wall-clock of a fleet — and in every case it is paid by someone other than whoever decided not to keep it.
+
+Every mechanism in this document that carries something across a stop exists to serve this, and none of them is optional in the sense that matters:
+
+- **The journal** carries the route and the reasons, so nothing re-derives where the resolution is.
+- **What a step committed** carries the work itself, so nothing re-does it.
+- **The draft** carries the reasoning behind an unfinished result, so a resumed step does not think it through again (§ Drafts).
+- **The session** carries the conversation itself across every step of the route, so the agent is not reintroduced to work it has already done (§ The agent session).
+- **The claim** keeps the item with the arena holding all of the above, so a resume finds it rather than starting over (§ Claiming).
+
+A step cannot be asked to notice that its own work was thrown away between dispatches: by the time it runs it has no way to tell a first attempt from a resume that lost everything. So the obligation is on the mechanisms — they preserve what they can, hand it over without being asked, and never drop something cheap to keep because keeping it was not wired up.
+
+**The test is not whether a re-derivation is affordable.** It is whether the resolution already had the answer. A dispatch that spends to reproduce something the system was holding has not been inefficient; it has been wrong, and the budget it consumed reports a cost that bought nothing.
+
 ## The item and its lifecycle
 
 An **item** is a unit of work owned by a backend. A **flow** is a set of steps that resolves items of a given type — a graph, not a sequence. Each step declares what may run after it, and the route an item actually takes is elected step by step as it is worked.
@@ -151,7 +169,15 @@ Steps try to resolve the item. The **treasurer** keeps what that costs at bay. T
 
 The reasoning is the guard rule (§ Guards): a limit held by the party it limits is editable by that party, and an agent that can move its own bounds has none.
 
-The treasurer keeps a **durable ledger**: time and cost, per step and for the resolution whole, and the count of dispatches and resumptions of each step on the route. The ledger survives interruption with the same durability as the journal, and `status` reports from it.
+The treasurer keeps a **durable ledger**: time and cost, per step and for the resolution whole, the count of dispatches and resumptions of each step on the route, and **the count of agent sessions the resolution has opened**. The ledger survives interruption with the same durability as the journal, and `status` reports from it.
+
+**The session count is checked against the journal, not against a policy.** A resolution opens one session at its entry, and one more for each **execution** of a step declaring a new one ([flow-registration.md](flow-registration.md) § Session continuity). The journal records exactly one entry per execution, so the number a resolution should have opened is read off the route it actually travelled — **not off the graph**, which may route through the same step many times and offers no static answer.
+
+> **A resolution that has opened more sessions than its journal accounts for has paid for conversations its route never asked for. The count must be reported and an excess flagged.**
+
+The excess is the signal, and it is very nearly the only one: nothing else about such a resolution looks wrong afterwards. What it does not say by itself is *why* — whether the machinery decided a moment was special and started over, which is a defect in the flow, or the handle was simply gone, which is a limit of the substrate or the backend (§ The agent session). Both cost the same and have different fixes, so the flag names the count and the record names the cause. The comparison is within the vantage the treasurer already has, which reads the journal and its own ledger and nothing else.
+
+**A count that matches the journal and is still high is a routing problem, not a session one.** A route crossing a declaring step repeatedly opens a session each time, correctly; what that reports is a resolution going around, which is the runaway the treasurer detects by its own means. The two are told apart by which record disagrees — the ledger against the journal, or the journal against itself.
 
 **The time it keeps is active time — time spent doing work — and waiting is recorded apart from it.** Cost measures what the agent spent; active time measures everything else the resolution consumes — the machine hosting it while it runs gates, commands, and git. A dispatch blocked on a declared exclusion — the serialized landing, a gate's lock, any resource the system queues work for — spends wall-clock and consumes nothing, and the two must not be confused in either direction: waiting charged as work has the treasurer refusing a resolution for being queued behind another, naming the wrong problem, while waiting dropped entirely leaves `status` unable to say where an afternoon went. So the ledger carries both, separately — active time, which the treasurer prices and bounds, and waiting time, which it reads as evidence about contention rather than about the work.
 
@@ -159,10 +185,21 @@ The treasurer keeps a **durable ledger**: time and cost, per step and for the re
 
 **Waiting on an exclusion is not waiting on a signal, and the ledger's waiting covers only the first.** Serialization is temporal: the dispatch is running, the claim is held, and the wait ends when the queue reaches it — nothing about the world needs to change, only its turn to arrive. A signal wait is the opposite in every dimension: a declared position in the graph, the item sitting between dispatches with nobody's move pending, ended by the world changing — a fact observed, not a turn arriving ([artifacts-and-signals.md](artifacts-and-signals.md)). One is a queue inside a dispatch; the other is a state of the item. The ledger accrues waiting only while a dispatch holds it, so a signal wait accrues nothing.
 
-It is consulted at exactly two chokepoints, both **before** the spend:
+It is consulted at exactly three chokepoints, each **before** the act it governs — two before a spend, and one before a discard:
 
 - **Every dispatch of a step.** The treasurer approves or refuses it; an approval sets the **time allowance** the dispatch runs within.
 - **Every agent expense.** The treasurer allows or blocks it before it is incurred, and prices the allowance it grants — see [agent.md](agent.md) for how the allowance reaches the agent substrate.
+- **Every new agent session.** Opening one discards context the resolution has already paid for (§ Nothing is bought twice), so it is asked for and recorded rather than taken. The treasurer approves it against the route: a session the journal accounts for is approved and counted, and **one that no declaration accounts for is refused before the context is discarded.**
+
+**The third chokepoint is what makes § Nothing is bought twice enforceable rather than merely detectable.** A count reconciled afterwards says a session was opened that should not have been, once the conversation it replaced is already gone. A chokepoint answers at the moment: the machinery that decided this dispatch was special enough to start over has to say so to a party that knows what the route declared, and be told no. It is the same shape as refusing a prompt from a step that declared it would not prompt — the refusal lands before the thing it is refusing has cost anything, which is the only point at which refusing it is worth anything.
+
+**What it refuses is a decision, not a circumstance.** A session the machinery chose to start, where the route declared none, is refused. A session that had to be opened because the handle was gone — the substrate declined it, or the backend keeps none — was nobody's decision and is approved and counted (§ The agent session).
+
+**A refusal does not stop the resolution.** The safe direction is the cheap one: the session that was about to be discarded is kept, the dispatch proceeds on it, and the attempt is recorded. Parking would stop work over something no operator can clear, since the fix is in the graph or in the machinery rather than on the item; continuing silently would leave it invisible, which is what the record is for.
+
+**So the count answers "how many", and the record answers "why".** An excess over what the journal accounts for says the resolution paid for conversations the graph did not ask for — which is worth knowing whether the cause was machinery starting over or a backend that keeps no handle. Which of those it was is in what each request recorded, and the two have different fixes: one is a defect in the flow, the other a limit of the backend it runs on.
+
+**A declared new session is not the treasurer's to second-guess.** Where a step declared one, the reason is independence — a judgement that must not be coloured by the reasoning that produced what it judges ([flow-registration.md](flow-registration.md) § Session continuity) — and that is a property of the graph, not a spending decision. The treasurer records it, counts it, and approves it. What it refuses is a request the route does not account for, and what it stops is a route opening them without going anywhere, which is the runaway it detects by its own means.
 
 What the treasurer decides from is everything the resolution has durably produced: the journal — the route traveled — and its own ledger, the per-step dispatch and resumption counts included, and the pending step. That is what makes it the party that **detects runaway**: a route cycling without its messages changing, a step resumed past reason, a resolution whose spend grows while its journal does not. Steps cannot be asked to notice this about themselves; the treasurer has exactly the vantage they lack, and stopping it is its purpose, not a side effect.
 
@@ -178,6 +215,8 @@ What the treasurer decides from is everything the resolution has durably produce
 That is the shape to check any retry against: **a retry that cannot differ from the attempt before it is not a retry, it is a loop with a budget.** It exhausts whatever the treasurer allows, reports the limit as the reason, and names the wrong problem — an operator extending the allowance would buy an identical failure.
 
 So an attempt stopped by something correctable hands the correction back. A refused write returns to the step that produced the text, carrying what was refused and why, so the next attempt is answering something the last one did not know.
+
+**And spending must not re-buy what the resolution already has** (§ Nothing is bought twice). The rule above read backwards: a dispatch must leave progress behind, and must start from the progress left for it. The treasurer is where the failure becomes visible — a resolution whose spend grows while its journal does not is the shape it detects — but the obligation is on the mechanisms that carry work across a stop, not on the step that finds them empty.
 
 **A correction round is priced as a round, not as a dispatch.** A dispatch is an attempt at the step; a refused *expression* of finished work is not a failed attempt, and a treasurer that charged it as one would report exhaustion after three refused sentences — naming the wrong problem, which is exactly what this section is about. It must cost something: a correction that were free is a loop against whatever refused it, with nothing bounding it at all.
 
@@ -204,8 +243,25 @@ The draft is **scaffolding, not a result**:
 - **It is never published.** For a refused write the text to keep *is* the text a guard refused, so a store that could go outward is a store that cannot hold it.
 - **It is cleared when the step completes**, and when the claim is released or the item finalized. Scaffolding that outlives its work becomes stale prose a later reader mistakes for a record; reasoning left behind after the work is over is a disclosure sitting around for no benefit.
 - **It is optional, and the progress rule is why a parking step rarely wants to skip it.** A step that does not use it behaves exactly as one would without the mechanism — but every dispatch must leave behind something the next one starts from (§ The treasurer), and a step whose work lives nowhere durable — no commit, no tree — has only the draft to leave. Parking without one re-derives the same reasoning at full price on resume, and the treasurer counts both times.
-
 Where the draft physically lives is the backend's: beside its claim state on a machine that holds one, or with the claim on a server, so that an arena can lose its disk without losing the record.
+
+**A draft is not the session, and the two must not be folded together.** A draft belongs to one step, is read only when item and step both match, and is cleared when that step completes. The agent session belongs to the resolution and outlives every step on the route (§ The agent session). Keying the session like a draft would end it at the first step boundary; clearing a draft like a session would feed one step's unfinished reasoning to the next. They are stored beside each other and neither is the other's key.
+
+## The agent session
+
+The **session** is the conversation a resolution has with its agent. It is **the resolution's**, not a step's and not a process's: the same session carries across every step on the route, across a park and its resume, across a process exiting and another picking the item up, and across the boundary between a binary driving the whole route and one advancing a single step at a time.
+
+> **A new session is opened only where the graph declared one, and the entry of a resolution is where its first one begins.** Which steps declare one, and why, is [flow-registration.md](flow-registration.md) § Session continuity.
+
+It is state of the same kind as the draft and lives with it — beside the claim on a machine that holds one, or with the claim on a server — and it is subject to the same rules: it is never published, it is not part of what a reviewer reads, and it is cleared when the claim is released or the item finalized. What differs is scope and lifetime, and those differ deliberately.
+
+**A backend that cannot store it is not incorrect, only expensive.** Where there is nowhere to keep the handle, every dispatch opens a session and every step starts from the prompt it was given — which is exactly what the best-effort rule below already requires a step to tolerate. The mechanism is absent rather than broken.
+
+**The handle is offered, never depended on.** A substrate may decline to resume, expire the conversation, or have no such notion at all. So a resolution hands the handle over and proceeds correctly without it: the prompt and the draft are what make a dispatch right, and the handle decides only what it costs. **A step whose result differs depending on whether the substrate honoured the handle has made an optimisation load-bearing, and is wrong for that reason rather than for an expensive one.**
+
+**A handle that is unavailable is not a new session being declared.** A substrate may decline one; a backend may have nowhere to keep one. In both the conversation ended somewhere the system did not choose, and what follows is the best-effort clause above doing its job — not a decision to start over, and so not what the treasurer's third chokepoint refuses (§ The treasurer).
+
+> **The distinction is who decided.** A resolution that chose to discard its context must have declared it. A resolution whose context was taken from it carries on, and says so.
 
 ## Questions
 
