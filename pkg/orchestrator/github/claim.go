@@ -528,6 +528,17 @@ func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef, d flow.Di
 			return fmt.Errorf("github.Finalize: parse state comment: %w", perr)
 		}
 		if found && doc != nil {
+			// Setting the flag CHANGES WHAT THE ITEM AWAITS: a finalized item
+			// awaits nobody, whatever its last entry elected (awaitsFromDoc). So
+			// the marker derived from that answer moves here too, read off the
+			// document before the flag is set.
+			//
+			// Ordinarily there is nothing to move — the finalizing entry's Awaits
+			// is empty, so AppendEntry already removed the marker and this costs no
+			// request. What it catches is finalization reached with a route still
+			// mid-flight (an item closed on GitHub under a flow whose required
+			// signals are unset), and a best-effort removal that did not land.
+			clearedAwaits := b.awaitsLabel(awaitsFromDoc(doc))
 			doc.Finalized = true
 			// The disposition the finalizing election carried, recorded beside
 			// the flag: the read is required with the write, so Load reports
@@ -536,6 +547,7 @@ func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef, d flow.Di
 			if _, err := b.updateStateComment(ctx, issueNum, stateID, *doc, owner); err != nil {
 				return fmt.Errorf("github.Finalize: update state comment: %w", err)
 			}
+			b.moveAwaitsLabel(ctx, issueNum, clearedAwaits, "")
 		}
 	}
 

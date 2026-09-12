@@ -148,10 +148,9 @@ func (b *Orchestrator) AppendEntry(ctx context.Context, ref flow.ItemRef, entry 
 	// for work that is recorded, and send the caller back to append it twice.
 	_ = b.ClearWorkInProgress(ctx, ref, entry.Step)
 	b.removeParkLabel(ctx, ref, clearedLabel)
-	// THE ONE WRITER of the awaited marker. Every append passes through here —
-	// including a finalizing one, whose Awaits is empty and which therefore
-	// removes the label by the same path that moves it. Finalize needs no label
-	// code of its own, and has none.
+	// Every append passes through here — including a finalizing one, whose
+	// Awaits is empty and which therefore removes the label by the same path
+	// that moves it.
 	b.moveAwaitsLabel(ctx, issueNum, prevAwaits, want)
 	if firstEntry {
 		// The marker that says this binary has begun on the item. It used to go
@@ -368,6 +367,13 @@ func (b *Orchestrator) awaitsLabel(a flow.Awaits) string {
 // it now awaits: REMOVE THEN ADD, so an item never carries two at once, and
 // nothing at all when the new value is empty — which is how a finalizing entry
 // clears it.
+//
+// THE ONE WRITER of the marker, and every caller is an operation that CHANGES
+// WHAT awaitsFromDoc ANSWERS: AppendEntry, which appends the entry the answer is
+// read off; Reset, which clears the journal; and Finalize, which sets the flag
+// that makes the answer nobody regardless of the journal. An operation that
+// moved that answer without coming through here would leave the index pointing
+// at a wait the record no longer describes.
 //
 // Best-effort, like the binary label beside it and for the same reason: the
 // entry that elected this wait has already landed, and failing the append over a

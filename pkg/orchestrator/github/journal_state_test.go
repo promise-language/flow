@@ -725,6 +725,71 @@ func TestBackend_Reset_RemovesTheAwaitedLabel(t *testing.T) {
 	}
 }
 
+// Finalization removes the marker too, and not only when the finalizing entry
+// is what got there. Setting the finalized flag makes awaitsFromDoc answer
+// "nobody" WHATEVER the last entry elected, so a run that finalizes with a route
+// still mid-flight — here an item closed on GitHub while its journal awaits
+// contributor — would otherwise leave a marker advertising a move the record no
+// longer describes, which RemoveTag refuses to clear because it is maintained.
+func TestBackend_Finalize_RemovesTheAwaitedLabelOnAMidRouteItem(t *testing.T) {
+	mock, b, claim := newJournalEnv(t)
+	ctx := t.Context()
+
+	appendMarkdown(t, b, claim.ItemRef, "plan", "the plan")
+	if got := awaitsLabelsOn(b, mock); len(got) != 1 || got[0] != "flow:awaits:contributor" {
+		t.Fatalf("labels before Finalize = %v, want flow:awaits:contributor", got)
+	}
+	mock.mu.Lock()
+	mock.issueState = "closed"
+	mock.mu.Unlock()
+
+	if err := b.Finalize(ctx, claim.ItemRef, flow.DispositionResolved); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if got := awaitsLabelsOn(b, mock); len(got) != 0 {
+		t.Errorf("labels after Finalize = %v, want the awaited marker gone", got)
+	}
+	// And the record agrees, which is what the marker indexes.
+	state, err := b.Load(ctx, claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !state.Awaits.Empty() {
+		t.Errorf("Awaits = %+v, want nobody — the item is finalized", state.Awaits)
+	}
+}
+
+// The ordinary route costs NOTHING for that: the finalizing entry's Awaits is
+// empty, so AppendEntry already removed the marker and Finalize has no label
+// request to make.
+func TestBackend_Finalize_MakesNoLabelRequestAfterAFinalizingEntry(t *testing.T) {
+	mock, b, claim := newJournalEnv(t)
+	ctx := t.Context()
+
+	appendMarkdown(t, b, claim.ItemRef, "plan", "the plan")
+	final := flow.JournalEntry{
+		Step: "merge", Execution: 1,
+		Route: flow.Route{Finalize: flow.DispositionResolved},
+		By:    "ann", Role: "maintainer",
+	}
+	if err := b.AppendEntry(ctx, claim.ItemRef, final); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	mock.mu.Lock()
+	mock.issueState = "closed"
+	mock.mu.Unlock()
+	mock.resetRequests()
+
+	if err := b.Finalize(ctx, claim.ItemRef, flow.DispositionResolved); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	for path, n := range mock.snapshotRequests() {
+		if strings.Contains(path, "/labels/"+b.labels.AwaitsPrefix()) {
+			t.Errorf("%s was asked for %d times, want 0 — the marker was already gone", path, n)
+		}
+	}
+}
+
 // THE POINT OF THE LABEL. An item carrying no flow:awaits:* marker awaits
 // nobody, and answering that costs NO state-comment fetch — the listing reads a
 // label it already has in hand. The gate used to be flow:seeded, so an item

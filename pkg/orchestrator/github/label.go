@@ -217,8 +217,11 @@ func (l labels) ArenaPrefix() string { return l.prefix + labelSuffixArenaPrefix 
 func (l labels) Awaits(value string) string { return l.named(labelSuffixAwaitsPrefix + value) }
 func (l labels) AwaitsPrefix() string       { return l.prefix + labelSuffixAwaitsPrefix }
 
-// Placement labels. The formatter exists so #251's writer has one spelling to
-// use; nothing in this package writes one yet.
+// Placement labels. The PREFIX only: nothing in this package writes one yet, and
+// #251 — which owns the axes and their values — is what adds the formatter that
+// spells `<axis>:<value>` after it. What this reserves is the namespace, so a
+// restriction already on an item is read as this orchestrator's marker rather
+// than as a binary's name.
 func (l labels) RequiresPrefix() string { return l.prefix + labelSuffixRequiresPrefix }
 
 // Step lifecycle labels.

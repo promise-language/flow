@@ -136,7 +136,7 @@ func (e *editor) Commit(ctx context.Context) error {
 					"it follows from the operation that set it", string(t))
 		}
 		if string(t) == e.b.labels.Binary(e.b.cfg.BinaryName) {
-			return fmt.Errorf("github: %q is the binary marker seeding maintains and cannot be removed directly", string(t))
+			return fmt.Errorf("github: %q is the binary marker the first journal entry writes and cannot be removed directly", string(t))
 		}
 	}
 
