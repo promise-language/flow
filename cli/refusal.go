@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/promise-language/flow"
@@ -43,4 +45,24 @@ func formatRefusal(prefix, reason, check, detail string) string {
 		}
 	}
 	return b.String()
+}
+
+// conditionOrError renders an error as the CONDITION it is when the vocabulary
+// says so, and otherwise unchanged.
+//
+// flow.ErrUnavailable means "this cannot be done right now — a service is down,
+// a lease is held elsewhere, a rate limit is in force. Retrying is what a caller
+// should do" (errs.go). Printed as a bare error, a GitHub rate limit read as
+// `resolve: add claim label: POST …/labels: 403 API rate limit exceeded`, which
+// tells an operator a status code and not what happened or when it clears. The
+// seam now names both; this is what stops the naming being thrown away one
+// layer up.
+//
+// The EXIT CODE is unchanged. Saying what a stop was does not change whether it
+// was a stop (docs/cli.md § Exit codes).
+func conditionOrError(prefix string, err error) string {
+	if errors.Is(err, flow.ErrUnavailable) {
+		return fmt.Sprintf("%s: waiting on a condition — %s", prefix, err)
+	}
+	return fmt.Sprintf("%s: %s", prefix, err)
 }

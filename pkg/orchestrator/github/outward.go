@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/go-github/v68/github"
 	"github.com/promise-language/flow"
@@ -23,11 +24,21 @@ import (
 // guard absent from the seventh, and the seventh is the one someone adds later
 // without knowing this document exists."
 //
-// This type is that seam. It holds the package's only *github.Client, and it
-// is the only route to `gh` and to `git push` — so the property is not that
-// publish is convenient to call, it is that there is nothing else to call.
-// Reaching GitHub from elsewhere in the package would mean building a second
-// client or spawning gh directly, which TestNoSecondRouteToGitHub fails.
+// This type is that seam. It holds the package's only *github.Client and is the
+// only route to `git push` — so the property is not that publish is convenient
+// to call, it is that there is nothing else to call. Reaching GitHub from
+// elsewhere would mean building a second client, naming api.github.com, or
+// spawning `gh`, and the `service seams` step of bin/verify refuses a commit
+// that does any of the three (tools/build/common/outsideroutes.go).
+//
+// ONE TRANSPORT. `gh` used to open and merge pull requests and to read the
+// authenticated login; all three went through the client here. Both routes
+// authenticate with the same token against the same limits, so the split was
+// never a capability one — and a seam that meters, caches and names a rate
+// limit (transport.go) can only do it for traffic it carries. `gh auth token`
+// remains, and is the single named exception the gate holds: it OBTAINS a
+// credential from the store the operator already logged into, once at
+// construction, and never talks to GitHub.
 //
 // Reads live here too. Not because they publish anything, but so that no other
 // file in the package needs the client at all — a file holding a client for its
@@ -37,6 +48,14 @@ type outward struct {
 	git    *gitOps
 	owner  string
 	repo   string
+
+	// meter counts what this seam spent, and cache is the machine-wide record
+	// every flow process on the host shares for this repository and account.
+	// Both are installed in the client's transport (transport.go) rather than
+	// consulted per method, so nothing here has to remember they exist. cache
+	// is nil on a machine with nowhere to cache; every use tolerates it.
+	meter *meter
+	cache *seamCache
 
 	// guard is consulted before every outward write and may refuse it.
 	//
@@ -57,16 +76,18 @@ type outward struct {
 // reads below still work, so `list`, `status` and `doctor` do. The first write
 // refuses.
 func newOutward(token string, git *gitOps, owner, repo string, guard flow.DisclosureGuard) *outward {
+	m := newMeter()
+	c := newSeamCache(owner, repo, token)
 	return &outward{
-		client: github.NewClient(nil).WithAuthToken(token),
+		client: newGitHubClient(token, nil, m, c),
 		git:    git,
 		owner:  owner,
 		repo:   repo,
+		meter:  m,
+		cache:  c,
 		guard:  guard,
 	}
 }
-
-func (o *outward) repoFullName() string { return o.owner + "/" + o.repo }
 
 // itemOf is the disclosure's item id for a write scoped to an issue. Empty
 // when the write is not issue-scoped, which is what flow.Disclosure.Item means.
@@ -299,12 +320,16 @@ func (o *outward) CreateRef(ctx context.Context, ref *github.Reference) error {
 
 // OpenPullRequest opens a PR for head against base and returns its URL.
 //
-// `gh pr create` rather than the Go client: the client requires an
-// owner-qualified head, and gh handles the cross-repo (fork) case natively.
-// --repo, not -C: `-C` is git's flag for selecting a working directory and gh
-// has no such flag — passing it fails argument validation before gh does
-// anything ("unknown shorthand flag: 'C'"). --repo also removes the dependency
-// on the process working directory entirely, which the runner does not set.
+// Through the client, not `gh pr create`. Both authenticate as the same account
+// against the same limits, so the split was never a capability one — and only
+// one of the two transports can be metered, cached or told apart from a rate
+// limit (see transport.go). The head needs no owner qualification because owner
+// and repo come from this checkout's origin, which is the repository the branch
+// was pushed to.
+//
+// What went with the shell-out is the `--repo` versus `-C` argument-validation
+// note that used to stand here: it was a workaround for a transport, and it
+// disappears with the transport.
 func (o *outward) OpenPullRequest(ctx context.Context, base, head, title, body string) (string, error) {
 	var prURL string
 	d := flow.Disclosure{Act: flow.ActPullRequest, Ref: head}
@@ -312,14 +337,16 @@ func (o *outward) OpenPullRequest(ctx context.Context, base, head, title, body s
 	// chose, so they are the two parts of this write that anyone vouches for.
 	d.Text = append(stated(flow.OriginAgent, title, body), stated(flow.OriginFlow, base, head)...)
 	err := o.publish(ctx, d, func(ctx context.Context) error {
-		args := []string{"--repo", o.repoFullName(), "pr", "create",
-			"--base", base, "--title", title, "--body", body, "--head", head}
-		stdout, stderr, err := o.git.runner(ctx, "", "gh", args...)
+		pr, _, err := o.client.PullRequests.Create(ctx, o.owner, o.repo, &github.NewPullRequest{
+			Base:  github.Ptr(base),
+			Head:  github.Ptr(head),
+			Title: github.Ptr(title),
+			Body:  github.Ptr(body),
+		})
 		if err != nil {
-			return fmt.Errorf("gh pr create: %w (stderr=%s)", err, strings.TrimSpace(string(stderr)))
+			return fmt.Errorf("create pull request: %w", err)
 		}
-		// gh pr create prints the PR URL on stdout.
-		prURL = strings.TrimSpace(string(stdout))
+		prURL = pr.GetHTMLURL()
 		return nil
 	})
 	if err != nil {
@@ -343,17 +370,46 @@ func (o *outward) OpenPullRequest(ctx context.Context, base, head, title, body s
 //
 // The URL is stated `item`: GitHub issued it, and it is already published
 // there.
+//
+// The number is taken from the URL BEFORE the guard is consulted, because an
+// unparseable one is a defect in the caller rather than a judgement about text:
+// there is no write for a guard to have an opinion about, and publish's contract
+// is that it refuses before the act, never after.
 func (o *outward) MergePullRequest(ctx context.Context, prURL string) error {
+	num, err := prNumberFromURL(prURL)
+	if err != nil {
+		return err
+	}
 	d := flow.Disclosure{Act: flow.ActMerge, Text: stated(flow.OriginItem, prURL)}
 	return o.publish(ctx, d, func(ctx context.Context) error {
-		// --repo, not -C: see OpenPullRequest. gh has no -C flag.
-		args := []string{"--repo", o.repoFullName(), "pr", "merge", prURL, "--squash"}
-		_, stderr, err := o.git.runner(ctx, "", "gh", args...)
+		// The strategy is --squash's successor and nothing else: #292 is open
+		// for whether this repository should name one at all.
+		_, _, err := o.client.PullRequests.Merge(ctx, o.owner, o.repo, num, "",
+			&github.PullRequestOptions{MergeMethod: "squash"})
 		if err != nil {
-			return fmt.Errorf("gh pr merge: %w (stderr=%s)", err, strings.TrimSpace(string(stderr)))
+			return fmt.Errorf("merge pull request %d: %w", num, err)
 		}
 		return nil
 	})
+}
+
+// prNumberFromURL reads the pull request number out of the URL GitHub issued
+// for it — the trailing element of …/pull/<n>, which is what every caller here
+// carries because that is what Open returned and what the state document holds.
+//
+// `gh pr merge` took the URL itself; the API takes a number, so this is where
+// the two meet. A URL that names no number is a caller defect and says so.
+func prNumberFromURL(prURL string) (int, error) {
+	trimmed := strings.TrimRight(strings.TrimSpace(prURL), "/")
+	i := strings.LastIndex(trimmed, "/")
+	if i < 0 {
+		return 0, fmt.Errorf("pull request URL names no number: %q", prURL)
+	}
+	num, err := strconv.Atoi(trimmed[i+1:])
+	if err != nil || num <= 0 {
+		return 0, fmt.Errorf("pull request URL names no number: %q", prURL)
+	}
+	return num, nil
 }
 
 // Push pushes the current branch to origin with -u (set upstream).
@@ -536,9 +592,61 @@ func (o *outward) GetIssue(ctx context.Context, issue int) (*github.Issue, error
 	return iss, err
 }
 
-func (o *outward) GetComment(ctx context.Context, commentID int64) (*github.IssueComment, error) {
-	c, _, err := o.client.Issues.GetComment(ctx, o.owner, o.repo, commentID)
-	return c, err
+// GetComment reads one comment and returns the ETag GitHub issued for it.
+//
+// The tag is the state document's compare-and-set. GitHub offers no conditional
+// WRITE on a comment, so the closest thing the API admits is to revalidate the
+// tag immediately before the PATCH — see CommentUnchanged and withStateDoc.
+// Returning it here rather than re-reading it there is what keeps the read that
+// produced the document and the tag that guards it the same read.
+func (o *outward) GetComment(ctx context.Context, commentID int64) (*github.IssueComment, string, error) {
+	c, resp, err := o.client.Issues.GetComment(ctx, o.owner, o.repo, commentID)
+	if err != nil {
+		return nil, "", err
+	}
+	return c, etagOf(resp), nil
+}
+
+// CommentUnchanged asks whether a comment is still exactly what etag named,
+// with a conditional GET.
+//
+// True means nobody has written since; false means a foreign writer landed and
+// whatever the caller computed from the earlier read is about a document that
+// no longer exists. An empty etag is no comparison at all and answers false —
+// the safe side, because it makes the caller re-read rather than overwrite.
+//
+// Through NewRequest/Do because go-github's typed method sends no conditional
+// header, and a hand-rolled http.Client here would be a second route around the
+// seam. A 304 is not a 2xx, so it arrives as an error carrying the response —
+// which is the answer, not a failure.
+func (o *outward) CommentUnchanged(ctx context.Context, commentID int64, etag string) (bool, error) {
+	if etag == "" {
+		return false, nil
+	}
+	u := fmt.Sprintf("repos/%v/%v/issues/comments/%d", o.owner, o.repo, commentID)
+	req, err := o.client.NewRequest("GET", u, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("If-None-Match", etag)
+	resp, err := o.client.Do(ctx, req, nil)
+	if resp != nil && resp.StatusCode == http.StatusNotModified {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+// etagOf reads the tag off a response, tolerating a nil one — a cached answer
+// served by the transport carries the tag it was stored with, and a response
+// that carries none simply cannot be compared against.
+func etagOf(resp *github.Response) string {
+	if resp == nil || resp.Response == nil {
+		return ""
+	}
+	return resp.Header.Get("ETag")
 }
 
 // ListCommentsPage returns ONE page of an issue's comments plus the response
@@ -663,9 +771,43 @@ func (o *outward) ListReviews(ctx context.Context, prNum int, opt *github.ListOp
 
 // WithHTTPClient is a test seam: replaces the underlying http.Client. Used
 // by unit tests that drive the github backend via httptest.Server.
+//
+// Through newGitHubClient, like construction, so the swapped client still
+// carries the metered transport and the same meter. A seam whose test path
+// bypassed its own metering would be a seam nothing about it was ever tested.
 func (b *Orchestrator) WithHTTPClient(c *http.Client) *Orchestrator {
-	b.out.client = github.NewClient(c).WithAuthToken(b.cfg.Token)
+	b.out.client = newGitHubClient(b.cfg.Token, c, b.out.meter, b.out.cache)
 	return b
+}
+
+// ServiceRequests reports what this orchestrator has spent at the seam: how
+// many requests it made, split by method, and what the cache and the rate
+// limiter saved or cost.
+//
+// A seam that meters can say what a resolution cost, which is the only way any
+// of this stays fixed.
+func (b *Orchestrator) ServiceRequests() ServiceUsage { return b.out.meter.Snapshot() }
+
+// ServiceSpend renders that snapshot as the line cli prints beside the agent's
+// quota (cli.ServiceMeter).
+//
+// Two methods for one fact, and each has a job the other cannot do: the
+// snapshot is the datum a test and a caller in this package act on, and the
+// line is what a CLI that knows nothing about GitHub can print without learning
+// this package's units.
+func (b *Orchestrator) ServiceSpend() string {
+	u := b.ServiceRequests()
+	if u.Requests == 0 && u.Served == 0 {
+		return ""
+	}
+	line := fmt.Sprintf("github: %d request(s)", u.Requests)
+	if u.Served > 0 || u.Revalidated > 0 {
+		line += fmt.Sprintf(", %d served from cache, %d revalidated", u.Served, u.Revalidated)
+	}
+	if u.Waits > 0 {
+		line += fmt.Sprintf(", waited %s on %d rate limit(s)", u.Waited.Round(time.Second), u.Waits)
+	}
+	return line
 }
 
 // WithBaseURL is a test seam: overrides the API base URL so tests can point
@@ -683,6 +825,23 @@ func (b *Orchestrator) WithBaseURL(baseURL, uploadURL string) (*Orchestrator, er
 	b.out.client.BaseURL = base
 	b.out.client.UploadURL = upload
 	return b, nil
+}
+
+// newGitHubClient is the ONE construction path for the package's client — and
+// it is in THIS file because this is the only file the `service seams` gate
+// lets hold one.
+//
+// Construction and the metered transport are inseparable: a test that swapped
+// the HTTP client and got a bare client would be exercising a seam with none of
+// the properties the seam exists for. base may be nil.
+//
+// The cache arrives already keyed rather than being built here: it is keyed by
+// repository AND account together — a token that cannot see a private
+// repository must never read an answer another token cached for it — and the
+// second caller, WithHTTPClient, must reuse the one already resolved rather
+// than open a second record.
+func newGitHubClient(token string, base *http.Client, m *meter, c *seamCache) *github.Client {
+	return github.NewClient(meteredHTTPClient(base, m, c)).WithAuthToken(token)
 }
 
 // resolveToken returns a GitHub token, preferring the explicit override,
@@ -712,21 +871,6 @@ func ghAuthToken(ctx context.Context) (string, error) {
 	out, err := exec.CommandContext(ctx, "gh", "auth", "token").Output()
 	if err != nil {
 		return "", fmt.Errorf("gh auth token: %w", err)
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-// resolveLogin returns the authenticated gh login (used as the claim
-// owner when the caller didn't override). Falls back to "" when gh is
-// absent — the cli/app.go layer derives a fallback from $USER.
-func resolveLogin(ctx context.Context) (string, error) {
-	if _, err := exec.LookPath("gh"); err != nil {
-		return "", nil
-	}
-	// `gh api user --jq .login` is the simplest path.
-	out, err := exec.CommandContext(ctx, "gh", "api", "user", "--jq", ".login").Output()
-	if err != nil {
-		return "", fmt.Errorf("gh api user: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }

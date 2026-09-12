@@ -335,7 +335,7 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 	}
 
 	// Find / supersede the state comment if needed.
-	stateBody, stateID, err := b.fetchStateComment(ctx, issueNum, 0)
+	stateBody, stateID, _, err := b.fetchStateComment(ctx, issueNum, 0)
 	if err != nil {
 		return flow.Claim{}, fmt.Errorf("locate state comment: %w", err)
 	}
@@ -518,7 +518,7 @@ func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef, d flow.Di
 	// Mark the item finalized in the state comment so Load returns
 	// Item.Finalized=true — the read is required with the write, because a
 	// write nothing can observe is not a record.
-	body, stateID, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
+	body, stateID, _, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
 	if err != nil {
 		return fmt.Errorf("github.Finalize: fetch state comment: %w", err)
 	}

@@ -285,16 +285,14 @@ func (b *Orchestrator) awaitsOfIssue(ctx context.Context, issueNum int, lblNames
 	if !hasLabel(lblNames, b.labels.Seeded()) {
 		return flow.Awaits{}, nil
 	}
-	body, stateID, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
+	body, stateID, _, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
 	if err != nil {
 		return flow.Awaits{}, err
 	}
 	if body == "" {
 		return flow.Awaits{}, nil
 	}
-	b.mu.Lock()
-	b.stateCommentCache[issueNum] = stateID
-	b.mu.Unlock()
+	b.rememberStateCommentID(issueNum, stateID)
 	doc, _, found, perr := extractStateDoc(body)
 	if perr != nil {
 		return flow.Awaits{}, fmt.Errorf("parse state comment on #%d: %w", issueNum, perr)

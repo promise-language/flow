@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,123 +12,33 @@ import (
 	"github.com/promise-language/flow"
 )
 
-// The pull-request path invokes `gh`, and nothing else in this package does.
-// It shipped passing `-C <dir>` — git's flag for selecting a working directory,
-// which gh does not have — so every invocation died in argument validation
-// before gh contacted GitHub at all, and neither call site had ever run.
-//
-// These assert the shape of the command line rather than its effect: the whole
-// failure was that the arguments were wrong, and a test that mocked the result
-// would have passed against the broken version.
-func ghArgsFor(t *testing.T, invoke func(*worktree) error) []string {
-	t.Helper()
-	var got []string
-	b := &Orchestrator{cfg: Config{Owner: "acme", Repo: "widget", WorktreeDir: "/tmp/wt"}}
-	b.git = &gitOps{
-		dir: "/tmp/wt",
-		runner: func(_ context.Context, _ string, name string, args ...string) ([]byte, []byte, error) {
-			if name == "gh" {
-				got = args
-				return []byte("https://github.com/acme/widget/pull/1\n"), nil, nil
-			}
-			// Open checks the worktree is on the claim branch before it will
-			// invoke gh, so the git side has to answer plausibly to get there.
-			if slices.Contains(args, "rev-parse") {
-				return []byte("flow/issue-42\n"), nil, nil
-			}
-			return nil, nil, nil
-		},
-	}
-	b.out = newOutward("", b.git, b.cfg.Owner, b.cfg.Repo, allowing())
-	_ = invoke(&worktree{b: b, issueNum: 42})
-	if got == nil {
-		t.Fatal("gh was never invoked")
-	}
-	return got
-}
-
-func TestGhInvocationsCarryNoDashC(t *testing.T) {
-	// -C is git's. Passing it to gh fails before anything happens, and the
-	// convention is easy to re-copy from the git helper next door.
-	for name, invoke := range map[string]func(*worktree) error{
-		"pr create": func(w *worktree) error {
-			_, err := w.Open(context.Background(), "main", "t", "b")
-			return err
-		},
-		"pr merge": func(w *worktree) error {
-			return w.Merge(context.Background(), "https://github.com/acme/widget/pull/1")
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			args := ghArgsFor(t, invoke)
-			if slices.Contains(args, "-C") {
-				t.Errorf("gh %s carries -C, which gh rejects: %v", name, args)
-			}
-			if !slices.Contains(args, "--repo") {
-				t.Errorf("gh %s does not name the repo: %v", name, args)
-			}
-			if i := slices.Index(args, "--repo"); i+1 >= len(args) || args[i+1] != "acme/widget" {
-				t.Errorf("gh %s: --repo should be owner/repo, got %v", name, args)
-			}
-		})
-	}
-}
-
-// The merge must complete before the call returns, because the step after it
-// reads the merge commit the merge produced. `--auto` only queues the merge
-// behind GitHub's checks — the question stepVerifyMerge just answered against
-// the merge result — so the recording step finds nothing and the merge step is
-// re-dispatched until the runaway guard stops it (#148). Asserting the argv is
-// what keeps the flag from drifting back: a test mocking the merge's result
-// would pass against either command line.
-func TestGhMergeIsSynchronousSquash(t *testing.T) {
-	const prURL = "https://github.com/acme/widget/pull/1"
-	args := ghArgsFor(t, func(w *worktree) error {
-		return w.Merge(context.Background(), prURL)
-	})
-
-	if slices.Contains(args, "--auto") {
-		t.Errorf("gh pr merge carries --auto, which only queues the merge: %v", args)
-	}
-	if !slices.Contains(args, "--squash") {
-		t.Errorf("gh pr merge does not name a strategy; --squash is the one this repo allows: %v", args)
-	}
-	// The URL is positional, and it has to follow the subcommand — gh reads the
-	// first non-flag word after `pr merge` as the pull request to act on.
-	i := slices.Index(args, "merge")
-	if i < 0 || i+1 >= len(args) || args[i+1] != prURL {
-		t.Errorf("gh pr merge does not name the pull request straight after the subcommand: %v", args)
-	}
-}
-
-// The merge happens inside the call now, so gh's exit status IS the answer to
+// The merge happens inside the call, so the API's answer IS the answer to
 // whether the request landed — and the pr-merged signal this backend writes as
-// a side effect of Merge has to follow that status in both directions.
+// a side effect of Merge has to follow it in both directions.
 //
 // Set over a merge that did not happen, the signal is #148: the step reports
 // done, the recording step after it looks for a merge commit that does not
 // exist, and resolve re-dispatches until the runaway guard stops it. Unset
 // after a merge that did happen, the flow re-merges an already-merged request
-// forever. And a refusal has to carry gh's own words out, because "the base
-// moved — rebase and measure again" is now an ordinary outcome and the operator
+// forever. And a refusal has to carry GitHub's own words out, because "the base
+// moved — rebase and measure again" is an ordinary outcome and the operator
 // cannot tell it from a genuinely stuck request without them.
-func TestMergeSignalTracksWhetherGhMerged(t *testing.T) {
+func TestMergeSignalTracksWhetherTheMergeLanded(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		ghErr    error
-		ghStderr string
-		wantSet  bool
+		name    string
+		refusal string
+		wantSet bool
 	}{
 		{name: "merged", wantSet: true},
 		{
-			name:     "refused",
-			ghErr:    errors.New("exit status 1"),
-			ghStderr: "Pull request is not mergeable: the base branch has moved",
-			wantSet:  false,
+			name:    "refused",
+			refusal: "Pull request is not mergeable: the base branch has moved",
+			wantSet: false,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mock := newGHMock(t)
+			mock.mergeRefusal = tc.refusal
 			srv := mock.server()
 			defer srv.Close()
 			b := newMockedOrchestrator(t, mock, srv)
@@ -142,14 +51,6 @@ func TestMergeSignalTracksWhetherGhMerged(t *testing.T) {
 				t.Fatalf("Claim: %v", err)
 			}
 
-			git := b.git.runner
-			b.git.runner = func(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
-				if name == "gh" {
-					return nil, []byte(tc.ghStderr), tc.ghErr
-				}
-				return git(ctx, dir, name, args...)
-			}
-
 			wt, err := b.Worktree(ctx, claim.ItemRef)
 			if err != nil {
 				t.Fatalf("Worktree: %v", err)
@@ -157,12 +58,12 @@ func TestMergeSignalTracksWhetherGhMerged(t *testing.T) {
 			mergeErr := wt.Request().Merge(ctx, "https://github.com/o/r/pull/1")
 
 			switch {
-			case tc.ghErr == nil && mergeErr != nil:
-				t.Fatalf("Merge: %v, want nil — gh merged", mergeErr)
-			case tc.ghErr != nil && mergeErr == nil:
-				t.Fatal("Merge returned nil though gh refused the merge — the caller records a landing that did not happen")
-			case tc.ghErr != nil && !strings.Contains(mergeErr.Error(), tc.ghStderr):
-				t.Errorf("Merge error = %q, want it to carry what gh said (%q)", mergeErr, tc.ghStderr)
+			case tc.refusal == "" && mergeErr != nil:
+				t.Fatalf("Merge: %v, want nil — GitHub merged", mergeErr)
+			case tc.refusal != "" && mergeErr == nil:
+				t.Fatal("Merge returned nil though GitHub refused the merge — the caller records a landing that did not happen")
+			case tc.refusal != "" && !strings.Contains(mergeErr.Error(), tc.refusal):
+				t.Errorf("Merge error = %q, want it to carry what GitHub said (%q)", mergeErr, tc.refusal)
 			}
 
 			state, err := b.Load(ctx, claim.ItemRef)
@@ -173,22 +74,6 @@ func TestMergeSignalTracksWhetherGhMerged(t *testing.T) {
 				t.Errorf("pr-merged = %v, want %v", got, tc.wantSet)
 			}
 		})
-	}
-}
-
-func TestGhOpenTargetsTheBranchAndBase(t *testing.T) {
-	// --repo removes the dependency on the process working directory, which the
-	// runner never sets — so the branch and base must be named explicitly or gh
-	// has nothing to work from.
-	args := ghArgsFor(t, func(w *worktree) error {
-		_, err := w.Open(context.Background(), "main", "title", "body")
-		return err
-	})
-	joined := strings.Join(args, " ")
-	for _, want := range []string{"--base main", "--title title", "--body body"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("missing %q in: %s", want, joined)
-		}
 	}
 }
 

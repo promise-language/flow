@@ -96,6 +96,12 @@ func verifySteps(repoRoot string) []step {
 			// is proposed. It costs milliseconds, and it is the last thing
 			// standing between an unapproved agent turn and trunk.
 			{"agent turns", checkApprovedAgentTurns},
+			// The other ratchet, for the same reason and at the same cost. A
+			// seam that meters, names a rate limit and caches is worth exactly
+			// as much as the guarantee that nothing goes around it, and a
+			// second client added in a later change exempts itself from all of
+			// it while leaving every test passing.
+			{"service seams", checkOutsideServiceRoutes},
 			{"format", checkFormatted},
 			{"vet", func(r string) error { return runAllModules(r, "vet") }},
 			{"build", func(r string) error { return runAllModules(r, "build") }},

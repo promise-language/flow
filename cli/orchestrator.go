@@ -389,7 +389,18 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// it through the wrapped error). Park with ParkInfraTransient and
 	// SKIP the dispatch count — a flapping runner must not burn the
 	// step's invocation budget.
-	if handlerErr != nil && errors.Is(handlerErr, flow.ErrTransient) {
+	//
+	// flow.ErrUnavailable lands here too, and it is the SAME condition by the
+	// other name: errs.go defines it for "a service is down, a lease is held
+	// elsewhere, a rate limit is in force. Retrying is what a caller should
+	// do". A GitHub rate limit reached this branch as an ordinary failure
+	// before — so it was BILLED a dispatch to report that nothing could be
+	// done, and an unattended runner stopped on a condition that clears itself
+	// in minutes. infra-transient is the kind docs/orchestrator.md says a
+	// re-dispatch may clear, and the reset instant rides in the reason, where
+	// ParkKind's contract puts it: clears_at belongs to account-exhausted
+	// alone.
+	if handlerErr != nil && (errors.Is(handlerErr, flow.ErrTransient) || errors.Is(handlerErr, flow.ErrUnavailable)) {
 		return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
 			Kind:   flow.ParkInfraTransient,
 			Step:   li.Result(),

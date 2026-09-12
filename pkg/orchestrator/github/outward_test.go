@@ -3,7 +3,6 @@ package github
 import (
 	"context"
 	"errors"
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -11,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -261,6 +259,7 @@ var outwardReads = map[string]bool{
 	"SearchIssues":           true,
 	"GetIssue":               true,
 	"GetComment":             true,
+	"CommentUnchanged":       true,
 	"ListCommentsPage":       true,
 	"ListIssues":             true,
 	"GetRepo":                true,
@@ -592,12 +591,12 @@ func TestRefusalNamesTheActAndKeepsTheReason(t *testing.T) {
 // The declarations are read out of the package source rather than reflected
 // over the type. Reflection sees exported methods only, and an unexported one
 // that reached the client directly would be exactly the seventh call site
-// docs/disclosure.md is about — invisible to this check and to
-// TestNoSecondRouteToGitHub, which exempts outward.go.
+// docs/disclosure.md is about — invisible to this check and to the commit
+// gate's seam scan, which exempts outward.go.
 func TestOutwardMethodsAreAllClassified(t *testing.T) {
 	// Neither a read nor a write of its own: publish IS the funnel the writes
-	// go through, and repoFullName only formats "owner/repo". Adding a name
-	// here is a claim that the method reaches GitHub by neither route.
+	// go through. Adding a name here is a claim that the method reaches GitHub
+	// by neither route.
 	//
 	// ExaminePush and pushDisclosure are the two that ask ABOUT a write without
 	// performing one: pushDisclosure assembles what a push would carry, out of
@@ -608,7 +607,6 @@ func TestOutwardMethodsAreAllClassified(t *testing.T) {
 	// by TestExaminePushShowsTheGuardThePushAndSendsNothing.
 	notARoute := map[string]bool{
 		"publish":        true,
-		"repoFullName":   true,
 		"ExaminePush":    true,
 		"pushDisclosure": true,
 	}
@@ -1887,201 +1885,13 @@ func TestGuardSeesTheCommitsAndDiffAPushWouldPublish(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// No second route.
-// ---------------------------------------------------------------------------
-// secondRouteViolations parses one file and reports every place it could reach
-// GitHub without passing the seam, as "<position>: <what>".
-//
-// The client check follows the IMPORT rather than the identifier `github`:
-// aliasing the library is a one-word edit, and a check that only knows the
-// default name is one a future author defeats without meaning to. The command
-// check looks at composite literals as well as call arguments, because
-// `args := []string{"gh", ...}` spawns gh exactly as well as
-// `runner(ctx, "", "gh", args...)` does. Both are positions a string can reach
-// a process from; `p["push"]`, a permission map key, is not one.
-//
-// Separate from the test that walks the package because the package is clean:
-// against real files every report below is dead code, and a check whose
-// reporting path never runs is one that can stop working in silence.
-// TestSecondRouteCheckFindsTheRoutesItNames is what runs it.
-func secondRouteViolations(t *testing.T, name string, src any) []string {
-	t.Helper()
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, name, src, 0)
-	if err != nil {
-		t.Fatalf("parse %s: %v", name, err)
-	}
-	var found []string
-	report := func(pos token.Pos, format string, args ...any) {
-		found = append(found, fset.Position(pos).String()+": "+fmt.Sprintf(format, args...))
-	}
-
-	// Whatever local name this file gave the client library, if any. The files
-	// that legitimately import it do so for option structs and github.Ptr,
-	// which is why the import itself is not the violation.
-	clientPkg := map[string]bool{}
-	for _, imp := range file.Imports {
-		path, err := strconv.Unquote(imp.Path.Value)
-		if err != nil || !strings.HasPrefix(path, "github.com/google/go-github/") {
-			continue
-		}
-		local := "github" // the library's own package name
-		if imp.Name != nil {
-			local = imp.Name.Name
-		}
-		if local == "." {
-			report(imp.Pos(), "%s dot-imports the client library, which puts NewClient in scope "+
-				"unqualified and out of this check's reach", name)
-			continue
-		}
-		clientPkg[local] = true
-	}
-
-	// commands flags any of exprs that is the string "gh" or "push".
-	commands := func(exprs []ast.Expr) {
-		for _, e := range exprs {
-			if kv, ok := e.(*ast.KeyValueExpr); ok {
-				e = kv.Value // a key is never an argument
-			}
-			lit, ok := e.(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				continue
-			}
-			v, err := strconv.Unquote(lit.Value)
-			if err != nil || (v != "gh" && v != "push") {
-				continue
-			}
-			report(lit.Pos(), "%s reaches GitHub with %q outside the seam; "+
-				"add a method to outward.go instead", name, v)
-		}
-	}
-	ast.Inspect(file, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.SelectorExpr:
-			pkg, ok := node.X.(*ast.Ident)
-			if !ok || !clientPkg[pkg.Name] {
-				return true
-			}
-			// The type itself, and every constructor of one: go-github names
-			// them all New* (NewClient, NewTokenClient, NewEnterpriseClient,
-			// NewClientWithEnvProxy).
-			if node.Sel.Name == "Client" || strings.HasPrefix(node.Sel.Name, "New") {
-				report(node.Pos(), "%s holds a second GitHub client (%s.%s); the only one lives in outward.go",
-					name, pkg.Name, node.Sel.Name)
-			}
-		case *ast.CallExpr:
-			commands(node.Args)
-		case *ast.CompositeLit:
-			commands(node.Elts)
-		}
-		return true
-	})
-	return found
-}
-
-// The seam is a guarantee only while it is the ONLY way out. This fails any
-// file in the package that builds a GitHub client of its own, or that names
-// `gh` or `push` in a string literal.
-//
-// _test.go is the one exemption: newMockedOrchestrator builds a client on purpose,
-// and the tables above name the very commands this forbids elsewhere.
-func TestNoSecondRouteToGitHub(t *testing.T) {
-	for _, name := range packageSourceFiles(t) {
-		if name == "outward.go" {
-			continue
-		}
-		for _, v := range secondRouteViolations(t, name, nil) {
-			t.Error(v)
-		}
-	}
-}
-
-// What the check above is worth depends entirely on it still detecting, and
-// against a clean package it reports nothing whether it works or not. These are
-// files that DO reach GitHub, so a check that stopped seeing one fails here
-// rather than passing quietly forever.
-//
-// The last case is the other half: the package really does import the client
-// library for option structs and github.Ptr, and really does keep a permission
-// map keyed "push". A check that flagged those would be turned off within a
-// week, which is the same outcome as not having one.
-func TestSecondRouteCheckFindsTheRoutesItNames(t *testing.T) {
-	const lib = "github.com/google/go-github/v68/github"
-	for _, tc := range []struct {
-		name string
-		src  string
-		want string // substring the report must contain; "" means no report
-	}{{
-		name: "a client under the library's own name",
-		src: `package github
-import "` + lib + `"
-func f(token string) { _ = github.NewClient(nil).WithAuthToken(token) }`,
-		want: "second GitHub client",
-	}, {
-		name: "a client under an alias",
-		src: `package github
-import gh "` + lib + `"
-func f(token string) { _ = gh.NewClient(nil).WithAuthToken(token) }`,
-		want: "second GitHub client",
-	}, {
-		name: "the client type held in a field",
-		src: `package github
-import "` + lib + `"
-type backend struct{ client *github.Client }`,
-		want: "second GitHub client",
-	}, {
-		name: "the library dot-imported",
-		src: `package github
-import . "` + lib + `"
-func f() { _ = NewClient(nil) }`,
-		want: "dot-imports",
-	}, {
-		name: "gh spawned as a call argument",
-		src: `package github
-import "context"
-func f(ctx context.Context, run func(context.Context, string, string, ...string) error) {
-	_ = run(ctx, "", "gh", "pr", "create")
-}`,
-		want: `with "gh"`,
-	}, {
-		name: "gh spawned from an argument slice",
-		src: `package github
-func f(base string) []string { return []string{"gh", "pr", "create", "--base", base} }`,
-		want: `with "gh"`,
-	}, {
-		name: "a push run outside the seam",
-		src: `package github
-import "context"
-func f(ctx context.Context, run func(context.Context, ...string) error, branch string) {
-	_ = run(ctx, "push", "-u", "origin", branch)
-}`,
-		want: `with "push"`,
-	}, {
-		name: "the library used for what files may legitimately use it for",
-		src: `package github
-import "` + lib + `"
-func f(perms map[string]bool) *github.IssueComment {
-	_ = map[string]bool{"push": true, "pull": true}
-	_ = perms["push"]
-	return &github.IssueComment{Body: github.Ptr("hi")}
-}`,
-		want: "",
-	}} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := secondRouteViolations(t, "subject.go", tc.src)
-			if tc.want == "" {
-				if len(got) > 0 {
-					t.Errorf("clean file reported %v", got)
-				}
-				return
-			}
-			if !slices.ContainsFunc(got, func(v string) bool { return strings.Contains(v, tc.want) }) {
-				t.Errorf("reported %v, want one mentioning %q", got, tc.want)
-			}
-		})
-	}
-}
+// The single route out of this package is not asserted here any more. The check
+// moved into the commit gate — tools/build/common/outsideroutes.go, the `service
+// seams` step of bin/verify — because a rule that only this package's tests
+// enforce is a rule a file in another package can break: nothing here would have
+// noticed a cli command building its own client. The gate's rules subsume the
+// ones that stood here and add the import check and the host literal, and its
+// table test carries the cases this one did.
 
 // The editor is the transaction: "applies every change made on this editor, or
 // none of them". Where this orchestrator cannot write a staged combination
