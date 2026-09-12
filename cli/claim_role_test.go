@@ -146,6 +146,116 @@ func TestCmdClaim_ReclaimingAHeldItemSurvivesAnUnassumableRole(t *testing.T) {
 	assertHeldHere(t, be, "1")
 }
 
+// The idempotence above is for THE ITEM THIS ARENA HOLDS, and for no other: an
+// arena holding one item is not thereby licensed to claim a second whose
+// pending move is somebody else's. The two refs are told apart by the
+// orchestrator that minted them and the name it gives the item, so a holder
+// check that compared nothing would waive the role rule for any arena that
+// happened to hold anything at all.
+func TestCmdClaim_HoldingAnotherItemDoesNotWaiveTheRoleRule(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem("1", awaitingMaintainer())
+	inner.AddItem("2", flow.Item{Type: "task", Title: "2"})
+	heldHere(t, inner, "2") // this arena's lease, on the OTHER item
+	inner.SetCapabilities("", flow.CapPush)
+	be := &recordingClaimBackend{Orchestrator: inner}
+	app, errBuf := handoffTestApp(t, be)
+
+	if code := app.cmdClaim(context.Background(), []string{"1"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1 — the held item is not the one claimed; err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "awaits maintainer") {
+		t.Errorf("the refusal does not name the awaited role; got %q", errBuf.String())
+	}
+	if be.claims != 0 {
+		t.Errorf("Backend.Claim was called %d time(s) on a refused claim", be.claims)
+	}
+	item, err := inner.Load(context.Background(), inner.Ref("1"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !item.Holder.Empty() {
+		t.Errorf("a refused claim left the item held by %+v", item.Holder)
+	}
+	assertHeldHere(t, inner, "2") // and the lease it did hold is untouched
+}
+
+// An orchestrator that cannot say whether this arena holds anything has NOT
+// said that it does: the role check runs, which is the safe direction — the
+// worst it costs a genuine holder is a refusal naming the role the item is
+// stopped at, and the lease it already has is left alone. Read the other way,
+// one failing lookup would waive the rule for every claim.
+func TestCmdClaim_AnUnanswerableHolderLookupStillChecksTheRole(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem("1", awaitingMaintainer())
+	heldHere(t, inner, "1") // genuinely ours — but the lookup cannot say so
+	inner.SetCapabilities("", flow.CapPush)
+	be := &failingLookupActiveClaimBackend{Orchestrator: inner, err: errors.New("the forge will not say")}
+	app, errBuf := handoffTestApp(t, be)
+
+	if code := app.cmdClaim(context.Background(), []string{"1"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1 — an unanswered holder lookup does not waive the rule; err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "awaits maintainer") {
+		t.Errorf("the refusal does not name the role the item is stopped at; got %q", errBuf.String())
+	}
+	assertHeldHere(t, inner, "1") // the refusal took nothing away
+}
+
+// A refusal must not tell an operator their account backs no role when nothing
+// about the account could be detected: "none" sends them to fix permissions,
+// "unknown" to fix the orchestrator. The refusal renders the set through the
+// same function the announcement does, so the two cannot word one fact
+// differently — here the role is out of COVERAGE, which is configuration and
+// was never in question, so the refusal stands on a fact that is known while
+// the set it offers instead is not.
+func TestCmdClaim_ARefusalSaysUnknownRatherThanNoneWhenNothingWasDetected(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem("1", awaitingMaintainer())
+	be := &undetectableCapabilities{Orchestrator: inner, err: errors.New("the forge will not say")}
+	app, errBuf := handoffTestAppCovering(t, be, "contributor")
+
+	if code := app.cmdClaim(context.Background(), []string{"1"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1 — an uncovered role is refused whatever the account holds; err=%q", code, errBuf.String())
+	}
+	got := errBuf.String()
+	if !strings.Contains(got, "this run can assume: unknown — this orchestrator cannot detect capabilities") {
+		t.Errorf("the refusal does not say the capability question went unanswered; got %q", got)
+	}
+	if strings.Contains(got, "this run can assume: none") {
+		t.Errorf("an unanswered capability question was reported as an account that backs nothing; got %q", got)
+	}
+}
+
+// The refusal the SDK owns is a TYPED one, and its three fields are its
+// contract: the code `awaits-other-role`, ITEM-SCOPED so an auto-select loop
+// takes the next ref rather than stopping, and NO override — "a role is
+// assumable only where the runner both declares it and its account backs it"
+// (docs/resolution.md § Accounts, capabilities and roles), so there is nothing
+// a flag could unlock and offering one would send an operator to a flag that
+// cannot help.
+func TestTakeClaim_TheRoleRefusalIsTypedAndOffersNoOverride(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", awaitingMaintainer())
+	be.SetCapabilities("", flow.CapPush)
+	app, _ := handoffTestApp(t, be)
+
+	_, err := app.takeClaim(context.Background(), be.Ref("1"), nil)
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("takeClaim error = %v (%T), want a flow.ErrClaimRefused", err, err)
+	}
+	if refused.Code != "awaits-other-role" {
+		t.Errorf("Code = %q, want awaits-other-role", refused.Code)
+	}
+	if !refused.ItemScoped {
+		t.Error("the refusal is not item-scoped; auto-selection would stop the run on it")
+	}
+	if refused.Override != "" {
+		t.Errorf("Override = %q, want none — no flag can make a role assumable", refused.Override)
+	}
+}
+
 // Undetectable capabilities filter nothing within coverage: an orchestrator that
 // cannot answer the capability question has said NOTHING about the account, and
 // refusing a claim on the strength of a fact nobody established would stop a run
