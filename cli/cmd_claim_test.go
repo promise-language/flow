@@ -91,13 +91,17 @@ func (b refusingRefBackend) ResolveRef(_ context.Context, input string) (flow.It
 // recordingClaimBackend captures the overrides passed to Claim so the
 // flag-after-positional test can assert that the flag is actually
 // parsed (and not silently dropped).
+// It also counts the calls, which is what a test about a refusal decided BEFORE
+// the backend is reached asserts on: no lease was asked for at all.
 type recordingClaimBackend struct {
 	*fake.Orchestrator
 	lastOverrides []flow.ClaimOverride
+	claims        int
 }
 
 func (r *recordingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, overrides []flow.ClaimOverride) (flow.Claim, error) {
 	r.lastOverrides = overrides
+	r.claims++
 	return r.Orchestrator.Claim(ctx, ref, overrides)
 }
 
@@ -271,10 +275,21 @@ func TestCmdClaim_ParkDerivedBlockWarnsNothing(t *testing.T) {
 	}
 }
 
-// unreadableBackend mints claims normally and then cannot read the item back.
-type unreadableBackend struct{ *fake.Orchestrator }
+// unreadableBackend mints claims normally and then cannot read the item back:
+// the FIRST read — the one that decides whose move it is, before any lease is
+// taken — succeeds, and every read after it fails. That is where the warning
+// read sits, and the only place a failing read is best-effort: a pre-claim read
+// that fails refuses the claim rather than taking one blind.
+type unreadableBackend struct {
+	*fake.Orchestrator
+	loads int
+}
 
-func (b unreadableBackend) Load(context.Context, flow.ItemRef) (*flow.Item, error) {
+func (b *unreadableBackend) Load(ctx context.Context, ref flow.ItemRef) (*flow.Item, error) {
+	b.loads++
+	if b.loads == 1 {
+		return b.Orchestrator.Load(ctx, ref)
+	}
 	return nil, errors.New("backend unavailable")
 }
 
@@ -297,7 +312,7 @@ func TestCmdClaim_AWarningReadThatYieldsNoItemIsSilentAndStillSucceeds(t *testin
 		name string
 		wrap func(*fake.Orchestrator) flow.Orchestrator
 	}{
-		{"the read fails", func(be *fake.Orchestrator) flow.Orchestrator { return unreadableBackend{be} }},
+		{"the read fails", func(be *fake.Orchestrator) flow.Orchestrator { return &unreadableBackend{Orchestrator: be} }},
 		{"the read returns no item", func(be *fake.Orchestrator) flow.Orchestrator { return itemlessBackend{be} }},
 	}
 	for _, tt := range tests {

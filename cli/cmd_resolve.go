@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
-	"slices"
 	"strings"
 	"time"
 
@@ -100,11 +99,19 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		if code, ok := app.awaitFit(ctx, ref, &fitnessWaits); !ok {
 			return code
 		}
-		c, err := app.Orchestrator.Claim(ctx, ref, resolveOverrides)
+		c, err := app.takeClaim(ctx, ref, resolveOverrides)
 		if err != nil {
 			var refused flow.ErrClaimRefused
 			if errors.As(err, &refused) {
 				fmt.Fprintln(app.Err, formatClaimRefusal("resolve", refused))
+				return 1
+			}
+			// A recorded awaited role outside the declared set matches nothing
+			// and never will: no claim is taken, and the report names the role
+			// and the alternatives so a person can fix the flow or the record.
+			var unknown flow.ErrUnknownRole
+			if errors.As(err, &unknown) {
+				fmt.Fprintf(app.Err, "resolve: %s is blocked — %s\n", ref.Display, unknown)
 				return 1
 			}
 			fmt.Fprintln(app.Err, conditionOrError("resolve", err))
@@ -163,7 +170,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 				if code, fitOK := app.awaitFit(ctx, ref, &fitnessWaits); !fitOK {
 					return code
 				}
-				c, err := app.Orchestrator.Claim(ctx, ref, resolveOverrides)
+				c, err := app.takeClaim(ctx, ref, resolveOverrides)
 				if err == nil {
 					newClaim = c
 					claimed = true
@@ -279,21 +286,27 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		// the boundary like one whose account lacks the merge, and the item
 		// records the role it awaits. A run that crosses instead says so before
 		// it does: that is the default branch.
-		if st != nil && acts && !st.Finalized && st.Awaits.Role != "" && st.Awaits.Signal == "" {
-			role := st.Awaits.Role
-			switch {
-			case !app.Flow.DeclaresRole(role):
+		//
+		// The SAME classification the claim refusal reads (cli/claim.go
+		// whoseMoveIs), over the standing derived once above: the rule that
+		// decides whether an item may be claimed for a role and the rule that
+		// decides whether this run may advance it are one rule, and a run that
+		// held its claim through a boundary must reach the same verdict the
+		// claim would have.
+		if st != nil && acts && !st.Finalized {
+			switch whoseMoveIs(app.Flow, st.Awaits, stand.roles) {
+			case moveUndeclared:
 				// A recorded awaited role outside the declared set matches
 				// nothing and never will, and read as "the runner has not
 				// arrived" it would leave the item unofferable with nothing
 				// naming why. A person fixes the flow or the record.
 				fmt.Fprintf(app.Err, "resolve: %s is blocked — %s\n", claim.ItemRef.Display,
-					flow.ErrUnknownRole{Role: role, Declared: app.Flow.RoleNames()})
+					flow.ErrUnknownRole{Role: st.Awaits.Role, Declared: app.Flow.RoleNames()})
 				app.reportSpend()
 				return 1
-			case !stand.assumes(role):
+			case moveTheirs:
 				return app.handOff(ctx, *claim, st.Awaits, stand)
-			default:
+			case moveOurs:
 				app.reportCrossing(*claim, st)
 			}
 		}
@@ -476,16 +489,6 @@ type standing struct {
 	creator flow.AccountId
 }
 
-// assumes reports whether this run may take a move belonging to role.
-//
-// It reads the derived set and nothing else — the one derivation already
-// decided what undetectable capabilities mean (roleStanding.assumable), and
-// deciding it again here is how the announcement and the handoff come to
-// disagree.
-func (s standing) assumes(role flow.RoleName) bool {
-	return slices.Contains(s.roles, role)
-}
-
 // announceStanding derives the run's standing and prints it, before anything is
 // dispatched and before anything is waited on (docs/cli.md § The announcement
 // names the run's standing).
@@ -520,21 +523,44 @@ func (app *App) reportStanding(s standing) {
 	}
 }
 
-// rolesPhrase renders the assumable set for a person. "none" and "unknown" are
-// different answers and read differently: one says the account backs no
-// declared role, the other that nothing could be detected about it.
+// rolesPhrase renders the standing's assumable set. The rendering itself is the
+// free function below, which the claim refusal also reads: a refusal and an
+// announcement that worded the same set differently would have an operator
+// comparing two descriptions of one fact.
 func (s standing) rolesPhrase() string {
-	if !s.rolesKnown {
+	return rolesPhrase(s.roles, s.rolesKnown)
+}
+
+// rolesPhrase renders an assumable set for a person. "none" and "unknown" are
+// different answers and read differently: one says the account backs no
+// declared role, the other that nothing could be detected about it — which is
+// what `known` distinguishes.
+func rolesPhrase(roles []flow.RoleName, known bool) string {
+	if !known {
 		return "unknown — this orchestrator cannot detect capabilities"
 	}
-	if len(s.roles) == 0 {
+	if len(roles) == 0 {
 		return "none"
 	}
-	names := make([]string, 0, len(s.roles))
-	for _, r := range s.roles {
+	names := make([]string, 0, len(roles))
+	for _, r := range roles {
 		names = append(names, string(r))
 	}
 	return strings.Join(names, ", ")
+}
+
+// awaitedPhrase renders what an item awaits: the role, and its account of record
+// when the role has one — a route that returns to a role returns to the account
+// that acted in it, so whoever reads a handoff or a refusal is told who to
+// expect and not only what (docs/resolution.md § Whose move it is).
+//
+// One rendering for both, so the report that ends a run at a boundary and the
+// refusal that stops one starting cannot name the same marker differently.
+func awaitedPhrase(a flow.Awaits) string {
+	if a.Account == "" {
+		return string(a.Role)
+	}
+	return string(a.Role) + ", account of record " + string(a.Account)
 }
 
 // accountName renders an account for display, naming the one case where there
@@ -564,17 +590,10 @@ func (app *App) handOff(ctx context.Context, claim flow.Claim, awaits flow.Await
 		app.reportSpend()
 		return 1
 	}
-	awaited := string(awaits.Role)
-	// The account of record when the role has one — a route that returns to a
-	// role returns to the account that acted in it, and an operator reading the
-	// handoff is being told who to expect, not only what.
-	if awaits.Account != "" {
-		awaited += ", account of record " + string(awaits.Account)
-	}
 	// The SAME suffix the finalization prints, so the two totals cannot
 	// disagree about what the run cost.
 	fmt.Fprintf(app.Err, "resolve: %s handed off — awaits %s%s\n",
-		claim.ItemRef.Display, awaited, finalTotalSuffix(ctx, app, claim))
+		claim.ItemRef.Display, awaitedPhrase(awaits), finalTotalSuffix(ctx, app, claim))
 	app.reportStanding(s)
 	app.reportSpend()
 	return 0
