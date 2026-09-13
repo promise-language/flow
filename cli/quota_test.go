@@ -367,6 +367,61 @@ func TestDiscoverOAuthToken_DefaultsToHomeClaude(t *testing.T) {
 	}
 }
 
+// os.UserConfigDir()/claude — ~/.config/claude on Linux — was one of the
+// directories the walk probed, and the client writes nothing there. A
+// credential sitting in it is not a credential this reader has found.
+func TestDiscoverOAuthToken_UserConfigDirIsNotRead(t *testing.T) {
+	useCredentialGOOS(t, "linux")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	// Resolved AFTER the redirect, and asserted to be inside it: a test must
+	// never write a credential into the developer's own configuration.
+	ucd, err := os.UserConfigDir()
+	if err != nil {
+		t.Skipf("no user config dir on this host: %v", err)
+	}
+	if !strings.HasPrefix(ucd, home) {
+		t.Skipf("user config dir %s is not under the redirected home", ucd)
+	}
+	writeCredentialsFile(t, filepath.Join(ucd, "claude"), ".credentials.json",
+		claudeCredentials("from-user-config-dir", 0))
+
+	tok, reason := discoverOAuthToken()
+	if tok != "" {
+		t.Errorf("token = %q, want empty — the client writes nothing under %s", tok, ucd)
+	}
+	if want := filepath.Join(home, ".claude", ".credentials.json"); !strings.Contains(reason, want) {
+		t.Errorf("reason should name %s and nothing else; got %q", want, reason)
+	}
+}
+
+// Neither source can be located: the file branch needs a directory, and saying
+// so is not the same as saying the file is missing from one.
+func TestDiscoverOAuthToken_NoConfigDirAndNoHome(t *testing.T) {
+	useCredentialGOOS(t, "linux")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	if _, err := os.UserHomeDir(); err == nil {
+		t.Skip("this host reports a home directory with the environment cleared")
+	}
+
+	tok, reason := discoverOAuthToken()
+	if tok != "" {
+		t.Errorf("token = %q, want empty", tok)
+	}
+	if !strings.Contains(reason, "CLAUDE_CONFIG_DIR") || !strings.Contains(reason, "home directory") {
+		t.Errorf("reason should name both places a directory could come from; got %q", reason)
+	}
+	if strings.Contains(reason, ".credentials.json") {
+		t.Errorf("no path was read, so none may be named; got %q", reason)
+	}
+}
+
 // The missing-file reason names the one path that was read, and mentions no
 // Keychain: the generic "(searched … and macOS Keychain)" message is what made
 // a one-character path defect read like an environment problem.

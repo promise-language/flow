@@ -239,7 +239,7 @@ func keychainOAuthToken() (string, string) {
 // looks like it might name the token, and takes the first field that looks like
 // it might be one, returns a different answer on two hosts holding the same
 // account, and the failure is silent because each answer is individually
-// plausible (docs/environment.md § The set is closed).
+// plausible (docs/environment.md § The agent account is a scope).
 func parseClaudeCredentials(data []byte, source string, now time.Time) (string, string) {
 	var creds struct {
 		ClaudeAiOauth struct {
@@ -278,9 +278,15 @@ var agentAccount = discoverAgentAccount
 // when nothing on disk says — an unknown account drops the line rather than
 // printing a guess.
 //
-// The shape discoverOAuthToken uses, for the same reasons: nothing is pinned in
-// flow's source, nothing is asked of a subprocess, and nothing touches the
-// network. What cannot be learned by reading is not learned here.
+// Nothing is asked of a subprocess and nothing touches the network: what cannot
+// be learned by reading configuration is not learned here, which is
+// discoverAPIBase's rule for the same reason.
+//
+// The key is still discovered rather than stated — the shape the token reader
+// used until #183 gave it up. docs/environment.md § The agent account is a scope
+// requires the opposite ("read from a stated field in a stated place, never
+// discovered"), so this reader has remaining work; it is not this change's, and
+// folding it in here would collide with the change that does it.
 func discoverAgentAccount() string {
 	for _, path := range agentAccountFiles() {
 		data, err := os.ReadFile(path)
