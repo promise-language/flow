@@ -549,8 +549,11 @@ func TestCmdResolve_AHandoffThatCannotReleaseTheClaimFails(t *testing.T) {
 
 // A release refused on a worktree precondition is TYPED, and its detail is the
 // only thing that says how to clear it — which files are in the way, or which
-// branch HEAD is on. The one-line "could not be released" fold prints the error
-// but not the detail beneath it, so the refusal is rendered too.
+// branch HEAD is on. So the consequence is stated and the refusal is rendered
+// beneath it, ONCE: the typed error's own Error() is the reason and the check,
+// which is exactly what the rendering's first line says, so folding it into the
+// consequence line as well prints that sentence twice and buries the detail
+// under a repeat of it.
 func TestCmdResolve_ARefusedReleaseIsRenderedWithItsDetail(t *testing.T) {
 	inner := fake.New()
 	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
@@ -579,6 +582,15 @@ func TestCmdResolve_ARefusedReleaseIsRenderedWithItsDetail(t *testing.T) {
 	}
 	if strings.Contains(out, "override with") {
 		t.Errorf("offered an override for a release; nothing bypasses these checks. got %q", out)
+	}
+	if n := strings.Count(out, "worktree has uncommitted or untracked changes"); n != 1 {
+		t.Errorf("the reason is printed %d times, want 1 — a repeat of it buries the detail; got %q", n, out)
+	}
+	// The narration of a resolve is prefixed by the command the operator ran.
+	// The line above already says it was the release that refused, so a second
+	// prefix naming a command nobody invoked is one more thing to reconcile.
+	if !strings.Contains(out, "resolve: refused —") {
+		t.Errorf("the refusal is not narrated as this run's; got %q", out)
 	}
 }
 

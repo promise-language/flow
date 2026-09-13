@@ -707,17 +707,23 @@ func accountName(a flow.AccountId) string {
 // given up.
 func (app *App) handOff(ctx context.Context, claim flow.Claim, awaits flow.Awaits, s standing) int {
 	if err := app.Orchestrator.Release(ctx, claim.ItemRef); err != nil {
-		fmt.Fprintf(app.Err, "resolve: %s awaits %s, but the claim could not be released: %s\n",
-			claim.ItemRef.Display, awaits.Role, err)
 		// A refused release is typed, and its DETAIL is what tells the operator
 		// how to clear it — which files are in the way, or which branch HEAD is
-		// on (docs/cli.md § Releasing). The line above states the consequence
-		// and folds the error into one line; the renderer below is what carries
-		// the failing check and the verbatim output beneath it, the same shape
-		// `release` prints.
+		// on (docs/cli.md § Releasing). So the consequence is stated on its own
+		// line and the refusal is RENDERED beneath it, rather than folded into
+		// the line as well: ErrClaimRefused.Error() is the reason and the check,
+		// which is the whole of what the rendering's first line says, so folding
+		// it in prints that sentence twice and buries the detail under a repeat.
+		// An untyped failure has no rendering, so it keeps the fold — the
+		// backend's own account of it is the only account there is.
 		var refused flow.ErrClaimRefused
 		if errors.As(err, &refused) {
-			fmt.Fprintln(app.Err, formatClaimRefusal("release", refused))
+			fmt.Fprintf(app.Err, "resolve: %s awaits %s, but the claim could not be released\n",
+				claim.ItemRef.Display, awaits.Role)
+			fmt.Fprintln(app.Err, formatClaimRefusal("resolve", refused))
+		} else {
+			fmt.Fprintf(app.Err, "resolve: %s awaits %s, but the claim could not be released: %s\n",
+				claim.ItemRef.Display, awaits.Role, err)
 		}
 		app.reportSpend()
 		return 1
