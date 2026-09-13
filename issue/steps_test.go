@@ -2205,8 +2205,14 @@ func TestQuestionDisclosureRevisionSucceedsOnFirstRetry(t *testing.T) {
 	if rev.PermissionMode != "plan" {
 		t.Errorf("revision PermissionMode = %q, want plan — a revision must not edit files", rev.PermissionMode)
 	}
-	if rev.ResumeSessionID != "session-1" {
-		t.Errorf("revision resumes %q, want the session that produced the question", rev.ResumeSessionID)
+	// The handler leaves ResumeSessionID EMPTY. Which conversation a prompt
+	// continues is the chokepoint's to say, from the resolution's own session
+	// (docs/resolution.md § The agent session) — this context hands the agent over
+	// unmetered, so a handler that filled the field in would be choosing for it.
+	// That the revision continues the turn that produced the question is proven
+	// against the real chokepoint in cli's session tests.
+	if rev.ResumeSessionID != "" {
+		t.Errorf("revision sets ResumeSessionID = %q; the session is the resolution's, stamped at the chokepoint", rev.ResumeSessionID)
 	}
 }
 
@@ -2342,9 +2348,11 @@ func TestQuestionDisclosureSecondRefusalRevisesTheRevision(t *testing.T) {
 	if !strings.Contains(second.Prompt, "second refusal") {
 		t.Errorf("second revision carries the first refusal's reason, not this one's: %q", second.Prompt)
 	}
-	// Session chaining: round 2 resumes the session that wrote round 1.
-	if second.ResumeSessionID != "session-2" {
-		t.Errorf("second revision resumes %q, want the session that wrote the previous draft", second.ResumeSessionID)
+	// No session chaining HERE: the handler leaves the field empty and the
+	// chokepoint stamps the resolution's session on the way out. See the first
+	// revision test for why, and cli's session tests for the chaining itself.
+	if second.ResumeSessionID != "" {
+		t.Errorf("second revision sets ResumeSessionID = %q; the session is the resolution's, stamped at the chokepoint", second.ResumeSessionID)
 	}
 	// Each refusal stashes a record; the last one is the latest refused text.
 	if len(ctx.wipSaves) < 2 {

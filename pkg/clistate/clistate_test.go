@@ -219,6 +219,165 @@ func TestClearRemovesEveryWorkRecord(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Agent session.
+// ---------------------------------------------------------------------------
+
+func TestSessionRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	flowDir := filepath.Join(dir, ".flow")
+	t.Setenv("FLOW_DIR", flowDir)
+
+	if id, boundary, err := clistate.LoadSession("42"); id != "" || boundary != "" || err != nil {
+		t.Errorf("LoadSession with nothing stored = (%q, %q, %v), want two empties and nil", id, boundary, err)
+	}
+	if err := clistate.SaveSession("42", "sess-1", ""); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	// Keyed by the item ALONE — one file, not a tree of steps. That is the whole
+	// difference from a draft: the session belongs to the resolution, so keying
+	// it by step would end the conversation at the first step boundary.
+	if _, err := os.Stat(filepath.Join(flowDir, "session", "42.json")); err != nil {
+		t.Errorf("record is not at .flow/session/42.json: %v", err)
+	}
+	id, boundary, err := clistate.LoadSession("42")
+	if err != nil || id != "sess-1" || boundary != "" {
+		t.Fatalf("LoadSession = (%q, %q, %v), want the stored handle", id, boundary, err)
+	}
+	// A second save replaces: the record is the handle the resolution is holding
+	// now, not a log of every one it has held.
+	if err := clistate.SaveSession("42", "sess-2", "review"); err != nil {
+		t.Fatalf("SaveSession (again): %v", err)
+	}
+	if id, boundary, _ := clistate.LoadSession("42"); id != "sess-2" || boundary != "review" {
+		t.Errorf("LoadSession after re-save = (%q, %q), want the newer record", id, boundary)
+	}
+	if err := clistate.ClearSession("42"); err != nil {
+		t.Fatalf("ClearSession: %v", err)
+	}
+	if id, boundary, err := clistate.LoadSession("42"); id != "" || boundary != "" || err != nil {
+		t.Errorf("LoadSession after ClearSession = (%q, %q, %v), want two empties and nil", id, boundary, err)
+	}
+	// Idempotent: clearing what is not there is not an error.
+	if err := clistate.ClearSession("42"); err != nil {
+		t.Errorf("ClearSession on an absent record: %v", err)
+	}
+}
+
+// The keying is the correctness property here too: a record left behind by a
+// crash and read under another item's key would hand one resolution another's
+// whole conversation — arriving as the agent's own memory, with nothing to mark
+// it as foreign.
+func TestSessionIsNotReadableUnderAnotherKey(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+
+	if err := clistate.SaveSession("42", "sess-42", "review"); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	if id, boundary, err := clistate.LoadSession("43"); id != "" || boundary != "" || err != nil {
+		t.Errorf("LoadSession for another item = (%q, %q, %v), want two empties and nil", id, boundary, err)
+	}
+	if id, _, _ := clistate.LoadSession("42"); id != "sess-42" {
+		t.Errorf("LoadSession under its own key = %q, want the stored handle", id)
+	}
+}
+
+// The in-file item is the authority, so two ids that sanitise onto one path can
+// only LOSE a record, never hand one resolution another's conversation.
+func TestSessionRefusesARecordWhosePathItShares(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+
+	if err := clistate.SaveSession("a/b", "sess-1", ""); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	// "a/b" and "a:b" sanitise onto the same file name.
+	if id, _, err := clistate.LoadSession("a:b"); id != "" || err != nil {
+		t.Errorf("LoadSession under a colliding id = (%q, %v), want (\"\", nil)", id, err)
+	}
+}
+
+// Releasing a claim ends that conversation's life: a handle left behind after
+// the work is over names a session holding the resolution's whole reasoning,
+// kept for no benefit.
+func TestClearRemovesEverySessionRecord(t *testing.T) {
+	dir := t.TempDir()
+	flowDir := filepath.Join(dir, ".flow")
+	t.Setenv("FLOW_DIR", flowDir)
+
+	if err := clistate.Save(flow.Claim{OrchestratorName: "fake", Account: "alice"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	for _, item := range []string{"42", "43"} {
+		if err := clistate.SaveSession(item, "sess-"+item, ""); err != nil {
+			t.Fatalf("SaveSession(%s): %v", item, err)
+		}
+	}
+	if err := clistate.Clear(); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if id, _, _ := clistate.LoadSession("42"); id != "" {
+		t.Errorf("LoadSession after Clear = %q, want nothing left", id)
+	}
+	if _, err := os.Stat(filepath.Join(flowDir, "session")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf(".flow/session survived Clear, stat err = %v", err)
+	}
+	// And the state directory itself goes, which it cannot if the session tree is
+	// left behind.
+	if _, err := os.Stat(flowDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("%s should be gone once it holds nothing, stat err = %v", flowDir, err)
+	}
+}
+
+// ClearItemSession is what a Reset needs: a conversation kept past the journal
+// it belonged to has nothing left to continue. Per-item, because one arena's
+// other items are not part of the record being cleared.
+func TestClearItemSessionTakesOneItemsRecordAndNoOthers(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FLOW_DIR", filepath.Join(dir, ".flow"))
+
+	for _, item := range []string{"42", "43"} {
+		if err := clistate.SaveSession(item, "sess-"+item, ""); err != nil {
+			t.Fatalf("SaveSession(%s): %v", item, err)
+		}
+	}
+	if err := clistate.ClearItemSession("42"); err != nil {
+		t.Fatalf("ClearItemSession: %v", err)
+	}
+	if id, _, err := clistate.LoadSession("42"); id != "" || err != nil {
+		t.Errorf("LoadSession(42) after ClearItemSession = (%q, %v), want (\"\", nil)", id, err)
+	}
+	if id, _, _ := clistate.LoadSession("43"); id != "sess-43" {
+		t.Errorf("LoadSession(43) = %q; clearing one item took another item's conversation", id)
+	}
+	// Idempotent.
+	if err := clistate.ClearItemSession("42"); err != nil {
+		t.Errorf("ClearItemSession on an absent record: %v", err)
+	}
+}
+
+// A corrupt record is reported rather than read as absence. Absence means "this
+// resolution holds no handle", which is a true answer the caller acts on; a file
+// that cannot be parsed is a broken store, and answering it with a true-looking
+// "nothing here" hides that.
+func TestLoadSessionRefusesACorruptRecord(t *testing.T) {
+	dir := t.TempDir()
+	flowDir := filepath.Join(dir, ".flow")
+	t.Setenv("FLOW_DIR", flowDir)
+
+	if err := clistate.SaveSession("42", "sess-1", ""); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	path := filepath.Join(flowDir, "session", "42.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("corrupt the record: %v", err)
+	}
+	if _, _, err := clistate.LoadSession("42"); err == nil {
+		t.Error("LoadSession read a corrupt record as absence")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Running-step record.
 // ---------------------------------------------------------------------------
 
@@ -450,6 +609,9 @@ func TestDirRefusesARelativeOverride(t *testing.T) {
 	if err := clistate.SaveWork("42", "plan", "reasoning"); err == nil {
 		t.Error("SaveWork wrote a record under a relative FLOW_DIR")
 	}
+	if err := clistate.SaveSession("42", "sess-1", "review"); err == nil {
+		t.Error("SaveSession wrote a record under a relative FLOW_DIR")
+	}
 	if err := clistate.SaveRunning(clistate.RunningRecord{Item: "1", Step: "plan"}); err == nil {
 		t.Error("SaveRunning wrote a record under a relative FLOW_DIR")
 	}
@@ -479,6 +641,10 @@ func TestOperationsRefuseWhenTheStateDirCannotBeLocated(t *testing.T) {
 		{"LoadWork", func() error { _, err := clistate.LoadWork("42", "plan"); return err }},
 		{"ClearWork", func() error { return clistate.ClearWork("42", "plan") }},
 		{"ClearItemWork", func() error { return clistate.ClearItemWork("42") }},
+		{"SaveSession", func() error { return clistate.SaveSession("42", "sess-1", "review") }},
+		{"LoadSession", func() error { _, _, err := clistate.LoadSession("42"); return err }},
+		{"ClearSession", func() error { return clistate.ClearSession("42") }},
+		{"ClearItemSession", func() error { return clistate.ClearItemSession("42") }},
 		{"SaveRunning", func() error { return clistate.SaveRunning(clistate.RunningRecord{Item: "1"}) }},
 		{"LoadRunning", func() error { _, err := clistate.LoadRunning(); return err }},
 		{"ClearRunning", clistate.ClearRunning},

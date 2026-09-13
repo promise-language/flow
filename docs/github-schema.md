@@ -257,6 +257,12 @@ Idempotence reads the **source** issue, not search: the state comment's `filed` 
 
 The GitHub backend's draft store is the worktree-local `.flow/draft/` directory. Drafts are keyed by issue number and step result id. Nothing in this directory touches the GitHub API — the structural separation from the outward-facing code **is** the "never published" guarantee. Drafts are cleared when the claim is released (via `clistate.Clear`).
 
+## The agent session
+
+The backend's session store is the worktree-local `.flow/session/` directory, beside the draft tree and never published for the same structural reason: nothing in it touches the GitHub API. One file per issue — the session belongs to the resolution ([resolution.md](resolution.md) § The agent session), so it is **keyed by the issue number alone**, and keying it like a draft would end the conversation at the first step boundary. The record holds the substrate's handle and the step whose `fresh` declaration it already honoured; the issue number is stored in the file as well as in its path, so two ids that sanitise onto one name lose a record rather than hand one resolution another's conversation. It is cleared when the claim is released (via `clistate.Clear`) and when the item's record is reset.
+
+**Nothing about the session reaches the issue.** It is not in the state comment, not in the journal, and not in any published body: the handle names a conversation holding the resolution's whole reasoning.
+
 ## Cross-references
 
 - [artifacts-and-signals.md](artifacts-and-signals.md) — the result kinds stored here.

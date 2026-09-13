@@ -10,9 +10,11 @@
 // One file per checkout is what does the arena scoping a fleet-serving
 // orchestrator has to do explicitly.
 //
-// The same directory holds the other per-clone thing a claim owns: the
+// The same directory holds the other per-clone things a claim owns: the
 // work-in-progress records a step leaves for its own next invocation
-// (`.flow/draft/<item>/<step>.json`). See SaveWork and flow.WorkInProgress.
+// (`.flow/draft/<item>/<step>.json`; see SaveWork and flow.WorkInProgress), and
+// the agent session the resolution is holding (`.flow/session/<item>.json`; see
+// SaveSession and flow.AgentSession).
 package clistate
 
 import (
@@ -31,6 +33,7 @@ const (
 	flowDirName   = ".flow"
 	activeJSONRel = "active.json"
 	workDirRel    = "draft"
+	sessionDirRel = "session"
 )
 
 // Dir returns the state directory: `.flow` inside the checkout the running
@@ -113,12 +116,13 @@ func Save(c flow.Claim) error {
 }
 
 // Clear removes the worktree-local claim state: `active.json`, the running
-// record, and every work-in-progress record (and the directory if empty).
-// Idempotent — no error if already absent.
+// record, every work-in-progress record, and every agent-session record (and the
+// directory if empty). Idempotent — no error if already absent.
 //
-// The work tree goes first, and not only so `os.Remove(Dir())` can succeed
-// again: releasing a claim ends that reasoning's life. Prose left on disk after
-// the work is over is a disclosure sitting around for no benefit.
+// The work and session trees go first, and not only so `os.Remove(Dir())` can
+// succeed again: releasing a claim ends that reasoning's life. Prose left on
+// disk after the work is over is a disclosure sitting around for no benefit, and
+// so is a handle on the conversation that produced it.
 func Clear() error {
 	dir, err := Dir()
 	if err != nil {
@@ -127,6 +131,10 @@ func Clear() error {
 	workDir := filepath.Join(dir, workDirRel)
 	if err := os.RemoveAll(workDir); err != nil {
 		return fmt.Errorf("remove %s: %w", workDir, err)
+	}
+	sessDir := filepath.Join(dir, sessionDirRel)
+	if err := os.RemoveAll(sessDir); err != nil {
+		return fmt.Errorf("remove %s: %w", sessDir, err)
 	}
 	if err := ClearRunning(); err != nil {
 		return fmt.Errorf("clear running: %w", err)
@@ -294,6 +302,124 @@ func ClearWork(item, step string) error {
 	_ = os.Remove(filepath.Dir(path))
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// Agent session.
+//
+// The handle the resolution holds on its agent conversation, so the next
+// dispatch continues it rather than buying it again. See flow.AgentSession for
+// the contract these implement.
+//
+// Records live at `.flow/session/<item>.json`, beside the draft tree, and are
+// keyed by the ITEM ALONE: the session belongs to the resolution, and keying it
+// by step as well would end the conversation at the first step boundary. They
+// are never published.
+// ---------------------------------------------------------------------------
+
+// sessionRecord is one resolution's session handle. Item is stored IN the file
+// as well as being in its path, for the reason workRecord stores its pair:
+// the in-file value is the authority, so sanitising two different ids onto one
+// path can only lose a record, never hand one resolution another's conversation.
+type sessionRecord struct {
+	Item       string    `json:"item"`
+	SessionID  string    `json:"session_id"`
+	Boundary   string    `json:"boundary"`
+	RecordedAt time.Time `json:"recorded_at"`
+}
+
+// SessionDir returns the directory agent-session records live under.
+func SessionDir() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, sessionDirRel), nil
+}
+
+// sessionPath is the file one item's record lives at.
+func sessionPath(item string) (string, error) {
+	dir, err := SessionDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, sanitizeSegment(item)+".json"), nil
+}
+
+// SaveSession stores the session handle and the boundary already honoured for
+// item, replacing whatever was there. The file is 0o600 because the handle names
+// a conversation holding the resolution's whole reasoning.
+func SaveSession(item, sessionID, boundary string) error {
+	path, err := sessionPath(item)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
+	}
+	b, err := json.MarshalIndent(sessionRecord{
+		Item:       item,
+		SessionID:  sessionID,
+		Boundary:   boundary,
+		RecordedAt: time.Now().UTC(),
+	}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal session record: %w", err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// LoadSession returns the session handle and boundary stored for item, or two
+// empty strings when there is none.
+//
+// A record naming a different item is not this resolution's, and reads as
+// absence. That check — not the clearing — is what keeps one item's conversation
+// out of another item's agent when a crash, a kill, or an abandoned run leaves
+// `.flow/` behind.
+func LoadSession(item string) (sessionID, boundary string, err error) {
+	path, perr := sessionPath(item)
+	if perr != nil {
+		return "", "", perr
+	}
+	b, rerr := os.ReadFile(path)
+	if rerr != nil {
+		if errors.Is(rerr, os.ErrNotExist) {
+			return "", "", nil
+		}
+		return "", "", fmt.Errorf("read %s: %w", path, rerr)
+	}
+	var rec sessionRecord
+	if uerr := json.Unmarshal(b, &rec); uerr != nil {
+		return "", "", fmt.Errorf("parse %s: %w", path, uerr)
+	}
+	if rec.Item != item {
+		return "", "", nil
+	}
+	return rec.SessionID, rec.Boundary, nil
+}
+
+// ClearSession removes the record for item. Idempotent — no error if already
+// absent.
+func ClearSession(item string) error {
+	path, err := sessionPath(item)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove %s: %w", path, err)
+	}
+	return nil
+}
+
+// ClearItemSession removes the agent-session record for one item.
+//
+// What Reset needs: a reset clears the flow's whole record, and a conversation
+// kept past the journal it belonged to has nothing left to continue. One item's
+// record IS one file, so this is ClearSession by another name — it exists so the
+// Reset path spells the intent the way ClearItemWork does beside it.
+func ClearItemSession(item string) error { return ClearSession(item) }
 
 // ---------------------------------------------------------------------------
 // Running-step record.

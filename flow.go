@@ -180,6 +180,18 @@ func (f *Flow) AwaitSignal(description string, signal SignalId, cfg StepConfig) 
 // call that was made, because a registration panic is read without a stack that
 // says which of the three it came from.
 func (f *Flow) prepareStep(registrar string, kind stepKind, description string, cfg StepConfig) *step {
+	// Read BEFORE normalization, which is the whole reason this check sits above
+	// the rest: after it an entry step that declared nothing is indistinguishable
+	// from one that declared `continued`, and only the second is a defect. The
+	// entry step always begins a new session — nothing precedes it in this
+	// resolution, and what precedes it in the arena belongs to a different item —
+	// so `continued` there asks for something that cannot exist, and is refused
+	// for the reason a signal wait declaring Prompts is (docs/flow-registration.md
+	// § Session continuity).
+	if cfg.Entry && cfg.Session == SessionContinued {
+		panic(fmt.Sprintf("flow.%s: step %q in flow %q is the entry and declares Session %q; nothing precedes the entry step, so there is no session for it to continue — declare %q or leave Session unset",
+			registrar, description, f.name, SessionContinued, SessionFresh))
+	}
 	cfg = cfg.normalized()
 
 	// The second entry is refusable here — the first one is already recorded.
@@ -200,6 +212,10 @@ func (f *Flow) prepareStep(registrar string, kind stepKind, description string, 
 	if !cfg.Leaves.Valid() {
 		panic(fmt.Sprintf("flow.%s: step %q in flow %q has Leaves %q, which is not one of %v",
 			registrar, description, f.name, cfg.Leaves, AllLeavesStates()))
+	}
+	if !cfg.Session.Valid() {
+		panic(fmt.Sprintf("flow.%s: step %q in flow %q has Session %q, which is not one of %v",
+			registrar, description, f.name, cfg.Session, AllSessionPolicies()))
 	}
 	// Prompts is REQUIRED on a step and has no default: PromptsNone as a zero
 	// value would publish a guarantee no author wrote, and PromptsAgent as one
@@ -262,6 +278,7 @@ func (f *Flow) prepareStep(registrar string, kind stepKind, description string, 
 		needs:       cfg.Needs,
 		leaves:      cfg.Leaves,
 		prompts:     cfg.Prompts,
+		session:     cfg.Session,
 	}
 }
 
@@ -505,6 +522,10 @@ type LifecycleItem struct {
 	Writes      WriteContract // what the step may change in the worktree
 	Leaves      LeavesState   // the worktree state the step must end in
 	Prompts     PromptPolicy  // whether the step may prompt the agent; empty on a wait
+	// Session is whether the step continues the resolution's agent conversation
+	// or begins a new one. Independent of Prompts: a step that does not prompt
+	// does not disturb the session.
+	Session SessionPolicy
 }
 
 // Result returns the step's identity: its ArtifactId when it produces an
@@ -584,6 +605,7 @@ func toLifecycleItem(st *step) LifecycleItem {
 		Writes:      st.writes,
 		Leaves:      st.leaves,
 		Prompts:     st.prompts,
+		Session:     st.session,
 	}
 	switch st.kind {
 	case stepArtifact:

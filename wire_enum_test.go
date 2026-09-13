@@ -278,6 +278,7 @@ func TestStepModelEnums_ExhaustiveAgainstAST(t *testing.T) {
 		// refused outright — so a member left out of the enumerator would be
 		// refused at every registration naming it, as with Capability.
 		{"step.go", "PromptPolicy", stringsOf(flow.AllPromptPolicies())},
+		{"step.go", "SessionPolicy", stringsOf(flow.AllSessionPolicies())},
 		// Capability has no defined zero, but the enumerator is still the only
 		// thing standing between a declared member and a role that can never be
 		// assumed: Flow.Role validates a declaration against AllCapabilities,

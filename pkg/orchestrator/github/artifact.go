@@ -305,8 +305,10 @@ func (b *Orchestrator) Reset(ctx context.Context, ref flow.ItemRef) error {
 	if err != nil {
 		return err
 	}
-	// Drafts are worktree-local and go whether or not a state comment exists:
-	// scratch prose kept past the record it belonged to has nothing to resume.
+	// Drafts and the agent session are worktree-local and go whether or not a
+	// state comment exists: scratch prose kept past the record it belonged to has
+	// nothing to resume, and a conversation kept past the journal it belonged to
+	// has nothing left to continue.
 	//
 	// Keyed through workItemKey, the same function the writes use: a second
 	// spelling of the key would clear a directory nothing stores records in, and
@@ -317,6 +319,9 @@ func (b *Orchestrator) Reset(ctx context.Context, ref flow.ItemRef) error {
 	}
 	if derr := clistate.ClearItemWork(workItem); derr != nil {
 		return fmt.Errorf("github.Reset: clear drafts for #%d: %w", issueNum, derr)
+	}
+	if derr := clistate.ClearItemSession(workItem); derr != nil {
+		return fmt.Errorf("github.Reset: clear the agent session for #%d: %w", issueNum, derr)
 	}
 	if body == "" || stateID == 0 {
 		// Nothing recorded — the next AppendEntry writes a fresh state comment.

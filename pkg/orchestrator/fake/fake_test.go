@@ -511,6 +511,7 @@ func TestBackend_Reset_ClearsTheFlowsWholeRecord(t *testing.T) {
 	_ = b.AddCost(ctx, ref, "plan", 4.25)
 	_ = b.AddDuration(ctx, ref, "plan", time.Minute)
 	_ = b.SaveWorkInProgress(ctx, ref, "impl", "half a diff")
+	_ = b.SaveAgentSession(ctx, ref, flow.AgentSession{SessionID: "sess-1", Boundary: "impl"})
 	if err := b.Park(ctx, ref, flow.ParkRequest{Kind: flow.ParkRefused, Step: "impl", Reason: "no"}); err != nil {
 		t.Fatalf("Park: %v", err)
 	}
@@ -540,6 +541,11 @@ func TestBackend_Reset_ClearsTheFlowsWholeRecord(t *testing.T) {
 	}
 	if draft, _ := b.LoadWorkInProgress(ctx, ref, "impl"); draft != "" {
 		t.Errorf("draft = %q after Reset, want empty", draft)
+	}
+	// The conversation is part of the record being cleared: kept past the journal
+	// it belonged to, it would resume reasoning about a route that is gone.
+	if sess, _ := b.LoadAgentSession(ctx, ref); sess != (flow.AgentSession{}) {
+		t.Errorf("agent session = %+v after Reset, want the zero value", sess)
 	}
 }
 
@@ -1447,6 +1453,28 @@ func TestBackend_ReleaseDropsWorkInProgress(t *testing.T) {
 	}
 	if got, err := b.LoadWorkInProgress(ctx, ref, "plan"); got != "" || err != nil {
 		t.Errorf("Load after Release = (%q, %v), want nothing left", got, err)
+	}
+}
+
+// And the agent session goes with it, for a sharper reason than the draft's: the
+// handle names a conversation holding the resolution's whole reasoning, and the
+// next claim on this item is a different resolution.
+func TestBackend_ReleaseDropsTheAgentSession(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := addItem(b, "1")
+	if _, err := b.Claim(ctx, ref, nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+
+	if err := b.SaveAgentSession(ctx, ref, flow.AgentSession{SessionID: "sess-1", Boundary: "review"}); err != nil {
+		t.Fatalf("SaveAgentSession: %v", err)
+	}
+	if err := b.Release(ctx, ref); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if got, err := b.LoadAgentSession(ctx, ref); got != (flow.AgentSession{}) || err != nil {
+		t.Errorf("Load after Release = (%+v, %v), want nothing left", got, err)
 	}
 }
 

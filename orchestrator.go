@@ -550,6 +550,27 @@ type CommandRun struct {
 	Detail string
 }
 
+// AgentSession is the resolution's handle on its agent conversation, and the
+// boundary already honoured.
+//
+// Backend state of the same kind as the draft: never published, not part of what
+// a reviewer reads, cleared when the claim is released or the item finalized
+// (docs/resolution.md § The agent session). The handle is OFFERED and never
+// depended on — a substrate may decline to resume it — so a resolution holding
+// none is not a resolution that is wrong, only one paying for context it already
+// had.
+type AgentSession struct {
+	// SessionID is the substrate's handle, or "" when the resolution holds none.
+	SessionID string
+	// Boundary is the step whose `fresh` declaration this record already
+	// honoured. It is what makes `fresh` a property of one EXECUTION rather than
+	// of each dispatch: a fresh step that prompts, parks and is re-dispatched
+	// resumes the session it opened instead of opening a second one, because a
+	// resume deciding this moment is special is exactly the machinery-chosen
+	// session docs/resolution.md § The agent session forbids.
+	Boundary StepId
+}
+
 // Orchestrator is what the SDK talks to. It leases items to arenas, holds their
 // state, runs gates and commands in a worktree, and lands what those produce.
 // WHERE IT STORES ANY OF THAT IS ITS OWN BUSINESS — the GitHub orchestrator
@@ -874,6 +895,36 @@ type Orchestrator interface {
 	// ClearWorkInProgress discards it. Clearing what is not there is not an
 	// error.
 	ClearWorkInProgress(ctx context.Context, ref ItemRef, step StepId) error
+
+	// SaveAgentSession stores the resolution's handle on its agent conversation,
+	// so the next dispatch continues it instead of buying it again
+	// (docs/resolution.md § The agent session).
+	//
+	// Keyed by the ITEM ALONE, and that is the difference from the work-in-progress
+	// record above. The session belongs to the RESOLUTION: keying it by item and
+	// step as well would end the conversation at the first step boundary, which is
+	// the failure this store exists to close.
+	//
+	// NOTHING HERE IS EVER PUBLISHED, for the reason the draft is not: the handle
+	// names a conversation that holds the resolution's whole reasoning. It lives
+	// with the claim, and is cleared when the claim is released or the item
+	// finalized.
+	//
+	// A backend with nowhere to keep one answers ErrUnsupported rather than
+	// pretending. Such a backend is not incorrect, only expensive: every dispatch
+	// opens a session and every step starts from the prompt it was given, which is
+	// exactly what AgentRequest.ResumeSessionID being best-effort already requires
+	// a step to tolerate.
+	SaveAgentSession(ctx context.Context, ref ItemRef, s AgentSession) error
+
+	// LoadAgentSession returns the stored record, or the zero value. Absence is
+	// (AgentSession{}, nil), not an error — and a record naming a different item
+	// is not this resolution's, so it reads as absence too.
+	LoadAgentSession(ctx context.Context, ref ItemRef) (AgentSession, error)
+
+	// ClearAgentSession discards the record. Clearing what is not there is not an
+	// error.
+	ClearAgentSession(ctx context.Context, ref ItemRef) error
 
 	// PostAnswer records a person's answer AGAINST THE QUESTION IT ANSWERS. The
 	// orchestrator stores the text on that Question, so the question stops being

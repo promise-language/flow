@@ -217,6 +217,177 @@ func TestRun_ArgsIncludeStreamFlags(t *testing.T) {
 	}
 }
 
+// A handle the substrate no longer has is DROPPED, and the same prompt is sent
+// again without it.
+//
+// `claude --resume <gone>` fails before the turn starts and fails identically
+// every time it is asked, so a dead handle re-offered is a step that can never
+// run: the failure is transient, the re-dispatch does not count, and the handle
+// stored with the resolution outlives the process that minted it. The handle is
+// offered and never depended on (docs/resolution.md § The agent session) — this
+// is that rule at the substrate.
+func TestRun_DeadHandleIsDroppedAndThePromptResent(t *testing.T) {
+	var argv [][]string
+	c := &Client{
+		Binary: "claude",
+		spawn: func(ctx context.Context, name string, args ...string) cmdHandle {
+			argv = append(argv, args)
+			if len(argv) == 1 {
+				// What a declined resume looks like: no stream at all, and a
+				// non-zero exit.
+				return &fakeCmd{stderrStream: "No conversation found with session ID: gone", waitErr: errors.New("exit 1")}
+			}
+			return &fakeCmd{stdoutStream: successStream}
+		},
+	}
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go", ResumeSessionID: "gone"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.Failure != nil {
+		t.Fatalf("Failure = %+v, want the second turn's success — a declined handle must not fail the turn", resp.Failure)
+	}
+	if resp.SessionID != "sess-1" {
+		t.Errorf("SessionID = %q, want the session the retry opened", resp.SessionID)
+	}
+	if len(argv) != 2 {
+		t.Fatalf("spawned %d times, want 2 — one offering the handle, one without it", len(argv))
+	}
+	if !strings.Contains(strings.Join(argv[0], " "), "--resume gone") {
+		t.Errorf("first spawn did not offer the handle: %v", argv[0])
+	}
+	if strings.Contains(strings.Join(argv[1], " "), "--resume") {
+		t.Errorf("the retry offered the handle again: %v", argv[1])
+	}
+}
+
+// The fallback is for a turn that NEVER STARTED, and the sharp case is the one
+// next to it: a turn killed in the middle produces no result event either, and
+// it must not be re-sent. It resumed fine — it said which conversation it was in
+// before it died — so re-sending it would run the prompt a second time and
+// abandon a conversation that is still there, which is § Nothing is bought twice
+// paying twice.
+func TestRun_ATurnKilledInTheMiddleIsNotResent(t *testing.T) {
+	// An init event names the session; nothing after it. This is a killed
+	// process, not a declined handle.
+	const killedMidTurn = `{"type":"system","subtype":"init","session_id":"sess-1"}
+{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"working"}]},"session_id":"sess-1"}
+`
+	spawns := 0
+	c := &Client{
+		Binary: "claude",
+		spawn: func(ctx context.Context, name string, args ...string) cmdHandle {
+			spawns++
+			return &fakeCmd{stdoutStream: killedMidTurn, waitErr: errors.New("signal: killed")}
+		},
+	}
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go", ResumeSessionID: "sess-1"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if spawns != 1 {
+		t.Errorf("spawned %d times, want 1 — the turn started, so the handle was honoured", spawns)
+	}
+	if resp.Failure == nil || !resp.Failure.Transient {
+		t.Errorf("Failure = %+v, want the transient no-result it has always been", resp.Failure)
+	}
+	if resp.SessionID != "sess-1" {
+		t.Errorf("SessionID = %q, want the session the dead turn named — that is what says it started", resp.SessionID)
+	}
+}
+
+// And a turn that carried NO handle is never resent either: there is nothing to
+// drop, so a second spawn would only re-send a prompt at full price.
+func TestRun_NoHandleMeansNoRetry(t *testing.T) {
+	spawns := 0
+	c := &Client{
+		Binary: "claude",
+		spawn: func(ctx context.Context, name string, args ...string) cmdHandle {
+			spawns++
+			return &fakeCmd{waitErr: errors.New("exit 1")}
+		},
+	}
+
+	resp, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if spawns != 1 {
+		t.Errorf("spawned %d times, want 1", spawns)
+	}
+	if resp.Failure == nil {
+		t.Fatal("Failure = nil, want the failure reported as before")
+	}
+}
+
+// The retry drops THE HANDLE AND NOTHING ELSE. It is the same turn, sent again,
+// so every other term the caller set still binds — and the cost ceiling is the
+// one that matters: a retry that lost `--max-budget-usd` would spend unbounded
+// on a step that had been granted a fixed amount, and nothing downstream would
+// notice, because the ceiling is enforced by the process that no longer has it.
+func TestRun_TheRetryDropsTheHandleAndNothingElse(t *testing.T) {
+	var argv [][]string
+	c := &Client{
+		Binary: "claude",
+		spawn: func(ctx context.Context, name string, args ...string) cmdHandle {
+			argv = append(argv, args)
+			if len(argv) == 1 {
+				return &fakeCmd{waitErr: errors.New("exit 1")}
+			}
+			return &fakeCmd{stdoutStream: successStream}
+		},
+	}
+
+	if _, err := c.Run(context.Background(), flow.AgentRequest{
+		Prompt:          "go",
+		ResumeSessionID: "gone",
+		Model:           "claude-opus-4-7",
+		PermissionMode:  "acceptEdits",
+		MaxCostUSD:      1.5,
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(argv) != 2 {
+		t.Fatalf("spawned %d times, want 2", len(argv))
+	}
+	retry := strings.Join(argv[1], " ")
+	for _, want := range []string{"--model claude-opus-4-7", "--permission-mode acceptEdits", "--max-budget-usd 1.5"} {
+		if !strings.Contains(retry, want) {
+			t.Errorf("the retry does not carry %q: %v", want, argv[1])
+		}
+	}
+}
+
+// A turn the CALLER cancelled is not retried. The failure is the context's, not
+// the substrate's: the handle was never judged, a second spawn would be refused
+// the same way, and a run stopping on a deadline must not spend twice on its way
+// out.
+func TestRun_ACancelledTurnIsNotRetried(t *testing.T) {
+	spawns := 0
+	c := &Client{
+		Binary: "claude",
+		spawn: func(ctx context.Context, name string, args ...string) cmdHandle {
+			spawns++
+			return &fakeCmd{waitErr: errors.New("signal: killed")}
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	resp, err := c.Run(ctx, flow.AgentRequest{Prompt: "go", ResumeSessionID: "sess-1"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if spawns != 1 {
+		t.Errorf("spawned %d times, want 1 — a cancelled turn says nothing about the handle", spawns)
+	}
+	if resp.Failure == nil || resp.Failure.Kind != "cancelled" {
+		t.Errorf("Failure = %+v, want the cancellation reported as itself", resp.Failure)
+	}
+}
+
 func TestRun_MaxCostUSDBecomesMaxBudgetFlag(t *testing.T) {
 	var capturedArgs []string
 	c := &Client{

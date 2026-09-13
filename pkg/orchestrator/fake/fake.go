@@ -158,6 +158,11 @@ type itemRecord struct {
 	// rather than orchestrator-wide, which is the keying the contract turns on:
 	// one item's reasoning must never be readable as another's.
 	work map[flow.StepId]string
+
+	// session is the handle this item's resolution holds on its agent
+	// conversation. Per-item and NOT per-step: the session belongs to the
+	// resolution, so it survives every step boundary the drafts beside it do not.
+	session flow.AgentSession
 }
 
 // New constructs an empty fake orchestrator. Signals lists the SignalIds this
@@ -824,8 +829,13 @@ func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef) error {
 	rec.claim = nil
 	rec.holder = flow.Holder{}
 	// Releasing ends that reasoning's life: work in progress kept past the
-	// claim it belonged to is scratch prose with nothing left to resume.
+	// claim it belonged to is scratch prose with nothing left to resume, and a
+	// handle kept past it names a conversation holding the whole of it. Both go,
+	// because the contract says both are cleared when the claim is released — and
+	// a double that kept the session would hand the NEXT claim on this item a
+	// conversation about the last one's work, passing tests the real store fails.
 	rec.work = nil
+	rec.session = flow.AgentSession{}
 	if b.active != nil {
 		if activeID, aerr := refID(b.active.ItemRef); aerr == nil && activeID == id {
 			b.active = nil
@@ -963,6 +973,10 @@ func (b *Orchestrator) Reset(ctx context.Context, ref flow.ItemRef) error {
 	rec.artifacts = map[flow.ArtifactId]*flow.ArtifactRecord{}
 	rec.parkRequest = nil
 	rec.work = nil
+	// The conversation goes with the journal it was working towards: a handle
+	// that outlived the record has nothing left to continue, and the next
+	// dispatch would resume reasoning about a route that no longer exists.
+	rec.session = flow.AgentSession{}
 	rec.item.Flow = ""
 	rec.item.Finalized = false
 	rec.finalizedAs = ""
@@ -1426,6 +1440,55 @@ func (b *Orchestrator) ClearWorkInProgress(ctx context.Context, ref flow.ItemRef
 		return fmt.Errorf("fake: item %q not registered", itemID)
 	}
 	delete(rec.work, step)
+	return nil
+}
+
+// SaveAgentSession stores the handle this item's resolution is holding. Keyed
+// by the item alone, which is the property the contract turns on.
+func (b *Orchestrator) SaveAgentSession(ctx context.Context, ref flow.ItemRef, s flow.AgentSession) error {
+	itemID, err := refID(ref)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	rec.session = s
+	return nil
+}
+
+// LoadAgentSession returns the handle stored against this item, or the zero
+// value when there is none. Absence is (AgentSession{}, nil), not an error.
+func (b *Orchestrator) LoadAgentSession(ctx context.Context, ref flow.ItemRef) (flow.AgentSession, error) {
+	itemID, err := refID(ref)
+	if err != nil {
+		return flow.AgentSession{}, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return flow.AgentSession{}, fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	return rec.session, nil
+}
+
+// ClearAgentSession drops this item's record. Idempotent.
+func (b *Orchestrator) ClearAgentSession(ctx context.Context, ref flow.ItemRef) error {
+	itemID, err := refID(ref)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	rec.session = flow.AgentSession{}
 	return nil
 }
 
