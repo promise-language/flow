@@ -82,6 +82,10 @@ type fakeWorktree struct {
 	// means success for that call. When exhausted, Open falls back to the
 	// default (success).
 	openErrs []error
+	// pushErrs scripts what Push returns on successive calls, on the same terms
+	// as openErrs: the updating push a rework round performs is its own act, and
+	// the guard can refuse it without any Open being involved.
+	pushErrs []error
 	// examineErrs scripts the guard's answer about a push that does not
 	// happen — flow.PushExaminer. A nil entry, and an exhausted slice, are a
 	// guard that permits. examines counts the asks, so a test can assert the
@@ -190,7 +194,22 @@ func (w *fakeWorktree) Stage(context.Context) error {
 	}
 	return nil
 }
-func (w *fakeWorktree) Push(context.Context) error { w.pushed = true; return nil }
+
+// Push records itself in the ordered log, because some properties here are
+// about WHEN it happened — the gate measures the branch as it will be proposed,
+// which is a statement about the push coming after it.
+func (w *fakeWorktree) Push(context.Context) error {
+	w.calls = append(w.calls, "push")
+	if len(w.pushErrs) > 0 {
+		err := w.pushErrs[0]
+		w.pushErrs = w.pushErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
+	w.pushed = true
+	return nil
+}
 
 // ExaminePush is the optional flow.PushExaminer capability: the guard's answer
 // about a push, and no push. Both halves are asserted — the answer the step
@@ -345,6 +364,13 @@ func (w *fakeWorktree) Open(_ context.Context, base flow.BranchName, title, body
 		if err != nil {
 			return "", err
 		}
+	}
+	// A second request is never opened for the same branch, and the backend is
+	// where that is enforced: GitHub answers 422 "a pull request already exists".
+	// Modelling it here is what makes a regression that opens twice fail in the
+	// double rather than pass silently.
+	if w.opened {
+		return "", errors.New("fake: a pull request already exists for this branch")
 	}
 	w.opened, w.openBody = true, body
 	return "https://example.invalid/pr/1", nil
@@ -1932,6 +1958,242 @@ func TestStepOpenPR_RequestRefusedAfterARepairRound_ParksWithoutQuotingIt(t *tes
 	}
 	if agent.calls != 0 {
 		t.Errorf("agent called %d times, want 0 — the request declares Prompts: none", agent.calls)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The rework round: the request already exists, so the push updates it and no
+// second request is opened for the same branch (#247).
+// ---------------------------------------------------------------------------
+
+// onAReworkRound is the state a SECOND dispatch of open request finds: a
+// request for this branch is already open, which the orchestrator observed of
+// the request's state and set the signal from. It is what makes the round the
+// documented one — docs/issue-flow.md § Open request — rather than a first-time
+// opening.
+func onAReworkRound(ctx *fakeCtx) *fakeCtx {
+	if ctx.signals == nil {
+		ctx.signals = map[flow.SignalId]bool{}
+	}
+	ctx.signals[flow.SignalId(StepOpenPR)] = true
+	return ctx
+}
+
+// The defect, at the handler: a second Open for a branch that already carries a
+// request is refused by the backend — GitHub answers 422 — so the step that
+// called it unconditionally failed on every rework round, and failed the same
+// way on every retry. The push is the update, and it is the whole act.
+func TestStepOpenPR_AnExistingRequestIsUpdatedNotReopened(t *testing.T) {
+	wt := resumedWorktree()
+	wt.commits = 1 // the rework is on the branch
+	ctx := onAReworkRound(ctxWithPlan(wt, &scriptedAgent{}))
+
+	res, err := testBuilder(t).stepOpenPR(ctx)
+	if err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	if wt.callIndex("push") < 0 {
+		t.Errorf("calls = %v, want the push that brings the open request current", wt.calls)
+	}
+	if wt.callIndex("open") >= 0 {
+		t.Errorf("calls = %v — a second request was opened for a branch that already has one", wt.calls)
+	}
+	if res.Route.Next != flow.StepId(StepCloseBranch) {
+		t.Errorf("elected %q, want %q — the contributor's part ends at the proposal either way",
+			res.Route.Next, StepCloseBranch)
+	}
+	// The successor is told the one fact, and which of the two ways it got
+	// there: the step completed on the request being CURRENT, not on it being new.
+	if !strings.Contains(res.Message, "was already open") {
+		t.Errorf("message = %q, want it to say the request was already open", res.Message)
+	}
+	if ctx.park != nil {
+		t.Errorf("park = %+v, want none — a rework round is ordinary, not exceptional", ctx.park)
+	}
+}
+
+// The same ORDERING property the first round has, and for the same reasons: the
+// gate measures the branch exactly as it will be proposed, so after the
+// recording and before anything leaves the machine.
+func TestStepOpenPR_TheUpdatingPushHappensAfterTheGate(t *testing.T) {
+	wt := resumedWorktree()
+	wt.commits = 1
+	wt.dirty = []byte("diff --git a/cli/app.go b/cli/app.go\n")
+	ctx := onAReworkRound(ctxWithPlan(wt, &scriptedAgent{}))
+
+	if _, err := testBuilder(t).stepOpenPR(ctx); err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	commit := wt.callIndex("commit")
+	gate := wt.callIndex("gate:" + string(flow.GateIntegration))
+	push := wt.callIndex("push")
+	if commit < 0 || gate < 0 || push < 0 {
+		t.Fatalf("calls = %v, want the recording, the gate and the push all to have happened", wt.calls)
+	}
+	if !(commit < gate) {
+		t.Errorf("calls = %v — the gate measured a tree the recording then changed", wt.calls)
+	}
+	if !(gate < push) {
+		t.Errorf("calls = %v — the branch left the machine before anything was measured", wt.calls)
+	}
+}
+
+// Review and coverage may edit on the rework round too, and the recording is
+// above the branch for exactly that reason: without it the push updates the
+// request to a branch that does not carry what they left, and nothing says so.
+func TestStepOpenPR_AnExistingRequestStillRecordsWhatTheCheckingStepsLeft(t *testing.T) {
+	wt := resumedWorktree()
+	wt.commits = 1
+	wt.dirty = []byte("diff --git a/cli/app.go b/cli/app.go\n")
+	ctx := onAReworkRound(ctxWithPlan(wt, &scriptedAgent{}))
+	b := testBuilder(t)
+
+	before := wt.commits
+	if _, err := b.stepOpenPR(ctx); err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	if wt.commits != before+1 {
+		t.Fatalf("commits = %d, want %d — the rework round updated the request to a branch "+
+			"missing what review and coverage left", wt.commits, before+1)
+	}
+	if got, want := wt.commitMsgs[len(wt.commitMsgs)-1], b.followUpCommitMessage(ctx); got != want {
+		t.Errorf("the recording commit = %q, want the follow-up message %q", got, want)
+	}
+	if wt.callIndex("commit") > wt.callIndex("push") {
+		t.Errorf("calls = %v — the push went out before the work was recorded", wt.calls)
+	}
+}
+
+// The gate is not something the first round buys for every later one. A rework
+// round that cannot pass it must not reach the maintainer either, and a refusal
+// is a perfectly good verdict about the change.
+func TestStepOpenPR_AnExistingRequestDoesNotProposeWhatTheJudgeRefuses(t *testing.T) {
+	wt := resumedWorktree()
+	wt.judgeRefuses = true
+	wt.judgeDetail = "coverage 61.2% is below the floor of 70%"
+	ctx := onAReworkRound(ctxWithPlan(wt, &scriptedAgent{}))
+
+	_, err := testBuilder(t).stepOpenPR(ctx)
+	if err == nil {
+		t.Fatal("a rework round proposed a change the maintainer's own gate will reject")
+	}
+	if !strings.Contains(err.Error(), wt.judgeDetail) {
+		t.Errorf("err = %v, want the judge's reason carried", err)
+	}
+	if errors.Is(err, flow.ErrTransient) {
+		t.Errorf("err = %v, must NOT wrap flow.ErrTransient — a refusal is a real verdict "+
+			"about the change, not infrastructure", err)
+	}
+	if wt.pushed {
+		t.Error("the updating push went out over a branch the gate refused")
+	}
+}
+
+// And the mirror: a gate that measured nothing says nothing about the change on
+// a rework round either, so it is infrastructure rather than the change failing.
+//
+// Derived from AllOutcomes rather than listed, on the same terms as the
+// first-round case.
+func TestStepOpenPR_AGateThatCouldNotRunOnAReworkRoundIsNotTheChangeFailing(t *testing.T) {
+	for _, outcome := range flow.AllOutcomes() {
+		if outcome == flow.OutcomeMeasured {
+			continue
+		}
+		t.Run(string(outcome), func(t *testing.T) {
+			wt := resumedWorktree()
+			wt.gateOutcome = map[flow.GateName]flow.Outcome{flow.GateIntegration: outcome}
+			ctx := onAReworkRound(ctxWithPlan(wt, &scriptedAgent{}))
+
+			_, err := testBuilder(t).stepOpenPR(ctx)
+			if err == nil {
+				t.Fatal("a rework round updated a request over a gate that measured nothing")
+			}
+			if !strings.Contains(err.Error(), "not the change failing") {
+				t.Errorf("err = %v, want it to say plainly that nothing was measured "+
+					"about the change", err)
+			}
+			if !errors.Is(err, flow.ErrTransient) {
+				t.Errorf("err = %v, want it to wrap flow.ErrTransient — a non-measured "+
+					"outcome is infrastructure", err)
+			}
+			if wt.pushed {
+				t.Error("the updating push went out over a branch nothing was measured about")
+			}
+		})
+	}
+}
+
+// The updating push goes through the same disclosure guard the first round's
+// does, so a refusal of it elects the same repair. No second copy of that
+// decision: the arm calls electRepairOrPark unchanged.
+func TestStepOpenPR_TheUpdatingPushRefusalElectsTheRepair(t *testing.T) {
+	wt := resumedWorktree()
+	wt.pushErrs = []error{pushRefusal}
+
+	agent := &scriptedAgent{}
+	ctx := onAReworkRound(routedFrom(ctxWithPlan(wt, agent), StepCoverage))
+
+	res, err := testBuilder(t).stepOpenPR(ctx)
+	if err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	assertElectsTheRepair(t, res, wt, agent, ctx, "absolute home path")
+	if wt.pushed {
+		t.Error("the guard refused the push and it went out anyway")
+	}
+}
+
+// And the same bound applies: a branch arriving back from the repair step whose
+// updating push is still refused has had its round, so it parks rather than
+// electing the same round again. The guard's words go where they may — this
+// step's own unpublished record — and never into the published park reason.
+func TestStepOpenPR_TheUpdatingPushRefusedAfterARepairRoundParks(t *testing.T) {
+	wt := resumedWorktree()
+	wt.pushErrs = []error{pushRefusal}
+
+	agent := &scriptedAgent{}
+	ctx := onAReworkRound(routedFrom(ctxWithPlan(wt, agent), StepRepairDisclosure))
+
+	_, err := testBuilder(t).stepOpenPR(ctx)
+	if err == nil || !strings.Contains(err.Error(), "parked") {
+		t.Fatalf("err = %v, want a park", err)
+	}
+	if ctx.park == nil || ctx.park.Kind != flow.ParkBlocked {
+		t.Fatalf("park = %+v, want ParkBlocked", ctx.park)
+	}
+	if strings.Contains(ctx.park.Reason, "absolute home path") {
+		t.Errorf("the park record quotes what the guard refused: %q", ctx.park.Reason)
+	}
+	if len(ctx.wipSaves) != 1 || !strings.Contains(ctx.wipSaves[0], "absolute home path") {
+		t.Errorf("WIP saves = %q, want one carrying the refusal for the next run", ctx.wipSaves)
+	}
+	if agent.calls != 0 {
+		t.Errorf("agent called %d times, want 0 — the request declares Prompts: none", agent.calls)
+	}
+}
+
+// An infrastructure failure says nothing about what the branch carries, so it is
+// neither a repair election nor a park: it is returned, and the next dispatch
+// pushes again.
+func TestStepOpenPR_AnUpdatingPushInfraErrorIsReturned(t *testing.T) {
+	wt := resumedWorktree()
+	wt.pushErrs = []error{errors.New("dial tcp: connection refused")}
+
+	agent := &scriptedAgent{}
+	ctx := onAReworkRound(ctxWithPlan(wt, agent))
+
+	res, err := testBuilder(t).stepOpenPR(ctx)
+	if err == nil || !strings.Contains(err.Error(), "dial tcp") {
+		t.Fatalf("err = %v, want the infrastructure error passed through unchanged", err)
+	}
+	if res.Route.Next != "" {
+		t.Errorf("elected %q, want nothing", res.Route.Next)
+	}
+	if ctx.park != nil {
+		t.Errorf("park = %+v, want none", ctx.park)
+	}
+	if agent.calls != 0 {
+		t.Errorf("agent called %d times, want 0", agent.calls)
 	}
 }
 
@@ -4288,26 +4550,52 @@ func TestStepImplement_FixLoopNotifications(t *testing.T) {
 }
 
 // The PR step notifies before recording post-implement changes and before
-// pushing/opening.
+// pushing — and the two rounds say different things about what the push is for,
+// because an operator watching a rework round is not watching a request being
+// opened.
 func TestStepOpenPR_SubPhaseNotifications(t *testing.T) {
-	wt := resumedWorktree()
-	ctx := ctxWithPlan(wt, &scriptedAgent{})
+	for _, tc := range []struct {
+		name     string
+		rework   bool
+		want     []string
+		unwanted string
+	}{
+		{
+			name:     "first round",
+			want:     []string{"recording post-implement changes", "pushing and opening pull request"},
+			unwanted: "pushing to update the open pull request",
+		},
+		{
+			name:     "rework round",
+			rework:   true,
+			want:     []string{"recording post-implement changes", "pushing to update the open pull request"},
+			unwanted: "pushing and opening pull request",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wt := resumedWorktree()
+			ctx := ctxWithPlan(wt, &scriptedAgent{})
+			if tc.rework {
+				onAReworkRound(ctx)
+			}
 
-	if _, err := testBuilder(t).stepOpenPR(ctx); err != nil {
-		t.Fatalf("stepOpenPR: %v", err)
-	}
-	want := []string{
-		"recording post-implement changes",
-		"pushing and opening pull request",
-	}
-	idx := 0
-	for _, n := range ctx.notices {
-		if idx < len(want) && n == want[idx] {
-			idx++
-		}
-	}
-	if idx != len(want) {
-		t.Errorf("notices = %v, want %v in order", ctx.notices, want)
+			if _, err := testBuilder(t).stepOpenPR(ctx); err != nil {
+				t.Fatalf("stepOpenPR: %v", err)
+			}
+			idx := 0
+			for _, n := range ctx.notices {
+				if idx < len(tc.want) && n == tc.want[idx] {
+					idx++
+				}
+			}
+			if idx != len(tc.want) {
+				t.Errorf("notices = %v, want %v in order", ctx.notices, tc.want)
+			}
+			if slices.Contains(ctx.notices, tc.unwanted) {
+				t.Errorf("notices = %v, want no %q — that is the other round's wording",
+					ctx.notices, tc.unwanted)
+			}
+		})
 	}
 }
 

@@ -707,6 +707,28 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) (flow.StepResult, error) {
 		return flow.StepResult{}, err
 	}
 
+	// On a rework round the request already exists: the push updates it, a second
+	// request is never opened for the same branch, and this step completes on the
+	// request being CURRENT rather than on it being new (docs/issue-flow.md
+	// § Open request). A second Open is refused by the backend — GitHub answers
+	// 422 — so a step that called it unconditionally died on every rework round.
+	//
+	// The already-open fact is read off the SIGNAL, which is this step's own
+	// result, exactly as stepMerge reads pr-merged: the orchestrator observes the
+	// request's state on every load, flow.PRInfo carries no open flag to read
+	// instead, and FindPR's "no request" answer is an untyped error that cannot
+	// be told from a backend failure.
+	if ctx.Signal(flow.SignalId(StepOpenPR)) {
+		ctx.Notify("", "pushing to update the open pull request")
+		// The push is the update, and it is the same act flow.Open performs on
+		// the first round — including through the disclosure guard, so a refusal
+		// here elects the repair exactly as a first-round refusal does.
+		if err := wt.Push(ctx.Context()); err != nil {
+			return b.electRepairOrPark(ctx, err)
+		}
+		return b.requestOpened(ctx, "was already open and the push brought it current"), nil
+	}
+
 	body, err := b.pullRequestBody(ctx, verdict)
 	if err != nil {
 		return flow.StepResult{}, err
@@ -714,7 +736,7 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) (flow.StepResult, error) {
 	ctx.Notify("", "pushing and opening pull request")
 	_, err = flow.Open(ctx.Context(), wt, flow.BranchName(base), title, body)
 	if err == nil {
-		return b.requestOpened(ctx), nil
+		return b.requestOpened(ctx, "is open"), nil
 	}
 	return b.electRepairOrPark(ctx, err)
 }
@@ -925,11 +947,16 @@ func (b *builder) repaired(ctx flow.StepCtx, what string) flow.StepResult {
 // requestOpened is the election the pull request step makes once the request is
 // open, whichever way it got there: one wording for the two call sites, so the
 // successor cannot be told two different things about the same fact.
-func (b *builder) requestOpened(ctx flow.StepCtx) flow.StepResult {
+//
+// what names which of the two ways this dispatch got there — a request opened
+// now, or one that already existed and was brought current by the push. The
+// fact is one wording; only the route to it differs, so only that is
+// interpolated, exactly as repaired does it.
+func (b *builder) requestOpened(ctx flow.StepCtx, what string) flow.StepResult {
 	return ctx.Next(flow.StepId(StepCloseBranch), fmt.Sprintf(
-		"the pull request for branch %q is open and the integration gate passed on the branch as proposed; "+
+		"the pull request for branch %q %s and the integration gate passed on the branch as proposed; "+
 			"return the worktree to the base branch",
-		b.branchName(ctx)))
+		b.branchName(ctx), what))
 }
 
 // runIntegrationGate measures subject and asks the project whether the
