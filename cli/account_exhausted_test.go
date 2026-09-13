@@ -34,9 +34,9 @@ func refusedTurn(cost float64) flow.AgentResponse {
 	}
 }
 
-// promptingStep is a one-step flow whose handler prompts once and returns
+// promptingFlow is a one-step flow whose handler prompts once and returns
 // whatever handle() makes of the result. Every test below differs only in that.
-func promptingStep(handle func(flow.StepCtx, *flow.AgentResponse, error) (flow.StepResult, error)) func(*flow.Flow) {
+func promptingFlow(handle func(flow.StepCtx, *flow.AgentResponse, error) (flow.StepResult, error)) func(*flow.Flow) {
 	return func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			resp, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1"})
@@ -60,7 +60,7 @@ func surfacing(ctx flow.StepCtx, _ *flow.AgentResponse, err error) (flow.StepRes
 // attempt, so the ledger must not move by a cent.
 func TestMeteredAgent_ARefusedTurnIsNotBilled(t *testing.T) {
 	a := &stubAgent{name: "stub", responses: []flow.AgentResponse{refusedTurn(3.20)}}
-	app, be, claim := testApp(t, promptingStep(surfacing), a)
+	app, be, claim := testApp(t, promptingFlow(surfacing), a)
 
 	ctx := context.Background()
 	if _, err := RunOne(ctx, app, claim); err != nil {
@@ -83,7 +83,7 @@ func TestMeteredAgent_ARefusedTurnIsNotBilled(t *testing.T) {
 func TestRunOne_AnExhaustedAccountParksWithTheInstantAndTheAccount(t *testing.T) {
 	useStubAgentAccount(t, agentAccountRecord{Id: "uuid-1", Email: "pat@example.com"}, nil)
 	a := &stubAgent{name: "stub", responses: []flow.AgentResponse{refusedTurn(3.20)}}
-	app, be, claim := testApp(t, promptingStep(surfacing), a)
+	app, be, claim := testApp(t, promptingFlow(surfacing), a)
 
 	ctx := context.Background()
 	res, err := RunOne(ctx, app, claim)
@@ -134,7 +134,7 @@ func TestRunOne_AnExhaustedAccountParksWithTheInstantAndTheAccount(t *testing.T)
 func TestRunOne_TheParkCarriesTheIdentifierAndNeverTheEmail(t *testing.T) {
 	useStubAgentAccount(t, agentAccountRecord{Id: "uuid-1", Email: "pat@example.com"}, nil)
 	a := &stubAgent{name: "stub", responses: []flow.AgentResponse{refusedTurn(0)}}
-	app, _, claim := testApp(t, promptingStep(surfacing), a)
+	app, _, claim := testApp(t, promptingFlow(surfacing), a)
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -155,7 +155,7 @@ func TestRunOne_TheParkCarriesTheIdentifierAndNeverTheEmail(t *testing.T) {
 func TestRunOne_AnUnidentifiedAccountStillParksScopedToNothing(t *testing.T) {
 	useStubAgentAccount(t, agentAccountRecord{}, errors.New("nothing names the account"))
 	a := &stubAgent{name: "stub", responses: []flow.AgentResponse{refusedTurn(0)}}
-	app, _, claim := testApp(t, promptingStep(surfacing), a)
+	app, _, claim := testApp(t, promptingFlow(surfacing), a)
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -194,7 +194,7 @@ func TestRunOne_AnExhaustedAccountParksThroughAHandlerThatSwallowsTheError(t *te
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &stubAgent{name: "stub", responses: []flow.AgentResponse{refusedTurn(3.20)}}
-			app, be, claim := testApp(t, promptingStep(tc.handle), a)
+			app, be, claim := testApp(t, promptingFlow(tc.handle), a)
 
 			ctx := context.Background()
 			res, err := RunOne(ctx, app, claim)
@@ -223,7 +223,7 @@ func TestRunOne_AnExhaustedAccountParksThroughAHandlerThatSwallowsTheError(t *te
 // touches nothing that would release it, and this is what keeps it that way.
 func TestRunOne_TheClaimSurvivesAnAccountExhaustedPark(t *testing.T) {
 	a := &stubAgent{name: "stub", responses: []flow.AgentResponse{refusedTurn(0)}}
-	app, be, claim := testApp(t, promptingStep(surfacing), a)
+	app, be, claim := testApp(t, promptingFlow(surfacing), a)
 
 	ctx := context.Background()
 	res, err := RunOne(ctx, app, claim)
@@ -251,7 +251,7 @@ func TestRunOne_TheClaimSurvivesAnAccountExhaustedPark(t *testing.T) {
 // waits-on-condition — nobody must act, and there is nothing to go work.
 func TestRunOne_AnAccountExhaustedParkDoesNotStopTheOwningArenaResuming(t *testing.T) {
 	a := &stubAgent{name: "stub", responses: []flow.AgentResponse{refusedTurn(0)}}
-	app, be, claim := testApp(t, promptingStep(surfacing), a)
+	app, be, claim := testApp(t, promptingFlow(surfacing), a)
 
 	ctx := context.Background()
 	if _, err := RunOne(ctx, app, claim); err != nil {
@@ -311,7 +311,7 @@ func exhaustedWindow(used float64) []windowUsage {
 func TestRunOne_AnAlreadyExhaustedWindowWithholdsTheDispatch(t *testing.T) {
 	useStubAgentAccount(t, agentAccountRecord{Id: "uuid-1"}, nil)
 	dispatched := false
-	app, be, claim := testApp(t, promptingStep(func(ctx flow.StepCtx, _ *flow.AgentResponse, _ error) (flow.StepResult, error) {
+	app, be, claim := testApp(t, promptingFlow(func(ctx flow.StepCtx, _ *flow.AgentResponse, _ error) (flow.StepResult, error) {
 		dispatched = true
 		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("ran"), nil
 	}), &stubAgent{name: "stub"})
@@ -409,7 +409,7 @@ func TestRunOne_ThePreDispatchCheckWithholdsNothingElse(t *testing.T) {
 // straight back and be told the same thing, for as long as the reading lives.
 func TestRunOne_AWindowWhoseResetHasPassedDoesNotWithholdTheDispatch(t *testing.T) {
 	dispatched := false
-	app, _, claim := testApp(t, promptingStep(func(ctx flow.StepCtx, _ *flow.AgentResponse, _ error) (flow.StepResult, error) {
+	app, _, claim := testApp(t, promptingFlow(func(ctx flow.StepCtx, _ *flow.AgentResponse, _ error) (flow.StepResult, error) {
 		dispatched = true
 		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("ran"), nil
 	}), &stubAgent{name: "stub"})
@@ -433,7 +433,7 @@ func TestRunOne_AWindowWhoseResetHasPassedDoesNotWithholdTheDispatch(t *testing.
 // not asked for the reading does not get the check either.
 func TestRunOne_NoQuotaReaderMeansNoPreDispatchCheck(t *testing.T) {
 	dispatched := false
-	app, _, claim := testApp(t, promptingStep(func(ctx flow.StepCtx, _ *flow.AgentResponse, _ error) (flow.StepResult, error) {
+	app, _, claim := testApp(t, promptingFlow(func(ctx flow.StepCtx, _ *flow.AgentResponse, _ error) (flow.StepResult, error) {
 		dispatched = true
 		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("ran"), nil
 	}), &stubAgent{name: "stub"})
@@ -453,7 +453,7 @@ func TestRunOne_NoQuotaReaderMeansNoPreDispatchCheck(t *testing.T) {
 // from the park it holds, which is what this exercises.
 func TestFakeOrchestrator_AnAccountExhaustedParkWaitsOnACondition(t *testing.T) {
 	a := &stubAgent{name: "stub", responses: []flow.AgentResponse{refusedTurn(0)}}
-	app, be, claim := testApp(t, promptingStep(surfacing), a)
+	app, be, claim := testApp(t, promptingFlow(surfacing), a)
 
 	ctx := context.Background()
 	if _, err := RunOne(ctx, app, claim); err != nil {
@@ -548,7 +548,7 @@ func TestCmdResolve_AnExhaustedWindowParksRatherThanPacingOutTheWindow(t *testin
 // window it names must be the one that actually binds.
 func TestRunOne_TwoExhaustedWindowsParkOnTheOneThatResetsLast(t *testing.T) {
 	later := futureReset.Add(72 * time.Hour)
-	app, _, claim := testApp(t, promptingStep(surfacing), &stubAgent{name: "stub"})
+	app, _, claim := testApp(t, promptingFlow(surfacing), &stubAgent{name: "stub"})
 	stubQuota(app, []windowUsage{
 		{Label: "5h", Length: 5 * time.Hour, Used: 1.0, ResetsAt: futureReset},
 		{Label: "7d", Length: 7 * 24 * time.Hour, Used: 1.0, ResetsAt: later},
@@ -575,7 +575,7 @@ func TestRunOne_TwoExhaustedWindowsParkOnTheOneThatResetsLast(t *testing.T) {
 // re-dispatch immediately into the same refusal, which is worse than saying
 // nothing.
 func TestRunOne_AnUnparsedResetCarriesNoInstantRatherThanTheEpoch(t *testing.T) {
-	app, _, claim := testApp(t, promptingStep(surfacing), &stubAgent{name: "stub"})
+	app, _, claim := testApp(t, promptingFlow(surfacing), &stubAgent{name: "stub"})
 	stubQuota(app, []windowUsage{{Label: "5h", Length: 5 * time.Hour, Used: 1.0}}, nil)
 
 	res, err := RunOne(context.Background(), app, claim)
@@ -606,7 +606,7 @@ func TestRunOne_AnOrdinaryTransientAgentFailureStillParksInfraTransient(t *testi
 	a := &stubAgent{name: "stub", responses: []flow.AgentResponse{{
 		Failure: &flow.AgentFailure{Kind: "no-result", Transient: true, Message: "runner flapped"},
 	}}}
-	app, _, claim := testApp(t, promptingStep(surfacing), a)
+	app, _, claim := testApp(t, promptingFlow(surfacing), a)
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -635,7 +635,7 @@ func TestRunOne_ARefusalThatNamesNoWindowStillReportsTheInstant(t *testing.T) {
 			Message: "agent account allowance exhausted, resets 2026-09-13T18:42:00Z",
 		},
 	}}}
-	app, _, claim := testApp(t, promptingStep(surfacing), a)
+	app, _, claim := testApp(t, promptingFlow(surfacing), a)
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
