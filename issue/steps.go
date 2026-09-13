@@ -227,29 +227,43 @@ func firstLine(s string) string {
 // rather than "prepare a workspace and then make it work". And every step after
 // this one commits, so the branch has to exist before any of them runs.
 //
-// It records HEAD after the checkout, not the base branch's tip. On a resume the
-// two differ: a branch cut by an earlier attempt that died before resolving is
-// still empty, and its HEAD is the base as it stood when the branch was cut.
-// Reading the base branch today would record a commit the branch was never cut
-// from — and that record is exactly what makes "what is this change relative to"
-// answerable later against a base that has since moved.
+// It records the CUT POINT — the merge base of HEAD and the resolved base —
+// rather than HEAD or the base branch's tip, because on a resume neither of
+// those is it. A branch an earlier attempt cut and then died on is still empty
+// and its HEAD IS the cut point, even though the base branch has moved on since;
+// a branch already carrying that attempt's commits has a HEAD that is the cut
+// point PLUS the work, and recording that makes the work its own baseline —
+// which is how a finished branch came to read as "the agent changed nothing".
+// The merge base answers both, and that record is exactly what makes "what is
+// this change relative to" answerable later against a base that has since moved.
 func (b *builder) stepOpenBranch(ctx flow.StepCtx) (flow.StepResult, error) {
 	wt, err := ctx.Worktree()
 	if err != nil {
 		return flow.StepResult{}, err
 	}
-	if _, _, err := b.ensureBranch(ctx, wt); err != nil {
+	base, _, err := b.ensureBranch(ctx, wt)
+	if err != nil {
 		// Named, so the message stands on its own wherever it is read: what
 		// could not be opened, and why. That is the whole of "fails as itself".
 		return flow.StepResult{}, fmt.Errorf("could not open branch %q: %w", b.branchName(ctx), err)
+	}
+	cut, err := wt.CutPoint(ctx.Context(), base)
+	if err != nil {
+		// Fails as itself too, for the same reason the checkout above does: the
+		// alternative is an implement failure about an empty branch.
+		return flow.StepResult{}, fmt.Errorf("could not read the commit branch %q was cut from: %w",
+			b.branchName(ctx), err)
 	}
 	head, err := wt.RevParse(ctx.Context(), "HEAD")
 	if err != nil {
 		return flow.StepResult{}, err
 	}
+	// Two facts, stated separately: where the branch stands now, and where it
+	// left the base. Conflating them is what the message used to do, and on a
+	// resumed branch it named the work as the thing the work was cut from.
 	return ctx.Next(flow.StepId(StepImplement), fmt.Sprintf(
-		"branch %q is open at %s, the commit it was cut from; implement the plan on it",
-		b.branchName(ctx), head)).CommitHash(string(head)), nil
+		"branch %q is open at %s, cut from %s; implement the plan on it",
+		b.branchName(ctx), head, cut)).CommitHash(string(cut)), nil
 }
 
 // stepImplement makes the change and drives it to a passing gate.

@@ -58,7 +58,13 @@ type fakeWorktree struct {
 	staged     bool
 	revsAsked  []flow.Revision
 	strictRevs map[flow.Revision]bool // when set, any other revision errors
-	pushed     bool
+	// cutPoint is where the branch left the base. Zero means "report head",
+	// which is what a merge base answers for a branch carrying nothing; a test
+	// resuming on a branch that already carries work sets it behind head.
+	// cutErr models a cut point that cannot be computed at all.
+	cutPoint flow.CommitSha
+	cutErr   error
+	pushed   bool
 	// drift is what Drift reports. Zero is level, which is what a fresh
 	// worktree measures.
 	drift    flow.Drift
@@ -300,6 +306,20 @@ func (w *fakeWorktree) RevParse(_ context.Context, rev flow.Revision) (flow.Comm
 		return w.head, nil
 	}
 	return w.base, nil
+}
+
+// CutPoint is the commit the branch left the base at — behind head on a branch
+// carrying work, and head itself on one carrying none, which is what a merge
+// base reports in each case.
+func (w *fakeWorktree) CutPoint(_ context.Context, base flow.BranchName) (flow.CommitSha, error) {
+	w.calls = append(w.calls, "cut-point:"+string(base))
+	if w.cutErr != nil {
+		return "", w.cutErr
+	}
+	if w.cutPoint == "" {
+		return w.head, nil
+	}
+	return w.cutPoint, nil
 }
 func (w *fakeWorktree) Request() flow.RequestManager { return w }
 
@@ -573,7 +593,8 @@ func ctxWithPlan(wt *fakeWorktree, agent flow.Agent) *fakeCtx {
 // ---------------------------------------------------------------------------
 
 // The record is what makes "what is this change relative to" answerable later.
-// It is the branch's own HEAD, taken after the checkout.
+// On a branch just cut it is the branch's own HEAD, which is what a merge base
+// against the base reports for a branch carrying nothing.
 func TestStepOpenBranch_RecordsTheCommitTheBranchWasCutFrom(t *testing.T) {
 	wt := newFakeWorktree()
 	ctx := ctxWithPlan(wt, &scriptedAgent{})
@@ -590,6 +611,14 @@ func TestStepOpenBranch_RecordsTheCommitTheBranchWasCutFrom(t *testing.T) {
 	}
 	if res.Payload.CommitHash != "base" {
 		t.Errorf("recorded %q, want the commit the branch sits on", res.Payload.CommitHash)
+	}
+	// Read against the item's RESOLVED base, which is the only thing that makes
+	// a merge base a cut point. Nothing else here would catch handing over the
+	// claim branch or a blank — the fake answers whatever it is asked — while a
+	// backend refuses a base nobody named, so the mistake surfaces only on a
+	// real run.
+	if wt.callIndex("cut-point:main") < 0 {
+		t.Errorf("calls = %v, want the cut point read against the item's base %q", wt.calls, "main")
 	}
 	// Mechanical: no prose, and no agent turn.
 	if res.Payload.Markdown != "" {
@@ -640,6 +669,56 @@ func TestStepOpenBranch_ResumedBranchRecordsItsOwnHead(t *testing.T) {
 	}
 	if res.Payload.CommitHash != "cut-from" {
 		t.Errorf("recorded %q, want the commit the branch actually sits on", res.Payload.CommitHash)
+	}
+}
+
+// The other resumption, and the reported failure: a branch already carrying an
+// earlier run's implementation commit. Its HEAD is the cut point PLUS that work,
+// so recording HEAD as "the commit it was cut from" makes the work its own
+// baseline — and the empty-branch check one step later compares it against
+// itself. The merge base is behind both sides and says what actually happened.
+func TestStepOpenBranch_ResumedBranchCarryingWorkRecordsTheCutPoint(t *testing.T) {
+	wt := resumedWorktree()
+	wt.head = "sha-1"    // an earlier run's implementation commit
+	wt.cutPoint = "base" // ...which is not where the branch left the base
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	res, err := testBuilder(t).stepOpenBranch(ctx)
+	if err != nil {
+		t.Fatalf("stepOpenBranch on a resumed branch carrying work: %v", err)
+	}
+	if res.Payload.CommitHash != "base" {
+		t.Errorf("recorded %q, want the cut point \"base\" — recording HEAD records "+
+			"the branch's own work as the thing it was cut from", res.Payload.CommitHash)
+	}
+	// The message states the two facts separately. Conflating them is what named
+	// the work as the commit the work was cut from.
+	if !strings.Contains(res.Message, "open at sha-1") || !strings.Contains(res.Message, "cut from base") {
+		t.Errorf("message = %q, want the branch's position and its cut point named separately", res.Message)
+	}
+}
+
+// A cut point that cannot be computed — unrelated histories, a base that will
+// not resolve — fails HERE, naming the branch, for the same reason the dirty
+// tree above does: the alternative is an implement failure about an empty
+// branch, which sends a reader to look at an agent that never ran.
+func TestStepOpenBranch_AnUnreadableCutPointFailsHere(t *testing.T) {
+	wt := newFakeWorktree()
+	wt.cutErr = errors.New("refusing to work on unrelated histories")
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	res, err := testBuilder(t).stepOpenBranch(ctx)
+	if err == nil {
+		t.Fatal("want the cut point's failure surfaced by this step")
+	}
+	if !strings.Contains(err.Error(), testBranch) || !strings.Contains(err.Error(), "unrelated histories") {
+		t.Errorf("err = %v, want it to name the branch and carry the cause", err)
+	}
+	if res.Payload != nil {
+		t.Error("recorded a branch whose cut point could not be read")
+	}
+	if agent, ok := ctx.agent.(*scriptedAgent); ok && agent.calls != 0 {
+		t.Errorf("agent ran %d times in a mechanical step that failed", agent.calls)
 	}
 }
 
@@ -709,6 +788,68 @@ func TestStepImplement_AcceptsWorkCommittedByAnEarlierRun(t *testing.T) {
 	// empty record cannot be told from "the step did nothing".
 	if res.Payload.CommitHash != "sha-1" {
 		t.Errorf("recorded %q, want the commit the earlier run left", res.Payload.CommitHash)
+	}
+}
+
+// The reported failure end to end: a re-entered item whose branch already
+// carries the work, driven through the branch step and then implement over one
+// worktree, so implement reads the record the branch step actually wrote rather
+// than one a test chose. Recording HEAD made the two hashes equal and the branch
+// carrying a finished change refused as "the agent changed nothing".
+func TestStepImplement_AcceptsAReenteredBranchTheBranchStepRecorded(t *testing.T) {
+	wt := resumedWorktree()
+	wt.head = "sha-1"    // the earlier execution's implementation commit
+	wt.cutPoint = "base" // where the branch left the base
+	wt.noCommit = true   // this round finds the work already done
+	b := testBuilder(t)
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	branch, err := b.stepOpenBranch(ctx)
+	if err != nil {
+		t.Fatalf("stepOpenBranch: %v", err)
+	}
+	ctx.arts["branch"] = flow.ArtifactRecord{
+		Resolved: true, Type: flow.ArtifactCommitHash, CommitHash: branch.Payload.CommitHash}
+
+	res, err := b.stepImplement(ctx)
+	if err != nil {
+		t.Fatalf("stepImplement = %v, want the branch's existing work accepted", err)
+	}
+	if res.Payload == nil {
+		t.Fatal("resolved nothing for a branch carrying a finished change")
+	}
+	if res.Payload.CommitHash != "sha-1" {
+		t.Errorf("recorded %q, want the commit the branch carries", res.Payload.CommitHash)
+	}
+}
+
+// The guard direction of the pairing above, over the same two steps and one
+// worktree: a branch an earlier attempt cut and died on, still empty, on a base
+// that has moved since. What the branch step records has to still EQUAL HEAD
+// here or the empty-branch check stops firing altogether — a cut point that
+// never matched HEAD would make every branch read as work and send an empty one
+// on to `gh pr create`. Neither accepting test could tell that apart from a fix.
+func TestStepImplement_RefusesAnEmptyBranchTheBranchStepRecorded(t *testing.T) {
+	wt := resumedWorktree()
+	wt.head = "cut-from"      // where the earlier attempt cut it
+	wt.base = "base-moved-on" // the base branch has advanced since
+	wt.noCommit = true        // and this round changes nothing
+	b := testBuilder(t)
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	branch, err := b.stepOpenBranch(ctx)
+	if err != nil {
+		t.Fatalf("stepOpenBranch: %v", err)
+	}
+	ctx.arts["branch"] = flow.ArtifactRecord{
+		Resolved: true, Type: flow.ArtifactCommitHash, CommitHash: branch.Payload.CommitHash}
+
+	res, err := b.stepImplement(ctx)
+	if err == nil || !strings.Contains(err.Error(), "no commits beyond") {
+		t.Fatalf("err = %v, want a refusal — the branch carries nothing", err)
+	}
+	if res.Payload != nil {
+		t.Error("resolved an implementation for a branch that carries nothing")
 	}
 }
 

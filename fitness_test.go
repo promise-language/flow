@@ -36,6 +36,9 @@ func (s *stubWorktree) Drift(context.Context) (Drift, error)  { panic("not imple
 func (s *stubWorktree) RevParse(context.Context, Revision) (CommitSha, error) {
 	panic("not implemented")
 }
+func (s *stubWorktree) CutPoint(context.Context, BranchName) (CommitSha, error) {
+	panic("not implemented")
+}
 func (s *stubWorktree) Run(context.Context, CommandName) (CommandRun, error) {
 	panic("not implemented")
 }

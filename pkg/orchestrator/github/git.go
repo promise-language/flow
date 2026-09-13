@@ -365,6 +365,21 @@ func (g *gitOps) RevListLeftRight(ctx context.Context, left, right string) (int,
 	return l, r, nil
 }
 
+// MergeBase reports the newest commit reachable from both revisions:
+// `git merge-base <a> <b>`.
+//
+// A revision that will not resolve, and histories with no commit in common, are
+// git's own non-zero exit and come back as an ERROR rather than an empty string
+// — same reason RevParse's contract gives: a caller handed a blank would have
+// nothing to tell "no common commit" from a commit it could act on.
+func (g *gitOps) MergeBase(ctx context.Context, a, b string) (string, error) {
+	stdout, stderr, err := g.run(ctx, "merge-base", a, b)
+	if err != nil {
+		return "", fmt.Errorf("git merge-base %s %s: %w (%s)", a, b, err, string(stderr))
+	}
+	return strings.TrimSpace(string(stdout)), nil
+}
+
 // MergeLocal merges the given ref into the current branch without opening an
 // editor. Conflicts produce an error.
 func (g *gitOps) MergeLocal(ctx context.Context, ref string) error {

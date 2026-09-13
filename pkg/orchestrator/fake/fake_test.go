@@ -1766,3 +1766,46 @@ func TestBackend_WorktreeDriftReportsTheRecordedPair(t *testing.T) {
 		t.Error("Level() = true on a drifted pair")
 	}
 }
+
+// The fake's cut point is what lets a consumer's test model a RESUMED branch:
+// HEAD level with it is a branch carrying nothing, HEAD past it is one carrying
+// work. A CutPoint that answered HEAD — the mistake the interface exists to
+// rule out — would collapse the two and make the fake unable to model either.
+func TestBackend_WorktreeCutPointStaysPutWhileHeadAdvances(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	wt, err := b.Worktree(ctx, claimed(t, b, "1"))
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+
+	cut, err := wt.CutPoint(ctx, "main")
+	if err != nil {
+		t.Fatalf("CutPoint: %v", err)
+	}
+	head, err := wt.RevParse(ctx, flow.HeadRevision)
+	if err != nil {
+		t.Fatalf("RevParse: %v", err)
+	}
+	if cut != head {
+		t.Errorf("CutPoint = %q, HEAD = %q; on a branch carrying nothing the two are one commit", cut, head)
+	}
+
+	if err := wt.Commit(ctx, "the work"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	moved, err := wt.RevParse(ctx, flow.HeadRevision)
+	if err != nil {
+		t.Fatalf("RevParse: %v", err)
+	}
+	if moved == head {
+		t.Fatalf("HEAD = %q after a commit landed; the fake models a branch that advances", moved)
+	}
+	after, err := wt.CutPoint(ctx, "main")
+	if err != nil {
+		t.Fatalf("CutPoint: %v", err)
+	}
+	if after != cut {
+		t.Errorf("CutPoint moved to %q with the commit; the work would be its own baseline", after)
+	}
+}

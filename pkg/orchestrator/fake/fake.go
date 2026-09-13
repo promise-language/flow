@@ -1813,6 +1813,15 @@ func (w *fakeWorktree) RevParse(ctx context.Context, rev flow.Revision) (flow.Co
 	return flow.CommitSha(fmt.Sprintf("sha-%d", w.commits)), nil
 }
 
+// CutPoint answers "sha-0" — the same commit RevParse gives for every revision
+// that is not HEAD — because the fake models one base and a HEAD that advances
+// as commits land. That keeps the two answers one model: on a branch carrying
+// nothing the cut point IS HEAD, which is what a merge base reports there, and
+// once a commit lands HEAD moves and the cut point does not.
+func (w *fakeWorktree) CutPoint(ctx context.Context, base flow.BranchName) (flow.CommitSha, error) {
+	return "sha-0", nil
+}
+
 // Run answers for the three declared commands. A command returns a RUN, not a
 // bare error: the outcome separates "ran and reported" from "could not start",
 // "timed out" or "died", and the three have different budget consequences.
