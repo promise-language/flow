@@ -224,6 +224,54 @@ func TestSession_FreshStepThatParksResumesItsOwnSession(t *testing.T) {
 	}
 }
 
+// Once per execution means ONCE PER EXECUTION: a route that leaves the
+// declaring step and comes back opens a second session, because that is a second
+// execution. The rework handback is such a route in the shipped graph — `review
+// the proposal` elects `implement the change`, which routes to `review the work`
+// again — and the boundary honoured for the first execution must not still be
+// standing when the second one starts. If it is, the second reviewer resumes the
+// conversation that wrote the very changes it is judging, which is the one thing
+// `fresh` is declared to prevent.
+//
+// It is also what the treasurer counts (docs/resolution.md § The treasurer): the
+// journal accounts for one session per execution of a declaring step, so a route
+// crossing it twice and opening one session is short by one against its own
+// record.
+func TestSession_FreshStepReachedTwiceOpensTwoSessions(t *testing.T) {
+	agent := &sessionAgent{}
+	judged := 0
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", promptingStep("implementation", asPlan),
+			flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true,
+				Next: []flow.StepId{"implementation"}})
+		f.AddStep("review the work", "implementation", promptingStep("commit", asPatch),
+			flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor",
+				Session: flow.SessionFresh, Next: []flow.StepId{"commit"}})
+		// The handback: the first judgement sends the route back through the
+		// declaring step, the second lets it finish.
+		f.AddStep("judge the proposal", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"}); err != nil {
+				return flow.StepResult{}, err
+			}
+			judged++
+			if judged == 1 {
+				return ctx.Next("implementation", "rework").CommitHash("abc"), nil
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("abc"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor",
+			Next:        []flow.StepId{"implementation"},
+			MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, agent)
+
+	runSteps(t, app, claim, 5)
+
+	wantFresh(t, agent, 0)            // the entry
+	wantFresh(t, agent, 1)            // the declaration, first execution
+	wantResume(t, agent, 2, "sess-2") // the judgement continues the reviewer's
+	wantFresh(t, agent, 3)            // the declaration again: a SECOND execution
+	wantResume(t, agent, 4, "sess-3")
+}
+
 // A MECHANICAL step may declare `fresh`: not prompting and not being a boundary
 // are different facts. The declaration says where the conversation ends, and
 // nothing requires the step that says so to be the one talking.
@@ -346,6 +394,61 @@ func TestSession_SignalStepIsHandedItAndRecordsIt(t *testing.T) {
 	if got.SessionID != "sess-1" {
 		t.Errorf("session after the signal step = %+v, want the handle it opened kept for whatever comes next", got)
 	}
+}
+
+// A turn that FAILED still opened a conversation, and the handle it named is
+// kept. The next dispatch resumes it instead of buying the same context again:
+// a transient failure suspends the cost and dispatch axes because a flapping
+// runner never used them, and a substrate that named its session did use one.
+func TestSession_ATransientlyFailedTurnStillKeepsItsHandle(t *testing.T) {
+	agent := &sessionAgent{}
+	failing := &failThenSucceedAgent{inner: agent}
+	dispatches := 0
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			dispatches++
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"}); err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, failing)
+
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "parked" {
+		t.Fatalf("first RunOne = (%+v, %v), want parked on the transient failure", res, err)
+	}
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
+		t.Fatalf("second RunOne = (%+v, %v), want done", res, err)
+	}
+	if dispatches != 2 {
+		t.Fatalf("the step was dispatched %d times, want 2", dispatches)
+	}
+	wantFresh(t, agent, 0)
+	wantResume(t, agent, 1, "sess-1")
+	if agent.minted > 1 {
+		t.Errorf("the substrate opened %d sessions, want 1 — the dead turn's conversation was thrown away and bought again", agent.minted)
+	}
+}
+
+// failThenSucceedAgent turns the FIRST turn into a transient infra failure that
+// still names its session: the conversation was opened, the turn did not
+// finish. Every later turn is the inner agent's.
+type failThenSucceedAgent struct {
+	inner *sessionAgent
+	turns int
+}
+
+func (a *failThenSucceedAgent) Name() string { return "fail-then-succeed" }
+
+func (a *failThenSucceedAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.AgentResponse, error) {
+	resp, err := a.inner.Run(ctx, req)
+	a.turns++
+	if a.turns == 1 && resp != nil {
+		resp.Failure = &flow.AgentFailure{Kind: "no-result", Message: "the host interfered", Transient: true}
+		resp.LastText = ""
+	}
+	return resp, err
 }
 
 // noSessionBackend refuses the agent-session store rather than lacking it —

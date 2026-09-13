@@ -56,10 +56,53 @@ func (c *Client) Name() string {
 	return c.Binary
 }
 
+// Run sends one turn, and RESUMES ONLY IF THE SUBSTRATE STILL HAS THE SESSION.
+//
+// `claude --resume <id>` fails outright when the conversation is gone — pruned,
+// recorded by another machine, or written under a different project directory —
+// and it fails the same way every time it is asked. A handle stored with the
+// resolution outlives the process that minted it (docs/resolution.md § The agent
+// session), so a dead one is reachable, and re-offering it would turn a turn that
+// could have run into a turn that never can: the failure is transient-shaped, the
+// re-dispatch offers the same dead handle, and nothing in the loop ever spends a
+// dispatch to notice.
+//
+// So a turn that carried a handle and came back with NOTHING AT ALL — no result,
+// no session, not even a failed turn to report — is sent once more with the
+// handle dropped. That is the best-effort rule this end of: the handle is
+// offered, the substrate declined it, and the prompt is what makes the turn
+// right. A turn that ran at all reports its session id, failed or not, so this
+// cannot swallow a turn that merely went badly; what it costs where the host was
+// the real problem is one more spawn that produces nothing.
 func (c *Client) Run(ctx context.Context, req flow.AgentRequest) (*flow.AgentResponse, error) {
 	if err := c.spawnable(); err != nil {
 		return nil, &startError{wrapped: err}
 	}
+	resp, err := c.turn(ctx, req, req.ResumeSessionID)
+	if req.ResumeSessionID == "" || !declinedTheHandle(resp, err) || ctx.Err() != nil {
+		return resp, err
+	}
+	return c.turn(ctx, req, "")
+}
+
+// declinedTheHandle reports whether a turn came back with no evidence it ever
+// started. Deliberately narrow: a response carrying a session id, any text, or a
+// failure the substrate itself described is a turn that HAPPENED, and dropping
+// the handle after one of those would discard a live conversation over an
+// unrelated fault.
+func declinedTheHandle(resp *flow.AgentResponse, err error) bool {
+	if err != nil || resp == nil {
+		return false
+	}
+	if resp.SessionID != "" || resp.LastText != "" {
+		return false
+	}
+	return resp.Failure != nil && (resp.Failure.Kind == "no-result" || resp.Failure.Kind == "exit-error")
+}
+
+// turn spawns one `claude` process. resume is passed rather than read off req so
+// Run can send the same request a second time without it.
+func (c *Client) turn(ctx context.Context, req flow.AgentRequest, resume string) (*flow.AgentResponse, error) {
 	args := []string{
 		"--print",
 		"--verbose",
@@ -72,8 +115,8 @@ func (c *Client) Run(ctx context.Context, req flow.AgentRequest) (*flow.AgentRes
 	if req.PermissionMode != "" {
 		args = append(args, "--permission-mode", req.PermissionMode)
 	}
-	if req.ResumeSessionID != "" {
-		args = append(args, "--resume", req.ResumeSessionID)
+	if resume != "" {
+		args = append(args, "--resume", resume)
 	}
 	// req.FreshSession needs no argument here, and its absence is not a gap. This
 	// spawns `claude --print` with neither --resume nor --continue, which IS the
@@ -167,7 +210,18 @@ func (c *Client) Run(ctx context.Context, req flow.AgentRequest) (*flow.AgentRes
 	}
 
 	if parseErr != nil {
+		// The session id the stream did name is kept, and it is the difference
+		// between a turn that never started and one that was killed in the middle:
+		// `claude` announces its session in the init event, long before the result
+		// event this path is missing. Run reads exactly that to decide whether a
+		// handle it offered was declined, and a turn that got as far as saying
+		// which conversation it was in is never re-sent.
+		var session string
+		if resp != nil {
+			session = resp.SessionID
+		}
 		return &flow.AgentResponse{
+			SessionID: session,
 			Failure: &flow.AgentFailure{
 				Kind:      "no-result",
 				Message:   combineDiagnostic(parseErr, waitErr, stderrBytes),
@@ -322,7 +376,11 @@ func parseStream(r io.Reader) (*flow.AgentResponse, error) {
 	}
 
 	if !resultEvent {
-		return nil, errors.New("stream ended without a result event")
+		// The partial response travels WITH the error: there is no usable turn
+		// here, and the caller must not read it as one, but the session id an
+		// init event already named says the turn started — which is what tells a
+		// declined resume apart from a turn killed in the middle.
+		return resp, errors.New("stream ended without a result event")
 	}
 	if isError {
 		// A budget stop is a clean end-of-run, not a broken one: the result

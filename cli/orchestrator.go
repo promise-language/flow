@@ -336,8 +336,18 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// machinery-chosen session § The agent session forbids. RunNumber cannot serve
 	// here: it reads the ledger's cumulative dispatches, which is already above one
 	// on a second execution reached by a handback.
-	if li.Session == flow.SessionFresh && sctx.resolutionSession().Boundary != li.Result() {
+	//
+	// And the boundary belongs to that ONE execution, which is why the second
+	// branch retires it as soon as the route moves on. A route may cross the
+	// declaring step more than once — the rework handback is exactly that — and a
+	// boundary still standing from the first crossing would make the second
+	// execution resume the conversation it is supposed to be independent of, with
+	// nothing anywhere saying so.
+	switch sess := sctx.resolutionSession(); {
+	case li.Session == flow.SessionFresh && sess.Boundary != li.Result():
 		sctx.setResolutionSession(flow.AgentSession{Boundary: li.Result()})
+	case sess.Boundary != "" && sess.Boundary != li.Result():
+		sctx.setResolutionSession(flow.AgentSession{SessionID: sess.SessionID})
 	}
 
 	// Dispatch. The handler completes by RETURNING its election; res is read
@@ -1618,14 +1628,20 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 	m.promptsThisInvocation++
 
 	resp, err := m.inner.Run(ctx, req)
+	// The session is recorded whatever became of the turn, and it is the one
+	// thing here that a transient failure does not suspend. Cost and dispatches
+	// are skipped on transience because a flapping runner must not burn an axis
+	// it never used; a substrate that named its session USED one, and the
+	// conversation it opened holds everything the dead turn paid for. Dropping
+	// the handle because the turn ended badly is the re-buying
+	// docs/resolution.md § Nothing is bought twice forbids — the next dispatch
+	// would open a second session and start from the prompt again.
+	m.recordSession(sess, resp)
 	// Skip cost accounting on transient infra failures — symmetric with the
 	// orchestrator's skip-the-dispatch-count policy for ParkInfraTransient. A
 	// flapping runner must not burn the cost axis any more than it burns the
 	// invocations axis.
 	transient := resp != nil && resp.Failure != nil && resp.Failure.Transient
-	if !transient {
-		m.recordSession(sess, resp)
-	}
 	if err == nil && resp != nil && resp.CostUSD > 0 && !transient {
 		_ = m.orch.AddCost(ctx, m.claim.ItemRef, step, resp.CostUSD)
 		// Update the local mirror so subsequent calls, and the park snapshot,
