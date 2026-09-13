@@ -1031,31 +1031,96 @@ func TestStepImplement_RecordsTheCommitItProduced(t *testing.T) {
 // The steps that CONSUME the implementation.
 // ---------------------------------------------------------------------------
 
-func TestConsumingStepsRefuseAMissingBranch(t *testing.T) {
-	// The worktree directory is shared across items. A missing claim branch
-	// means the work is not here; cutting a fresh one off the base and carrying
-	// on would have implement work on nothing, review and coverage analyse an
-	// empty change, and the request propose one. Cutting a branch is the open
-	// branch step's job, and only its.
+// The six steps that run against the implementation SWITCH NO BRANCH.
+//
+// Each declares Needs: item-branch, and the SDK establishes that before the
+// handler is dispatched — acquiring the worktree, checking the branch out from
+// durable state, and only then taking the write-contract snapshot
+// (docs/resolution.md § Steps and the worktree). A handler that checked out for
+// itself would do it AFTER that snapshot, which is what parked every rework
+// handback on "branch moved" and blamed the agent for a switch the flow's own
+// helper made.
+//
+// The refusal the old helper carried — the implementation is not in this
+// worktree — is not lost: the establishment blocks the item on it, before the
+// snapshot and before any dispatch is charged
+// (cli.TestRunOne_NeedsItemBranch_ABranchThatIsNotHereBlocks, and on this
+// package's own shipped graph, TestReworkHandback_AMissingItemBranchBlocksBeforeImplementRuns).
+//
+// The worktree each case is handed sits on the BASE with the item's branch
+// present, which is the state the old helper corrected. Nothing corrects it
+// here: what the SDK hands the step is the state the step runs in.
+func TestConsumingStepsDoNotMoveTheBranch(t *testing.T) {
 	b := testBuilder(t)
-	for name, step := range map[string]func(flow.StepCtx) (flow.StepResult, error){
-		"implement":    b.stepImplement,
-		"review":       b.stepReview,
-		"coverage":     b.stepCoverage,
-		"open request": openRequest(b),
-	} {
-		t.Run(name, func(t *testing.T) {
-			wt := newFakeWorktree()
-			ctx := ctxWithPlan(wt, &scriptedAgent{})
-			res, err := step(ctx)
-			if err == nil || !strings.Contains(err.Error(), "did not exist") {
-				t.Errorf("err = %v, want a refusal that the branch is absent", err)
+	// onBase is the worktree as the establishment would NOT have left it: the
+	// work is here, and the tree is sitting somewhere else.
+	onBase := func(wt *fakeWorktree) *fakeWorktree {
+		wt.exists[testBranch] = true
+		wt.branch = "main"
+		return wt
+	}
+	iwt := newIntegrationWorktree()
+	iwt.envelope = []byte(`{"coverage": 95}`)
+	iwt.thresholds = []byte(`{"coverage": 80}`)
+	onBase(&iwt.fakeWorktree)
+
+	cases := []struct {
+		name string
+		wt   *fakeWorktree
+		run  func() (flow.StepResult, error)
+	}{}
+	add := func(name string, wt *fakeWorktree, run func() (flow.StepResult, error)) {
+		cases = append(cases, struct {
+			name string
+			wt   *fakeWorktree
+			run  func() (flow.StepResult, error)
+		}{name, wt, run})
+	}
+
+	implementWT := onBase(newFakeWorktree())
+	add("implement", implementWT, func() (flow.StepResult, error) {
+		return b.stepImplement(ctxWithPlan(implementWT, &scriptedAgent{replies: []string{"done"}}))
+	})
+	reviewWT := onBase(newFakeWorktree())
+	add("review", reviewWT, func() (flow.StepResult, error) {
+		return b.stepReview(ctxWithPlan(reviewWT, &scriptedAgent{replies: []string{"the review"}}))
+	})
+	coverageWT := onBase(newFakeWorktree())
+	add("coverage", coverageWT, func() (flow.StepResult, error) {
+		return b.stepCoverage(ctxWithPlan(coverageWT, &scriptedAgent{replies: []string{"the coverage analysis"}}))
+	})
+	requestWT := onBase(newFakeWorktree())
+	add("open request", requestWT, func() (flow.StepResult, error) {
+		return b.stepOpenPR(ctxWithPlan(requestWT, &scriptedAgent{}))
+	})
+	repairWT := onBase(newFakeWorktree())
+	repairWT.examineErrs = []error{flow.ErrDisclosureRefused{
+		Act:    flow.ActPush,
+		Reason: errors.New("an absolute home path names the machine's user"),
+	}}
+	add("repair disclosure", repairWT, func() (flow.StepResult, error) {
+		return b.stepRepairDisclosure(routedFrom(ctxWithPlan(repairWT, &scriptedAgent{}), StepOpenPR))
+	})
+	add("verify merge result", &iwt.fakeWorktree, func() (flow.StepResult, error) {
+		return b.stepVerifyMerge(newIntegrationCtx(iwt))
+	})
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := c.run(); err != nil {
+				// The step is expected to run to completion on this setup:
+				// a failure would leave the assertion below true for the wrong
+				// reason — a handler that stopped before it could switch
+				// anything.
+				t.Fatalf("%s: %v", c.name, err)
 			}
-			if res.Payload != nil {
-				t.Error("produced an artifact describing a tree that has no implementation")
+			for _, call := range c.wt.calls {
+				if strings.HasPrefix(call, "branch:") {
+					t.Errorf("the handler checked a branch out itself (%s) — the SDK establishes the declared state before dispatch, and a checkout here lands after the write-contract snapshot", call)
+				}
 			}
-			if wt.commits != 0 {
-				t.Errorf("committed %d times onto a branch it had just cut", wt.commits)
+			if c.wt.branch != "main" {
+				t.Errorf("branch = %q, want it left where the handler was handed it (%q)", c.wt.branch, "main")
 			}
 		})
 	}

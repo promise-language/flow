@@ -33,6 +33,25 @@ const maxFitnessWaits = 20
 // Var (not const) so tests can shorten it without sleeping 30 s per round.
 var fitnessWaitInterval = 30 * time.Second
 
+// maxRedispatches bounds how many times cmdResolve re-dispatches an item that
+// parked under a kind the vocabulary classifies as cleared by a re-dispatch
+// (flow.ParkKind.RedispatchMayClear). It is the fitness wait's SHAPE, for the
+// fitness wait's reason: a condition that never clears must terminate the run
+// rather than spin it to the runaway guard, and exhausting the bound leaves the
+// item PARKED — a wait bound is not a verdict.
+//
+// Its own number, and lower than maxFitnessWaits, because the two wait on
+// different things. A fitness wait re-MEASURES and dispatches nothing, so
+// twenty of them cost twenty readings; a re-dispatch runs the step, spends one
+// of maxResolveSteps, and on a charged kind spends an invocation the treasurer
+// is counting — which bounds it below this one long before this one is reached.
+const maxRedispatches = 5
+
+// redispatchInterval is the delay between those re-dispatches. Var (not const)
+// for the reason fitnessWaitInterval is one: a test must not sleep 30 s per
+// round to exercise the loop.
+var redispatchInterval = 30 * time.Second
+
 // cmdResolve drives the FULL lifecycle: it repeatedly advances the item one
 // step at a time (the same RunOne the orchestrator runs in production) until
 // the item is FINALIZED (no eligible flow remains) or the run stops — a step
@@ -84,6 +103,12 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	// that fails on every call loop until the runaway guard, because each site
 	// kept resetting the other's budget.
 	fitnessWaits := 0
+
+	// redispatches is ONE counter for the whole run too, and for the same
+	// reason: a per-park counter would let a step that parks clearable, clears,
+	// then parks clearable again keep buying itself a fresh budget, which is a
+	// loop with extra steps.
+	redispatches := 0
 
 	var claim *flow.Claim
 	if fs.NArg() == 1 {
@@ -460,12 +485,78 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			fmt.Fprintf(app.Err, "resolve: %s is blocked — %s\n", claim.ItemRef.Display, res.Reason)
 			app.reportSpend()
 			return 1
-		case flow.StatusParked, flow.StatusSkipped:
-			// Parked (question/budget/timeout) or skipped (preflight refusal,
-			// e.g. an already-finalized item). Stop and let the operator act.
+		case flow.StatusSkipped:
+			// A preflight refusal — an already-finalized item, an item outside
+			// this binary's coverage. Nothing to re-dispatch: the next cycle
+			// answers identically until somebody acts.
 			fmt.Fprintf(app.Err, "resolve: %s %s — run `status %s` to inspect\n", claim.ItemRef.Display, res.Status, claim.ItemRef.Display)
 			app.reportSpend()
 			return 0
+		case flow.StatusParked:
+			// Whether this park is worth another dispatch is the PARK KIND's own
+			// answer, published on the result (flow.ParkKind.RedispatchMayClear,
+			// carried out by parkAndReturn). It is read here and nowhere else:
+			// a second table in the driver is how a vocabulary and its driver come
+			// to disagree about a question only one of them owns. An absent field
+			// reads as false, which is the direction wire.go already fixes for an
+			// unrecognised kind.
+			//
+			// docs/cli.md § Resolving: the five non-clearing kinds — blocked,
+			// question, treasurer-refused, refused and write-contract — stop here
+			// immediately. Those are the real reasons to stop.
+			mayClear := res.RedispatchMayClear != nil && *res.RedispatchMayClear
+			switch {
+			case mayClear && res.ClearsAt != nil:
+				// The one condition that knows when it clears. The instant is
+				// read WITH the classification and never instead of it — it
+				// says when a re-dispatch would be worth anything, which is a
+				// question only a kind that re-dispatch can clear is asking
+				// (wire.go: "a caller reads the two together").
+				//
+				// The run does NOT sit in front of it: a window may be hours or days from
+				// resetting, and nothing is served by a process waiting it out
+				// (docs/environment.md § The agent account). It exits, and the
+				// claim and its arena stay — so the draft, the session and the
+				// worktree are here when whatever returns at that instant
+				// resumes. Naming the instant is the fact a timer or an operator
+				// needs, and the one today's message omitted.
+				fmt.Fprintf(app.Err, "resolve: %s parked — %s — nothing clears before %s, so the run ends here; "+
+					"the claim and this arena are kept, so a run started then resumes from this state\n",
+					claim.ItemRef.Display, res.Reason, res.ClearsAt.UTC().Format(time.RFC3339))
+				app.reportSpend()
+				return 0
+			case mayClear && redispatches < maxRedispatches:
+				// The shape the fitness wait one arm above already has: hold,
+				// try again, and bound the trying. A step that left a job
+				// undone, a flapping runner, a remote that went away — the
+				// re-dispatch is what does the job, and stopping for an
+				// operator on a condition the codebase classifies as
+				// self-curing is stopping for no reason.
+				redispatches++
+				fmt.Fprintf(app.Err, "resolve: %s — re-dispatching (%d/%d)…\n",
+					res.Reason, redispatches, maxRedispatches)
+				select {
+				case <-time.After(redispatchInterval):
+				case <-ctx.Done():
+					fmt.Fprintln(app.Err, "resolve: interrupted while waiting to re-dispatch")
+					return 1
+				}
+				continue
+			default:
+				// A park that stays a park: either a kind no re-dispatch
+				// clears, or one that did not clear within the bound.
+				// Exhausting the bound is still a park, never a verdict, so the
+				// message says how many attempts it stands on and sends the
+				// operator to the same place.
+				bound := ""
+				if mayClear {
+					bound = fmt.Sprintf(" after %d re-dispatches", redispatches)
+				}
+				fmt.Fprintf(app.Err, "resolve: %s parked%s — run `status %s` to inspect\n",
+					claim.ItemRef.Display, bound, claim.ItemRef.Display)
+				app.reportSpend()
+				return 0
+			}
 		case flow.StatusDone:
 			// Finalize case: RunOne ran no step (empty Step) because no eligible
 			// flow remained.

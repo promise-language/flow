@@ -176,6 +176,81 @@ func TestApp_Validate_RefusesATagNamingNoDeclaredRole(t *testing.T) {
 	}
 }
 
+// --- Declared worktree states ---
+//
+// docs/cli.md § Startup: a binary declaring a worktree state it cannot resolve
+// branch names for is refused. The state is established before dispatch and
+// verified before capture, both from App.ItemBranches, so a flow declaring one
+// without a resolver names a state nothing can ever put the worktree into —
+// knowable from configuration alone, and refused before an item is claimed
+// rather than discovered mid-resolution.
+
+func TestApp_Validate_RefusesADeclaredNeedsWithNoBranchResolver(t *testing.T) {
+	app := graphApp(fake.New(), func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
+			Entry:       true,
+			Role:        "contributor",
+			Needs:       flow.NeedsItemBranch,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+		})
+	})
+	// The step and the field, because between them they are the whole repair:
+	// which declaration cannot be honoured, and what to wire so it can be.
+	wantStartupRefusal(t, app, "write plan", "item-branch", "App.ItemBranches")
+}
+
+func TestApp_Validate_RefusesADeclaredLeavesWithNoBranchResolver(t *testing.T) {
+	app := graphApp(fake.New(), func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
+			Entry:       true,
+			Role:        "contributor",
+			Leaves:      flow.LeavesBase,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+		})
+	})
+	wantStartupRefusal(t, app, "write plan", "base", "App.ItemBranches")
+}
+
+// The two loosest members establish and verify nothing, so a flow declaring
+// only those asks the resolver nothing — which is what makes the field optional
+// rather than required. A binary with no branches to name still starts.
+func TestApp_Validate_AcceptsTheLoosestStatesWithNoBranchResolver(t *testing.T) {
+	app := graphApp(fake.New(), func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
+			Entry:       true,
+			Role:        "contributor",
+			Needs:       flow.NeedsAny,
+			Leaves:      flow.LeavesAsFound,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+		})
+	})
+	if err := app.validate(); err != nil {
+		t.Fatalf("validate() = %v, want acceptance: nothing is established and nothing is verified", err)
+	}
+}
+
+// With the resolver wired, the same declaration starts: the refusal is about
+// the state having no names, not about declaring a state at all.
+func TestApp_Validate_AcceptsADeclaredStateWithABranchResolver(t *testing.T) {
+	app := graphApp(fake.New(), func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", inertStep, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
+			Entry:       true,
+			Role:        "contributor",
+			Needs:       flow.NeedsItemBranch,
+			Leaves:      flow.LeavesItemBranch,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+		})
+	})
+	app.ItemBranches = testItemBranches
+	if err := app.validate(); err != nil {
+		t.Fatalf("validate() = %v, want acceptance: the names are resolvable", err)
+	}
+}
+
 // --- Coverage ---
 //
 // docs/resolution-standalone.md § Declaring what a binary may do: coverage is

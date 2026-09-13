@@ -27,9 +27,6 @@ import (
 // underneath it. Verifying the branch again would re-establish something
 // already known and miss the thing that changed.
 func (b *builder) stepVerifyMerge(ctx flow.StepCtx) (flow.StepResult, error) {
-	if err := b.onClaimBranch(ctx); err != nil {
-		return flow.StepResult{}, err
-	}
 	wt, err := ctx.Worktree()
 	if err != nil {
 		return flow.StepResult{}, err

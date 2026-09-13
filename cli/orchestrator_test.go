@@ -500,6 +500,23 @@ func appendMarkdown(t *testing.T, o flow.Orchestrator, ref flow.ItemRef, step, n
 
 // testApp builds a minimal App with the fake backend pre-populated with one
 // item and a single-flow registration.
+// testItemBranches is what the fixtures' items name: a branch per item, and the
+// base the fake worktree starts on.
+//
+// The base is "main" because that is what fake.Orchestrator's fresh worktree
+// reports, so a step declaring `base` is already there and one declaring
+// `item-branch` has somewhere else to be put — which is the difference the
+// establishment and the verification are about.
+func testItemBranches(_ context.Context, item flow.Item) (flow.ItemBranches, error) {
+	return flow.ItemBranches{Item: testItemBranchOf(item.Ref), Base: "main"}, nil
+}
+
+// testItemBranchOf is the item branch alone, so a fixture can say where the
+// worktree ought to be without restating the convention testItemBranches holds.
+func testItemBranchOf(ref flow.ItemRef) flow.BranchName {
+	return flow.BranchName("item/" + ref.Display)
+}
+
 func testApp(t *testing.T, configure func(*flow.Flow), agent flow.Agent) (*App, *fake.Orchestrator, flow.Claim) {
 	t.Helper()
 	return testAppItem(t, flow.Item{Ref: itemRefFor("1"), Type: "task", Title: "test#1"}, []flow.ItemType{"task"}, configure, agent)
@@ -535,6 +552,12 @@ func testAppItem(t *testing.T, item flow.Item, types []flow.ItemType, configure 
 	f.Role("contributor", flow.CapPush)
 	configure(f)
 	app.Flow = f
+	// The branch names a declared worktree state resolves to. Wired for every
+	// fixture rather than per test, because startup refuses a flow declaring a
+	// state with no resolver (App.validate) — a fixture that declared Needs and
+	// forgot this would fail before its own subject ran. A test about the
+	// resolver FAILING replaces it on the returned App, after validate.
+	app.ItemBranches = testItemBranches
 	// Every declared role is covered: what the account can do is the lever
 	// these fixtures turn, and none of them is about declining a role.
 	app.Coverage = f.RoleNames()
@@ -3822,5 +3845,939 @@ func TestRemedyFor_AccountExhausted_NamesTheWindowAndNotTheInfrastructure(t *tes
 	}
 	if got == remedyFor(flow.ParkInfraTransient) {
 		t.Error("the account-exhausted remedy is the infra-transient one verbatim: the two conditions are cleared by different things")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The declared worktree state
+//
+// docs/resolution.md § Steps and the worktree: "A step runs only in its
+// declared worktree state, and completes only into its declared worktree
+// state." The state a step NEEDS is established mechanically before dispatch,
+// from durable state; the state it LEAVES is verified before its result is
+// captured.
+// ---------------------------------------------------------------------------
+
+// putItemBranchInTheWorktree leaves the arena's worktree in the state a
+// maintainer-side rework handback hands the next step: the item's branch is
+// here, and the tree is sitting on the base — `close branch` put it there, and
+// `review the proposal` ran there.
+func putItemBranchInTheWorktree(t *testing.T, be *fake.Orchestrator, ref flow.ItemRef) {
+	t.Helper()
+	ctx := context.Background()
+	wt, err := be.Worktree(ctx, ref)
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	if _, err := wt.Branch(ctx, testItemBranchOf(ref), "main"); err != nil {
+		t.Fatalf("Branch(item): %v", err)
+	}
+	if _, err := wt.Branch(ctx, "main", ""); err != nil {
+		t.Fatalf("Branch(main): %v", err)
+	}
+}
+
+// branchNow is where the arena's worktree is sitting, read from outside the
+// dispatch.
+func branchNow(t *testing.T, be *fake.Orchestrator, ref flow.ItemRef) flow.BranchName {
+	t.Helper()
+	wt, err := be.Worktree(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	branch, err := wt.CurrentBranch(context.Background())
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	return branch
+}
+
+// The regression this whole half exists for (#293/#349), asserted as a
+// COMPLETION rather than as a better park.
+//
+// The step declares Needs: item-branch and {MayCommit, MayEditTree} — no
+// MayBranch — and is dispatched on a worktree sitting on the base, which is
+// what every maintainer-side rework handback hands it. The establishment puts
+// the worktree on the item's branch BEFORE the write-contract snapshot, so the
+// snapshot records the state the step was given and the step completes. The
+// flow's own checkout used to land one line AFTER that snapshot, and was read
+// back as the agent having switched a branch it never touched.
+func TestRunOne_NeedsItemBranch_IsEstablishedBeforeTheWriteContractSnapshot(t *testing.T) {
+	var sawBranch flow.BranchName
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("implement the change", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			wt, err := ctx.Worktree()
+			if err != nil {
+				return flow.StepResult{}, err
+			}
+			sawBranch, err = wt.CurrentBranch(ctx.Context())
+			if err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
+			Role:        "contributor",
+			Entry:       true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+			Needs:       flow.NeedsItemBranch,
+			Writes:      flow.WriteContract{MayCommit: true, MayEditTree: true},
+		})
+	}, &stubAgent{name: "stub"})
+	putItemBranchInTheWorktree(t, be, claim.ItemRef)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusDone) {
+		t.Fatalf("status = %q (%s), want done — the established branch is not the agent moving one",
+			res.Status, res.Reason)
+	}
+	if want := testItemBranchOf(claim.ItemRef); sawBranch != want {
+		t.Errorf("the handler was dispatched on %q, want the declared %q", sawBranch, want)
+	}
+}
+
+// A branch that is not in this worktree is the state that cannot be
+// established, and it BLOCKS the item naming the step and the state
+// (docs/flow-registration.md § Step configuration). Nothing is dispatched, so
+// nothing is charged and nothing is journaled — the failure costs the item no
+// invocation at all, where the handler-level refusal it replaces cost one.
+func TestRunOne_NeedsItemBranch_ABranchThatIsNotHereBlocks(t *testing.T) {
+	dispatched := false
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("implement the change", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			dispatched = true
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
+			Role:        "contributor",
+			Entry:       true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+			Needs:       flow.NeedsItemBranch,
+			Writes:      flow.WriteContract{MayCommit: true, MayEditTree: true},
+		})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if dispatched {
+		t.Error("the handler ran: a state that cannot be established stops the dispatch, it does not precede it")
+	}
+	if res.Status != string(flow.StatusParked) || res.Park == nil || res.Park.Kind != flow.ParkBlocked {
+		t.Fatalf("res = %+v, want parked %q", res, flow.ParkBlocked)
+	}
+	// The step and the state: between them they are what a person needs to know
+	// what is missing and which step wanted it.
+	for _, want := range []string{"plan", string(flow.NeedsItemBranch), string(testItemBranchOf(claim.ItemRef))} {
+		if !strings.Contains(res.Park.Reason, want) {
+			t.Errorf("reason = %q, want it to name %q", res.Park.Reason, want)
+		}
+	}
+	if res.RedispatchMayClear == nil || *res.RedispatchMayClear {
+		t.Errorf("RedispatchMayClear = %v, want a present false: the work is not here until a person puts it here",
+			res.RedispatchMayClear)
+	}
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := state.Ledger.Row("plan").Dispatches; got != 0 {
+		t.Errorf("Dispatches = %d, want 0: nothing was dispatched, so there is no attempt to bill", got)
+	}
+	if len(state.Journal) != 0 {
+		t.Errorf("journal has %d entries, want 0", len(state.Journal))
+	}
+	if rec, ok := state.Artifacts["plan"]; ok && rec.Resolved {
+		t.Error("an artifact was resolved by a step that never ran")
+	}
+}
+
+// branchErrWorktree is a worktree whose checkout fails the way git's does over
+// a dirty tree. The reason git gives is the reason the park has to carry: it is
+// the only thing that says what to go and fix.
+type branchErrBackend struct {
+	*fake.Orchestrator
+	err error
+}
+
+func (b *branchErrBackend) Worktree(ctx context.Context, ref flow.ItemRef) (flow.Worktree, error) {
+	inner, err := b.Orchestrator.Worktree(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	return &branchErrWorktree{Worktree: inner, err: b.err}, nil
+}
+
+type branchErrWorktree struct {
+	flow.Worktree
+	err error
+}
+
+func (w *branchErrWorktree) Branch(context.Context, flow.BranchName, flow.BranchName) (bool, error) {
+	return false, w.err
+}
+
+func TestRunOne_NeedsItemBranch_ACheckoutThatFailsBlocksCarryingTheReason(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("implement the change", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
+			Role:        "contributor",
+			Entry:       true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+			Needs:       flow.NeedsItemBranch,
+		})
+	}, &stubAgent{name: "stub"})
+	app.Orchestrator = &branchErrBackend{
+		Orchestrator: be,
+		err:          errors.New("worktree is dirty; cannot switch branches"),
+	}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusParked) || res.Park == nil || res.Park.Kind != flow.ParkBlocked {
+		t.Fatalf("res = %+v, want parked %q", res, flow.ParkBlocked)
+	}
+	if !strings.Contains(res.Park.Reason, "worktree is dirty") {
+		t.Errorf("reason = %q, want it to carry git's own reason", res.Park.Reason)
+	}
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := state.Ledger.Row("plan").Dispatches; got != 0 {
+		t.Errorf("Dispatches = %d, want 0", got)
+	}
+}
+
+// `any` establishes NOTHING. The step runs wherever the worktree already is,
+// and the snapshot is still taken at the handler's first Worktree() — which is
+// what the second case asserts: a step that switches a branch it may not switch
+// still parks write-contract, because there is a snapshot to compare against.
+func TestRunOne_NeedsAny_EstablishesNothingAndStillSnapshots(t *testing.T) {
+	t.Run("nothing is checked out", func(t *testing.T) {
+		var sawBranch flow.BranchName
+		app, be, claim := testApp(t, func(f *flow.Flow) {
+			f.AddStep("review the proposal", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+				wt, err := ctx.Worktree()
+				if err != nil {
+					return flow.StepResult{}, err
+				}
+				sawBranch, err = wt.CurrentBranch(ctx.Context())
+				if err != nil {
+					return flow.StepResult{}, err
+				}
+				return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+			}, flow.StepConfig{
+				Prompts:     flow.PromptsAgent,
+				Role:        "contributor",
+				Entry:       true,
+				MayFinalize: []flow.Disposition{flow.DispositionResolved},
+				Needs:       flow.NeedsAny,
+			})
+		}, &stubAgent{name: "stub"})
+		// The item's branch IS here. A step declaring `any` is still not put on
+		// it: "the step requires nothing established".
+		putItemBranchInTheWorktree(t, be, claim.ItemRef)
+
+		res, err := RunOne(context.Background(), app, claim)
+		if err != nil {
+			t.Fatalf("RunOne: %v", err)
+		}
+		if res.Status != string(flow.StatusDone) {
+			t.Fatalf("status = %q (%s), want done", res.Status, res.Reason)
+		}
+		if sawBranch != "main" {
+			t.Errorf("the handler was dispatched on %q, want the base it was already sitting on", sawBranch)
+		}
+		if got := branchNow(t, be, claim.ItemRef); got != "main" {
+			t.Errorf("the worktree ended on %q, want %q: nothing moved it", got, "main")
+		}
+	})
+
+	t.Run("the snapshot is still taken", func(t *testing.T) {
+		app, _, claim := testApp(t, func(f *flow.Flow) {
+			f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+				wt, err := ctx.Worktree()
+				if err != nil {
+					return flow.StepResult{}, err
+				}
+				if _, err := wt.Branch(ctx.Context(), "rogue", ""); err != nil {
+					return flow.StepResult{}, err
+				}
+				return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+			}, flow.StepConfig{
+				Prompts:     flow.PromptsAgent,
+				Role:        "contributor",
+				Entry:       true,
+				MayFinalize: []flow.Disposition{flow.DispositionResolved},
+				Needs:       flow.NeedsAny,
+				Writes:      flow.WriteContract{},
+			})
+		}, &stubAgent{name: "stub"})
+
+		res, err := RunOne(context.Background(), app, claim)
+		if err != nil {
+			t.Fatalf("RunOne: %v", err)
+		}
+		if res.Park == nil || res.Park.Kind != flow.ParkWriteContract {
+			t.Fatalf("res = %+v, want a write-contract park: the handler's own Worktree() takes the snapshot", res)
+		}
+	})
+}
+
+// `base` is established the same way, from the same names, and its absence
+// blocks the same way: a worktree with no base branch is one the step cannot be
+// run in.
+func TestRunOne_NeedsBase(t *testing.T) {
+	t.Run("checked out", func(t *testing.T) {
+		var sawBranch flow.BranchName
+		app, be, claim := testApp(t, func(f *flow.Flow) {
+			f.AddStep("close branch", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+				wt, err := ctx.Worktree()
+				if err != nil {
+					return flow.StepResult{}, err
+				}
+				sawBranch, err = wt.CurrentBranch(ctx.Context())
+				if err != nil {
+					return flow.StepResult{}, err
+				}
+				return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+			}, flow.StepConfig{
+				Prompts:     flow.PromptsAgent,
+				Role:        "contributor",
+				Entry:       true,
+				MayFinalize: []flow.Disposition{flow.DispositionResolved},
+				Needs:       flow.NeedsBase,
+			})
+		}, &stubAgent{name: "stub"})
+		// Both branches exist, and the tree is left on the item's — the state
+		// the step declaring `base` has to be moved out of.
+		putItemBranchInTheWorktree(t, be, claim.ItemRef)
+		wt, err := be.Worktree(context.Background(), claim.ItemRef)
+		if err != nil {
+			t.Fatalf("Worktree: %v", err)
+		}
+		if _, err := wt.Branch(context.Background(), testItemBranchOf(claim.ItemRef), "main"); err != nil {
+			t.Fatalf("Branch: %v", err)
+		}
+
+		res, err := RunOne(context.Background(), app, claim)
+		if err != nil {
+			t.Fatalf("RunOne: %v", err)
+		}
+		if res.Status != string(flow.StatusDone) {
+			t.Fatalf("status = %q (%s), want done", res.Status, res.Reason)
+		}
+		if sawBranch != "main" {
+			t.Errorf("the handler was dispatched on %q, want the declared base %q", sawBranch, "main")
+		}
+	})
+
+	t.Run("not in this worktree", func(t *testing.T) {
+		app, _, claim := testApp(t, func(f *flow.Flow) {
+			f.AddStep("close branch", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+				return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+			}, flow.StepConfig{
+				Prompts:     flow.PromptsAgent,
+				Role:        "contributor",
+				Entry:       true,
+				MayFinalize: []flow.Disposition{flow.DispositionResolved},
+				Needs:       flow.NeedsBase,
+			})
+		}, &stubAgent{name: "stub"})
+
+		res, err := RunOne(context.Background(), app, claim)
+		if err != nil {
+			t.Fatalf("RunOne: %v", err)
+		}
+		if res.Park == nil || res.Park.Kind != flow.ParkBlocked {
+			t.Fatalf("res = %+v, want parked %q", res, flow.ParkBlocked)
+		}
+		if !strings.Contains(res.Park.Reason, string(flow.NeedsBase)) {
+			t.Errorf("reason = %q, want it to name the state that could not be established", res.Park.Reason)
+		}
+	})
+}
+
+// Failing to RESOLVE the names is not the item's state being wrong: a base
+// branch read over the network, or an arena that cannot produce a worktree, are
+// conditions a re-dispatch may clear — so they park infra-transient, which is
+// the kind `resolve` retries under its bound.
+func TestRunOne_NeedsItemBranch_UnresolvableNamesParkInfraTransient(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("implement the change", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
+			Role:        "contributor",
+			Entry:       true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+			Needs:       flow.NeedsItemBranch,
+		})
+	}, &stubAgent{name: "stub"})
+	app.ItemBranches = func(context.Context, flow.Item) (flow.ItemBranches, error) {
+		return flow.ItemBranches{}, errors.New("detect default branch: dial tcp: lookup api.github.com")
+	}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkInfraTransient {
+		t.Fatalf("res = %+v, want parked %q", res, flow.ParkInfraTransient)
+	}
+	if res.RedispatchMayClear == nil || !*res.RedispatchMayClear {
+		t.Errorf("RedispatchMayClear = %v, want a present true: the lookup may answer next time", res.RedispatchMayClear)
+	}
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := state.Ledger.Row("plan").Dispatches; got != 0 {
+		t.Errorf("Dispatches = %d, want 0", got)
+	}
+}
+
+// The other end of the same contract. A step that ends somewhere its
+// declaration does not allow has NOT completed: nothing journals, nothing is
+// captured, and the changes stay where they are for a person to judge
+// (docs/resolution.md § Steps and the worktree).
+//
+// The park is BLOCKED and not write-contract: the write-contract kind says the
+// agent moved something it may not move, and this step moved nothing — it
+// finished in a state its own declaration forbids. The dispatch IS charged: the
+// handler ran and spent, which is the difference from an establishment that
+// refused before anything was sent.
+func TestRunOne_LeavesItemBranch_AStepEndingOnTheBaseBlocks(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("implement the change", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			if _, err := ctx.Worktree(); err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
+			Role:        "contributor",
+			Entry:       true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+			Needs:       flow.NeedsAny,
+			Leaves:      flow.LeavesItemBranch,
+		})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusParked) || res.Park == nil || res.Park.Kind != flow.ParkBlocked {
+		t.Fatalf("res = %+v, want parked %q — and NOT %q, which says the agent moved something",
+			res, flow.ParkBlocked, flow.ParkWriteContract)
+	}
+	for _, want := range []string{"plan", string(flow.LeavesItemBranch), "main"} {
+		if !strings.Contains(res.Park.Reason, want) {
+			t.Errorf("reason = %q, want it to name %q", res.Park.Reason, want)
+		}
+	}
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.Journal) != 0 {
+		t.Errorf("journal has %d entries, want 0: a step that has not completed journals nothing", len(state.Journal))
+	}
+	if rec, ok := state.Artifacts["plan"]; ok && rec.Resolved {
+		t.Error("the result was captured from a tree in a state the step may not leave")
+	}
+	if got := state.Ledger.Row("plan").Dispatches; got != 1 {
+		t.Errorf("Dispatches = %d, want 1: the handler ran and spent", got)
+	}
+}
+
+// Always clean, on both declared states — cleanliness is the commit contract's
+// guarantee rather than a fourth value, so there is nothing to opt out of.
+func TestRunOne_LeavesItemBranch_ADirtyTreeBlocks(t *testing.T) {
+	var be *fake.Orchestrator
+	app, backend, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("implement the change", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			if _, err := ctx.Worktree(); err != nil {
+				return flow.StepResult{}, err
+			}
+			// Work left in the tree that no commit recorded.
+			be.SetDirty(true)
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
+			Role:        "contributor",
+			Entry:       true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+			Needs:       flow.NeedsItemBranch,
+			Writes:      flow.WriteContract{MayCommit: true, MayEditTree: true},
+			Leaves:      flow.LeavesItemBranch,
+		})
+	}, &stubAgent{name: "stub"})
+	be = backend
+	putItemBranchInTheWorktree(t, be, claim.ItemRef)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkBlocked {
+		t.Fatalf("res = %+v, want parked %q", res, flow.ParkBlocked)
+	}
+	if !strings.Contains(res.Park.Reason, "uncommitted") {
+		t.Errorf("reason = %q, want it to name the uncommitted work", res.Park.Reason)
+	}
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.Journal) != 0 {
+		t.Errorf("journal has %d entries, want 0", len(state.Journal))
+	}
+}
+
+// `as-found` verifies NOTHING — "whatever state it was handed is the state it
+// may hand on". A step declaring it completes over a tree that is dirty and on
+// another branch entirely, provided its write contract permits what it did.
+func TestRunOne_LeavesAsFound_VerifiesNothing(t *testing.T) {
+	var be *fake.Orchestrator
+	app, backend, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			wt, err := ctx.Worktree()
+			if err != nil {
+				return flow.StepResult{}, err
+			}
+			if _, err := wt.Branch(ctx.Context(), "somewhere-else", ""); err != nil {
+				return flow.StepResult{}, err
+			}
+			be.SetDirty(true)
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
+			Role:        "contributor",
+			Entry:       true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+			Leaves:      flow.LeavesAsFound,
+			Writes:      flow.WriteContract{MayBranch: true, MayCommit: true, MayEditTree: true},
+		})
+	}, &stubAgent{name: "stub"})
+	be = backend
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusDone) {
+		t.Fatalf("status = %q (%s), want done: `as-found` verifies nothing", res.Status, res.Reason)
+	}
+}
+
+// The verification is in the act of CAPTURE, so a step whose payload comes from
+// the worktree writes no artifact record when the tree is in a state the step
+// may not leave: what would be captured is the state the violation is about.
+func TestRunOne_LeavesViolation_ACaptureTreeStepRecordsNothing(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("implement the change", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			if _, err := ctx.Worktree(); err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("sha-1"), nil
+		}, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
+			Role:        "contributor",
+			Entry:       true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+			Capture:     flow.CaptureTree,
+			Leaves:      flow.LeavesItemBranch,
+		})
+	}, &stubAgent{name: "stub"})
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkBlocked {
+		t.Fatalf("res = %+v, want parked %q", res, flow.ParkBlocked)
+	}
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if rec, ok := state.Artifacts["commit"]; ok && rec.Resolved {
+		t.Errorf("artifact = %+v, want no record: the state it would be read from is the violation", rec)
+	}
+}
+
+// Failing to MEASURE is not the step's violation. A branch that could not be
+// read says nothing about where the step left the tree, and a re-dispatch can
+// measure again.
+type unreadableBranchBackend struct {
+	*fake.Orchestrator
+}
+
+func (b *unreadableBranchBackend) Worktree(ctx context.Context, ref flow.ItemRef) (flow.Worktree, error) {
+	inner, err := b.Orchestrator.Worktree(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	return &unreadableBranchWorktree{Worktree: inner}, nil
+}
+
+type unreadableBranchWorktree struct {
+	flow.Worktree
+	asked int
+}
+
+func (w *unreadableBranchWorktree) CurrentBranch(ctx context.Context) (flow.BranchName, error) {
+	w.asked++
+	// The pre-handler snapshot reads it too, and a snapshot that fails just
+	// fails open. The read this test is about is the one after the handler.
+	if w.asked > 1 {
+		return "", errors.New("git: could not read HEAD")
+	}
+	return w.Worktree.CurrentBranch(ctx)
+}
+
+func TestRunOne_LeavesItemBranch_AnUnreadableBranchParksInfraTransient(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("implement the change", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			if _, err := ctx.Worktree(); err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
+			Role:        "contributor",
+			Entry:       true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+			Leaves:      flow.LeavesItemBranch,
+		})
+	}, &stubAgent{name: "stub"})
+	app.Orchestrator = &unreadableBranchBackend{Orchestrator: be}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkInfraTransient {
+		t.Fatalf("res = %+v, want parked %q: failing to measure is not the step's violation",
+			res, flow.ParkInfraTransient)
+	}
+}
+
+// For an ESTABLISHING step the snapshot is the establishment's, taken once and
+// never re-taken — which is what makes the write-contract check survive a
+// handler that does not cooperate with it.
+//
+// An agent works in the arena, beside the handler rather than through it, so
+// neither case here is hypothetical:
+//
+//   - A handler that never calls ctx.Worktree() used to get NO snapshot, and
+//     its contract was not checked at all. Review and coverage are exactly that
+//     handler.
+//   - A handler that calls it after the tree has already moved would, if the
+//     snapshot were re-taken there, have the check compare the tampered state
+//     against itself. Both directions are a silent fail-open: the step
+//     completes, and the violation is never reported.
+func TestRunOne_NeedsItemBranch_TheContractIsCheckedAgainstTheEstablishedState(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		after func(ctx flow.StepCtx) error
+	}{
+		{"the handler never asks for the worktree", func(flow.StepCtx) error { return nil }},
+		{"the handler asks only after the tree moved", func(ctx flow.StepCtx) error {
+			_, err := ctx.Worktree()
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var be *fake.Orchestrator
+			app, backend, claim := testApp(t, func(f *flow.Flow) {
+				f.AddStep("implement the change", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+					// The arena's worktree, reached the way the agent reaches
+					// it: not through ctx, and not accounted for by it.
+					wt, err := be.Worktree(ctx.Context(), ctx.Item().Ref)
+					if err != nil {
+						return flow.StepResult{}, err
+					}
+					if _, err := wt.Branch(ctx.Context(), "rogue", ""); err != nil {
+						return flow.StepResult{}, err
+					}
+					if err := tc.after(ctx); err != nil {
+						return flow.StepResult{}, err
+					}
+					return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+				}, flow.StepConfig{
+					Prompts:     flow.PromptsAgent,
+					Role:        "contributor",
+					Entry:       true,
+					MayFinalize: []flow.Disposition{flow.DispositionResolved},
+					Needs:       flow.NeedsItemBranch,
+					Writes:      flow.WriteContract{MayCommit: true, MayEditTree: true},
+				})
+			}, &stubAgent{name: "stub"})
+			be = backend
+			putItemBranchInTheWorktree(t, be, claim.ItemRef)
+
+			res, err := RunOne(context.Background(), app, claim)
+			if err != nil {
+				t.Fatalf("RunOne: %v", err)
+			}
+			if res.Park == nil || res.Park.Kind != flow.ParkWriteContract {
+				t.Fatalf("res = %+v, want parked %q", res, flow.ParkWriteContract)
+			}
+			// Against the state the SDK ESTABLISHED — not against wherever the
+			// worktree was sitting when the dispatch began (the base), and not
+			// against where the handler had already put it.
+			if want := fmt.Sprintf("was %q, now %q", testItemBranchOf(claim.ItemRef), "rogue"); !strings.Contains(res.Park.Reason, want) {
+				t.Errorf("reason = %q, want it to read %q — the snapshot is the established state", res.Park.Reason, want)
+			}
+		})
+	}
+}
+
+// The declaration HOLDING is the case every real step is in, and a
+// verification that refused it would stop the flow on every step that declares
+// an exit state rather than on the ones that violate it. The step ends where it
+// said it would, over a clean tree: it completes, journals, and its result is
+// captured — the verification passes and is otherwise invisible.
+func TestRunOne_LeavesItemBranch_AStepThatEndsWhereItSaidCompletes(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("implement the change", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			if _, err := ctx.Worktree(); err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the change"), nil
+		}, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
+			Role:        "contributor",
+			Entry:       true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+			Needs:       flow.NeedsItemBranch,
+			Leaves:      flow.LeavesItemBranch,
+		})
+	}, &stubAgent{name: "stub"})
+	putItemBranchInTheWorktree(t, be, claim.ItemRef)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusDone) {
+		t.Fatalf("status = %q (%s), want done", res.Status, res.Reason)
+	}
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.Journal) != 1 {
+		t.Errorf("journal has %d entries, want 1", len(state.Journal))
+	}
+	if rec, ok := state.Artifacts["plan"]; !ok || !rec.Resolved {
+		t.Errorf("artifact = %+v (present=%v), want the step's result captured", rec, ok)
+	}
+}
+
+// The other declared exit state. `base` is verified against the BASE, and a
+// step that ends on the item's branch has not completed — the same violation as
+// the item-branch case, read off the other member.
+//
+// The two are one line apart (verifyLeaves picks `want`), and a `want` that
+// ignored the member would leave this case passing while every close-branch
+// step in a real graph silently stopped being checked.
+func TestRunOne_LeavesBase_AStepEndingOnTheItemBranchBlocks(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("close branch", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			// Nothing: the establishment put the worktree on the item's branch,
+			// and the step declares it must hand back the base.
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{
+			Prompts:     flow.PromptsAgent,
+			Role:        "contributor",
+			Entry:       true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+			Needs:       flow.NeedsItemBranch,
+			Leaves:      flow.LeavesBase,
+		})
+	}, &stubAgent{name: "stub"})
+	putItemBranchInTheWorktree(t, be, claim.ItemRef)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusParked) || res.Park == nil || res.Park.Kind != flow.ParkBlocked {
+		t.Fatalf("res = %+v, want parked %q", res, flow.ParkBlocked)
+	}
+	// The base it owed, and the branch it left instead: between them they are
+	// what a person needs to see the tree is not where the step said it would
+	// leave it.
+	for _, want := range []string{string(flow.LeavesBase), "main", string(testItemBranchOf(claim.ItemRef))} {
+		if !strings.Contains(res.Park.Reason, want) {
+			t.Errorf("reason = %q, want it to name %q", res.Park.Reason, want)
+		}
+	}
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.Journal) != 0 {
+		t.Errorf("journal has %d entries, want 0", len(state.Journal))
+	}
+}
+
+// noWorktreeBackend is an arena that cannot produce a worktree at all.
+type noWorktreeBackend struct {
+	*fake.Orchestrator
+}
+
+func (b *noWorktreeBackend) Worktree(context.Context, flow.ItemRef) (flow.Worktree, error) {
+	return nil, errors.New("arena: worktree directory is gone")
+}
+
+// undirtiableBackend is an arena whose worktree cannot say whether it is dirty.
+type undirtiableBackend struct {
+	*fake.Orchestrator
+}
+
+func (b *undirtiableBackend) Worktree(ctx context.Context, ref flow.ItemRef) (flow.Worktree, error) {
+	inner, err := b.Orchestrator.Worktree(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	return &undirtiableWorktree{Worktree: inner}, nil
+}
+
+type undirtiableWorktree struct {
+	flow.Worktree
+}
+
+func (w *undirtiableWorktree) IsDirty(context.Context) (bool, error) {
+	return false, errors.New("git: index is locked")
+}
+
+// Failing to MEASURE is never the item's state being wrong, at either end of
+// the step. An arena that could not produce a worktree, names that could not be
+// resolved, a dirtiness read that could not be taken — none of them says
+// anything about where the work is, and a re-dispatch may answer. They park
+// infra-transient, which is the kind `resolve` retries; parked `blocked`
+// instead, each would stop an unattended run for a person who has nothing to do.
+func TestRunOne_ADeclaredStateThatCannotBeMeasuredParksInfraTransient(t *testing.T) {
+	// The handler never asks for the worktree, so the VERIFICATION's own reads
+	// are the ones that fail rather than the handler failing first.
+	inert := func(ctx flow.StepCtx) (flow.StepResult, error) {
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+	}
+	for _, tc := range []struct {
+		name    string
+		cfg     flow.StepConfig
+		arrange func(*App, *fake.Orchestrator)
+	}{
+		{
+			name: "establishing, and the arena has no worktree",
+			cfg:  flow.StepConfig{Needs: flow.NeedsItemBranch},
+			arrange: func(app *App, be *fake.Orchestrator) {
+				app.Orchestrator = &noWorktreeBackend{Orchestrator: be}
+			},
+		},
+		{
+			name: "verifying, and the arena has no worktree",
+			cfg:  flow.StepConfig{Leaves: flow.LeavesItemBranch},
+			arrange: func(app *App, be *fake.Orchestrator) {
+				app.Orchestrator = &noWorktreeBackend{Orchestrator: be}
+			},
+		},
+		{
+			name: "verifying, and the branch names cannot be resolved",
+			cfg:  flow.StepConfig{Leaves: flow.LeavesItemBranch},
+			arrange: func(app *App, _ *fake.Orchestrator) {
+				app.ItemBranches = func(context.Context, flow.Item) (flow.ItemBranches, error) {
+					return flow.ItemBranches{}, errors.New("detect default branch: dial tcp: lookup api.github.com")
+				}
+			},
+		},
+		{
+			name: "verifying, and whether the tree is dirty cannot be read",
+			cfg:  flow.StepConfig{Needs: flow.NeedsItemBranch, Leaves: flow.LeavesItemBranch},
+			arrange: func(app *App, be *fake.Orchestrator) {
+				app.Orchestrator = &undirtiableBackend{Orchestrator: be}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.cfg
+			cfg.Prompts = flow.PromptsAgent
+			cfg.Role = "contributor"
+			cfg.Entry = true
+			cfg.MayFinalize = []flow.Disposition{flow.DispositionResolved}
+			app, be, claim := testApp(t, func(f *flow.Flow) {
+				f.AddStep("implement the change", "plan", inert, cfg)
+			}, &stubAgent{name: "stub"})
+			putItemBranchInTheWorktree(t, be, claim.ItemRef)
+			tc.arrange(app, be)
+
+			res, err := RunOne(context.Background(), app, claim)
+			if err != nil {
+				t.Fatalf("RunOne: %v", err)
+			}
+			if res.Park == nil || res.Park.Kind != flow.ParkInfraTransient {
+				t.Fatalf("res = %+v, want parked %q", res, flow.ParkInfraTransient)
+			}
+			if res.RedispatchMayClear == nil || !*res.RedispatchMayClear {
+				t.Errorf("RedispatchMayClear = %v, want a present true: the reading may come back",
+					res.RedispatchMayClear)
+			}
+		})
+	}
+}
+
+// A state declared with nothing to resolve its branch names. Startup refuses
+// this (App.validate), so it is reachable only by a caller that assembled an
+// App itself and dispatched through RunOne — which is a supported way to use
+// the SDK, and the answer there has to be a named park rather than a panic on a
+// nil call. Blocked: wiring the resolver is a person's job, and no re-dispatch
+// does it.
+func TestRunOne_ADeclaredStateWithNoBranchResolverBlocks(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  flow.StepConfig
+	}{
+		{"needs", flow.StepConfig{Needs: flow.NeedsItemBranch}},
+		{"leaves", flow.StepConfig{Leaves: flow.LeavesItemBranch}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.cfg
+			cfg.Prompts = flow.PromptsAgent
+			cfg.Role = "contributor"
+			cfg.Entry = true
+			cfg.MayFinalize = []flow.Disposition{flow.DispositionResolved}
+			app, _, claim := testApp(t, func(f *flow.Flow) {
+				f.AddStep("implement the change", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+					return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+				}, cfg)
+			}, &stubAgent{name: "stub"})
+			// After validate, which is the only reason the fixture wires one.
+			app.ItemBranches = nil
+
+			res, err := RunOne(context.Background(), app, claim)
+			if err != nil {
+				t.Fatalf("RunOne: %v", err)
+			}
+			if res.Park == nil || res.Park.Kind != flow.ParkBlocked {
+				t.Fatalf("res = %+v, want parked %q", res, flow.ParkBlocked)
+			}
+			if !strings.Contains(res.Park.Reason, "App.ItemBranches") {
+				t.Errorf("reason = %q, want it to name the field a person has to wire", res.Park.Reason)
+			}
+		})
 	}
 }

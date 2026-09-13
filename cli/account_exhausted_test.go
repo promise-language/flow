@@ -654,3 +654,48 @@ func TestRunOne_ARefusalThatNamesNoWindowStillReportsTheInstant(t *testing.T) {
 		t.Errorf("Reason = %q, want %q", res.Park.Reason, want)
 	}
 }
+
+// The instant is the fact the run's report is FOR. A driver or an operator
+// reading "parked" alone has to go and find out when the allowance returns; the
+// park already carries it, and the run that exits on it says so.
+//
+// And it exits after ONE dispatch. The classification says a re-dispatch may
+// clear this kind, and the instant says when — so re-dispatching before it is
+// looping against an answer the system was already handed, which is why the
+// clears_at arm sits ahead of the bounded retry.
+func TestCmdResolve_AnExhaustedAccountNamesTheInstantAndDispatchesOnce(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	dispatches := 0
+	app, _, errBuf := resolveTestAppPrompts(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+		dispatches++
+		_, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "p1"})
+		if err != nil {
+			return flow.StepResult{}, err
+		}
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("never reached"), nil
+	}, flow.PromptsAgent)
+	app.Agent = &stubAgent{name: "stub", responses: []flow.AgentResponse{
+		refusedTurn(3.20), refusedTurn(3.20), refusedTurn(3.20),
+	}}
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if dispatches != 1 {
+		t.Errorf("the step was dispatched %d time(s), want 1 — the window says when, and it is not now", dispatches)
+	}
+	out := errBuf.String()
+	if !strings.Contains(out, windowResetsAt.Format(time.RFC3339)) {
+		t.Errorf("the run did not name the instant the park carries (%s); got:\n%s",
+			windowResetsAt.Format(time.RFC3339), out)
+	}
+	// What the exit is FOR: the arena keeps the draft, the session and the
+	// worktree, so whatever returns at that instant resumes here.
+	if !strings.Contains(out, "claim and this arena are kept") {
+		t.Errorf("the run did not say the claim is held across the wait; got:\n%s", out)
+	}
+	if strings.Contains(out, "re-dispatching") {
+		t.Errorf("the run re-dispatched against a window it was told the reset time of; got:\n%s", out)
+	}
+}

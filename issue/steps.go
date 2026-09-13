@@ -1,6 +1,7 @@
 package issue
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -315,13 +316,12 @@ func (b *builder) stepImplement(ctx flow.StepCtx) (flow.StepResult, error) {
 			"refusing to implement without the commit the branch was cut from")
 	}
 
+	// The branch is already under the step: it declares Needs: item-branch, and
+	// the SDK establishes that before this handler is dispatched — including the
+	// refusal when the branch is not in this worktree, which now happens before
+	// anything is charged.
 	wt, err := ctx.Worktree()
 	if err != nil {
-		return flow.StepResult{}, err
-	}
-	// The branch must already exist. Cutting one here is the failure the open
-	// branch step exists to report as itself.
-	if err := b.onClaimBranch(ctx); err != nil {
 		return flow.StepResult{}, err
 	}
 
@@ -635,9 +635,6 @@ func (b *builder) producingMarkdownStep(ctx flow.StepCtx, id PromptID, label str
 
 // stepReview asks for a critique of the change.
 func (b *builder) stepReview(ctx flow.StepCtx) (flow.StepResult, error) {
-	if err := b.onClaimBranch(ctx); err != nil {
-		return flow.StepResult{}, err
-	}
 	return b.producingMarkdownStep(ctx, PromptReview, "review",
 		flow.StepId(StepCoverage),
 		"the change has been reviewed and the review recorded; analyze the coverage of the change")
@@ -645,9 +642,6 @@ func (b *builder) stepReview(ctx flow.StepCtx) (flow.StepResult, error) {
 
 // stepCoverage analyses test coverage of the change.
 func (b *builder) stepCoverage(ctx flow.StepCtx) (flow.StepResult, error) {
-	if err := b.onClaimBranch(ctx); err != nil {
-		return flow.StepResult{}, err
-	}
 	return b.producingMarkdownStep(ctx, PromptCoverage, "coverage",
 		flow.StepId(StepOpenPR),
 		"the coverage of the change has been analysed and recorded; propose the change")
@@ -670,13 +664,6 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) (flow.StepResult, error) {
 	if title == "" {
 		title = fmt.Sprintf("Resolve #%s", itemNumber(item))
 	}
-	// Check the branch back out, like every other consuming step. Relying on
-	// Open's guard instead would turn a worktree left on another item's branch
-	// into a deterministic failure on every retry, rather than something the
-	// step simply corrects.
-	if err := b.onClaimBranch(ctx); err != nil {
-		return flow.StepResult{}, err
-	}
 	base, err := b.baseBranch(ctx.Context())
 	if err != nil {
 		return flow.StepResult{}, err
@@ -685,10 +672,11 @@ func (b *builder) stepOpenPR(ctx flow.StepCtx) (flow.StepResult, error) {
 	// typed-nil interface a backend can hand back, and would panic on the call
 	// instead of reporting that the backend has no pull-request surface.
 	//
-	// It also pushes, and only AFTER checking the worktree is on the claim
-	// branch. Pushing here first would defeat that guard: a tree left on the
-	// default branch — or on another item's branch — would be force-tracked to
-	// origin before anything noticed it was the wrong one.
+	// It also pushes, and the worktree is already on the claim branch when it
+	// does: the step declares Needs: item-branch, and the SDK establishes that
+	// before dispatch. Pushing from a tree left on the default branch — or on
+	// another item's branch — is not a case this handler has to guard against,
+	// because such a tree never reaches the handler at all.
 	// Record anything the steps AFTER implement produced, before the push.
 	//
 	// Review and coverage may edit — deliberately, since a reviewer that can
@@ -869,9 +857,6 @@ var errBranchRefused = errors.New("what this branch carries was refused")
 // must be the branch as the commit left it, and a repair round that arrives
 // over a tree carrying work would otherwise ask about a state nobody proposes.
 func (b *builder) stepRepairDisclosure(ctx flow.StepCtx) (flow.StepResult, error) {
-	if err := b.onClaimBranch(ctx); err != nil {
-		return flow.StepResult{}, err
-	}
 	wt, err := ctx.Worktree()
 	if err != nil {
 		return flow.StepResult{}, err
@@ -1352,12 +1337,13 @@ func (b *builder) answersFor(ctx flow.StepCtx) []Answer {
 // ensureBranch puts the worktree on this item's claim branch and reports
 // whether it had to create it.
 //
-// Every step that reads or runs against the tree needs this, not just the one
-// that writes to it. The worktree directory is shared across items, so a tree
-// left on another item's branch would have review and coverage analyse code
-// from a different issue, and — worst — the gate the request rests on measure
-// it. Nothing would notice: the request would be proposed carrying a
-// measurement of somebody else's change.
+// It is the OPEN BRANCH step's helper and nothing else's now. Every other step
+// that runs against the tree declares Needs: item-branch, and the SDK
+// establishes that before the step is dispatched — from the same names, through
+// cli.App.ItemBranches — which is what retired the per-handler convention this
+// used to back (docs/resolution.md § Steps and the worktree). Open branch keeps
+// it because creating the branch is that step's job, which is why it alone
+// declares Needs: any.
 func (b *builder) ensureBranch(ctx flow.StepCtx, wt flow.Worktree) (base flow.BranchName, created bool, err error) {
 	base, err = b.baseBranch(ctx.Context())
 	if err != nil {
@@ -1368,30 +1354,6 @@ func (b *builder) ensureBranch(ctx flow.StepCtx, wt flow.Worktree) (base flow.Br
 		return "", false, err
 	}
 	return base, created, nil
-}
-
-// onClaimBranch is ensureBranch for the steps that read the implementation
-// rather than produce it.
-//
-// It REFUSES when the branch had to be created. These steps run after the open
-// branch step, so a missing claim branch means the work is not here — a
-// re-cloned or reset worktree, most likely. Cutting a fresh branch off the base
-// and carrying on would have review and coverage analyse an empty change, and
-// the request propose one.
-func (b *builder) onClaimBranch(ctx flow.StepCtx) error {
-	wt, err := ctx.Worktree()
-	if err != nil {
-		return err
-	}
-	_, created, err := b.ensureBranch(ctx, wt)
-	if err != nil {
-		return err
-	}
-	if created {
-		return fmt.Errorf("branch %q did not exist — the implementation is not in this worktree, "+
-			"so there is nothing here to inspect", b.branchName(ctx))
-	}
-	return nil
 }
 
 // commitMessage is the subject for the verified implementation commit.
@@ -1439,16 +1401,42 @@ func itemNumber(item flow.Item) string {
 	return d
 }
 
-// branchName is the working branch for an item. Kept deterministic so a resumed
-// step lands on the branch its earlier invocation created.
+// branchName is the working branch for the item a dispatch is running against.
+// The spelling the handlers' own messages use; the definition is
+// branchNameFor's, so a message and the branch the SDK establishes cannot name
+// two different things.
+func (b *builder) branchName(ctx flow.StepCtx) string {
+	return b.branchNameFor(ctx.Item())
+}
+
+// branchNameFor is THE working branch for an item, over the item rather than
+// over a dispatch — which is what the SDK needs, because it asks before there is
+// a dispatch to ask from (itemBranches). Kept deterministic so a resumed step
+// lands on the branch its earlier invocation created.
 //
 // This MUST match what the backend considers the claim branch — the github
 // backend's Open refuses to raise a pull request from any other branch, so a
 // divergence here fails every run at the last step with a confusing message.
 // The coupling is unfortunate but real: no interface exposes the backend's
 // naming, so the two are kept in the same format by hand.
-func (b *builder) branchName(ctx flow.StepCtx) string {
-	return "flow/issue-" + itemNumber(ctx.Item())
+func (b *builder) branchNameFor(item flow.Item) string {
+	return "flow/issue-" + itemNumber(item)
+}
+
+// itemBranches is what cli.App.ItemBranches is wired to: the two branch names
+// an item's declared worktree states name, answered from the definitions this
+// package already holds.
+//
+// It is the SDK's only route to either name, which is what keeps the convention
+// in one place. The base resolves lazily through baseBranch exactly as every
+// handler's does, so Config.BaseBranch keeps overriding it and a detected base
+// is still detected once per process.
+func (b *builder) itemBranches(ctx context.Context, item flow.Item) (flow.ItemBranches, error) {
+	base, err := b.baseBranch(ctx)
+	if err != nil {
+		return flow.ItemBranches{}, err
+	}
+	return flow.ItemBranches{Item: flow.BranchName(b.branchNameFor(item)), Base: base}, nil
 }
 
 // pullRequestBody assembles the PR description from what the flow produced and
