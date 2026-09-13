@@ -2519,3 +2519,50 @@ func TestCmdResolve_AnInstantOnANonClearingParkIsNotAWait(t *testing.T) {
 		t.Errorf("the stop does not send the operator to `status`; got:\n%s", out)
 	}
 }
+
+// The bound is ONE budget for the whole run, not one per park.
+//
+// A per-park counter — reset whenever a park cleared — is the loop the single
+// counter exists to prevent: a route whose steps each park clearable, clear,
+// and park again buys itself a fresh allowance at every step, and the run spins
+// to the runaway guard instead of ending. It is the reason fitnessWaits is one
+// counter too, and the two are easy to get wrong in the same way.
+//
+// The first step parks once and clears, spending one of the allowance. The
+// second then gets what is LEFT, so the run stops after maxRedispatches
+// re-dispatches in total rather than after maxRedispatches on each park.
+func TestCmdResolve_TheReDispatchBoundIsOneAllowanceForTheWholeRun(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	planCalls, branchCalls := 0, 0
+	app, _, errBuf := resolveTestAppFlow(t, be, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			planCalls++
+			if planCalls == 1 {
+				return flow.StepResult{}, fmt.Errorf("the runner is flapping: %w", flow.ErrTransient)
+			}
+			return ctx.Next("commit", "planned").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Entry: true, Role: "contributor", Next: []flow.StepId{"commit"}})
+		f.AddStep("open branch", "commit", func(flow.StepCtx) (flow.StepResult, error) {
+			branchCalls++
+			return flow.StepResult{}, fmt.Errorf("the runner is still flapping: %w", flow.ErrTransient)
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	})
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if planCalls != 2 {
+		t.Fatalf("the first step was dispatched %d time(s), want 2 (its park, and the re-dispatch that cleared it)", planCalls)
+	}
+	// maxRedispatches - 1 re-dispatches are left, so the second step is
+	// dispatched that many times plus its own first. A per-park counter would
+	// give it maxRedispatches + 1.
+	if want := maxRedispatches; branchCalls != want {
+		t.Errorf("the second step was dispatched %d time(s), want %d — the allowance the first step spent was not refunded",
+			branchCalls, want)
+	}
+	if !strings.Contains(errBuf.String(), fmt.Sprintf("parked after %d re-dispatches", maxRedispatches)) {
+		t.Errorf("the stop does not stand on the run's whole allowance; got:\n%s", errBuf.String())
+	}
+}
