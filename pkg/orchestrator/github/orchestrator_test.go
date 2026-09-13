@@ -72,6 +72,12 @@ type ghMock struct {
 	// read that does not show what was just written to it — selectively.
 	hideLabelOnRead func(name string) bool
 
+	// failIssueRead answers the issue endpoint with 500, for a caller whose
+	// correctness is in what it does when it CANNOT read the item. Endpoint-
+	// scoped, where `refusals` is served before routing: a test about one read
+	// failing must not depend on how many other requests happen to precede it.
+	failIssueRead bool
+
 	// comments
 	nextCommentID int64
 	comments      []ghMockComment
@@ -529,6 +535,10 @@ const rawContentPrefix = "/raw/"
 func (m *ghMock) handleIssue(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.failIssueRead {
+		http.Error(w, `{"message":"Server Error"}`, http.StatusInternalServerError)
+		return
+	}
 	// PATCH is how the editor lands title, body and labels — the three
 	// together, in one request, which is what makes them atomic. Applying it
 	// here is what lets a test assert that a refused edit wrote NOTHING: a mock
@@ -1972,22 +1982,39 @@ func claimForFinalize(b *Orchestrator) flow.Claim {
 	}
 }
 
-func TestBackend_Finalize_ReturnsWorktreeToBaseAndReleases(t *testing.T) {
-	b, mock, rec := newFinalizeBackend(t)
-
-	// Script: on a feature branch, clean, base exists.
+// scriptFinalizeWorktree registers the git handlers Finalize and the Release
+// it ends with both read: a clean tree, untracked files included; a base that
+// exists; and HEAD on branch until `checkout main` is issued, on main after
+// it. HEAD has to move, because Release re-reads it after Finalize's checkout
+// — a handler that kept answering the item's branch would have Release
+// refuse the very checkout Finalize just made.
+func scriptFinalizeWorktree(rec *gitRecorder, branch string) {
+	var mu sync.Mutex
+	head := branch
 	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
-		return []byte("flow/issue-42\n"), nil
+		mu.Lock()
+		defer mu.Unlock()
+		return []byte(head + "\n"), nil
 	}
-	rec.handlers["status --porcelain --untracked-files=no"] = func([]string) ([]byte, error) {
+	rec.handlers["status --porcelain --untracked-files=normal"] = func([]string) ([]byte, error) {
 		return []byte(""), nil // clean
 	}
 	rec.handlers["rev-parse --verify refs/heads/main"] = func([]string) ([]byte, error) {
 		return []byte("abc123\n"), nil // exists
 	}
 	rec.handlers["checkout main"] = func([]string) ([]byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		head = "main"
 		return []byte(""), nil
 	}
+}
+
+func TestBackend_Finalize_ReturnsWorktreeToBaseAndReleases(t *testing.T) {
+	b, mock, rec := newFinalizeBackend(t)
+
+	// Script: on a feature branch, clean, base exists.
+	scriptFinalizeWorktree(rec, "flow/issue-42")
 
 	claim := claimForFinalize(b)
 	// Save claim file so Release can clear it.
@@ -2029,9 +2056,7 @@ func TestBackend_Finalize_ReturnsWorktreeToBaseAndReleases(t *testing.T) {
 func TestBackend_Finalize_AlreadyOnBase(t *testing.T) {
 	b, mock, rec := newFinalizeBackend(t)
 
-	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
-		return []byte("main\n"), nil
-	}
+	scriptFinalizeWorktree(rec, "main")
 
 	claim := claimForFinalize(b)
 	if err := clistate.Save(claim); err != nil {
@@ -2053,14 +2078,18 @@ func TestBackend_Finalize_AlreadyOnBase(t *testing.T) {
 	}
 }
 
+// Finalize ends in a Release, and Release refuses a dirty tree — untracked
+// files included, since after a release nothing is left to attribute them to.
+// So the same check runs FIRST, before the state comment is written: found out
+// only at the release, a leftover file would leave the item recorded finalized
+// and still held.
 func TestBackend_Finalize_RefusesDirtyWorktree(t *testing.T) {
-	b, _, rec := newFinalizeBackend(t)
+	b, mock, rec := newFinalizeBackend(t)
 
-	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
-		return []byte("flow/issue-42\n"), nil
-	}
-	rec.handlers["status --porcelain --untracked-files=no"] = func([]string) ([]byte, error) {
-		return []byte(" M dirty-file.go\n"), nil // dirty
+	scriptFinalizeWorktree(rec, "flow/issue-42")
+	rec.handlers["status --porcelain --untracked-files=normal"] = func([]string) ([]byte, error) {
+		// One tracked change and one untracked file: either alone is enough.
+		return []byte(" M dirty-file.go\n?? leftover.txt\n"), nil
 	}
 
 	claim := claimForFinalize(b)
@@ -2072,8 +2101,18 @@ func TestBackend_Finalize_RefusesDirtyWorktree(t *testing.T) {
 	if err == nil {
 		t.Fatal("Finalize should refuse a dirty worktree")
 	}
-	if !strings.Contains(err.Error(), "dirty") {
-		t.Errorf("error = %v, want mention of dirty", err)
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+	}
+	if refused.Code != "dirty-tree" {
+		t.Errorf("Code = %q, want dirty-tree", refused.Code)
+	}
+	if refused.Override != "" {
+		t.Errorf("Override = %q, want none: nothing bypasses the check at a release", refused.Override)
+	}
+	if !strings.Contains(refused.Detail, "leftover.txt") {
+		t.Errorf("Detail = %q, want the porcelain output naming what is in the way", refused.Detail)
 	}
 
 	// No checkout, claim NOT released.
@@ -2084,17 +2123,70 @@ func TestBackend_Finalize_RefusesDirtyWorktree(t *testing.T) {
 	if c == nil {
 		t.Error("claim file should not be cleared on dirty worktree")
 	}
+
+	// And nothing recorded: the state comment does not carry finalized, so the
+	// item is not finalized-but-held.
+	mock.mu.Lock()
+	for _, c := range mock.comments {
+		if doc, _, found, _ := extractStateDoc(c.Body); found && doc != nil && doc.Finalized {
+			t.Error("state comment carries finalized: true although the release was refused")
+		}
+	}
+	mock.mu.Unlock()
+}
+
+// The happy path's own hazard: an item finished on the BASE branch, with a
+// single untracked file left behind. Nothing about it is off-base and nothing
+// is modified, so the narrower "tracked changes only" check that used to guard
+// the checkout passes it — and the release at the end then refuses, leaving the
+// item recorded finalized and still held. Untracked residue is ordinary here:
+// verify may mutate the worktree, and reverting merge prep is a hard reset that
+// leaves such files behind.
+func TestBackend_Finalize_RefusesAnUntrackedFileOnTheBase(t *testing.T) {
+	b, mock, rec := newFinalizeBackend(t)
+
+	scriptFinalizeWorktree(rec, "main")
+	rec.handlers["status --porcelain --untracked-files=normal"] = func([]string) ([]byte, error) {
+		return []byte("?? verify-output.log\n"), nil
+	}
+
+	claim := claimForFinalize(b)
+	if err := clistate.Save(claim); err != nil {
+		t.Fatalf("save claim: %v", err)
+	}
+
+	err := b.Finalize(t.Context(), claim.ItemRef, flow.DispositionResolved)
+	if err == nil {
+		t.Fatal("Finalize should refuse a tree carrying an untracked file")
+	}
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+	}
+	if refused.Code != "dirty-tree" {
+		t.Errorf("Code = %q, want dirty-tree", refused.Code)
+	}
+	if !strings.Contains(refused.Detail, "verify-output.log") {
+		t.Errorf("Detail = %q, want the untracked file named", refused.Detail)
+	}
+
+	// Nothing recorded and nothing released: the refusal came before the write.
+	mock.mu.Lock()
+	for _, c := range mock.comments {
+		if doc, _, found, _ := extractStateDoc(c.Body); found && doc != nil && doc.Finalized {
+			t.Error("state comment carries finalized: true although Finalize refused")
+		}
+	}
+	mock.mu.Unlock()
+	if c, _ := clistate.Load(); c == nil {
+		t.Error("the claim was released although Finalize refused")
+	}
 }
 
 func TestBackend_Finalize_RefusesMissingBaseBranch(t *testing.T) {
 	b, _, rec := newFinalizeBackend(t)
 
-	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
-		return []byte("flow/issue-42\n"), nil
-	}
-	rec.handlers["status --porcelain --untracked-files=no"] = func([]string) ([]byte, error) {
-		return []byte(""), nil // clean
-	}
+	scriptFinalizeWorktree(rec, "flow/issue-42")
 	rec.handlers["rev-parse --verify refs/heads/main"] = func([]string) ([]byte, error) {
 		return nil, fmt.Errorf("base branch main not found")
 	}
@@ -2125,15 +2217,7 @@ func TestBackend_Finalize_RefusesMissingBaseBranch(t *testing.T) {
 func TestBackend_Finalize_CheckoutFailureKeepsClaimIntact(t *testing.T) {
 	b, mock, rec := newFinalizeBackend(t)
 
-	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
-		return []byte("flow/issue-42\n"), nil
-	}
-	rec.handlers["status --porcelain --untracked-files=no"] = func([]string) ([]byte, error) {
-		return []byte(""), nil // clean
-	}
-	rec.handlers["rev-parse --verify refs/heads/main"] = func([]string) ([]byte, error) {
-		return []byte("abc123\n"), nil
-	}
+	scriptFinalizeWorktree(rec, "flow/issue-42")
 	rec.handlers["checkout main"] = func([]string) ([]byte, error) {
 		return nil, fmt.Errorf("checkout failed: locked index")
 	}
@@ -2632,8 +2716,13 @@ func TestBackend_Claim_HeldReclaimOffBaseChangesNothing(t *testing.T) {
 }
 
 // The short-circuit is item-scoped: a lease on a DIFFERENT item is not a
-// re-claim, so the fresh-claim preconditions still apply.
-func TestBackend_Claim_LeaseOnOtherItemIsNotAReclaim(t *testing.T) {
+// re-claim. It is the arena side of the one-to-one binding — this arena is
+// occupied — and that is refused before any worktree precondition is read,
+// because the first item's uncommitted work, branch and build outputs live in
+// this tree and nowhere else. No override reaches it: --force takes an item
+// from another party, and here there is nobody to take it from. Not item-scoped
+// either: no other item fares better in an occupied arena.
+func TestBackend_Claim_LeaseOnOtherItemRefusesTheOccupiedArena(t *testing.T) {
 	b, mock, rec := newClaimPrecondBackend(t)
 	scriptCleanWorktree(rec)
 	mock.mu.Lock()
@@ -2644,13 +2733,150 @@ func TestBackend_Claim_LeaseOnOtherItemIsNotAReclaim(t *testing.T) {
 	if _, err := b.Claim(ctx, b.refFromIssue(42), nil); err != nil {
 		t.Fatalf("first Claim: %v", err)
 	}
+	// Mid-work on #42: HEAD is on its branch. Immaterial to the refusal, which
+	// must fire before HEAD is read at all.
 	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
 		return []byte("flow/issue-42\n"), nil
 	}
 
-	_, err := b.Claim(ctx, b.refFromIssue(43), nil)
+	for _, overrides := range [][]flow.ClaimOverride{
+		nil,
+		{flow.OverrideAlreadyHeld, flow.OverrideDirtyTree, flow.OverrideStaleBase},
+	} {
+		rec.mu.Lock()
+		rec.calls = nil
+		rec.mu.Unlock()
+
+		_, err := b.Claim(ctx, b.refFromIssue(43), overrides)
+		if err == nil {
+			t.Fatalf("overrides %v: claiming a second item into an arena that holds one must refuse", overrides)
+		}
+		var refused flow.ErrClaimRefused
+		if !errors.As(err, &refused) {
+			t.Fatalf("overrides %v: error is not ErrClaimRefused: %T: %v", overrides, err, err)
+		}
+		if refused.Code != "arena-occupied" {
+			t.Errorf("overrides %v: Code = %q, want arena-occupied", overrides, refused.Code)
+		}
+		if refused.ItemScoped {
+			t.Errorf("overrides %v: ItemScoped = true, want false", overrides)
+		}
+		if refused.Override != "" {
+			t.Errorf("overrides %v: Override = %q, want none", overrides, refused.Override)
+		}
+		held := b.refFromIssue(42).Display
+		if !strings.Contains(refused.Reason, held) {
+			t.Errorf("overrides %v: Reason = %q, want it to name the held item %s", overrides, refused.Reason, held)
+		}
+		if rec.called("rev-parse --abbrev-ref HEAD") || rec.called("fetch origin") || rec.called("status") {
+			t.Errorf("overrides %v: the occupied-arena refusal ran a worktree precondition; it precedes them all", overrides)
+		}
+	}
+
+	// The first item's lease is untouched by the refusal.
+	active, err := b.LookupActiveClaim(ctx)
+	if err != nil || active == nil {
+		t.Fatalf("the refused claim must leave the standing lease: (%v, %v)", active, err)
+	}
+	if !contains(mock.labelNames(), "flow:owner:alice") {
+		t.Errorf("labels = %v, want the first item's owner half still present", mock.labelNames())
+	}
+}
+
+// --- Release preconditions (docs/cli.md § Releasing) ---
+
+// releaseBackend is an arena mid-work on #42: the claim is taken over a clean
+// trunk, and the caller then re-scripts git to whatever state it wants the
+// release to meet.
+func releaseBackend(t *testing.T) (*Orchestrator, *ghMock, *gitRecorder) {
+	t.Helper()
+	b, mock, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
+	if _, err := b.Claim(t.Context(), b.refFromIssue(42), nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	mock.mu.Lock()
+	mock.mutations = nil
+	mock.mu.Unlock()
+	return b, mock, rec
+}
+
+// assertReleaseChangedNothing is the other half of every refusal below: a
+// refused release leaves the lease exactly where it was, on the item AND in
+// this arena's own file. Anything less is the orphaned state the refusal
+// exists to prevent, reached by the refusal itself.
+func assertReleaseChangedNothing(t *testing.T, b *Orchestrator, mock *ghMock) {
+	t.Helper()
+	names := mock.labelNames()
+	if !contains(names, b.labels.Owner("alice")) || !contains(names, b.labels.Arena(b.arenaFingerprint())) {
+		t.Errorf("labels = %v, want both halves of the claim record still present", names)
+	}
+	mock.mu.Lock()
+	assignees := append([]string(nil), mock.assignees...)
+	mutations := append([]string(nil), mock.mutations...)
+	mock.mu.Unlock()
+	if !contains(assignees, "alice") {
+		t.Errorf("assignees = %v, want the holder still assigned", assignees)
+	}
+	if len(mutations) != 0 {
+		t.Errorf("a refused release wrote to GitHub: %v", mutations)
+	}
+	active, err := b.LookupActiveClaim(t.Context())
+	if err != nil || active == nil {
+		t.Fatalf("a refused release cleared the lease file: (%v, %v)", active, err)
+	}
+}
+
+// Releasing a dirty tree strands whatever is in it: the item becomes unheld and
+// selectable by any arena, while the changes are on no branch and under no
+// item. Untracked files count — after a release there is nothing left to
+// attribute them to.
+func TestBackend_Release_RefusesADirtyTree(t *testing.T) {
+	b, mock, rec := releaseBackend(t)
+	porcelain := " M pkg/orchestrator/github/claim.go\n?? scratch.md\n"
+	rec.handlers["status --porcelain --untracked-files=normal"] = func([]string) ([]byte, error) {
+		return []byte(porcelain), nil
+	}
+
+	err := b.Release(t.Context(), b.refFromIssue(42))
 	if err == nil {
-		t.Fatal("claiming a second item off-base must still refuse")
+		t.Fatal("Release should refuse a dirty worktree")
+	}
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+	}
+	if refused.Code != "dirty-tree" {
+		t.Errorf("Code = %q, want dirty-tree — the code Claim uses for the same condition", refused.Code)
+	}
+	if refused.ItemScoped {
+		t.Error("ItemScoped = true; the tree is the arena's, and no other item would fare better")
+	}
+	if refused.Override != "" {
+		t.Errorf("Override = %q, want none: nothing bypasses a release precondition", refused.Override)
+	}
+	// What StatusPorcelain returns, which is the porcelain with the surrounding
+	// whitespace trimmed — the seam's own long-standing behaviour, asserted here
+	// rather than restated, so this test says what the operator is shown.
+	if want := strings.TrimSpace(porcelain); refused.Detail != want {
+		t.Errorf("Detail = %q, want the status output (%q)", refused.Detail, want)
+	}
+	if !strings.Contains(refused.Detail, "scratch.md") {
+		t.Errorf("Detail = %q, want the untracked file named: it counts, and it is what the operator must deal with", refused.Detail)
+	}
+	assertReleaseChangedNothing(t, b, mock)
+}
+
+// An arena left on the released item's branch hands the next claim that branch.
+func TestBackend_Release_RefusesAnOffBaseArena(t *testing.T) {
+	b, mock, rec := releaseBackend(t)
+	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+		return []byte("flow/issue-42\n"), nil
+	}
+
+	err := b.Release(t.Context(), b.refFromIssue(42))
+	if err == nil {
+		t.Fatal("Release should refuse an arena off the base branch")
 	}
 	var refused flow.ErrClaimRefused
 	if !errors.As(err, &refused) {
@@ -2658,6 +2884,94 @@ func TestBackend_Claim_LeaseOnOtherItemIsNotAReclaim(t *testing.T) {
 	}
 	if refused.Code != "not-on-base" {
 		t.Errorf("Code = %q, want not-on-base", refused.Code)
+	}
+	if refused.Override != "" {
+		t.Errorf("Override = %q, want none", refused.Override)
+	}
+	if !strings.Contains(refused.Reason, "flow/issue-42") || !strings.Contains(refused.Reason, "main") {
+		t.Errorf("Reason = %q, want it to name where HEAD is and where it should be", refused.Reason)
+	}
+	assertReleaseChangedNothing(t, b, mock)
+}
+
+// Both conditions at once report the DIRTY one, because that is the order the
+// operator has to act in: checking out the base over a dirty tree carries the
+// changes onto it, so "go to main" is the wrong first instruction here.
+func TestBackend_Release_DirtyAndOffBaseReportsTheDirtyTree(t *testing.T) {
+	b, mock, rec := releaseBackend(t)
+	rec.handlers["status --porcelain --untracked-files=normal"] = func([]string) ([]byte, error) {
+		return []byte(" M errs.go\n"), nil
+	}
+	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+		return []byte("flow/issue-42\n"), nil
+	}
+
+	err := b.Release(t.Context(), b.refFromIssue(42))
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+	}
+	if refused.Code != "dirty-tree" {
+		t.Errorf("Code = %q, want dirty-tree: the tree is what has to be dealt with first", refused.Code)
+	}
+	assertReleaseChangedNothing(t, b, mock)
+}
+
+// A git command that could not ANSWER is not a refusal, and the difference is
+// load-bearing at the seam above: the CLI renders a typed refusal as the failing
+// check with the porcelain indented under it, and an ordinary error as the
+// backend's own words. A `git status` that failed, reported as dirty-tree, would
+// name a check that never ran and send the operator to clean a tree git could
+// not read — and, since nothing overrides a release precondition, leave no way
+// out of it. Same for HEAD, which is why both are asserted here.
+func TestBackend_Release_AGitFailureIsAnErrorNotARefusal(t *testing.T) {
+	for _, c := range []struct {
+		name, sub, msg string
+	}{
+		{"status", "status --porcelain --untracked-files=normal", "fatal: not a git repository"},
+		{"head", "rev-parse --abbrev-ref HEAD", "fatal: ambiguous argument 'HEAD'"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b, mock, rec := releaseBackend(t)
+			rec.handlers[c.sub] = func([]string) ([]byte, error) {
+				return nil, errors.New(c.msg)
+			}
+
+			err := b.Release(t.Context(), b.refFromIssue(42))
+			if err == nil {
+				t.Fatal("Release must surface a git failure rather than proceeding")
+			}
+			var refused flow.ErrClaimRefused
+			if errors.As(err, &refused) {
+				t.Errorf("a git failure was dressed as the %q refusal; the condition was never read", refused.Code)
+			}
+			if !strings.Contains(err.Error(), c.msg) {
+				t.Errorf("error = %v, want git's own account of the failure", err)
+			}
+			assertReleaseChangedNothing(t, b, mock)
+		})
+	}
+}
+
+// A clean arena on the trunk releases, which is the condition the refusals
+// above describe the absence of — asserted here so they cannot all be passing
+// because Release refuses everything.
+func TestBackend_Release_CleanArenaOnTheTrunkSucceeds(t *testing.T) {
+	b, mock, _ := releaseBackend(t)
+
+	if err := b.Release(t.Context(), b.refFromIssue(42)); err != nil {
+		t.Fatalf("Release of a clean arena on the base branch: %v", err)
+	}
+	names := mock.labelNames()
+	if contains(names, b.labels.Owner("alice")) || contains(names, b.labels.Arena(b.arenaFingerprint())) {
+		t.Errorf("labels = %v, want both halves of the claim record gone", names)
+	}
+	active, err := b.LookupActiveClaim(t.Context())
+	if err != nil {
+		t.Fatalf("LookupActiveClaim: %v", err)
+	}
+	if active != nil {
+		t.Errorf("active claim = %+v, want none after a release", active)
 	}
 }
 

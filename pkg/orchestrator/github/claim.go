@@ -64,10 +64,46 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 			Reason: fmt.Sprintf("issue #%d is owned by other flow binary %q", issueNum, otherBinary),
 		}
 	}
+	// LookupActiveClaim is the single source for "what does this arena hold?"
+	// — requireOwnClaim (artifact.go) is its other consumer, and turns the same
+	// state into its two typed refusals instead of a lease. Read ONCE here,
+	// OUTSIDE every override, because three decisions need it: the arena-side
+	// refusal just below, the already-held refusal for a record that names no
+	// arena, and the holder's idempotent return.
+	active, err := b.LookupActiveClaim(ctx)
+	if err != nil {
+		return flow.Claim{}, fmt.Errorf("github.Claim: read active claim: %w", err)
+	}
 	// Whether THIS arena is the holder, from its own lease file. Declared out
 	// here because the already-held comparison is made twice — once on the
 	// preflight read below, once on the Phase 2 re-read — and both need it.
 	weHold := false
+	if active != nil {
+		activeNum, err := b.issueNumber(active.ItemRef)
+		if err != nil {
+			return flow.Claim{}, err
+		}
+		weHold = activeNum == issueNum
+		// The arena side of the one-to-one binding (docs/orchestrator.md §
+		// Required surface → Claiming): an arena holding one item is not free,
+		// and claiming a second would overwrite the lease file while the first
+		// item's uncommitted work, branch and build outputs stay in this tree —
+		// state that exists nowhere else and cannot be recovered by re-reading
+		// anything. Refused before any override is consulted, because no
+		// override reaches it: --force means "take this from another party",
+		// and there is nobody to take it from here — overwriting our own active
+		// claim is how the first item gets orphaned. Not item-scoped: no other
+		// item would fare better in an occupied arena. Re-claiming the item we
+		// hold is the idempotent path further down, not this.
+		if !weHold {
+			return flow.Claim{}, flow.ErrClaimRefused{
+				Code: "arena-occupied", ItemScoped: false,
+				Reason: fmt.Sprintf("this arena already holds %s — finish it, or run: release",
+					active.ItemRef.Display),
+				Check: "active-claim",
+			}
+		}
+	}
 	if !slices.Contains(overrides, flow.OverrideAlreadyHeld) {
 		// Refuse when another person holds the issue via an assignee. The
 		// caller must pass OverrideAlreadyHeld to take over deliberately.
@@ -79,23 +115,6 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 					Override: "force",
 				}
 			}
-		}
-		// LookupActiveClaim is the single source for "what does this arena
-		// hold?" — requireOwnClaim (artifact.go) is its other consumer, and
-		// turns the same state into its two typed refusals instead of a lease.
-		// Read ONCE here, because the two decisions below both need it: the
-		// already-held refusal, for a record that names no arena, and the
-		// holder's idempotent return.
-		active, err := b.LookupActiveClaim(ctx)
-		if err != nil {
-			return flow.Claim{}, fmt.Errorf("github.Claim: read active claim: %w", err)
-		}
-		if active != nil {
-			activeNum, err := b.issueNumber(active.ItemRef)
-			if err != nil {
-				return flow.Claim{}, err
-			}
-			weHold = activeNum == issueNum
 		}
 		// Refuse when another ARENA holds the issue — the claim record on the
 		// item, read by the one predicate `list` also uses, so the two cannot
@@ -153,18 +172,10 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 		if err != nil {
 			return flow.Claim{}, fmt.Errorf("resolve default branch: %w", err)
 		}
-		current, err := b.git.CurrentBranch(ctx)
-		if err != nil {
-			return flow.Claim{}, fmt.Errorf("current branch: %w", err)
-		}
-		if flow.BranchName(current) != base {
-			return flow.Claim{}, flow.ErrClaimRefused{
-				Code: "not-on-base", ItemScoped: false,
-				Reason: fmt.Sprintf("HEAD is on %q, want %q — run: git checkout %s",
-					current, base, base),
-				Check:    "base-branch",
-				Override: "force",
-			}
+		if refused, err := b.refuseOffBase(ctx, base, "force"); err != nil {
+			return flow.Claim{}, err
+		} else if refused != nil {
+			return flow.Claim{}, *refused
 		}
 
 		// 3. Local base must be at origin's tip.
@@ -189,18 +200,10 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 
 	if !slices.Contains(overrides, flow.OverrideDirtyTree) {
 		// 4. Tree must be clean, including untracked files.
-		porcelain, err := b.git.StatusPorcelain(ctx)
-		if err != nil {
-			return flow.Claim{}, fmt.Errorf("check dirty tree: %w", err)
-		}
-		if porcelain != "" {
-			return flow.Claim{}, flow.ErrClaimRefused{
-				Code: "dirty-tree", ItemScoped: false,
-				Reason:   "worktree has uncommitted or untracked changes",
-				Detail:   porcelain,
-				Check:    "clean-tree",
-				Override: "force",
-			}
+		if refused, err := b.refuseDirtyTree(ctx, "force"); err != nil {
+			return flow.Claim{}, err
+		} else if refused != nil {
+			return flow.Claim{}, *refused
 		}
 	}
 
@@ -432,9 +435,91 @@ func fingerprintArena(a flow.Arena) string {
 // arenaFingerprint is fingerprintArena over this checkout's own arena.
 func (b *Orchestrator) arenaFingerprint() string { return fingerprintArena(b.arena()) }
 
+// refuseOffBase is the "HEAD is on the base branch" precondition, shared by
+// Claim and Release: the refusal is returned when HEAD is elsewhere, nil when
+// the condition holds, and a plain error when git could not answer. override
+// names the flag that bypasses it, or "" when nothing does — Release's case.
+//
+// One body for both directions of the lease, because the condition is the same
+// one read at two moments: a fresh claim must start from the trunk, and a
+// release must leave the arena on it, or the next claim inherits the released
+// item's branch.
+func (b *Orchestrator) refuseOffBase(ctx context.Context, base flow.BranchName, override string) (*flow.ErrClaimRefused, error) {
+	current, err := b.git.CurrentBranch(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("current branch: %w", err)
+	}
+	if flow.BranchName(current) == base {
+		return nil, nil
+	}
+	return &flow.ErrClaimRefused{
+		Code: "not-on-base", ItemScoped: false,
+		Reason: fmt.Sprintf("HEAD is on %q, want %q — run: git checkout %s",
+			current, base, base),
+		Check:    "base-branch",
+		Override: override,
+	}, nil
+}
+
+// refuseDirtyTree is the "tree is clean, untracked files included" precondition,
+// shared by Claim, Release and Finalize. Same shape as refuseOffBase: the
+// refusal when the tree is dirty, nil when clean, an error when git could not
+// say. Detail carries `git status --porcelain` verbatim, so the operator sees
+// what is in the way rather than being told something is.
+//
+// Untracked files COUNT. At a release there is no item left to attribute them
+// to, and a file nothing tracks is exactly the kind of leftover the next claim
+// would otherwise start on top of. The project must therefore ignore .flow/, or
+// the lease file itself would answer here — StageAll already refuses a
+// project that does not.
+func (b *Orchestrator) refuseDirtyTree(ctx context.Context, override string) (*flow.ErrClaimRefused, error) {
+	porcelain, err := b.git.StatusPorcelain(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("check dirty tree: %w", err)
+	}
+	if porcelain == "" {
+		return nil, nil
+	}
+	return &flow.ErrClaimRefused{
+		Code: "dirty-tree", ItemScoped: false,
+		Reason:   "worktree has uncommitted or untracked changes",
+		Detail:   porcelain,
+		Check:    "clean-tree",
+		Override: override,
+	}, nil
+}
+
 // Release strips the assignee, removes the flow:owner:<account> and
 // flow:arena:<fingerprint> labels, clears the worktree-local active-claim file,
-// and leaves the state comment intact.
+// and leaves the state comment intact. It deletes no branch and no commit.
+//
+// It is the EXCEPTION to the binding's lifetime, not a step in it. The lease
+// binds item ↔ arena from the claim until the item is finalized
+// (docs/resolution.md § Claiming), and a release breaks that binding early —
+// so it must leave the arena genuinely free, and it REFUSES while the arena is
+// in no state to be handed on:
+//
+//   - a dirty tree (untracked files included), because the changes in it would
+//     belong to nobody afterwards — the item is unheld and selectable by any
+//     arena, and nothing points at the work;
+//   - HEAD off the base branch, because the next claim would inherit the
+//     released item's branch.
+//
+// The same two conditions Claim enforces, with the same typed codes, and with
+// NO override: a flag that dropped the claim and left the tree as it was would
+// produce exactly the orphaned state the refusal exists to prevent — work no
+// item holds and no branch carries. Nor would it leave the arena usable: an
+// unforced Claim refuses that same tree, so the claim that would follow a
+// forced release is one carrying OverrideDirtyTree, which starts the second
+// item on the first one's leftovers. The way past a refused release is git,
+// deliberately — commit the work to the item's branch
+// or discard it, check out the base, release — because that is the moment
+// somebody decides what happens to the work. An arena that is GONE is recovered
+// from another arena with the already-held override on Claim; that emergency
+// path is unchanged and is not this one.
+//
+// The dirty check runs first. Checking out the base on a dirty tree carries the
+// changes onto it, which would turn the second refusal into a worse state.
 //
 // Addressed by ref: the account is ambient, so it is read rather than taken off
 // a claim value the caller might be holding after the lease was revoked.
@@ -446,6 +531,42 @@ func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef) error {
 	owner, err := b.resolveAccount(ctx)
 	if err != nil {
 		return err
+	}
+	if refused, err := b.refuseDirtyTree(ctx, ""); err != nil {
+		return fmt.Errorf("github.Release: %w", err)
+	} else if refused != nil {
+		return *refused
+	}
+	// No fetch and no base-stale check: a stale local trunk strands nothing.
+	base, err := b.DefaultBranch(ctx)
+	if err != nil {
+		return fmt.Errorf("github.Release: resolve default branch: %w", err)
+	}
+	if refused, err := b.refuseOffBase(ctx, base, ""); err != nil {
+		return fmt.Errorf("github.Release: %w", err)
+	} else if refused != nil {
+		return *refused
+	}
+	// A DISPLACED arena — one whose item another arena under this same account
+	// took over with --force — is refused every other claim by the check at the
+	// top of Claim, so release is its only exit. But its record on the item is
+	// already gone: the take-over replaced the arena half, and the owner half is
+	// byte-identical between the two arenas. Removing the owner label here would
+	// take the TAKER's record apart, leaving a bare arena label, which
+	// docs/github-schema.md § Labels defines as not a claim — the item would read
+	// free while the taker runs it. So when the item names this account with an
+	// arena that is not ours, only the local lease file is cleared. Every other
+	// case — our own record, no record, a record naming no arena — proceeds.
+	issue, err := b.out.GetIssue(ctx, issueNum)
+	if err != nil {
+		return fmt.Errorf("github.Release: get issue %d: %w", issueNum, err)
+	}
+	if holder, fingerprint := b.holderFromLabels(labelNamesOf(issue.Labels)); holder.Account == owner &&
+		fingerprint != "" && fingerprint != b.arenaFingerprint() {
+		if err := clistate.Clear(); err != nil {
+			return fmt.Errorf("github.Release: clear active claim file: %w", err)
+		}
+		return nil
 	}
 	// The arena half comes off FIRST, and the order is the correctness of the
 	// pair — the two removals are separate requests, so one of them can be the
@@ -492,9 +613,15 @@ func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef) error {
 // The refusal is ErrUnavailable, not ErrUnsupported: the item may reach
 // terminal later, so asking again is exactly what a caller should do.
 //
-// The state-comment write comes first so a failure there leaves the claim
-// intact; the worktree return precedes the release so a checkout failure also
-// keeps the claim recoverable.
+// The clean-tree check comes BEFORE the state-comment write, and it is the
+// same check Release makes. Release refuses a dirty tree, untracked files
+// included, so a tree that would fail it must be found out before anything is
+// recorded: checked only afterwards, an untracked file left by a step — verify
+// may mutate the worktree, and reverting merge prep is a hard reset that leaves
+// such files — would be recorded as finalized and then refused at the release,
+// a finalized-but-held item in the happy path. The state-comment write then
+// comes before the worktree return so a checkout failure leaves the claim
+// recoverable, and the return precedes the release for the same reason.
 func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef, d flow.Disposition) error {
 	issueNum, err := b.issueNumber(ref)
 	if err != nil {
@@ -513,6 +640,12 @@ func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef, d flow.Di
 		return fmt.Errorf(
 			"github.Finalize: issue #%d is %s, and only a %s item's flow run may be recorded complete: %w",
 			issueNum, status, flow.StatusTerminal, flow.ErrUnavailable)
+	}
+
+	if refused, err := b.refuseDirtyTree(ctx, ""); err != nil {
+		return fmt.Errorf("github.Finalize: %w", err)
+	} else if refused != nil {
+		return fmt.Errorf("github.Finalize: %w", *refused)
 	}
 
 	// Mark the item finalized in the state comment so Load returns
@@ -562,14 +695,6 @@ func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef, d flow.Di
 	}
 
 	if flow.BranchName(current) != base {
-		dirty, err := b.git.IsDirty(ctx)
-		if err != nil {
-			return fmt.Errorf("github.Finalize: check dirty: %w", err)
-		}
-		if dirty {
-			return fmt.Errorf("github.Finalize: worktree is dirty on %s — refusing to discard uncommitted changes", current)
-		}
-
 		exists, err := b.git.BranchExists(ctx, string(base))
 		if err != nil {
 			return fmt.Errorf("github.Finalize: check base branch: %w", err)

@@ -770,7 +770,8 @@ usage:
                                      additively extend one step's budget. <step-id> is the
                                      id from AddStep (e.g. "plan") — the first column of
                                      "status" — never the label (e.g. "write plan")
-  %[1]s release                      drop the claim
+  %[1]s release                      drop the active claim (refused while the worktree is dirty
+                                     or off the base branch)
   %[1]s reseed [--force]              clear seed state (artifacts, budgets, park) on the active claim
 
 answer, status, list, grant, run-step, and resolve print human-readable text on a terminal and

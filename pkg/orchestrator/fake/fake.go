@@ -799,6 +799,27 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 	if rec == nil {
 		return flow.Claim{}, fmt.Errorf("fake: item %q not registered", id)
 	}
+	// The arena side of the one-to-one binding (docs/orchestrator.md § Required
+	// surface → Claiming): an arena holding one item is not free, so a claim on
+	// a DIFFERENT item is refused, and no override reaches it — --force takes an
+	// item from another party, and there is nobody to take it from here.
+	// Re-claiming the held item stays idempotent, so only a different id refuses.
+	//
+	// Keyed on the ACTIVE CLAIM, not on the records: AddItem replaces a record
+	// wholesale, so a re-registered item would drop rec.claim while this arena
+	// still believes it holds the lease — and the active claim is the double's
+	// answer to "what does this arena hold?", the same question the github
+	// orchestrator puts to its lease file.
+	if b.active != nil {
+		if activeID, aerr := refID(b.active.ItemRef); aerr == nil && activeID != id {
+			return flow.Claim{}, flow.ErrClaimRefused{
+				Code: "arena-occupied", ItemScoped: false,
+				Reason: fmt.Sprintf("this arena already holds %s — finish it, or run: release",
+					b.active.ItemRef.Display),
+				Check: "active-claim",
+			}
+		}
+	}
 	if rec.claim != nil && rec.holder.Arena != b.arena && !slices.Contains(overrides, flow.OverrideAlreadyHeld) {
 		return flow.Claim{}, flow.ErrClaimRefused{
 			Code: "already-claimed", ItemScoped: true,
