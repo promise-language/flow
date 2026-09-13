@@ -68,7 +68,10 @@ func newScriptedTransport(t *testing.T, responses ...*http.Response) *scriptedTr
 		return s.script[i], nil
 	})
 	s.seamTransport = newSeamTransport(base, newMeter(), newSeamCache("o", "r", "tok"))
-	s.seamTransport.now = func() time.Time { return s.now }
+	// The clock goes on the RECORD, which is where the seam's one clock lives:
+	// installing it on the transport would leave the record pruning its rows on
+	// the wall clock, and a pinned test would empty its own cache a day later.
+	s.seamTransport.cache.now = func() time.Time { return s.now }
 	s.seamTransport.sleep = func(ctx context.Context, d time.Duration) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -394,7 +397,7 @@ func TestRateLimit_IsSharedAcrossTheMachineAndExpires(t *testing.T) {
 		sibling.calls++
 		return okResponse(), nil
 	}), newMeter(), newSeamCache("o", "r", "tok"))
-	sibling.seamTransport.now = func() time.Time { return sibling.now }
+	sibling.seamTransport.cache.now = func() time.Time { return sibling.now }
 
 	_, err := getThrough(t, sibling)
 	if !errors.Is(err, flow.ErrUnavailable) {
@@ -607,6 +610,137 @@ func TestTransport_AnErrorAnswerIsNeitherCachedNorHiddenByTheCachedBody(t *testi
 	if !ok || !strings.Contains(string(row.Body), "full_name") {
 		t.Errorf("the record holds %q, want the last SUCCESS — a cached failure is the answer for the whole TTL", row.Body)
 	}
+}
+
+// A row is stamped and retired by ONE clock, so a seam driven on a clock far
+// from the wall one still finds what it just cached.
+//
+// This is the failure #372 was filed over, at the level it was reported: the
+// row was stamped with the transport's injected clock and pruned on the wall
+// clock, so once the two were more than the horizon apart the store retired its
+// own row and the next read bought the answer again. The clock here is years
+// out deliberately — a test that is only valid within a day of a pinned date is
+// asserting today's date.
+func TestTransport_ARowIsFoundOnAClockYearsFromTheWallOne(t *testing.T) {
+	s := newScriptedTransport(t, okResponse())
+	s.now = time.Date(2031, 2, 3, 4, 5, 0, 0, time.UTC)
+
+	if _, err := getPathThrough(t, s, "/repos/o/r"); err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	// Inside repoMetaTTL, so the second read is the record's answer and the
+	// helper would fail the test for an unscripted second request.
+	if _, err := getPathThrough(t, s, "/repos/o/r"); err != nil {
+		t.Fatalf("RoundTrip (second): %v", err)
+	}
+	u := s.meter.Snapshot()
+	if u.Requests != 1 || u.Served != 1 {
+		t.Errorf("meter counted %d request(s) and %d served, want 1 and 1 — the row was retired by the store that wrote it",
+			u.Requests, u.Served)
+	}
+}
+
+// A 304 RESTAMPS the row, and that restamp is the OTHER write into the record —
+// the one whose instant comes in as an argument rather than off the response.
+// Driven on a clock years from the wall one, because a refresh that reached a
+// second clock leaves a row the horizon retires inside the very update that
+// wrote it: the caller still gets its bytes that once, and the read after it
+// finds no row, no tag, and buys the body again.
+func TestTransport_ARevalidatedRowSurvivesItsOwnRestamp(t *testing.T) {
+	s := newScriptedTransport(t)
+	s.now = time.Date(2031, 2, 3, 4, 5, 0, 0, time.UTC)
+	first := okResponse()
+	first.Header.Set("ETag", `W/"tag-1"`)
+	first.Body = io.NopCloser(strings.NewReader(`{"number":42}`))
+	s.script = []*http.Response{first, canned(http.StatusNotModified, nil), canned(http.StatusNotModified, nil)}
+
+	// The issue read is the revalidated policy: always requested, conditionally.
+	var tags []string
+	scripted := s.seamTransport.base
+	s.seamTransport.base = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		tags = append(tags, r.Header.Get("If-None-Match"))
+		return scripted.RoundTrip(r)
+	})
+
+	for i := range 3 {
+		resp, err := getPathThrough(t, s, "/repos/o/r/issues/42")
+		if err != nil {
+			t.Fatalf("RoundTrip %d: %v", i+1, err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), `"number":42`) {
+			t.Fatalf("read %d answered %q, want the stored body — a 304 with nothing held is not an answer", i+1, body)
+		}
+	}
+	if tags[1] != `W/"tag-1"` || tags[2] != `W/"tag-1"` {
+		t.Errorf("the conditional reads carried %q and %q, want the stored tag both times — a row retired by its own restamp is revalidated against nothing", tags[1], tags[2])
+	}
+	if u := s.meter.Snapshot(); u.Revalidated != 2 {
+		t.Errorf("meter counted %d revalidation(s), want 2 — a read that re-bought the body costs primary budget", u.Revalidated)
+	}
+}
+
+// The clock NOTHING installs is the wall one, and that is the only clock a real
+// run reads: every test above hangs its own on the record, so a default of the
+// zero instant would satisfy all of them while taking the machine off the air.
+//
+// Both shapes, because the transport reads its clock through the record and the
+// record may be absent: nil is a clock too.
+func TestTransport_TheClockNothingInstallsIsTheWallOne(t *testing.T) {
+	// A refusal is recorded until an instant, and limitInForce short-circuits
+	// every request before it is made. A clock stopped at the zero instant is
+	// before every window ever recorded, and clearLimit only runs after a
+	// request that the refusal itself stopped — so the machine never asks again.
+	t.Run("over a record", func(t *testing.T) {
+		useTempSeamCache(t)
+		c := newSeamCache("o", "r", "tok")
+		c.recordLimit(seamLimit{Until: time.Now().Add(-time.Minute), Endpoint: "GET /a-window-that-closed"})
+
+		calls := 0
+		tr := newSeamTransport(roundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls++
+			return okResponse(), nil
+		}), newMeter(), c)
+		req, err := http.NewRequest("GET", "https://example.test/repos/o/r/issues/42/timeline", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tr.RoundTrip(req); err != nil {
+			t.Fatalf("RoundTrip under a window that closed a minute ago: %v", err)
+		}
+		if calls != 1 {
+			t.Errorf("made %d request(s), want 1 — a refusal whose window has closed must not still bind", calls)
+		}
+	})
+
+	// And with nowhere to cache there is no record to hang a clock on at all.
+	// The instant is still what every refusal is measured against: a zero one
+	// caps a window GitHub named to an hour past the year 1 and hands the caller
+	// that as the moment to come back.
+	t.Run("with nowhere to cache", func(t *testing.T) {
+		reset := time.Now().Add(20 * time.Minute).Truncate(time.Second)
+		tr := newSeamTransport(roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return canned(http.StatusForbidden, map[string]string{
+				"X-RateLimit-Remaining": "0",
+				"X-RateLimit-Reset":     strconv.FormatInt(reset.Unix(), 10),
+			}), nil
+		}), newMeter(), nil)
+		req, err := http.NewRequest("GET", "https://example.test/repos/o/r/issues/42/timeline", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = tr.RoundTrip(req)
+		var limited *rateLimited
+		if !errors.As(err, &limited) {
+			t.Fatalf("error = %v, want a *rateLimited — a machine with no cache still names its refusals", err)
+		}
+		if !limited.Until.Equal(reset) {
+			t.Errorf("the refusal clears at %s, want the instant the header named (%s)", limited.Until, reset)
+		}
+	})
 }
 
 // The test seam is built through the same construction path as the real client,

@@ -193,17 +193,27 @@ type seamTransport struct {
 	// cache may be nil — a machine with nowhere to cache still meters and still
 	// names a limit, it just buys everything again.
 	cache *seamCache
-	// now and sleep are the clock, replaced wholesale by a test. A rate-limit
-	// test that actually slept for the cap would be a two-minute test.
-	now   func() time.Time
+	// sleep is replaced wholesale by a test. A rate-limit test that actually
+	// slept for the cap would be a two-minute test.
+	//
+	// The CLOCK is not here, it is on the record (seamCache.now), and now()
+	// below reads that one. A transport-owned clock would be a second clock: the
+	// stamp on a row it stores would come from here and the horizon that retires
+	// the row from there, and the two agreeing only because both happen to be
+	// time.Now is the defect #372 was filed over.
 	sleep func(context.Context, time.Duration) error
 }
+
+// now is the seam's one clock — the record's, so the instant a row is stamped
+// with and the instant it is aged and pruned against are the same by
+// construction.
+func (t *seamTransport) now() time.Time { return t.cache.clock() }
 
 func newSeamTransport(base http.RoundTripper, m *meter, c *seamCache) *seamTransport {
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	return &seamTransport{base: base, meter: m, cache: c, now: time.Now, sleep: sleepCtx}
+	return &seamTransport{base: base, meter: m, cache: c, sleep: sleepCtx}
 }
 
 // sleepCtx waits, or gives up the moment the caller does. A step that was

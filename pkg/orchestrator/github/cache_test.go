@@ -316,17 +316,24 @@ func TestCachePolicy_Table(t *testing.T) {
 // so a record that only ever grows turns the cache into the cost it exists to
 // remove. The file sweep cannot retire it — a record something is still writing
 // never reaches its own KeepFor — so the rows are retired inside it.
+// The horizon is measured on the RECORD's clock, not the wall clock: the now
+// here is years away from the wall one, so every row below would be retired on
+// sight by a prune that read time.Now(), and the edges — 23h in, 25h out — pin
+// which horizon is actually being applied.
 func TestCache_RowsNothingReadsAnyMoreAreRetired(t *testing.T) {
 	useTempSeamCache(t)
 	c := newSeamCache("o", "r", "tok")
-	c.storeRow("/repos/o/r/issues/1", seamRow{StoredAt: time.Now(), Body: []byte("fresh")})
-	c.storeRow("/repos/o/r/issues/2", seamRow{StoredAt: time.Now().Add(-2 * seamRecordKeepFor), Body: []byte("cold")})
+	now := time.Date(2031, 2, 3, 4, 5, 0, 0, time.UTC)
+	c.now = func() time.Time { return now }
+
+	c.storeRow("/repos/o/r/issues/1", seamRow{StoredAt: now.Add(-23 * time.Hour), Body: []byte("fresh")})
+	c.storeRow("/repos/o/r/issues/2", seamRow{StoredAt: now.Add(-25 * time.Hour), Body: []byte("cold")})
 	// A row dated in the FUTURE is a machine whose clock jumped, and it is as
 	// unreadable as a cold one: row() reports it stale for good.
-	c.storeRow("/repos/o/r/issues/3", seamRow{StoredAt: time.Now().Add(2 * seamRecordKeepFor), Body: []byte("skewed")})
+	c.storeRow("/repos/o/r/issues/3", seamRow{StoredAt: now.Add(25 * time.Hour), Body: []byte("skewed")})
 
 	// Any store is when the retiring happens; this one is an ordinary write.
-	c.storeRow("/repos/o/r", seamRow{StoredAt: time.Now(), Body: []byte("meta")})
+	c.storeRow("/repos/o/r", seamRow{StoredAt: now, Body: []byte("meta")})
 
 	rec := c.load()
 	if rec == nil {
