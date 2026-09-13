@@ -116,6 +116,23 @@ type seamCache struct {
 	limitPath string
 	dir       string
 	key       string
+	// now is THE clock behind this seam: the one a row is stamped by, aged
+	// against and pruned on, and the one the transport reads for everything it
+	// does with a wait. One clock rather than one per caller, because a row
+	// stamped by one and pruned by another is retired by a horizon it was never
+	// measured against — which is a cache that empties itself the moment the two
+	// drift a day apart (#372). Nil is the wall clock; only a test installs one.
+	now func() time.Time
+}
+
+// clock is the one instant everything behind this seam reads. Tolerant of a nil
+// receiver and a nil field — a machine with nowhere to cache still has a clock,
+// and the wall-clock default is spelled here and nowhere else.
+func (c *seamCache) clock() time.Time {
+	if c == nil || c.now == nil {
+		return time.Now()
+	}
+	return c.now()
 }
 
 // newSeamCache resolves the record for this repository and credential. Returns
@@ -209,7 +226,11 @@ func (c *seamCache) update(mutate func(*seamRecord)) {
 		rec = &seamRecord{}
 	}
 	mutate(rec)
-	pruneSeamRows(rec, time.Now())
+	// The seam's own clock, not the wall one: every mutating path — storeRow,
+	// refreshRow, dropPath, rememberStateCommentID — funnels through here, so
+	// this is the single place the horizon is applied and it reads the clock the
+	// rows were stamped by.
+	pruneSeamRows(rec, c.clock())
 	machinecache.Store(c.path, *rec, seamSweep)
 }
 

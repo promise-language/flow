@@ -68,7 +68,10 @@ func newScriptedTransport(t *testing.T, responses ...*http.Response) *scriptedTr
 		return s.script[i], nil
 	})
 	s.seamTransport = newSeamTransport(base, newMeter(), newSeamCache("o", "r", "tok"))
-	s.seamTransport.now = func() time.Time { return s.now }
+	// The clock goes on the RECORD, which is where the seam's one clock lives:
+	// installing it on the transport would leave the record pruning its rows on
+	// the wall clock, and a pinned test would empty its own cache a day later.
+	s.seamTransport.cache.now = func() time.Time { return s.now }
 	s.seamTransport.sleep = func(ctx context.Context, d time.Duration) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -394,7 +397,7 @@ func TestRateLimit_IsSharedAcrossTheMachineAndExpires(t *testing.T) {
 		sibling.calls++
 		return okResponse(), nil
 	}), newMeter(), newSeamCache("o", "r", "tok"))
-	sibling.seamTransport.now = func() time.Time { return sibling.now }
+	sibling.seamTransport.cache.now = func() time.Time { return sibling.now }
 
 	_, err := getThrough(t, sibling)
 	if !errors.Is(err, flow.ErrUnavailable) {
@@ -606,6 +609,34 @@ func TestTransport_AnErrorAnswerIsNeitherCachedNorHiddenByTheCachedBody(t *testi
 	row, ok, _ := s.cache.row("/repos/o/r", s.now, repoMetaTTL)
 	if !ok || !strings.Contains(string(row.Body), "full_name") {
 		t.Errorf("the record holds %q, want the last SUCCESS — a cached failure is the answer for the whole TTL", row.Body)
+	}
+}
+
+// A row is stamped and retired by ONE clock, so a seam driven on a clock far
+// from the wall one still finds what it just cached.
+//
+// This is the failure #372 was filed over, at the level it was reported: the
+// row was stamped with the transport's injected clock and pruned on the wall
+// clock, so once the two were more than the horizon apart the store retired its
+// own row and the next read bought the answer again. The clock here is years
+// out deliberately — a test that is only valid within a day of a pinned date is
+// asserting today's date.
+func TestTransport_ARowIsFoundOnAClockYearsFromTheWallOne(t *testing.T) {
+	s := newScriptedTransport(t, okResponse())
+	s.now = time.Date(2031, 2, 3, 4, 5, 0, 0, time.UTC)
+
+	if _, err := getPathThrough(t, s, "/repos/o/r"); err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	// Inside repoMetaTTL, so the second read is the record's answer and the
+	// helper would fail the test for an unscripted second request.
+	if _, err := getPathThrough(t, s, "/repos/o/r"); err != nil {
+		t.Fatalf("RoundTrip (second): %v", err)
+	}
+	u := s.meter.Snapshot()
+	if u.Requests != 1 || u.Served != 1 {
+		t.Errorf("meter counted %d request(s) and %d served, want 1 and 1 — the row was retired by the store that wrote it",
+			u.Requests, u.Served)
 	}
 }
 
