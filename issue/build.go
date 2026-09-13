@@ -216,6 +216,12 @@ func (b *builder) addContributorSteps(f *flow.Flow) {
 			Role:    contributorRole,
 			Next:    []flow.StepId{flow.StepId(StepCoverage)},
 			Prompts: flow.PromptsAgent,
+			// The step the declaration exists for. A reviewer holding the
+			// implementer's deliberations is not reviewing: an agent shown its own
+			// rationalisations reliably agrees with them, so this one answers to the
+			// code on the branch and to nothing it remembers writing. Independence,
+			// not hygiene (docs/flow-registration.md § Session continuity).
+			Session: flow.SessionFresh,
 			Needs:   flow.NeedsItemBranch,
 			Writes:  flow.WriteContract{MayCommit: true, MayEditTree: true},
 			Leaves:  flow.LeavesItemBranch,

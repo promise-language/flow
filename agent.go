@@ -7,9 +7,20 @@ import "context"
 // impl may still attach to whatever session the substrate has cached);
 // non-empty resumes that exact session id. FreshSession is the stronger
 // "discard any inherited session state" signal — Agent impls should
-// honor it by spawning the underlying tool from a clean slate. Useful at
-// flow-boundary turns (e.g. the plan step opens a new piece of work and
-// must never inherit the previous flow's chat history).
+// honor it by spawning the underlying tool from a clean slate.
+//
+// BOTH ARE SET BY THE SDK AT THE CHOKEPOINT, NEVER BY A STEP, from the
+// resolution's own session (docs/resolution.md § The agent session): the session
+// belongs to the resolution, so which conversation a prompt continues is not the
+// handler's to choose, exactly as Worktree is not. A step that wants a new one
+// declares StepConfig.Session: fresh and the machinery does the rest.
+//
+// The handle is OFFERED AND NEVER DEPENDED ON. A substrate may decline to
+// resume, expire the conversation, or have no such notion; a backend may have
+// nowhere to keep a handle. So a step whose result differs depending on whether
+// the substrate honoured ResumeSessionID has made an optimisation load-bearing
+// and is wrong for that reason — the prompt and the draft are what make a
+// dispatch right, and the handle decides only what it costs.
 type AgentRequest struct {
 	Prompt          string
 	ResumeSessionID string

@@ -320,24 +320,23 @@ func (b *builder) stepImplement(ctx flow.StepCtx) (flow.StepResult, error) {
 	if rounds <= 0 {
 		rounds = DefaultMaxFixRounds
 	}
-	// session chains the fix rounds into ONE agent conversation. Without it
-	// every round is a fresh process whose entire prompt is a verify tail —
-	// no item, no plan, no memory of the edits it just made — so rounds 2..N
-	// would be trying to fix code they cannot see the reasoning behind.
-	var session string
 	// attempt counts FIX rounds: the opening turn is attempt 0, so
 	// MaxFixRounds=N buys N re-prompts, which is what the name says.
+	//
+	// The fix rounds chain into ONE agent conversation — a round whose entire
+	// prompt is a verify tail, with no item, no plan and no memory of the edits it
+	// just made, would be fixing code it cannot see the reasoning behind. Nothing
+	// here arranges that: the session is the resolution's and the chokepoint hands
+	// it over (docs/resolution.md § The agent session), which is also what carries
+	// the chain across a park and a process exit that a local variable could not.
 	for attempt := 0; ; attempt++ {
 		ctx.Notify("", fmt.Sprintf("implement round %d", attempt+1))
-		resp, err := b.runAgent(ctx, flow.AgentRequest{
-			Prompt:          prompt,
-			PermissionMode:  "acceptEdits",
-			ResumeSessionID: session,
-		})
-		if err != nil {
+		if _, err := b.runAgent(ctx, flow.AgentRequest{
+			Prompt:         prompt,
+			PermissionMode: "acceptEdits",
+		}); err != nil {
 			return flow.StepResult{}, err
 		}
-		session = resp.SessionID
 
 		ctx.Notify("", "running the verify command")
 		run, rerr := wt.Run(ctx.Context(), flow.CommandVerify)
@@ -1161,7 +1160,6 @@ func (b *builder) resolveQuestion(ctx flow.StepCtx, resp *flow.AgentResponse, he
 		ctx.Notify("", "could not record work in progress: "+err.Error())
 	}
 
-	session := resp.SessionID
 	questionText := header + "\n" + body
 
 	for round := 0; ; round++ {
@@ -1212,9 +1210,8 @@ func (b *builder) resolveQuestion(ctx flow.StepCtx, resp *flow.AgentResponse, he
 		// Call ctx.Agent().Run directly — NOT b.runAgent, which detects
 		// questions and calls resolveQuestion, creating infinite recursion.
 		newResp, rerr := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{
-			Prompt:          prompt,
-			PermissionMode:  "plan",
-			ResumeSessionID: session,
+			Prompt:         prompt,
+			PermissionMode: "plan",
 		})
 		if rerr != nil {
 			return nil, rerr
@@ -1223,7 +1220,6 @@ func (b *builder) resolveQuestion(ctx flow.StepCtx, resp *flow.AgentResponse, he
 			return nil, fmt.Errorf("agent returned no response when asked to revise refused question")
 		}
 
-		session = newResp.SessionID
 		resp = newResp
 
 		// Did the agent drop the question on revision?

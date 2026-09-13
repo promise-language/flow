@@ -75,6 +75,10 @@ func (c *Client) Run(ctx context.Context, req flow.AgentRequest) (*flow.AgentRes
 	if req.ResumeSessionID != "" {
 		args = append(args, "--resume", req.ResumeSessionID)
 	}
+	// req.FreshSession needs no argument here, and its absence is not a gap. This
+	// spawns `claude --print` with neither --resume nor --continue, which IS the
+	// clean slate the field asks for; a flag saying so would be a second way to
+	// spell what leaving --resume off already says.
 	if req.MaxCostUSD > 0 {
 		// Exact, not rounded: %.2f would round 20.005 UP and hand the turn
 		// half a cent more than the step was granted.

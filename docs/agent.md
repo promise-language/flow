@@ -30,6 +30,8 @@ The request goes out, the agent works — reading, editing, calling tools, as ma
 
 The chokepoint also **stamps the request's `Worktree`** with the arena's checkout (`Orchestrator.ArenaRoot()`), overwriting whatever the step put there. Where the agent edits is not a step's choice: it is the tree the commit will be taken in and the gates will measure, and a request that names no directory inherits the directory the binary was started in.
 
+It stamps **the session** for the same reason. `ResumeSessionID` and `FreshSession` are set here from the resolution's own session ([resolution.md](resolution.md) § The agent session), overwriting whatever the step put there: which conversation a prompt continues is a property of the resolution, and a step choosing its own would be choosing what the resolution is having. A prompt resumes the handle the resolution is holding; where there is none it spawns a clean slate, which is also why the empty handle is stamped as `FreshSession` rather than left blank — an empty `ResumeSessionID` alone lets a substrate attach to whatever it last cached, and for an entry step that is another item's reasoning. A step that needs a new conversation declares `Session: fresh` ([flow-registration.md](flow-registration.md) § Session continuity), and the machinery does the rest.
+
 ## Nothing mechanical may spend
 
 A prompt is sent **only where somebody asked for work**: a step of resolving an item, against a budget, producing an artifact. Every other path answers by reading, or does not answer.
@@ -76,8 +78,8 @@ An agent with no `AgentDoctor` is reported as **skipped**, not failed. The SDK c
 | `Effort` | `string` | `low`, `medium`, `high`, or `max`. |
 | `MaxCostUSD` | `float64` | Ceiling on what this prompt may spend, in USD. Zero means unbounded. |
 | `Worktree` | `string` | Working directory for the agent process. **Set by the SDK at the chokepoint, never by the step**: the arena's checkout (`Orchestrator.ArenaRoot()`), the same tree the commit is taken in and the gates measure. |
-| `ResumeSessionID` | `string` | Non-empty resumes that exact session. Empty means "don't actively resume a specific session." |
-| `FreshSession` | `bool` | Discard any inherited session state — spawn from a clean slate. |
+| `ResumeSessionID` | `string` | Non-empty resumes that exact session. Empty means "don't actively resume a specific session." **Set by the SDK at the chokepoint, never by the step**: the handle the resolution is holding ([resolution.md](resolution.md) § The agent session). Offered and never depended on — a substrate may decline it, and a step whose result depends on its being honoured has made an optimisation load-bearing. |
+| `FreshSession` | `bool` | Discard any inherited session state — spawn from a clean slate. **Set by the SDK at the chokepoint, never by the step**: true exactly when the resolution holds no handle, so a prompt with nothing to resume cannot attach to whatever the substrate cached. |
 
 ### MaxCostUSD contract
 

@@ -321,6 +321,25 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		}
 	}
 
+	// The declared session boundary, applied before the handler can prompt and
+	// after the pre-dispatch gate, so a refused dispatch never discards context
+	// the resolution has already paid for.
+	//
+	// A step declaring `fresh` gives up the conversation, and the write is durable
+	// because a MECHANICAL fresh step never prompts: the declaration says where
+	// the conversation ends, and nothing requires the step that says so to be the
+	// one talking (docs/flow-registration.md § Session continuity).
+	//
+	// Once per EXECUTION, not once per dispatch. Boundary is how a `fresh` step
+	// that prompts, parks and is re-dispatched resumes its own session instead of
+	// opening a second one — a resume deciding this moment is special is the
+	// machinery-chosen session § The agent session forbids. RunNumber cannot serve
+	// here: it reads the ledger's cumulative dispatches, which is already above one
+	// on a second execution reached by a handback.
+	if li.Session == flow.SessionFresh && sctx.resolutionSession().Boundary != li.Result() {
+		sctx.setResolutionSession(flow.AgentSession{Boundary: li.Result()})
+	}
+
 	// Dispatch. The handler completes by RETURNING its election; res is read
 	// only on the completion path (translateHandlerError's nil-error branch),
 	// because every other way a dispatch ends is one where nothing was elected.
@@ -1073,6 +1092,13 @@ type stepCtx struct {
 	wip       string
 	wipLoaded bool
 	wipErr    error
+	// session memoises the RESOLUTION's agent-session record, exactly as wip
+	// memoises the step's draft. Keyed by the item alone, so it is the same record
+	// whichever step this dispatch is — that is what makes the conversation
+	// survive a step boundary, a park, and a process exit.
+	session       flow.AgentSession
+	sessionLoaded bool
+	sessionErr    error
 	// startedAt and budget back the park-time axis snapshot: elapsed-vs-cap is
 	// the one axis with no counter in the ledger, and the caps are the ones the
 	// pre-dispatch gate judged by — read once, so nothing downstream can resolve
@@ -1392,6 +1418,53 @@ func (s *stepCtx) RecordWorkInProgress(body string) error {
 	return nil
 }
 
+// resolutionSession is the handle this RESOLUTION holds on its agent
+// conversation, and the boundary already honoured.
+//
+// Not on StepCtx, and deliberately: handlers are HANDED the session at the
+// chokepoint and never ask for it. A step that could read it is one step away
+// from choosing its own conversation, which docs/resolution.md § The agent
+// session says is not a step's to choose.
+//
+// Every way of not having one reads as "the resolution holds none" — no record,
+// a backend with no store, a store that failed to answer. That is the same
+// fail-to-absence the draft takes, and for a sharper reason: a handle is offered
+// and never depended on, so nothing here may turn a missing one into a failed
+// dispatch.
+func (s *stepCtx) resolutionSession() flow.AgentSession {
+	if s.sessionLoaded {
+		return s.session
+	}
+	s.sessionLoaded = true
+	s.session, s.sessionErr = s.app.Orchestrator.LoadAgentSession(s.ctx, s.claim.ItemRef)
+	if s.sessionErr != nil {
+		s.session = flow.AgentSession{}
+		// A backend with no store is the mechanism being ABSENT rather than
+		// failing — every dispatch opens a session and nothing is wrong — so it is
+		// not worth reporting on every step. Anything else is a store that was
+		// asked and could not answer, which costs a re-open and is worth saying.
+		if !errors.Is(s.sessionErr, flow.ErrUnsupported) {
+			s.Notify("", "could not read the agent session: "+s.sessionErr.Error())
+		}
+	}
+	return s.session
+}
+
+// setResolutionSession records the resolution's session, durably where the
+// backend has a store and in this dispatch's memo either way.
+//
+// BEST-EFFORT, like the draft's write: a failure costs a re-opened conversation
+// and never the step, because the prompt is what makes a dispatch right and the
+// handle decides only what it costs. The memo is updated whatever the store did,
+// so the rest of THIS dispatch behaves consistently with what was just decided.
+func (s *stepCtx) setResolutionSession(sess flow.AgentSession) {
+	err := s.app.Orchestrator.SaveAgentSession(s.ctx, s.claim.ItemRef, sess)
+	if err != nil && !errors.Is(err, flow.ErrUnsupported) {
+		s.Notify("", "could not record the agent session: "+err.Error())
+	}
+	s.session, s.sessionLoaded, s.sessionErr = sess, true, nil
+}
+
 func (s *stepCtx) Notify(step, detail string) {
 	if s.app.Telemetry == nil {
 		return
@@ -1483,11 +1556,30 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 	// back door of the orchestrator having nothing to say, which is the one
 	// thing docs/agent.md says this field is never set by.
 	req.Worktree = m.orch.ArenaRoot()
+	// The session is the RESOLUTION's, not this handler's (docs/resolution.md
+	// § The agent session). Assigned here for the reason Worktree is: a step that
+	// chose its own would be choosing which conversation the resolution is having,
+	// and a step chaining its own prompts through a local variable loses the chain
+	// at the step boundary, at a park, and at a process exit — which is every
+	// place the conversation is worth keeping.
+	//
+	// Unconditionally, the empty answer included. No handle to offer means there
+	// is none to inherit either: FreshSession, so an empty ResumeSessionID cannot
+	// quietly attach to whatever the substrate last cached, which for an entry
+	// step would be another item's reasoning.
+	//
+	// Read AFTER the mechanical refusal above: a step declaring Prompts: none must
+	// reach nothing and leave no record of having asked.
+	sess := m.stepCtx.resolutionSession()
+	req.ResumeSessionID = sess.SessionID
+	req.FreshSession = sess.SessionID == ""
 	// Signal/await steps carry no cap policy worth metering. Allow the call to
 	// pass through unmetered — those steps shouldn't normally call the agent,
 	// but if they do the spend is not gated here.
 	if li.Kind != flow.LifecycleArtifact {
-		return m.inner.Run(ctx, req)
+		resp, err := m.inner.Run(ctx, req)
+		m.recordSession(sess, resp)
+		return resp, err
 	}
 	step := li.Result()
 	row := m.stepCtx.state.Ledger.Row(step)
@@ -1531,6 +1623,9 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 	// flapping runner must not burn the cost axis any more than it burns the
 	// invocations axis.
 	transient := resp != nil && resp.Failure != nil && resp.Failure.Transient
+	if !transient {
+		m.recordSession(sess, resp)
+	}
 	if err == nil && resp != nil && resp.CostUSD > 0 && !transient {
 		_ = m.orch.AddCost(ctx, m.claim.ItemRef, step, resp.CostUSD)
 		// Update the local mirror so subsequent calls, and the park snapshot,
@@ -1562,6 +1657,28 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 		err = agentFailureError(resp.Failure)
 	}
 	return resp, err
+}
+
+// recordSession records the handle the substrate answered with as the
+// resolution's, so the next prompt continues this conversation — the next prompt
+// in this invocation, in this step's next dispatch, or in whatever process picks
+// the item up next.
+//
+// The boundary is carried forward unchanged: it says which step's `fresh`
+// declaration has already been honoured, and answering a prompt does not honour
+// another one.
+//
+// Nothing is written when the substrate offered no handle, or offered the one
+// already held: a store asked to record what it already has is a write that
+// cannot change anything and can still fail.
+func (m *meteredAgent) recordSession(prev flow.AgentSession, resp *flow.AgentResponse) {
+	if resp == nil || resp.SessionID == "" || resp.SessionID == prev.SessionID {
+		return
+	}
+	m.stepCtx.setResolutionSession(flow.AgentSession{
+		SessionID: resp.SessionID,
+		Boundary:  prev.Boundary,
+	})
 }
 
 // agentFailureError converts an AgentFailure into an error. When

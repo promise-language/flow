@@ -32,6 +32,7 @@ type step struct {
 	needs       NeedsState
 	leaves      LeavesState
 	prompts     PromptPolicy
+	session     SessionPolicy
 }
 
 // resultName returns the result identifier (artifact id OR signal id) as a
@@ -175,6 +176,44 @@ func AllPromptPolicies() []PromptPolicy {
 // configuration).
 func (p PromptPolicy) Valid() bool { return slices.Contains(AllPromptPolicies(), p) }
 
+// SessionPolicy is whether a step continues the resolution's agent conversation
+// or begins a new one (docs/flow-registration.md § Session continuity). Closed
+// at two.
+//
+// The session belongs to the RESOLUTION, not to a step and not to a process: a
+// step is handed the session the resolution has been using, whether the step
+// before it ran in this process or in a different invocation on another day. So
+// continuing is the behaviour and a new session is the declaration.
+//
+// Independent of PromptPolicy. Prompts says whether the step runs a prompt and
+// says nothing whatever about the session — a step that does not prompt does not
+// disturb it, and a mechanical step may still declare SessionFresh, because not
+// prompting and not being a boundary are different facts.
+type SessionPolicy string
+
+const (
+	// SessionContinued — the step continues the conversation the resolution has
+	// been having. The default: the steps of a resolution work one item, on one
+	// branch, toward one change, and an agent that read the tree in one step has
+	// read it for the next.
+	SessionContinued SessionPolicy = "continued"
+	// SessionFresh — the step begins a new session, and the conversation before
+	// it is given up. Declared for INDEPENDENCE: a step whose judgement must not
+	// be coloured by the reasoning that produced what it judges, because an agent
+	// shown its own rationalisations reliably agrees with them. Not for hygiene —
+	// a step that merely does something different needs a prompt, not this.
+	SessionFresh SessionPolicy = "fresh"
+)
+
+// AllSessionPolicies returns every declared policy, in declaration order.
+func AllSessionPolicies() []SessionPolicy {
+	return []SessionPolicy{SessionContinued, SessionFresh}
+}
+
+// Valid reports whether s is one of the two. The empty policy is not one —
+// StepConfig.normalized resolves it to SessionContinued before it is stored.
+func (s SessionPolicy) Valid() bool { return slices.Contains(AllSessionPolicies(), s) }
+
 // StepHandler is the function dispatched by the SDK for AddStep/AddSignalStep
 // lifecycle items. AwaitSignal items have no handler.
 //
@@ -245,6 +284,16 @@ type StepConfig struct {
 	// makes a property unreliable. Absent on signal waits, which dispatch
 	// nothing and panic if given one.
 	Prompts PromptPolicy
+	// Session is whether the step continues the resolution's agent conversation
+	// or begins a new one. The zero value means SessionContinued, and defaulting
+	// is right here where Prompts forbids it: SessionContinued publishes no
+	// guarantee — nothing relies on a step having inherited context, and a step
+	// that wanted a fresh one and did not say so is wrong in a way its own output
+	// shows (docs/flow-registration.md § Session continuity).
+	//
+	// INDEPENDENT of Prompts. A mechanical step's session is untouched unless it
+	// declares SessionFresh, which it may.
+	Session SessionPolicy
 }
 
 // normalized returns the config with every defaulting field resolved to the
@@ -263,6 +312,9 @@ func (c StepConfig) normalized() StepConfig {
 	}
 	if c.Leaves == "" {
 		c.Leaves = LeavesAsFound
+	}
+	if c.Session == "" {
+		c.Session = SessionContinued
 	}
 	return c
 }

@@ -128,6 +128,10 @@ func TestStepConfig_EveryFieldRoundTripsOntoLifecycleItem(t *testing.T) {
 		Writes:      WriteContract{MayCommit: true, MayEditTree: true},
 		Leaves:      LeavesItemBranch,
 		Prompts:     PromptsNone,
+		// fresh, not continued: this registration is the entry, and the entry step
+		// has nothing to continue. Declaring it here is redundant and true, which
+		// is the point — the field still has to arrive on the view.
+		Session: SessionFresh,
 	}
 	f.AddStep("implement the change", "impl", noopHandler, cfg)
 
@@ -159,6 +163,9 @@ func TestStepConfig_EveryFieldRoundTripsOntoLifecycleItem(t *testing.T) {
 		}
 		if li.Leaves != LeavesItemBranch {
 			t.Errorf("%s: Leaves = %q, want %q", what, li.Leaves, LeavesItemBranch)
+		}
+		if li.Session != SessionFresh {
+			t.Errorf("%s: Session = %q, want %q", what, li.Session, SessionFresh)
 		}
 	}
 
@@ -201,6 +208,9 @@ func TestStepConfig_ZeroValueNormalisesToTheLoosestMembers(t *testing.T) {
 		}
 		if li.Leaves != LeavesAsFound {
 			t.Errorf("%s: Leaves = %q, want %q", li.Description, li.Leaves, LeavesAsFound)
+		}
+		if li.Session != SessionContinued {
+			t.Errorf("%s: Session = %q, want %q", li.Description, li.Session, SessionContinued)
 		}
 		if li.Role != "" {
 			t.Errorf("%s: Role = %q, want empty", li.Description, li.Role)
@@ -413,6 +423,161 @@ func TestAwaitSignal_PanicsOnPromptsAndRegistersWithout(t *testing.T) {
 	}
 	if li.Prompts != "" {
 		t.Errorf("a wait's Prompts = %q, want empty: it declares none", li.Prompts)
+	}
+}
+
+// --- Session continuity ---
+
+// The one registration refusal the declaration has: the entry step cannot
+// continue a session, because nothing precedes it in this resolution. The
+// message names the step and the flow, as every registration panic does, and
+// says what to declare instead.
+func TestAddStep_PanicsWhenTheEntryStepDeclaresContinued(t *testing.T) {
+	cases := []struct {
+		registrar string
+		declare   func(*Flow)
+	}{
+		{"flow.AddStep:", func(f *Flow) {
+			f.AddStep("write plan", "plan", noopHandler,
+				StepConfig{Entry: true, Prompts: PromptsAgent, Session: SessionContinued})
+		}},
+		{"flow.AddSignalStep:", func(f *Flow) {
+			f.AddSignalStep("create pr", "pr-open", noopHandler,
+				StepConfig{Entry: true, Prompts: PromptsAgent, Session: SessionContinued})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.registrar, func(t *testing.T) {
+			f := NewFlow("x", nil)
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatal("the entry step declared Session: continued; there is no session for it to continue, so the declaration must panic")
+				}
+				msg, _ := r.(string)
+				for _, want := range []string{tc.registrar, "x", "is the entry", "continued", "fresh"} {
+					if !strings.Contains(msg, want) {
+						t.Errorf("panic = %q, want it to mention %q", msg, want)
+					}
+				}
+			}()
+			tc.declare(f)
+		})
+	}
+}
+
+// The refusal is about the DECLARATION, not about the value that ends up
+// stored. An entry step that says nothing registers and normalises to
+// `continued` — the entry's first dispatch finds no stored handle and opens a
+// session, so there is no entry-specific rule to write down anywhere else. And
+// an entry step declaring `fresh` registers too: redundant and true.
+func TestAddStep_EntryStepRegistersUnsetAndFresh(t *testing.T) {
+	f := NewFlow("x", nil)
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{Entry: true, Prompts: PromptsAgent})
+	li, ok := f.ItemByResult("plan")
+	if !ok {
+		t.Fatal("ItemByResult missing for the registered entry step")
+	}
+	if li.Session != SessionContinued {
+		t.Errorf("an unset entry Session = %q, want %q — the default is written in one place and the entry is not an exception to it",
+			li.Session, SessionContinued)
+	}
+
+	g := NewFlow("y", nil)
+	g.AddStep("write plan", "plan", noopHandler,
+		StepConfig{Entry: true, Prompts: PromptsAgent, Session: SessionFresh})
+	gli, ok := g.ItemByResult("plan")
+	if !ok {
+		t.Fatal("ItemByResult missing for the entry step declaring fresh")
+	}
+	if gli.Session != SessionFresh {
+		t.Errorf("Session = %q, want %q", gli.Session, SessionFresh)
+	}
+}
+
+// A non-entry step declaring `continued` is saying what it would have got
+// anyway, and that is legal: the refusal above is about a declaration that could
+// never be acted on, not about redundancy.
+func TestAddStep_NonEntryStepMayDeclareContinued(t *testing.T) {
+	f := NewFlow("x", nil)
+	f.AddStep("implement", "impl", noopHandler,
+		StepConfig{Prompts: PromptsAgent, Session: SessionContinued})
+	li, ok := f.ItemByResult("impl")
+	if !ok {
+		t.Fatal("ItemByResult missing for the registered step")
+	}
+	if li.Session != SessionContinued {
+		t.Errorf("Session = %q, want %q", li.Session, SessionContinued)
+	}
+}
+
+// An out-of-vocabulary value is refused the way an unknown Capture, Needs,
+// Leaves or Prompts is: naming the field and the vocabulary.
+func TestAddStep_PanicsOnUnknownSession(t *testing.T) {
+	f := NewFlow("x", nil)
+	mustPanic(t, "Session \"reset\", which is not one of [continued fresh]", func() {
+		f.AddStep("write plan", "plan", noopHandler, StepConfig{Prompts: PromptsAgent, Session: "reset"})
+	})
+}
+
+// THE CONFLATION GUARD. Prompts and Session are independent axes: a step
+// declaring `Prompts: none` and saying nothing about the session carries the
+// session across untouched, which is `continued`.
+//
+// This is the test that fails if someone later reads "mechanical" as "no
+// session". Getting that wrong is worse than not having the mechanism at all:
+// mechanical steps sit BETWEEN prompting ones — `open branch` runs between
+// `plan` and `implement` — so clearing the session there would sever the
+// conversation at exactly the point the declaration exists to preserve, and
+// every step would still look correctly declared.
+func TestStepConfig_PromptsNoneDoesNotImplyASessionValue(t *testing.T) {
+	f := NewFlow("x", nil)
+	f.AddStep("open branch", "branch", noopHandler, StepConfig{Prompts: PromptsNone})
+	li, ok := f.ItemByResult("branch")
+	if !ok {
+		t.Fatal("ItemByResult missing for the mechanical step")
+	}
+	if li.Session != SessionContinued {
+		t.Errorf("a mechanical step's unset Session = %q, want %q: not prompting says nothing about the session",
+			li.Session, SessionContinued)
+	}
+
+	// And a mechanical step MAY declare fresh — not prompting and not being a
+	// boundary are different facts.
+	f.AddStep("start over", "reset", noopHandler,
+		StepConfig{Prompts: PromptsNone, Session: SessionFresh})
+	fli, ok := f.ItemByResult("reset")
+	if !ok {
+		t.Fatal("ItemByResult missing for the mechanical step declaring fresh")
+	}
+	if fli.Session != SessionFresh {
+		t.Errorf("Session = %q, want %q: a step that does not prompt may still say where the conversation ends",
+			fli.Session, SessionFresh)
+	}
+}
+
+// The enumerator is the only route to the set, and Valid reads it: a member
+// missing from it would be refused at every registration naming it. The AST
+// check in wire_enum_test.go guards the membership; this guards the two
+// properties a caller relies on.
+func TestAllSessionPolicies_ExhaustiveAndUnmutable(t *testing.T) {
+	for _, p := range AllSessionPolicies() {
+		if !p.Valid() {
+			t.Errorf("AllSessionPolicies lists %q, which Valid rejects", p)
+		}
+	}
+	if SessionPolicy("").Valid() {
+		t.Error("the empty policy reports Valid; normalized resolves it before it is stored, so nothing may reach Valid empty and pass")
+	}
+	if SessionPolicy("continued ").Valid() {
+		t.Error("a near-miss reports Valid")
+	}
+	// The returned slice is fresh each call. A package-level var would be
+	// mutable by any importer, and a caller that reordered or truncated it would
+	// change the set for everyone else in the process — Valid included.
+	AllSessionPolicies()[0] = "clobbered"
+	if AllSessionPolicies()[0] == "clobbered" {
+		t.Error("mutating the returned slice changed the session-policy set for the next caller")
 	}
 }
 

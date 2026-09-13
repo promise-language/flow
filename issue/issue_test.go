@@ -1875,6 +1875,35 @@ func TestPublishedProsePromptsAskForRepositoryRelativePaths(t *testing.T) {
 	}
 }
 
+// The review prompt must name the ITEM. `review the work` declares
+// `Session: fresh` — it is the step the declaration exists for — so it arrives
+// at a conversation that has never heard of this item, and a body relying on an
+// inherited one would review a diff against nothing.
+//
+// This is the general rule stated for one prompt: the handle is offered and
+// never depended on (docs/resolution.md § The agent session), so a prompt whose
+// result differs depending on whether the substrate honoured it has made an
+// optimisation load-bearing. Making the body self-sufficient is what keeps the
+// handle deciding the price and never the result.
+func TestReviewPromptNamesTheItemItReviews(t *testing.T) {
+	pc := PromptContext{Prior: map[StepID]flow.ArtifactRecord{}}
+	pc.ItemID = "o/r#354"
+	pc.ItemTitle = "the agent session is not retained"
+	pc.VerifyCmd = "make check"
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	got, err := renderPrompt(Config{}, PromptReview, pc)
+	if err != nil {
+		t.Fatalf("renderPrompt: %v", err)
+	}
+	for _, want := range []string{"o/r#354", "the agent session is not retained"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the review prompt does not name %q, so a fresh session would review a diff against nothing:\n%s", want, got)
+		}
+	}
+}
+
 // The plan step's deliverable is the returned text and nothing else. An agent
 // that writes its plan to a file elsewhere and names the path has done the work
 // and delivered nothing, which is what happened on workspace#233 — so the plan

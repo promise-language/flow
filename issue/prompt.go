@@ -493,10 +493,13 @@ turns. You are deciding whether it should land, and saying why.
 Fix the cause. Do not change tests to make them pass unless the test is itself
 wrong, and say so explicitly if you conclude that.`,
 
-	PromptReview: `Review the diff on the current branch for correctness bugs, surprising
+	PromptReview: `{{.ItemHeader}}
+
+Review the diff on the current branch for correctness bugs, surprising
 behavior, missed edge cases, and unnecessary complexity — and FIX what you
-find. You have the context loaded; leaving a fault for someone else to repair
-costs another turn to rediscover what you already know.
+find. Read the branch and answer to the code: you are judging what is there,
+not what it was meant to be. Leaving a fault for someone else to repair costs
+another turn to rediscover what you are looking at right now.
 
 Keep {{.VerifyCmd}} passing. {{.DeferCommit}}
 

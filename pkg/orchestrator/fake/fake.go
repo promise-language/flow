@@ -158,6 +158,11 @@ type itemRecord struct {
 	// rather than orchestrator-wide, which is the keying the contract turns on:
 	// one item's reasoning must never be readable as another's.
 	work map[flow.StepId]string
+
+	// session is the handle this item's resolution holds on its agent
+	// conversation. Per-item and NOT per-step: the session belongs to the
+	// resolution, so it survives every step boundary the drafts beside it do not.
+	session flow.AgentSession
 }
 
 // New constructs an empty fake orchestrator. Signals lists the SignalIds this
@@ -1426,6 +1431,55 @@ func (b *Orchestrator) ClearWorkInProgress(ctx context.Context, ref flow.ItemRef
 		return fmt.Errorf("fake: item %q not registered", itemID)
 	}
 	delete(rec.work, step)
+	return nil
+}
+
+// SaveAgentSession stores the handle this item's resolution is holding. Keyed
+// by the item alone, which is the property the contract turns on.
+func (b *Orchestrator) SaveAgentSession(ctx context.Context, ref flow.ItemRef, s flow.AgentSession) error {
+	itemID, err := refID(ref)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	rec.session = s
+	return nil
+}
+
+// LoadAgentSession returns the handle stored against this item, or the zero
+// value when there is none. Absence is (AgentSession{}, nil), not an error.
+func (b *Orchestrator) LoadAgentSession(ctx context.Context, ref flow.ItemRef) (flow.AgentSession, error) {
+	itemID, err := refID(ref)
+	if err != nil {
+		return flow.AgentSession{}, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return flow.AgentSession{}, fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	return rec.session, nil
+}
+
+// ClearAgentSession drops this item's record. Idempotent.
+func (b *Orchestrator) ClearAgentSession(ctx context.Context, ref flow.ItemRef) error {
+	itemID, err := refID(ref)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	rec.session = flow.AgentSession{}
 	return nil
 }
 

@@ -258,6 +258,15 @@ func (b *buildTestBackend) LoadWorkInProgress(context.Context, flow.ItemRef, flo
 func (b *buildTestBackend) ClearWorkInProgress(context.Context, flow.ItemRef, flow.StepId) error {
 	return nil
 }
+func (b *buildTestBackend) SaveAgentSession(context.Context, flow.ItemRef, flow.AgentSession) error {
+	return flow.ErrUnsupported
+}
+func (b *buildTestBackend) LoadAgentSession(context.Context, flow.ItemRef) (flow.AgentSession, error) {
+	return flow.AgentSession{}, nil
+}
+func (b *buildTestBackend) ClearAgentSession(context.Context, flow.ItemRef) error {
+	return nil
+}
 func (b *buildTestBackend) PostAnswer(context.Context, flow.ItemRef, flow.QuestionId, string) error {
 	return flow.ErrUnsupported
 }
@@ -519,6 +528,52 @@ func TestResolveFlow_DeclaresWhichStepsAreMechanical(t *testing.T) {
 	}
 }
 
+// Which steps begin a new agent session, step by step. A resolution is ONE
+// conversation, so the table is almost entirely `continued` — and that is the
+// property worth pinning: a graph declares few boundaries, and each one is a
+// place an author decided the agent must stop knowing something
+// (docs/flow-registration.md § Session continuity).
+//
+// `review the work` is the one, and it is argued on INDEPENDENCE: a reviewer
+// holding the implementer's deliberations is not reviewing. Everything else
+// continues, the mechanical steps included — `open branch` runs between `plan`
+// and `implement` precisely so the implementing conversation picks up where the
+// planning one left off.
+func TestResolveFlow_DeclaresWhichStepsBeginANewSession(t *testing.T) {
+	want := map[flow.StepId]flow.SessionPolicy{
+		flow.StepId(StepPlan):   flow.SessionContinued,
+		flow.StepId(StepBranch): flow.SessionContinued,
+		// The entry step's own declaration is `continued` by default, and that is
+		// not a contradiction: nothing is stored when the entry runs, so its first
+		// prompt opens a session with no entry-specific rule anywhere.
+		flow.StepId(StepImplement): flow.SessionContinued,
+		flow.StepId(StepReview):    flow.SessionFresh,
+		flow.StepId(StepCoverage):  flow.SessionContinued,
+
+		flow.StepId(StepOpenPR):           flow.SessionContinued,
+		flow.StepId(StepRepairDisclosure): flow.SessionContinued,
+		flow.StepId(StepCloseBranch):      flow.SessionContinued,
+		flow.StepId(StepReviewProposal):   flow.SessionContinued,
+		flow.StepId(StepVerifyMerge):      flow.SessionContinued,
+		flow.StepId(StepMerge):            flow.SessionContinued,
+		flow.StepId(StepRecordMerge):      flow.SessionContinued,
+	}
+	items := (&builder{cfg: Config{}}).resolveFlow(Config{}).Items()
+	if len(items) != len(want) {
+		t.Fatalf("the flow registers %d steps, and the table covers %d", len(items), len(want))
+	}
+	for _, li := range items {
+		w, ok := want[li.Result()]
+		if !ok {
+			t.Errorf("step %q declares no session policy in the table", li.Result())
+			continue
+		}
+		if li.Session != w {
+			t.Errorf("step %q declares Session %q, want %q", li.Result(), li.Session, w)
+		}
+	}
+}
+
 // The graph does not vary by what the binary covers. Coverage is what narrows a
 // binary's part of it, at dispatch; building a different graph per coverage
 // would decide the processing before the journal begins, with nothing recording
@@ -558,7 +613,7 @@ func TestBuildApp_BuildsTheSameGraphForEveryCoverage(t *testing.T) {
 					a.Kind != want.Kind || a.Role != want.Role || a.Entry != want.Entry ||
 					!slices.Equal(a.Next, want.Next) || !slices.Equal(a.MayFinalize, want.MayFinalize) ||
 					a.Needs != want.Needs || a.Leaves != want.Leaves || a.Writes != want.Writes ||
-					a.Prompts != want.Prompts {
+					a.Prompts != want.Prompts || a.Session != want.Session {
 					t.Errorf("step %d differs from the contributor build:\n got %+v\nwant %+v", i, a, want)
 				}
 			}

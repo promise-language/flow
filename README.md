@@ -669,6 +669,7 @@ The CLI feature-detects these — implement the ones that fit your store:
 | `StateInspector` | `LoadStateByRef(ctx, ref) (*ItemState, error)` | `status <id>` inspects any item read-only, with no claim. |
 | `Finalizer` | `Finalize(ctx, claim) error` | On flow completion (or a completed manual run), the SDK marks the item finalized and releases the claim — instead of leaving it un-finalized with the lease held. |
 | `WorkInProgress` | `Save/Load/ClearWorkInProgress(ctx, claim, step[, body])` | A step that parks — on a question, or on a refused write — keeps what it worked out, and its next dispatch continues from it. Key by **item and step**, read only when both match, and never publish it: a record that crossed items would feed one item's reasoning to another item's agent. |
+| `AgentSession` | `Save/Load/ClearAgentSession(ctx, ref[, session])` | A resolution keeps one agent conversation across its steps, its parks and its processes, instead of reintroducing the agent to work it has already done. Key by **item alone** — the session belongs to the resolution, so keying it by step would end it at the first step boundary — and never publish it. A store you do not have is `ErrUnsupported`, which is honest and only expensive: every dispatch then opens a session. |
 
 ### Preflight
 
