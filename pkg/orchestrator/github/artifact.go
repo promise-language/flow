@@ -752,7 +752,7 @@ func (b *Orchestrator) withStateDoc(ctx context.Context, ref flow.ItemRef, op st
 	defer b.holdStateWriteLock(issueNum)()
 
 	for range stateWriteAttempts {
-		body, stateID, etag, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
+		body, stateID, _, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
 		if err != nil {
 			return err
 		}
@@ -802,18 +802,30 @@ func (b *Orchestrator) withStateDoc(ctx context.Context, ref flow.ItemRef, op st
 		// SCAN, which carries no per-comment tag. Nothing to compare then —
 		// which is the pre-existing behaviour, not a regression — and the next
 		// write through this item has an id and therefore a tag.
-		if etag != "" {
-			unchanged, err := b.out.CommentUnchanged(ctx, stateID, etag)
-			if err != nil {
-				return fmt.Errorf("github.%s: revalidate state comment %d: %w", op, stateID, err)
-			}
-			if !unchanged {
-				// Somebody landed a write between the read and here. The
-				// document just computed describes a state that no longer
-				// exists, so it is DISCARDED rather than written — writing it
-				// is exactly the lost update #219 is about.
-				continue
-			}
+		// The comparison is against the BYTES this iteration read, re-read
+		// now, rather than against an ETag.
+		//
+		// An ETag is not a fact about the document, it is a fact about one
+		// representation of it: GitHub hands a strong tag to one client and a
+		// weak one to another for the same comment, and each validates only
+		// against itself. A tag captured by one request and replayed on
+		// another therefore reports "changed" for a document nobody touched —
+		// deterministically, so the retry cannot converge and the caller is
+		// told it lost a race that never happened (#366).
+		//
+		// Two reads of the same comment are directly comparable, whoever asks
+		// and however the transport carries them, and the cost is identical:
+		// the conditional GET this replaces was a GET too.
+		current, _, cerr := b.out.GetComment(ctx, stateID)
+		if cerr != nil {
+			return fmt.Errorf("github.%s: re-read state comment %d: %w", op, stateID, cerr)
+		}
+		if current.GetBody() != body {
+			// Somebody landed a write between the read and here. The
+			// document just computed describes a state that no longer
+			// exists, so it is DISCARDED rather than written — writing it
+			// is exactly the lost update #219 is about.
+			continue
 		}
 
 		if _, err := b.updateStateComment(ctx, issueNum, stateID, *doc, owner); err != nil {

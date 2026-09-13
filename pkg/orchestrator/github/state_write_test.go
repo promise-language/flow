@@ -49,7 +49,7 @@ func TestStateWrite_AForeignWriteIsReplayedAndBothLand(t *testing.T) {
 	// revalidates too, so a hook that re-entered would recurse for good.
 	var mu sync.Mutex
 	fired := false
-	mock.setBeforeConditionalComment(func() {
+	mock.setBeforeCommentRead(func() {
 		mu.Lock()
 		if fired {
 			mu.Unlock()
@@ -69,7 +69,7 @@ func TestStateWrite_AForeignWriteIsReplayedAndBothLand(t *testing.T) {
 	if err := b.AddCost(ctx, ref, "plan", 1.25); err != nil {
 		t.Fatalf("AddCost: %v", err)
 	}
-	mock.setBeforeConditionalComment(nil)
+	mock.setBeforeCommentRead(nil)
 
 	state, err := b.Load(ctx, ref)
 	if err != nil {
@@ -93,7 +93,7 @@ func TestStateWrite_ExhaustedReplayReturnsAConditionAndWritesNothing(t *testing.
 	// A foreign write before EVERY revalidation, so no attempt can ever land.
 	var mu sync.Mutex
 	writes := 0
-	mock.setBeforeConditionalComment(func() {
+	mock.setBeforeCommentRead(func() {
 		mu.Lock()
 		writes++
 		mu.Unlock()
@@ -106,7 +106,7 @@ func TestStateWrite_ExhaustedReplayReturnsAConditionAndWritesNothing(t *testing.
 		mock.mu.Unlock()
 	})
 	err := b.AddCost(ctx, ref, "plan", 2)
-	mock.setBeforeConditionalComment(nil)
+	mock.setBeforeCommentRead(nil)
 
 	if err == nil {
 		t.Fatal("a write that never won returned no error")
@@ -116,8 +116,13 @@ func TestStateWrite_ExhaustedReplayReturnsAConditionAndWritesNothing(t *testing.
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if writes != stateWriteAttempts {
-		t.Errorf("the mutation was attempted %d time(s), want %d", writes, stateWriteAttempts)
+	// Two reads per attempt: one to compute the document from, one to compare
+	// against immediately before the write. The count is asserted exactly
+	// rather than loosely because what this test pins is that a loser STOPS —
+	// a bound that drifts is a spin nobody notices.
+	if wantReads := 2 * stateWriteAttempts; writes != wantReads {
+		t.Errorf("the state comment was read %d time(s), want %d (%d attempts × 2)",
+			writes, wantReads, stateWriteAttempts)
 	}
 	// The foreign writer's document is intact: nothing was written over it.
 	mock.mu.Lock()

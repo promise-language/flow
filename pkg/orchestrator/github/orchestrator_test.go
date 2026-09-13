@@ -166,19 +166,23 @@ type ghMock struct {
 	// is consumed once, so a test can say "refuse, then succeed".
 	refusals []ghMockRefusal
 
-	// beforeConditionalComment runs just before a CONDITIONAL comment read is
-	// answered — the revalidation the state document's compare-and-set turns
-	// on. It is the only place a test can land a foreign write in the window
-	// the compare-and-set exists to close, because the window is between two
+	// beforeCommentRead runs just before a single-comment read is answered.
+	// It is the only place a test can land a foreign write in the window the
+	// compare-and-set exists to close, because the window is between two
 	// requests and nothing else in the process is inside it.
-	beforeConditionalComment func()
+	//
+	// Every read rather than only a conditional one: the compare-and-set
+	// re-reads the body instead of revalidating a tag (#366), so there is no
+	// conditional request to hang this on. A test that wants one window takes
+	// its own once-guard, which is what the window is about anyway.
+	beforeCommentRead func()
 }
 
-// setBeforeConditionalComment installs the hook under the lock, because the
+// setBeforeCommentRead installs the hook under the lock, because the
 // handler goroutine reads it while the test goroutine writes it.
-func (m *ghMock) setBeforeConditionalComment(f func()) {
+func (m *ghMock) setBeforeCommentRead(f func()) {
 	m.mu.Lock()
-	m.beforeConditionalComment = f
+	m.beforeCommentRead = f
 	m.mu.Unlock()
 }
 
@@ -723,9 +727,9 @@ func (m *ghMock) handleSingleComment(w http.ResponseWriter, r *http.Request, id 
 	// BEFORE the lock, and before the answer: the hook writes through this same
 	// server, so holding the mock's lock across it would deadlock rather than
 	// model a concurrent writer.
-	if r.Header.Get("If-None-Match") != "" {
+	if r.Method == http.MethodGet {
 		m.mu.Lock()
-		hook := m.beforeConditionalComment
+		hook := m.beforeCommentRead
 		m.mu.Unlock()
 		if hook != nil {
 			hook()
