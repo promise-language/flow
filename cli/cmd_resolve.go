@@ -336,9 +336,24 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		// stays here, before dispatch — moving the wait inside the dispatch
 		// would have a handler hold its claim and worktree while it waited,
 		// withdrawing the arena from the fleet.
+		//
+		// An EXHAUSTED window is not paced against — it PARKS, and the park is
+		// RunOne's (docs/environment.md § The agent account). Pacing holds a
+		// step back to stay under a target the operator chose; an allowance
+		// that is spent is not a target, and the pacing arithmetic answers it
+		// with the whole remainder of the window. Pacing is on by default, so
+		// without this the default `resolve` sits in front of a window for
+		// hours holding the arena — "nothing is served by a process sitting in
+		// front of it" — and the pre-dispatch check downstream never sees the
+		// condition it exists for.
 		if !mechanical && app.Quota != nil && (targets.FiveHour > 0 || targets.SevenDay > 0) {
 			if usage, qerr := app.Quota(); qerr == nil {
-				if d := paceDelay(usage, targets, time.Now()); d > 0 {
+				// One instant for both readings: a wait and a park decided
+				// against two different "now"s could each answer for a window
+				// the other did not see.
+				now := time.Now()
+				if d := paceDelay(usage, targets, now); d > 0 &&
+					bindingExhaustedWindow(usage, now) == nil {
 					fmt.Fprintf(app.Err, "resolve: pacing — waiting %s for quota headroom\n", formatDurationCompact(d))
 					select {
 					case <-time.After(d):

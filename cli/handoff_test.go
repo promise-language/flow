@@ -575,9 +575,12 @@ func TestCmdResolve_TheStandingIsAnnouncedBeforeTheFirstPacingWait(t *testing.T)
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestApp(t, be)
+	// Just under 1.0, not at it: an EXHAUSTED window is a different condition
+	// — it parks instead of pacing — and this test is about pacing. The delay
+	// is identical either way, the target being exceeded at full elapse.
 	app.Quota = func() ([]windowUsage, error) {
 		return []windowUsage{{
-			Label: "5h", Length: time.Second, Used: 1.0, ResetsAt: time.Now().Add(30 * time.Millisecond),
+			Label: "5h", Length: time.Second, Used: 0.99, ResetsAt: time.Now().Add(30 * time.Millisecond),
 		}}, nil
 	}
 
@@ -756,10 +759,13 @@ func TestCmdResolve_AHandoffIsDecidedBeforeAnyPacingWait(t *testing.T) {
 			return ctx.Finalize(flow.DispositionResolved, "landed").CommitHash("abc"), nil
 		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "maintainer", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	})
-	// Saturated, so any run that reaches the pacing block waits and says so.
+	// Over target, so any run that reaches the pacing block waits and says so.
+	// Just under 1.0: an EXHAUSTED window parks instead of pacing, and a
+	// fixture that parked would pass this test without ever proving the
+	// handoff came first.
 	app.Quota = func() ([]windowUsage, error) {
 		return []windowUsage{{
-			Label: "5h", Length: time.Second, Used: 1.0, ResetsAt: time.Now().Add(50 * time.Millisecond),
+			Label: "5h", Length: time.Second, Used: 0.99, ResetsAt: time.Now().Add(50 * time.Millisecond),
 		}}, nil
 	}
 

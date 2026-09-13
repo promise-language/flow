@@ -303,21 +303,11 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// means no reading of any kind, and that is the contract of the field.
 	if !li.Mechanical() && app.Quota != nil {
 		if usage, qerr := app.Quota(); qerr == nil {
-			// The BINDING window is the exhausted one that resets LAST, not
-			// the first found. With two windows flat, the allowance returns
-			// when the later one does, and a park reporting the earlier
-			// instant hands a driver a time the system already knew was too
-			// early — which is the one thing clears_at exists to prevent.
-			var binding *windowUsage
-			for i := range usage {
-				if usage[i].Used < 1.0 {
-					continue
-				}
-				if binding == nil || usage[i].ResetsAt.After(binding.ResetsAt) {
-					binding = &usage[i]
-				}
-			}
-			if binding != nil {
+			// Which window binds — and whether one binds at all — is
+			// bindingExhaustedWindow's, shared with the pacing wait that runs
+			// just before this on `resolve`'s loop. Two readings of the same
+			// figures is how the wait and the gate come to disagree.
+			if binding := bindingExhaustedWindow(usage, time.Now()); binding != nil {
 				// A reading whose reset did not parse carries NO instant
 				// rather than the zero time: absent reads as "no instant",
 				// where the epoch reads as one long past and sends a driver

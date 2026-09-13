@@ -238,6 +238,16 @@ func (c *Client) turn(ctx context.Context, req flow.AgentRequest, resume string)
 			},
 		}, nil
 	}
+	// A refusal the substrate STATED outranks every reading of how the turn
+	// died. docs/environment.md § The signal is read where it arrives: a turn
+	// refused for an exhausted allowance also ends badly — no result, a
+	// non-zero exit, nothing on stdout but the refusal itself — and that
+	// ending is not the evidence. Reported as `exit-error` it would park as
+	// infrastructure, losing the window and the instant the substrate had
+	// already handed over.
+	if resp.Failure != nil && resp.Failure.Kind == flow.FailureAccountExhausted {
+		return resp, nil
+	}
 	if waitErr != nil && resp.SessionID == "" && resp.LastText == "" {
 		// No usable output and the process errored — treat as exit-error.
 		return &flow.AgentResponse{
@@ -403,17 +413,11 @@ func parseStream(r io.Reader) (*flow.AgentResponse, error) {
 			errorSubtype = ev.Subtype
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		// The partial response travels with the error here too, for the reason it
-		// does below: there is no usable turn, but a stream that named its session
-		// before the read broke is a turn that STARTED, and the caller decides a
-		// declined resume from a killed one on exactly that.
-		return resp, fmt.Errorf("scan: %w", err)
-	}
-
-	// An exhausted account, BEFORE either reading of how the turn ended. Order
+	// An exhausted account, BEFORE every reading of how the turn ended. Order
 	// is the requirement, not a preference:
 	//
+	//   - ahead of the scan error, because a statement already read is not
+	//     unread by the stream breaking after it;
 	//   - ahead of the no-result return, because a refused turn ends WITHOUT a
 	//     result — the case reported as `no-result` today, which loses the
 	//     window and the instant and bills the refusal;
@@ -423,15 +427,16 @@ func parseStream(r io.Reader) (*flow.AgentResponse, error) {
 	//
 	// Transient, so the caller's existing gate bills nothing and counts no
 	// dispatch: an allowance that refused to spend has not bought an attempt.
-	if rateLimit.Rejected() {
-		resp.Failure = &flow.AgentFailure{
-			Kind:      flow.FailureAccountExhausted,
-			Transient: true,
-			Window:    rateLimit.RateLimitType,
-			ClearsAt:  rateLimit.ResetsAtTime(),
-			Message:   rateLimit.Message(),
-		}
+	if f := rateLimit.failure(); f != nil {
+		resp.Failure = f
 		return resp, nil
+	}
+	if err := scanner.Err(); err != nil {
+		// The partial response travels with the error here too, for the reason it
+		// does below: there is no usable turn, but a stream that named its session
+		// before the read broke is a turn that STARTED, and the caller decides a
+		// declined resume from a killed one on exactly that.
+		return resp, fmt.Errorf("scan: %w", err)
 	}
 	if !resultEvent {
 		// The partial response travels WITH the error: there is no usable turn
@@ -637,6 +642,23 @@ const statusRejected = "rejected"
 // Rejected reports whether the substrate refused the turn for the account's
 // allowance.
 func (i rateLimitInfo) Rejected() bool { return i.Status == statusRejected }
+
+// failure is the refusal as an AgentFailure, or nil when the substrate did not
+// refuse. One constructor, because the classification is read at more than one
+// point in the parse and a second copy is how two of them come to differ about
+// what a refusal reports.
+func (i rateLimitInfo) failure() *flow.AgentFailure {
+	if !i.Rejected() {
+		return nil
+	}
+	return &flow.AgentFailure{
+		Kind:      flow.FailureAccountExhausted,
+		Transient: true,
+		Window:    i.RateLimitType,
+		ClearsAt:  i.ResetsAtTime(),
+		Message:   i.Message(),
+	}
+}
 
 // ResetsAtTime is the published instant the window returns, or nil when the
 // substrate refused without naming one. nil is a readable answer — "no

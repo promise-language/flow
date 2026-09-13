@@ -294,8 +294,15 @@ func stubQuota(app *App, usage []windowUsage, err error) *int {
 	return &reads
 }
 
+// futureReset is the reset a QUOTA READING publishes. Relative to now, where
+// the substrate's own refusal above is a fixed instant: the pre-dispatch check
+// reads a reading against the clock, because a window whose published reset has
+// passed has reset whatever the figure beside it says. A fixed instant would
+// stop being the condition under test the moment it went by.
+var futureReset = time.Now().Add(3 * time.Hour).UTC().Truncate(time.Second)
+
 func exhaustedWindow(used float64) []windowUsage {
-	return []windowUsage{{Label: "5h", Length: 5 * time.Hour, Used: used, ResetsAt: windowResetsAt}}
+	return []windowUsage{{Label: "5h", Length: 5 * time.Hour, Used: used, ResetsAt: futureReset}}
 }
 
 // A host that has not yet dispatched must not learn this by spending: the
@@ -322,8 +329,8 @@ func TestRunOne_AnAlreadyExhaustedWindowWithholdsTheDispatch(t *testing.T) {
 		res.Park.Kind != flow.ParkAccountExhausted {
 		t.Fatalf("res = %+v, want an account-exhausted park", res)
 	}
-	if res.Park.ClearsAt == nil || !res.Park.ClearsAt.Equal(windowResetsAt) {
-		t.Errorf("ClearsAt = %v, want the exhausted window's own reset %v", res.Park.ClearsAt, windowResetsAt)
+	if res.Park.ClearsAt == nil || !res.Park.ClearsAt.Equal(futureReset) {
+		t.Errorf("ClearsAt = %v, want the exhausted window's own reset %v", res.Park.ClearsAt, futureReset)
 	}
 	if !strings.Contains(res.Park.Reason, "5h") {
 		t.Errorf("Reason = %q, want it to name the window that refused", res.Park.Reason)
@@ -388,6 +395,37 @@ func TestRunOne_ThePreDispatchCheckWithholdsNothingElse(t *testing.T) {
 				t.Errorf("quota read %d times, want %d", *reads, tc.reads)
 			}
 		})
+	}
+}
+
+// A reading whose window has ALREADY RESET is not the condition — the window
+// it describes is over, and the reading is simply older than it.
+//
+// This is the ordinary case rather than a corner: a reading is served from the
+// machine-wide cache for minutes after it was taken, so a driver that waits to
+// the published instant and resumes there arrives inside exactly that
+// interval. Withholding the dispatch would report a condition that has ended,
+// with an instant already in the past — which tells that driver to come
+// straight back and be told the same thing, for as long as the reading lives.
+func TestRunOne_AWindowWhoseResetHasPassedDoesNotWithholdTheDispatch(t *testing.T) {
+	dispatched := false
+	app, _, claim := testApp(t, promptingStep(func(ctx flow.StepCtx, _ *flow.AgentResponse, _ error) (flow.StepResult, error) {
+		dispatched = true
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("ran"), nil
+	}), &stubAgent{name: "stub"})
+	stubQuota(app, []windowUsage{{
+		Label: "5h", Length: 5 * time.Hour, Used: 1.0, ResetsAt: time.Now().Add(-time.Minute),
+	}}, nil)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if !dispatched {
+		t.Errorf("the dispatch was withheld against a window that has already reset; res = %+v", res)
+	}
+	if res.Park != nil {
+		t.Errorf("Park = %+v, want none: the park would carry an instant in the past", res.Park)
 	}
 }
 
@@ -468,15 +506,51 @@ func TestCmdResolve_AnExhaustedAccountExitsZeroAndKeepsTheClaim(t *testing.T) {
 	}
 }
 
+// An exhausted window is not PACED against — it parks, and the run exits.
+//
+// Pacing is on by default (`--pace-five-hour` 90), and its arithmetic answers
+// a window already flat with the whole remainder of that window: without this
+// the default `resolve` sits in front of the reset for hours, holding the
+// arena, and never reaches the check that would have parked it. "A window may
+// be hours or days from resetting, and nothing is served by a process sitting
+// in front of it."
+//
+// The deadline is the assertion: a run that paced would still be asleep.
+func TestCmdResolve_AnExhaustedWindowParksRatherThanPacingOutTheWindow(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	app, _, errBuf := resolveTestAppPrompts(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("ran"), nil
+	}, flow.PromptsAgent)
+	app.Quota = func() ([]windowUsage, error) {
+		return []windowUsage{{
+			Label: "5h", Length: 5 * time.Hour, Used: 1.0, ResetsAt: time.Now().Add(4 * time.Hour),
+		}}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if code := app.cmdResolve(ctx, []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	out := errBuf.String()
+	if strings.Contains(out, "resolve: pacing —") {
+		t.Errorf("the run waited out a window it should have parked on; got:\n%s", out)
+	}
+	if !strings.Contains(out, "plan → parked") {
+		t.Errorf("the run did not park on the exhausted window; got:\n%s", out)
+	}
+}
+
 // With two windows flat, the allowance returns when the LATER one does. A park
 // reporting the earlier instant hands a driver a time the system already knew
 // was too early, which is the one thing clears_at exists to prevent — and the
 // window it names must be the one that actually binds.
 func TestRunOne_TwoExhaustedWindowsParkOnTheOneThatResetsLast(t *testing.T) {
-	later := windowResetsAt.Add(72 * time.Hour)
+	later := futureReset.Add(72 * time.Hour)
 	app, _, claim := testApp(t, promptingStep(surfacing), &stubAgent{name: "stub"})
 	stubQuota(app, []windowUsage{
-		{Label: "5h", Length: 5 * time.Hour, Used: 1.0, ResetsAt: windowResetsAt},
+		{Label: "5h", Length: 5 * time.Hour, Used: 1.0, ResetsAt: futureReset},
 		{Label: "7d", Length: 7 * 24 * time.Hour, Used: 1.0, ResetsAt: later},
 	}, nil)
 

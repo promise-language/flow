@@ -631,6 +631,48 @@ func parseUsageResponse(body []byte) ([]windowUsage, error) {
 	return result, nil
 }
 
+// bindingExhaustedWindow returns the window whose allowance is spent and that
+// decides when the account is usable again — or nil when none is spent.
+//
+// One predicate, two callers: RunOne's pre-dispatch check parks on it, and
+// `resolve`'s pacing wait declines to pace against it. A second reading of
+// "the allowance is spent" is how the gate that withholds a dispatch and the
+// wait that precedes it come to disagree about the same figures.
+//
+// THE BINDING WINDOW IS THE ONE THAT RESETS LAST. With two windows flat, the
+// allowance returns when the later one does, and reporting the earlier instant
+// hands a driver a time the system already knew was too early — which is the
+// one thing clears_at exists to prevent.
+//
+// A window whose PUBLISHED RESET HAS PASSED is not spent, whatever the figure
+// beside it says: the window it describes is over, and the reading is simply
+// older than it. This is the ordinary case rather than a corner — a reading is
+// served from the machine-wide cache for minutes after it was taken, and a
+// driver that waits to the published instant and resumes there arrives inside
+// exactly that interval. Parking on it would report a condition that has
+// ended, with an instant already in the past, which tells that driver to come
+// straight back and be told the same thing. The in-band refusal classifies the
+// turn if the allowance really is still spent.
+//
+// Used is a fraction in [0,1], or -1 when the endpoint reported none; -1 is
+// below the floor and reads as "not spent", which is the right direction for a
+// figure nobody has.
+func bindingExhaustedWindow(usage []windowUsage, now time.Time) *windowUsage {
+	var binding *windowUsage
+	for i := range usage {
+		if usage[i].Used < 1.0 {
+			continue
+		}
+		if !usage[i].ResetsAt.IsZero() && !usage[i].ResetsAt.After(now) {
+			continue
+		}
+		if binding == nil || usage[i].ResetsAt.After(binding.ResetsAt) {
+			binding = &usage[i]
+		}
+	}
+	return binding
+}
+
 // paceTargets holds the per-window target fractions for pacing.
 type paceTargets struct {
 	FiveHour float64 // e.g. 0.90

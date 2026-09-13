@@ -1407,3 +1407,33 @@ func TestRun_AnUnknownRateLimitStatusIsNotARefusal(t *testing.T) {
 		t.Fatalf("Failure = %+v, want nil: only %q is the refusal", resp.Failure, "rejected")
 	}
 }
+
+// A refused turn also ENDS BADLY — no result, a non-zero exit, nothing on
+// stdout but the refusal itself. That ending is not the evidence: read as an
+// exit-error it parks as infrastructure and loses the window and the instant
+// the substrate had already handed over.
+func TestRun_ARefusalOutranksHowTheTurnDied(t *testing.T) {
+	const resets = 1789153635
+	f := &fakeCmd{
+		stdoutStream: rejectedEvent("seven_day", resets) + "\n",
+		stderrStream: "error: exiting\n",
+		waitErr:      errors.New("exit status 1"),
+	}
+	resp, err := clientWith(f).Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.Failure == nil {
+		t.Fatal("Failure = nil, want the refusal the substrate stated")
+	}
+	if resp.Failure.Kind != flow.FailureAccountExhausted {
+		t.Fatalf("Kind = %q, want %q — the non-zero exit is the wreckage, not the evidence",
+			resp.Failure.Kind, flow.FailureAccountExhausted)
+	}
+	if resp.Failure.Window != "seven_day" {
+		t.Errorf("Window = %q, want seven_day", resp.Failure.Window)
+	}
+	if resp.Failure.ClearsAt == nil || resp.Failure.ClearsAt.Unix() != resets {
+		t.Errorf("ClearsAt = %v, want the published instant", resp.Failure.ClearsAt)
+	}
+}
