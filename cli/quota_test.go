@@ -48,6 +48,42 @@ func TestReadQuota_ReturnsErrorOnFailure(t *testing.T) {
 	}
 }
 
+// The acceptance line for #183: a valid .credentials.json on a non-mac host
+// yields a READING, not just a token. The discoverOAuthToken tests stop at the
+// token and TestFetchUsage_Success starts from one, so the join — readQuota
+// reading the credential at all, and handing the file's token to the request —
+// is what neither of them would miss going wrong. That join is the whole of
+// what "pacing disabled" was reporting.
+func TestReadQuota_ReadsTheFileCredentialEndToEnd(t *testing.T) {
+	useCredentialGOOS(t, "linux")
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		fmt.Fprint(w, `{"five_hour":{"utilization":47,"resets_at":"2026-09-01T14:24:00Z"}}`)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	writeCredentialsFile(t, dir, ".credentials.json",
+		claudeCredentials("file-token", time.Now().Add(time.Hour).UnixMilli()))
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"),
+		fmt.Appendf(nil, `{"apiBaseUrl":%q}`, srv.URL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	usage, err := readQuota()
+	if err != nil {
+		t.Fatalf("readQuota: %v — a present, fresh credential must produce a reading", err)
+	}
+	if len(usage) != 1 || math.Abs(usage[0].Used-0.47) > 0.001 {
+		t.Errorf("usage = %+v, want one window at 0.47", usage)
+	}
+	if gotAuth != "Bearer file-token" {
+		t.Errorf("Authorization = %q, want the token from the file", gotAuth)
+	}
+}
+
 func TestClampFraction(t *testing.T) {
 	tests := []struct {
 		in   float64
@@ -574,6 +610,32 @@ func TestDiscoverOAuthToken_FileBranchNeverAsksTheKeychain(t *testing.T) {
 	}
 }
 
+// The selection is darwin against everything else, not darwin against Linux.
+// Windows holds the file too (the issue's table names both), and every other
+// file-branch test here pins "linux" — so a reader narrowed to one non-mac name
+// would pass all of them and leave Windows reading a Keychain it does not have.
+func TestDiscoverOAuthToken_EveryNonDarwinHostReadsTheFile(t *testing.T) {
+	for _, goos := range []string{"linux", "windows", "freebsd"} {
+		t.Run(goos, func(t *testing.T) {
+			useCredentialGOOS(t, goos)
+			// A Keychain that WOULD answer, so a host that fell through to it
+			// succeeds with the wrong token rather than failing quietly.
+			stubSecurity(t, claudeCredentials("from-keychain", 0))
+			dir := t.TempDir()
+			t.Setenv("CLAUDE_CONFIG_DIR", dir)
+			writeCredentialsFile(t, dir, ".credentials.json", claudeCredentials("from-file", 0))
+
+			tok, reason := discoverOAuthToken()
+			if reason != "" {
+				t.Fatalf("expected success; got reason=%q", reason)
+			}
+			if tok != "from-file" {
+				t.Errorf("token = %q, want from-file — %s reads the file, not the Keychain", tok, goos)
+			}
+		})
+	}
+}
+
 // The other direction: on darwin the Keychain is the whole source, and a file
 // holding a different token is not read.
 func TestDiscoverOAuthToken_KeychainIsTheOnlyDarwinSource(t *testing.T) {
@@ -638,6 +700,19 @@ func TestDiscoverOAuthToken_KeychainSharesTheDecoder(t *testing.T) {
 				t.Errorf("reason should name the Keychain item; got %q", reason)
 			}
 		})
+	}
+}
+
+// Every test above pins credentialGOOS, so nothing else here would notice if
+// the seam's own default stopped being this host's OS — and a default stuck at
+// "darwin" is #183 again: every Linux host asking a Keychain it does not have,
+// reported as an environment problem. The seam-doctrine test
+// TestQuotaCache_TestsNeverUseTheRealCredential guards quotaCredential for the
+// same reason.
+func TestCredentialGOOS_IsThisHostsOS(t *testing.T) {
+	if credentialGOOS != runtime.GOOS {
+		t.Errorf("credentialGOOS = %q, want %q — the seam must default to the real OS, "+
+			"or the source is chosen for a host nobody is on", credentialGOOS, runtime.GOOS)
 	}
 }
 
