@@ -98,6 +98,7 @@ func TestParkKind_WireSpellings(t *testing.T) {
 		flow.ParkRemoteUnreachable:  "remote-unreachable",
 		flow.ParkRefused:            "refused",
 		flow.ParkWriteContract:      "write-contract",
+		flow.ParkAccountExhausted:   "account-exhausted",
 	}
 	got := flow.AllParkKinds()
 	if len(got) != len(want) {
@@ -139,6 +140,7 @@ func TestParkKind_RedispatchMayClear_ClassifiesEveryKind(t *testing.T) {
 		flow.ParkRemoteUnreachable:  true,  // once the remote returns
 		flow.ParkRefused:            false, // deterministic
 		flow.ParkWriteContract:      false, // same prompt, same result
+		flow.ParkAccountExhausted:   true,  // once the window has reset
 	}
 	got := flow.AllParkKinds()
 	if len(got) != len(want) {

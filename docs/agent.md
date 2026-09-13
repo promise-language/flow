@@ -124,9 +124,11 @@ Each step declares what permission mode it needs. A step calling an agent withou
 
 | Field | Type | Meaning |
 |---|---|---|
-| `Kind` | `string` | One of the six kinds below. |
-| `Transient` | `bool` | Infrastructure failure — see below. |
+| `Kind` | `string` | One of the seven kinds below. |
+| `Transient` | `bool` | The attempt is not charged — see below. |
 | `Message` | `string` | Human-readable detail. |
+| `Window` | `string` | Which of the account's allowance windows refused, in the substrate's own vocabulary. Set on `account-exhausted` alone; empty when the substrate refused without naming one. |
+| `ClearsAt` | `*time.Time` | The instant the refusing window resets, **as the substrate published it** — never re-derived afterwards, which can disagree with it and is unavailable exactly when the account is in no state to be queried. Set on `account-exhausted` alone. A pointer, so absent reads as *no instant* and never as *soon*. |
 
 ### Failure kinds
 
@@ -140,12 +142,21 @@ The `Kind` field is drawn from a closed set:
 | `exit-error` | The agent process exited with a non-zero code. |
 | `start-error` | The agent process could not be started. |
 | `cost-cap` | The substrate stopped the prompt because it reached `MaxCostUSD`. |
+| `account-exhausted` | The substrate **refused** the turn because the agent account's allowance is spent ([environment.md](environment.md) § The agent account). |
 
 ### Transient failures
 
-When `Transient` is true, the failure is infrastructure (remote runner died, network blip, transient 5xx) rather than a real agent-side failure. The orchestrator parks the step with `ParkInfraTransient`, and the treasurer does not count the attempt — a flapping runner must not spend the resolution's budget ([environment.md](environment.md)).
+When `Transient` is true, the attempt is not charged: the orchestrator parks the step and the treasurer does not count the dispatch, and the metered chokepoint bills none of the turn's reported cost. One flag, because it is one treatment — a flapping runner must not spend the resolution's budget ([environment.md](environment.md)), and neither may an allowance that refused to spend, which has not bought an attempt.
+
+**The kind decides which park it becomes.** An ordinary transient failure (remote runner died, network blip, transient 5xx) parks `ParkInfraTransient`. **Kind `account-exhausted` parks `ParkAccountExhausted`, not `ParkInfraTransient`** — nothing about the infrastructure failed, and an operator told to re-run *once the infrastructure is back* would be looking at healthy infrastructure for as long as the window lasts. The park carries `ClearsAt` and the account it belongs to.
 
 Agent implementations (typically a backend's runner-HTTP wrapper) set `Transient` from substrate-specific signals.
+
+### Reporting an exhausted account
+
+An implementation whose substrate rations its allowance **must establish the condition from the substrate's own statement that it refused, and never from how the turn died.** A refused turn also ends badly — without a result, or with an error whose classification may contradict itself — and that ending carries neither which window refused nor when it returns. An implementation that reads only the turn's outcome will report an ordinary agent failure, bill the refusal, and count the dispatch, which is what every clause above forbids. Error taxonomies must not be the discriminator: they vary between versions, and a classification keyed to them is wrong the first time one changes, silently, and in the direction that bills for it.
+
+The reference implementation reads the substrate's dedicated rate-limit event, which carries all three facts — that the refusal happened, which window, and the reset instant — and sets `Kind`, `Transient`, `Window` and `ClearsAt` from it.
 
 ## Cross-references
 

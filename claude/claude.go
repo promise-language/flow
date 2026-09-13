@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/promise-language/flow"
 )
@@ -270,6 +271,9 @@ func parseStream(r io.Reader) (*flow.AgentResponse, error) {
 		resultEvent  bool
 		isError      bool
 		errorSubtype string
+		// The live rate-limit standing, as the LAST rate_limit_event stated
+		// it. See the "rate_limit_event" arm below.
+		rateLimit rateLimitInfo
 	)
 
 	for scanner.Scan() {
@@ -352,6 +356,26 @@ func parseStream(r io.Reader) (*flow.AgentResponse, error) {
 					lastText = text
 				}
 			}
+		case "rate_limit_event":
+			// The substrate's own statement about the account's allowance, in
+			// band, at the moment it decides. It is the ONLY evidence this
+			// condition is classified from: a refused turn also ends badly —
+			// without a result, or with an is_error result whose subtype has
+			// been observed to read "success" — and that ending carries
+			// neither which window refused nor when it returns
+			// (docs/environment.md § The signal is read where it arrives).
+			//
+			// LAST EVENT WINS. `status` is a field reporting a standing, not
+			// an occurrence, so a later "allowed" supersedes an earlier
+			// "rejected" — a turn that was throttled and then let through was
+			// not refused. An event whose payload does not decode is skipped
+			// like every other undecodable line, leaving the standing as the
+			// last event that did state one.
+			var ev rateLimitEvent
+			if err := json.Unmarshal(line, &ev); err != nil {
+				continue
+			}
+			rateLimit = ev.Info
 		case "result":
 			var ev resultEvent_
 			if err := json.Unmarshal(line, &ev); err != nil {
@@ -387,6 +411,28 @@ func parseStream(r io.Reader) (*flow.AgentResponse, error) {
 		return resp, fmt.Errorf("scan: %w", err)
 	}
 
+	// An exhausted account, BEFORE either reading of how the turn ended. Order
+	// is the requirement, not a preference:
+	//
+	//   - ahead of the no-result return, because a refused turn ends WITHOUT a
+	//     result — the case reported as `no-result` today, which loses the
+	//     window and the instant and bills the refusal;
+	//   - ahead of the is_error branch, because docs/environment.md forbids an
+	//     error taxonomy as the discriminator, and this substrate's subtype has
+	//     been observed to read "success" on exactly this refusal.
+	//
+	// Transient, so the caller's existing gate bills nothing and counts no
+	// dispatch: an allowance that refused to spend has not bought an attempt.
+	if rateLimit.Rejected() {
+		resp.Failure = &flow.AgentFailure{
+			Kind:      flow.FailureAccountExhausted,
+			Transient: true,
+			Window:    rateLimit.RateLimitType,
+			ClearsAt:  rateLimit.ResetsAtTime(),
+			Message:   rateLimit.Message(),
+		}
+		return resp, nil
+	}
 	if !resultEvent {
 		// The partial response travels WITH the error: there is no usable turn
 		// here, and the caller must not read it as one, but the session id an
@@ -560,6 +606,63 @@ type resultEvent_ struct {
 	Result       string  `json:"result,omitempty"`
 	SessionID    string  `json:"session_id,omitempty"`
 	TotalCostUSD float64 `json:"total_cost_usd,omitempty"`
+}
+
+// rateLimitEvent is the dedicated event the substrate emits when it rations
+// the account's allowance — the one place the refusal, the window and the
+// reset instant arrive together, and the only thing this package classifies an
+// exhausted account from.
+type rateLimitEvent struct {
+	Type string        `json:"type"`
+	Info rateLimitInfo `json:"rate_limit_info"`
+}
+
+// rateLimitInfo is the allowance standing the event carries.
+//
+// ResetsAt is Unix SECONDS as an int64, not a time.Time: that is the wire form,
+// and decoding it into a time would need a custom unmarshaler whose only job
+// would be to make an absent value indistinguishable from the epoch.
+type rateLimitInfo struct {
+	Status        string `json:"status"`
+	RateLimitType string `json:"rateLimitType"`
+	ResetsAt      int64  `json:"resetsAt"`
+}
+
+// statusRejected is the discriminator: the substrate saying it refused. Any
+// other status — "allowed", "warning", whatever a later release adds — is not
+// a refusal, and an unknown one is read as not-refused so a new status cannot
+// silently park every step on a machine.
+const statusRejected = "rejected"
+
+// Rejected reports whether the substrate refused the turn for the account's
+// allowance.
+func (i rateLimitInfo) Rejected() bool { return i.Status == statusRejected }
+
+// ResetsAtTime is the published instant the window returns, or nil when the
+// substrate refused without naming one. nil is a readable answer — "no
+// instant", never "soon" — so an absent or nonsensical value yields nothing
+// rather than the epoch, which would read as an instant long past and tell a
+// driver to re-dispatch immediately into the same refusal.
+func (i rateLimitInfo) ResetsAtTime() *time.Time {
+	if i.ResetsAt <= 0 {
+		return nil
+	}
+	t := time.Unix(i.ResetsAt, 0).UTC()
+	return &t
+}
+
+// Message renders the refusal for a person: the condition, the window that
+// refused, and when it clears — which is what docs/environment.md § The
+// condition is reported requires of it, and what "agent failure" omits.
+func (i rateLimitInfo) Message() string {
+	msg := "agent account allowance exhausted"
+	if i.RateLimitType != "" {
+		msg += " (" + i.RateLimitType + " window)"
+	}
+	if t := i.ResetsAtTime(); t != nil {
+		msg += ", resets " + t.Format(time.RFC3339)
+	}
+	return msg
 }
 
 // spawnable refuses to start the real binary from a test process.

@@ -541,3 +541,73 @@ func TestLedgerFromDoc_KeepsSubSecondDurations(t *testing.T) {
 		t.Errorf("totals = %v/%v, want 250ms/1.5s", l.TotalActive, l.TotalWaiting)
 	}
 }
+
+// The instant and the account must survive the process exiting, which is the
+// whole point of the park: a window may be hours or days from resetting,
+// nothing is served by a process sitting in front of it, and the arena resumes
+// at the instant. An instant that did not round-trip is one nobody can wait
+// out.
+func TestStateDoc_AccountExhaustedParkRoundTripsTheInstantAndTheAccount(t *testing.T) {
+	at := time.Date(2026, 9, 13, 18, 42, 0, 0, time.UTC)
+	doc := stateDoc{
+		Flow:   "implement",
+		Schema: stateSchemaVersion,
+		Park: parkDocFromRequest(flow.ParkRequest{
+			Kind:     flow.ParkAccountExhausted,
+			Step:     "plan",
+			ClearsAt: &at,
+			Account:  flow.AgentAccountId("uuid-1"),
+			Reason:   "agent account allowance exhausted — 5h window, resets 2026-09-13T18:42:00Z",
+		}, time.Now().UTC()),
+	}
+	body, err := renderStateComment("alice", doc)
+	if err != nil {
+		t.Fatalf("renderStateComment: %v", err)
+	}
+	got, _, found, err := extractStateDoc(body)
+	if err != nil || !found {
+		t.Fatalf("extractStateDoc: found=%v err=%v", found, err)
+	}
+	req := parkRequestFromDoc(got.Park)
+	if req == nil {
+		t.Fatal("the park did not survive the round trip")
+	}
+	if req.Kind != flow.ParkAccountExhausted {
+		t.Errorf("Kind = %q, want %q", req.Kind, flow.ParkAccountExhausted)
+	}
+	if req.ClearsAt == nil || !req.ClearsAt.Equal(at) {
+		t.Errorf("ClearsAt = %v, want %v", req.ClearsAt, at)
+	}
+	if req.Account != flow.AgentAccountId("uuid-1") {
+		t.Errorf("Account = %q, want uuid-1", req.Account)
+	}
+}
+
+// A park with no instant comes back with none — never with the epoch, which
+// reads as an instant long past and sends a driver straight back into the same
+// refusal.
+func TestStateDoc_AParkWithNoInstantRoundTripsToNone(t *testing.T) {
+	doc := stateDoc{
+		Flow:   "implement",
+		Schema: stateSchemaVersion,
+		Park:   parkDocFromRequest(flow.ParkRequest{Kind: flow.ParkInfraTransient, Step: "plan"}, time.Now().UTC()),
+	}
+	body, err := renderStateComment("alice", doc)
+	if err != nil {
+		t.Fatalf("renderStateComment: %v", err)
+	}
+	if strings.Contains(body, "clears_at") || strings.Contains(body, "account:") {
+		t.Errorf("a park with neither fact writes them anyway:\n%s", body)
+	}
+	got, _, found, err := extractStateDoc(body)
+	if err != nil || !found {
+		t.Fatalf("extractStateDoc: found=%v err=%v", found, err)
+	}
+	req := parkRequestFromDoc(got.Park)
+	if req == nil {
+		t.Fatal("the park did not survive the round trip")
+	}
+	if req.ClearsAt != nil {
+		t.Errorf("ClearsAt = %v, want nil", req.ClearsAt)
+	}
+}

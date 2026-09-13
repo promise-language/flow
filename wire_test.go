@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestInvocationResult_JSONRoundTrip(t *testing.T) {
@@ -539,5 +540,125 @@ func TestFormatAxes(t *testing.T) {
 				t.Errorf("FormatAxes() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// account-exhausted: the instant and the account on the wire
+// ---------------------------------------------------------------------------
+
+// The two fields belong to ONE kind. On every other kind they are absent, and
+// a park serialises byte-for-byte as it did before they existed — which is what
+// keeps "absent" readable as "this park has no instant" rather than as "the
+// writer forgot".
+func TestParkRequest_ClearsAtAndAccountAreAbsentOnEveryOtherKind(t *testing.T) {
+	for _, kind := range AllParkKinds() {
+		if kind == ParkAccountExhausted {
+			continue
+		}
+		t.Run(string(kind), func(t *testing.T) {
+			b, err := json.Marshal(ParkRequest{Kind: kind, Step: "plan", Reason: "because"})
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			for _, key := range []string{`"clears_at"`, `"account"`} {
+				if strings.Contains(string(b), key) {
+					t.Errorf("a %q park carries %s: %s", kind, key, b)
+				}
+			}
+		})
+	}
+}
+
+// On its own kind both are present and survive the round trip. The instant is
+// the whole point of the park — the run EXITS and something resumes at it — so
+// a field that did not come back is an instant nobody can wait out.
+func TestParkRequest_AccountExhaustedRoundTripsTheInstantAndTheAccount(t *testing.T) {
+	at := time.Date(2026, 9, 13, 18, 42, 0, 0, time.UTC)
+	in := ParkRequest{
+		Kind:     ParkAccountExhausted,
+		Step:     "plan",
+		ClearsAt: &at,
+		Account:  AgentAccountId("uuid-1"),
+		Reason:   "agent account allowance exhausted — 5h window, resets 2026-09-13T18:42:00Z",
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"clears_at"`) || !strings.Contains(string(b), `"account":"uuid-1"`) {
+		t.Fatalf("both fields must reach the wire; got %s", b)
+	}
+	var out ParkRequest
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.ClearsAt == nil || !out.ClearsAt.Equal(at) {
+		t.Errorf("ClearsAt round-tripped to %v, want %v", out.ClearsAt, at)
+	}
+	if out.Account != AgentAccountId("uuid-1") {
+		t.Errorf("Account round-tripped to %q, want uuid-1", out.Account)
+	}
+}
+
+// A park written with no instant — the substrate refused without naming a
+// reset, or nothing could name the account — comes back with neither, and
+// never with the epoch. A zero time.Time is a VALUE: read back as an instant
+// it sits far in the past, which tells a driver to re-dispatch immediately
+// into the same refusal.
+func TestParkRequest_AnAbsentInstantIsNeverTheEpoch(t *testing.T) {
+	b, err := json.Marshal(ParkRequest{Kind: ParkAccountExhausted, Step: "plan"})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(b), `"clears_at"`) || strings.Contains(string(b), `"account"`) {
+		t.Fatalf("an unknown instant and an unnamed account must be absent, not zero; got %s", b)
+	}
+	var out ParkRequest
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.ClearsAt != nil {
+		t.Errorf("ClearsAt = %v, want nil", out.ClearsAt)
+	}
+}
+
+// clears_at accompanies redispatch_may_clear on the result rather than
+// qualifying it, and is absent on every result that reports no instant — so
+// output for every other stop is what it was before the field existed.
+func TestInvocationResult_ClearsAtPresentOnlyWithAnInstant(t *testing.T) {
+	at := time.Date(2026, 9, 13, 18, 42, 0, 0, time.UTC)
+	yes := true
+	with := InvocationResult{
+		Flow: "f", Item: "i", Step: "s", Status: "parked",
+		RedispatchMayClear: &yes, ClearsAt: &at,
+	}
+	without := InvocationResult{
+		Flow: "f", Item: "i", Step: "s", Status: "parked",
+		RedispatchMayClear: &yes,
+	}
+	bWith, err := json.Marshal(with)
+	if err != nil {
+		t.Fatalf("Marshal with: %v", err)
+	}
+	bWithout, err := json.Marshal(without)
+	if err != nil {
+		t.Fatalf("Marshal without: %v", err)
+	}
+	if !strings.Contains(string(bWith), `"clears_at":"2026-09-13T18:42:00Z"`) {
+		t.Errorf("clears_at must reach the wire as an RFC3339 instant; got %s", bWith)
+	}
+	if !strings.Contains(string(bWith), `"redispatch_may_clear":true`) {
+		t.Errorf("clears_at accompanies redispatch_may_clear, it does not replace it; got %s", bWith)
+	}
+	if strings.Contains(string(bWithout), `"clears_at"`) {
+		t.Errorf("ClearsAt=nil must omit clears_at; got %s", bWithout)
+	}
+	var out InvocationResult
+	if err := json.Unmarshal(bWith, &out); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if out.ClearsAt == nil || !out.ClearsAt.Equal(at) {
+		t.Errorf("ClearsAt round-tripped to %v, want %v", out.ClearsAt, at)
 	}
 }

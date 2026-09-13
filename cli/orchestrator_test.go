@@ -3804,3 +3804,23 @@ func TestRunOne_ARouteToAnUnregisteredStepSurfacesTheRefusal(t *testing.T) {
 			wrapped.finalizeCalls)
 	}
 }
+
+// An exhausted agent account gets its OWN remedy, and deliberately not
+// infra-transient's. Nothing about the infrastructure failed, so an operator
+// told to re-run "once the infrastructure is back" would be looking at healthy
+// infrastructure for as long as the window lasts. No grant clears it either —
+// the treasurer refused nothing.
+func TestRemedyFor_AccountExhausted_NamesTheWindowAndNotTheInfrastructure(t *testing.T) {
+	got := remedyFor(flow.ParkAccountExhausted)
+	for _, want := range []string{"Nothing to grant", "allowance", "window"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("remedyFor(ParkAccountExhausted) = %q, want it to mention %q", got, want)
+		}
+	}
+	if strings.Contains(got, "infrastructure") {
+		t.Errorf("remedyFor(ParkAccountExhausted) = %q, must not send the operator to the infrastructure: it is healthy", got)
+	}
+	if got == remedyFor(flow.ParkInfraTransient) {
+		t.Error("the account-exhausted remedy is the infra-transient one verbatim: the two conditions are cleared by different things")
+	}
+}

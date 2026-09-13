@@ -1,6 +1,9 @@
 package flow
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // AgentRequest is the spawn payload for one Agent.Run call. ResumeSessionID
 // empty means "don't actively resume a specific session id" (the Agent
@@ -107,9 +110,23 @@ type AgentResponse struct {
 // translates it into a cost park) must agree on the string.
 const FailureCostCap = "cost-cap"
 
+// FailureAccountExhausted is the AgentFailure.Kind for a turn the substrate
+// REFUSED because the agent account's allowance is spent — not a failure of the
+// agent, the step or the machine, and the one failure kind that knows when it
+// ends (docs/environment.md § The agent account).
+//
+// The condition is established from the substrate's own statement that it
+// refused, never inferred from how the turn died: a refused turn also ends
+// badly — no result, or an error whose subtype has been observed to read
+// `success` — and that ending is not the evidence. An impl that can read the
+// statement sets this kind together with Transient, Window and ClearsAt; the
+// orchestrator turns it into a ParkAccountExhausted, bills nothing and counts
+// no dispatch.
+const FailureAccountExhausted = "account-exhausted"
+
 // AgentFailure carries structured failure info inside AgentResponse.
 type AgentFailure struct {
-	Kind string // no-result | killed | cancelled | exit-error | start-error | cost-cap
+	Kind string // no-result | killed | cancelled | exit-error | start-error | cost-cap | account-exhausted
 	// Transient signals an infrastructure failure (remote runner died,
 	// network blip, transient 5xx) rather than a real claude-side
 	// failure. When true, the orchestrator parks the step with
@@ -117,8 +134,30 @@ type AgentFailure struct {
 	// runner must not burn the step's invocation budget. Agent impls
 	// (typically a backend's runner-HTTP wrapper) set this from
 	// substrate-specific signals; cli.RunOne is backend-agnostic.
+	//
+	// Kind FailureAccountExhausted sets it too, and parks
+	// ParkAccountExhausted rather than ParkInfraTransient: the two share
+	// exactly the treatment this field names — nothing billed, no dispatch
+	// counted — and differ in what an operator is told clears them. Reuse,
+	// not a second mechanism: one gate decides what is charged.
 	Transient bool
 	Message   string
+
+	// Window names which of the account's allowance windows refused, in the
+	// substrate's own vocabulary (the reference impl reports `five_hour` /
+	// `seven_day` verbatim). Empty on every other kind, and empty when the
+	// substrate refused without naming one.
+	Window string
+	// ClearsAt is the instant the refusing window resets, as the SUBSTRATE
+	// PUBLISHED IT — never re-derived afterwards, which can disagree with it
+	// and is unavailable exactly when the account is in no state to be
+	// queried.
+	//
+	// A pointer for the reason InvocationResult.CostUSD is one: a zero
+	// time.Time is a value, and absent must read as "no instant", never as
+	// "soon". nil on every other kind, and nil when the substrate refused
+	// without naming a reset.
+	ClearsAt *time.Time
 }
 
 // Agent is the SDK's abstraction over an LLM CLI (the reference impl is

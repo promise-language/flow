@@ -2009,12 +2009,18 @@ func TestCmdResolve_AMechanicalStepIsNotPaced(t *testing.T) {
 			// almost none of it elapsed, so the delay is the (short) remainder
 			// of the window. The delay is real, which is what makes the line
 			// print; it is short, which is what keeps the test quick.
+			//
+			// Just under 1.0, not at it: an EXHAUSTED window is a different
+			// condition — the pre-dispatch check withholds the dispatch
+			// entirely rather than pacing it — and this test is about pacing.
+			// The delay is identical either way (the target is already
+			// exceeded at full elapse, so it is the whole remainder).
 			app.Quota = func() ([]windowUsage, error) {
 				quotaReads++
 				return []windowUsage{{
 					Label:    "5h",
 					Length:   time.Second,
-					Used:     1.0,
+					Used:     0.99,
 					ResetsAt: time.Now().Add(30 * time.Millisecond),
 				}}, nil
 			}
@@ -2030,8 +2036,11 @@ func TestCmdResolve_AMechanicalStepIsNotPaced(t *testing.T) {
 				t.Fatalf("the step was never announced; got:\n%s", output)
 			}
 			if tc.paced {
-				if readsBeforeStep != 1 {
-					t.Errorf("quota read %d times before the agent step ran, want 1 — an agent step is paced", readsBeforeStep)
+				// Twice: the pacing wait here, and RunOne's own pre-dispatch
+				// check for an exhausted account. Both consult the same
+				// reading and both skip a mechanical step.
+				if readsBeforeStep != 2 {
+					t.Errorf("quota read %d times before the agent step ran, want 2 — an agent step is paced and pre-checked", readsBeforeStep)
 				}
 				if waited < 0 || waited > ran {
 					t.Errorf("an agent step must wait for quota headroom before it runs; got:\n%s", output)
@@ -2071,13 +2080,15 @@ func TestCmdResolve_PacingIsDecidedForEachPendingStep(t *testing.T) {
 		}, flow.StepConfig{Prompts: flow.PromptsNone, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	})
 	// Every reading forces a (short) wait, so an iteration that consults the
-	// quota is visible twice over: as a read, and as a pacing line.
+	// quota is visible twice over: as a read, and as a pacing line. Just under
+	// 1.0 for the reason the test above gives — an exhausted window withholds
+	// the dispatch instead of pacing it.
 	app.Quota = func() ([]windowUsage, error) {
 		quotaReads++
 		return []windowUsage{{
 			Label:    "5h",
 			Length:   time.Second,
-			Used:     1.0,
+			Used:     0.99,
 			ResetsAt: time.Now().Add(30 * time.Millisecond),
 		}}, nil
 	}
@@ -2086,11 +2097,13 @@ func TestCmdResolve_PacingIsDecidedForEachPendingStep(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
 	}
-	if readsBeforePlan != 1 {
-		t.Errorf("quota read %d times before the agent step, want 1 — an agent step is paced", readsBeforePlan)
+	// Two per agent step: the pacing wait, and RunOne's pre-dispatch check for
+	// an exhausted account.
+	if readsBeforePlan != 2 {
+		t.Errorf("quota read %d times before the agent step, want 2 — an agent step is paced and pre-checked", readsBeforePlan)
 	}
-	if readsBeforeBranch != 1 {
-		t.Errorf("quota read %d times before the mechanical step, want 1 — the same one read: the loop reached the mechanical step without consulting the quota again", readsBeforeBranch)
+	if readsBeforeBranch != 2 {
+		t.Errorf("quota read %d times before the mechanical step, want 2 — the same two: the loop reached the mechanical step without consulting the quota again", readsBeforeBranch)
 	}
 	output := errBuf.String()
 	planAt := strings.Index(output, `running "write plan"`)

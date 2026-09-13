@@ -29,7 +29,17 @@ const (
 	labelSuffixNeedsAnswer    = "needs-answer"
 	labelSuffixDisabled       = "disabled"
 	labelSuffixInfraTransient = "infra-transient"
-	labelSuffixClaimPrefix    = "claim:"
+	// labelSuffixAccountExhausted marks a park on the AGENT ACCOUNT's spent
+	// allowance. Its own suffix rather than infra-transient's: the two parks
+	// share their treatment — nothing billed, no dispatch counted — and differ
+	// in what a human scanning the issue list should do, which is go look at
+	// the infrastructure for one and nothing at all for the other.
+	//
+	// The label says only that the condition holds; WHEN it clears is in the
+	// park record, because a label cannot carry an instant without becoming a
+	// value nobody can query and everybody must parse.
+	labelSuffixAccountExhausted = "account-exhausted"
+	labelSuffixClaimPrefix      = "claim:"
 	// labelSuffixArenaPrefix marks WHICH ARENA holds the claim, as an opaque
 	// digest of its (HostId, ArenaId). It is the other half of
 	// flow:owner:<login>: the owner label records the account credited, and on
@@ -136,6 +146,7 @@ var structuralLabels = []structuralLabel{
 	{suffix: labelSuffixNeedsAnswer, maintained: true},
 	{suffix: labelSuffixDisabled},
 	{suffix: labelSuffixInfraTransient, maintained: true},
+	{suffix: labelSuffixAccountExhausted, maintained: true},
 	{suffix: labelSuffixClaimPrefix, valued: true, maintained: true},
 	{suffix: labelSuffixArenaPrefix, valued: true, maintained: true},
 	{suffix: labelSuffixTreasurerRefPref, valued: true, maintained: true},
@@ -194,6 +205,9 @@ func (l labels) NeedsAnswer() string    { return l.named(labelSuffixNeedsAnswer)
 func (l labels) Disabled() string       { return l.named(labelSuffixDisabled) }
 func (l labels) InfraTransient() string { return l.named(labelSuffixInfraTransient) }
 func (l labels) Manual() string         { return l.named(labelSuffixManual) }
+
+// AccountExhausted advertises a park on the agent account's spent allowance.
+func (l labels) AccountExhausted() string { return l.named(labelSuffixAccountExhausted) }
 
 // Per-binary owner labels.
 func (l labels) Binary(name string) string { return l.named(name) }

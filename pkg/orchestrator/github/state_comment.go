@@ -303,10 +303,22 @@ type stateParkDoc struct {
 	// Axes is the every-axis snapshot behind ParkRequest.Axes. Persisted so
 	// the operator reading a park hours later sees the same full picture the
 	// run did, instead of the one axis that happened to trip first.
-	Axes     []stateParkAxisDoc `yaml:"axes,omitempty"`
-	Reason   string             `yaml:"reason,omitempty"`
-	Details  string             `yaml:"details,omitempty"`
-	ParkedAt time.Time          `yaml:"parked_at,omitempty"`
+	Axes    []stateParkAxisDoc `yaml:"axes,omitempty"`
+	Reason  string             `yaml:"reason,omitempty"`
+	Details string             `yaml:"details,omitempty"`
+	// ClearsAt and Account are the account-exhausted park's two facts
+	// (docs/github-schema.md § Park record). Persisted rather than recomputed
+	// for the reason that park exists at all: the run EXITS — a window may be
+	// hours or days from resetting and nothing is served by a process sitting
+	// in front of it — and the arena resumes at the instant. An instant that
+	// did not survive the exit is an instant nobody can wait out.
+	//
+	// ClearsAt is a pointer so an absent one round-trips as absent: a zero
+	// time.Time is a value, and "no instant" must never come back as an
+	// instant long past.
+	ClearsAt *time.Time `yaml:"clears_at,omitempty"`
+	Account  string     `yaml:"account,omitempty"`
+	ParkedAt time.Time  `yaml:"parked_at,omitempty"`
 }
 
 type stateParkAxisDoc struct {
@@ -325,6 +337,8 @@ func parkDocFromRequest(req flow.ParkRequest, at time.Time) *stateParkDoc {
 		Axis:     string(req.Axis),
 		Reason:   req.Reason,
 		Details:  req.Details,
+		ClearsAt: req.ClearsAt,
+		Account:  string(req.Account),
 		ParkedAt: at,
 	}
 	for _, a := range req.Axes {
@@ -343,11 +357,13 @@ func parkRequestFromDoc(d *stateParkDoc) *flow.ParkRequest {
 		return nil
 	}
 	req := &flow.ParkRequest{
-		Kind:    flow.ParkKind(d.Kind),
-		Step:    flow.StepId(d.Step),
-		Axis:    flow.BudgetAxis(d.Axis),
-		Reason:  d.Reason,
-		Details: d.Details,
+		Kind:     flow.ParkKind(d.Kind),
+		Step:     flow.StepId(d.Step),
+		Axis:     flow.BudgetAxis(d.Axis),
+		Reason:   d.Reason,
+		Details:  d.Details,
+		ClearsAt: d.ClearsAt,
+		Account:  flow.AgentAccountId(d.Account),
 	}
 	for _, a := range d.Axes {
 		req.Axes = append(req.Axes, flow.AxisReport{
