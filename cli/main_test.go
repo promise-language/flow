@@ -22,7 +22,7 @@ import (
 // The credential seam is redirected for the same reason and one more: the
 // record is named after a digest of the credential, so discovery now runs on
 // the path every test takes, and the real one reads the developer's
-// credentials.json — or forks `security` to interrogate the macOS Keychain,
+// .credentials.json — or forks `security` to interrogate the macOS Keychain,
 // which on a locked machine prompts.
 //
 // Individual tests that care about cache CONTENT take a fresh directory of

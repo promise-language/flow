@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -232,22 +234,6 @@ func TestDiscoverAPIBase_DefaultFallback(t *testing.T) {
 	}
 }
 
-func TestDiscoverOAuthToken_KeychainFallback(t *testing.T) {
-	if os.Getenv("GOOS") != "" && os.Getenv("GOOS") != "darwin" {
-		t.Skip("Keychain fallback only runs on macOS")
-	}
-	// Point config dir to an empty temp dir so the file-based path fails.
-	// The Keychain call may or may not succeed depending on the machine,
-	// but it must not panic.
-	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	tok, reason := discoverOAuthToken()
-	// We cannot assert success (Keychain may not have the entry), but we
-	// can assert it doesn't panic and returns a coherent result.
-	if tok == "" && reason == "" {
-		t.Error("expected either a token or a reason, got neither")
-	}
-}
-
 func TestPrintWindow_ZeroLengthWindow(t *testing.T) {
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	win := windowUsage{
@@ -268,18 +254,68 @@ func TestPrintWindow_ZeroLengthWindow(t *testing.T) {
 	}
 }
 
-func TestDiscoverOAuthToken_ValidCredentials(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+// useCredentialGOOS pins which of the two credential sources
+// discoverOAuthToken selects, so both branches are exercised wherever the tests
+// run rather than only on the OS the developer happens to be on — which is how
+// the file branch stayed broken for #144's whole life (#183).
+func useCredentialGOOS(t *testing.T, goos string) {
+	t.Helper()
+	prev := credentialGOOS
+	credentialGOOS = goos
+	t.Cleanup(func() { credentialGOOS = prev })
+}
 
-	creds := `{
-		"claudeai_oauth": {
-			"token": "test-token-abc123"
-		}
-	}`
-	if err := os.WriteFile(dir+"/credentials.json", []byte(creds), 0644); err != nil {
+// stubSecurity puts a `security` on PATH that prints body and succeeds. It is
+// what exercises the Keychain branch off a Mac, and the only way to assert the
+// file branch never reaches a Keychain that WOULD have answered.
+func stubSecurity(t *testing.T, body string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the security stub is POSIX shell")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "security")
+	// `echo` and not a heredoc through `cat`: PATH is replaced by the stub's own
+	// directory, so the script may use nothing but shell builtins.
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho '"+body+"'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(path, 0o755); err != nil { // WriteFile respects umask; Chmod does not
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+}
+
+// claudeCredentials renders the JSON both sources hold. expiresAt is unix
+// milliseconds; 0 omits the field entirely.
+func claudeCredentials(token string, expiresAt int64) string {
+	if expiresAt == 0 {
+		return fmt.Sprintf(`{"claudeAiOauth":{"accessToken":%q}}`, token)
+	}
+	return fmt.Sprintf(`{"claudeAiOauth":{"accessToken":%q,"expiresAt":%d}}`, token, expiresAt)
+}
+
+// writeCredentialsFile writes body to dir/name, creating dir, and returns the
+// path. name is a parameter because one test writes the undotted name the
+// client never writes.
+func writeCredentialsFile(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestDiscoverOAuthToken_FileCredentials(t *testing.T) {
+	useCredentialGOOS(t, "linux")
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	writeCredentialsFile(t, dir, ".credentials.json",
+		claudeCredentials("test-token-abc123", time.Now().Add(time.Hour).UnixMilli()))
 
 	tok, reason := discoverOAuthToken()
 	if reason != "" {
@@ -290,87 +326,263 @@ func TestDiscoverOAuthToken_ValidCredentials(t *testing.T) {
 	}
 }
 
-func TestDiscoverOAuthToken_AccessTokenField(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+// $CLAUDE_CONFIG_DIR overrides the location, matching the client — so the
+// home-directory default must not be consulted when it is set.
+func TestDiscoverOAuthToken_ConfigDirOverridesHome(t *testing.T) {
+	useCredentialGOOS(t, "linux")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	writeCredentialsFile(t, filepath.Join(home, ".claude"), ".credentials.json",
+		claudeCredentials("from-home", 0))
 
-	creds := `{
-		"claudeAiOauth": {
-			"accessToken": "at-from-keychain"
-		}
-	}`
-	if err := os.WriteFile(dir+"/credentials.json", []byte(creds), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	tok, reason := discoverOAuthToken()
-	if reason != "" {
-		t.Fatalf("expected success; got reason=%q", reason)
-	}
-	if tok != "at-from-keychain" {
-		t.Errorf("token = %q, want at-from-keychain", tok)
-	}
-}
-
-func TestDiscoverOAuthToken_SnakeCaseAccessToken(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", dir)
-
-	creds := `{
-		"claudeAiOauth": {
-			"access_token": "at-snake"
-		}
-	}`
-	if err := os.WriteFile(dir+"/credentials.json", []byte(creds), 0644); err != nil {
-		t.Fatal(err)
-	}
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	writeCredentialsFile(t, configDir, ".credentials.json", claudeCredentials("from-config-dir", 0))
 
 	tok, reason := discoverOAuthToken()
 	if reason != "" {
 		t.Fatalf("expected success; got reason=%q", reason)
 	}
-	if tok != "at-snake" {
-		t.Errorf("token = %q, want at-snake", tok)
+	if tok != "from-config-dir" {
+		t.Errorf("token = %q, want from-config-dir", tok)
 	}
 }
 
+func TestDiscoverOAuthToken_DefaultsToHomeClaude(t *testing.T) {
+	useCredentialGOOS(t, "linux")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	writeCredentialsFile(t, filepath.Join(home, ".claude"), ".credentials.json",
+		claudeCredentials("from-home", 0))
+
+	tok, reason := discoverOAuthToken()
+	if reason != "" {
+		t.Fatalf("expected success; got reason=%q", reason)
+	}
+	if tok != "from-home" {
+		t.Errorf("token = %q, want from-home", tok)
+	}
+}
+
+// The missing-file reason names the one path that was read, and mentions no
+// Keychain: the generic "(searched … and macOS Keychain)" message is what made
+// a one-character path defect read like an environment problem.
+func TestDiscoverOAuthToken_FileMissingNamesThePath(t *testing.T) {
+	useCredentialGOOS(t, "linux")
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+
+	tok, reason := discoverOAuthToken()
+	if tok != "" {
+		t.Errorf("token = %q, want empty", tok)
+	}
+	want := filepath.Join(dir, ".credentials.json")
+	if !strings.Contains(reason, want) {
+		t.Errorf("reason should name %s; got %q", want, reason)
+	}
+	if strings.Contains(strings.ToLower(reason), "keychain") {
+		t.Errorf("reason must not mention the Keychain off darwin; got %q", reason)
+	}
+}
+
+func TestDiscoverOAuthToken_FileUnreadableNamesThePath(t *testing.T) {
+	useCredentialGOOS(t, "linux")
+	if runtime.GOOS == "windows" {
+		t.Skip("mode 0000 does not deny reads on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode 0000 file")
+	}
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	path := writeCredentialsFile(t, dir, ".credentials.json", claudeCredentials("unreadable", 0))
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	tok, reason := discoverOAuthToken()
+	if tok != "" {
+		t.Errorf("token = %q, want empty", tok)
+	}
+	if !strings.Contains(reason, path) {
+		t.Errorf("reason should name %s; got %q", path, reason)
+	}
+	if strings.Contains(reason, "does not exist") {
+		t.Errorf("an unreadable file is not a missing one; got %q", reason)
+	}
+}
+
+func TestDiscoverOAuthToken_MalformedJSON(t *testing.T) {
+	useCredentialGOOS(t, "linux")
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	writeCredentialsFile(t, dir, ".credentials.json", `{"claudeAiOauth": `)
+
+	tok, reason := discoverOAuthToken()
+	if tok != "" {
+		t.Errorf("token = %q, want empty", tok)
+	}
+	if !strings.Contains(reason, "not readable JSON") {
+		t.Errorf("reason should say the JSON is unreadable; got %q", reason)
+	}
+}
+
+// An empty token is a missing token, not an expired one: the two say different
+// things to whoever reads the warning.
 func TestDiscoverOAuthToken_EmptyToken(t *testing.T) {
+	useCredentialGOOS(t, "linux")
 	dir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	writeCredentialsFile(t, dir, ".credentials.json", claudeCredentials("", 0))
 
-	creds := `{
-		"claudeai_oauth": {
-			"token": ""
-		}
-	}`
-	if err := os.WriteFile(dir+"/credentials.json", []byte(creds), 0644); err != nil {
-		t.Fatal(err)
+	tok, reason := discoverOAuthToken()
+	if tok != "" {
+		t.Errorf("token = %q, want empty", tok)
 	}
+	if !strings.Contains(reason, "no claudeAiOauth.accessToken") {
+		t.Errorf("reason should name the missing field; got %q", reason)
+	}
+	if strings.Contains(reason, "expired") {
+		t.Errorf("a missing token must not be reported as expired; got %q", reason)
+	}
+}
 
-	_, reason := discoverOAuthToken()
-	if reason == "" {
-		t.Error("expected failure reason for empty token")
+func TestDiscoverOAuthToken_ExpiredToken(t *testing.T) {
+	useCredentialGOOS(t, "linux")
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	expiry := time.Now().Add(-2 * time.Hour)
+	writeCredentialsFile(t, dir, ".credentials.json",
+		claudeCredentials("stale-token", expiry.UnixMilli()))
+
+	tok, reason := discoverOAuthToken()
+	if tok != "" {
+		t.Errorf("token = %q, want empty", tok)
 	}
 	if !strings.Contains(reason, "expired") {
-		t.Errorf("reason should mention 'expired'; got %q", reason)
+		t.Errorf("reason should say expired; got %q", reason)
+	}
+	if want := expiry.Truncate(time.Second).Format(time.RFC3339); !strings.Contains(reason, want) {
+		t.Errorf("reason should name the instant %s; got %q", want, reason)
 	}
 }
 
-func TestDiscoverOAuthToken_NoOAuthKey(t *testing.T) {
+// Nothing is inferred from a field that is not there: a credential with no
+// expiresAt is returned, and fetchUsage's 401 branch catches it if it is dead.
+func TestDiscoverOAuthToken_AbsentExpiryIsNotExpired(t *testing.T) {
+	useCredentialGOOS(t, "linux")
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	writeCredentialsFile(t, dir, ".credentials.json", `{"claudeAiOauth":{"accessToken":"no-expiry"}}`)
+
+	tok, reason := discoverOAuthToken()
+	if reason != "" {
+		t.Fatalf("expected success; got reason=%q", reason)
+	}
+	if tok != "no-expiry" {
+		t.Errorf("token = %q, want no-expiry", tok)
+	}
+}
+
+// The defect itself: the undotted name is not one the client writes, so finding
+// it there is not finding a credential.
+func TestDiscoverOAuthToken_UndottedNameIsNotRead(t *testing.T) {
+	useCredentialGOOS(t, "linux")
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	writeCredentialsFile(t, dir, "credentials.json", claudeCredentials("undotted", 0))
+
+	tok, reason := discoverOAuthToken()
+	if tok != "" {
+		t.Errorf("token = %q, want empty — credentials.json is not a name the client writes", tok)
+	}
+	if !strings.Contains(reason, filepath.Join(dir, ".credentials.json")) {
+		t.Errorf("reason should name the dotted path; got %q", reason)
+	}
+}
+
+// No cross-OS fallback: a Keychain that would have answered is not asked.
+func TestDiscoverOAuthToken_FileBranchNeverAsksTheKeychain(t *testing.T) {
+	useCredentialGOOS(t, "linux")
+	stubSecurity(t, claudeCredentials("from-keychain", 0))
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+
+	tok, reason := discoverOAuthToken()
+	if tok != "" {
+		t.Errorf("token = %q, want empty — the Keychain must not be consulted off darwin", tok)
+	}
+	if reason == "" {
+		t.Error("expected a reason naming the file that was read")
+	}
+}
+
+// The other direction: on darwin the Keychain is the whole source, and a file
+// holding a different token is not read.
+func TestDiscoverOAuthToken_KeychainIsTheOnlyDarwinSource(t *testing.T) {
+	useCredentialGOOS(t, "darwin")
+	stubSecurity(t, claudeCredentials("from-keychain", time.Now().Add(time.Hour).UnixMilli()))
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	writeCredentialsFile(t, dir, ".credentials.json", claudeCredentials("from-file", 0))
+
+	tok, reason := discoverOAuthToken()
+	if reason != "" {
+		t.Fatalf("expected success; got reason=%q", reason)
+	}
+	if tok != "from-keychain" {
+		t.Errorf("token = %q, want from-keychain", tok)
+	}
+}
+
+func TestDiscoverOAuthToken_KeychainUnreadable(t *testing.T) {
+	useCredentialGOOS(t, "darwin")
+	t.Setenv("PATH", t.TempDir()) // no `security` to run
 	dir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", dir)
 
-	creds := `{"some_other_key": {"value": "x"}}`
-	if err := os.WriteFile(dir+"/credentials.json", []byte(creds), 0644); err != nil {
-		t.Fatal(err)
+	tok, reason := discoverOAuthToken()
+	if tok != "" {
+		t.Errorf("token = %q, want empty", tok)
 	}
+	if !strings.Contains(reason, "Keychain item") {
+		t.Errorf("reason should name the Keychain item; got %q", reason)
+	}
+	if strings.Contains(reason, ".credentials.json") {
+		t.Errorf("reason must not name a file on darwin; got %q", reason)
+	}
+}
 
-	_, reason := discoverOAuthToken()
-	if reason == "" {
-		t.Error("expected failure reason for missing OAuth key")
-	}
-	if !strings.Contains(reason, "no Claude OAuth") {
-		t.Errorf("reason should mention 'no Claude OAuth'; got %q", reason)
+// One decoder serves both sources: the Keychain's malformed, empty and expired
+// credentials produce the file branch's reasons, named after the Keychain.
+func TestDiscoverOAuthToken_KeychainSharesTheDecoder(t *testing.T) {
+	expiry := time.Now().Add(-time.Hour)
+	for _, c := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"empty token", claudeCredentials("", 0), "no claudeAiOauth.accessToken"},
+		{"expired token", claudeCredentials("stale", expiry.UnixMilli()), "expired at " + expiry.Truncate(time.Second).Format(time.RFC3339)},
+		{"malformed", `{"claudeAiOauth": `, "not readable JSON"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			useCredentialGOOS(t, "darwin")
+			stubSecurity(t, c.body)
+
+			tok, reason := discoverOAuthToken()
+			if tok != "" {
+				t.Errorf("token = %q, want empty", tok)
+			}
+			if !strings.Contains(reason, c.want) {
+				t.Errorf("reason should contain %q; got %q", c.want, reason)
+			}
+			if !strings.Contains(reason, keychainCredentialsItem) {
+				t.Errorf("reason should name the Keychain item; got %q", reason)
+			}
+		})
 	}
 }
 
