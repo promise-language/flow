@@ -109,7 +109,7 @@ func installCredential(t *testing.T, token string) *credStub {
 }
 
 // installCredentialFailure stands in for a machine whose credential cannot be
-// read at all — no credentials.json, no Keychain entry.
+// read at all — no .credentials.json, no Keychain entry.
 func installCredentialFailure(t *testing.T, reason string) *credStub {
 	t.Helper()
 	return installCredentialResult(t, "", reason)
@@ -842,7 +842,7 @@ func TestQuotaCache_TestsNeverUseTheRealCredential(t *testing.T) {
 	// The same doctrine for the seam keying added. The record is named after a
 	// digest of the credential, so discovery now runs on the path every test
 	// that resolves a record path takes, and the real one reads the operator's
-	// credentials.json — or, on a Keychain machine, forks `security`, which on a
+	// .credentials.json — or, on a Keychain machine, forks `security`, which on a
 	// locked machine prompts. TestMain redirects it for the whole package; if
 	// that redirect is ever dropped nothing else here would notice, because a
 	// real token names a record just as well as a stub one does.

@@ -2,13 +2,16 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -146,64 +149,122 @@ func clampFraction(v float64) float64 {
 	return v
 }
 
-// discoverOAuthToken reads the Claude OAuth token from the first available
-// credentials location. Returns (token, "") on success or ("", reason) on
-// failure with a distinct reason for each failure mode.
+// claudeCredentialsFile is the name the client writes, dot-prefixed. The
+// undotted "credentials.json" is not a name it writes anywhere: reading it is
+// what made pacing silently dead on every non-mac host (#183).
+const claudeCredentialsFile = ".credentials.json"
+
+// keychainCredentialsItem is the login Keychain item the client writes on macOS.
+const keychainCredentialsItem = "Claude Code-credentials"
+
+// credentialGOOS says which of the two credential sources this host holds. A
+// package var rather than runtime.GOOS read inline — the quotaCredential
+// pattern quota_cache.go documents — so both branches are exercisable wherever
+// the tests run, and for the same reason deliberately NOT an environment
+// variable.
+var credentialGOOS = runtime.GOOS
+
+// discoverOAuthToken reads the Claude OAuth token from the one place the
+// installed client writes it on this OS. Returns (token, "") on success or
+// ("", reason) on failure, with a distinct reason for each failure mode.
+//
+// The source is chosen BY OS and there is exactly one per OS: on macOS the
+// login Keychain, where nothing lands on disk, and on every other host the file
+// <config dir>/.credentials.json. There is no fallback between them in either
+// direction, because a walk across candidate locations is precisely what hid
+// this reader's defect: it reached the right directory, opened a name the client
+// does not write, fell through to a `security` that does not exist off a Mac,
+// and reported a generic "nothing found" that reads like an environment problem
+// rather than a defect here.
 func discoverOAuthToken() (string, string) {
-	dirs := claudeConfigDirs()
-	if len(dirs) == 0 {
-		return "", "no Claude credentials found — no config directories available"
+	if credentialGOOS == "darwin" {
+		return keychainOAuthToken()
 	}
+	return fileOAuthToken()
+}
 
-	for _, dir := range dirs {
-		path := filepath.Join(dir, "credentials.json")
-		data, err := os.ReadFile(path)
+// claudeCredentialsPath is the one file the client writes credentials to:
+// $CLAUDE_CONFIG_DIR when set, else $HOME/.claude, joined with the name above.
+// Returns ("", reason) when neither is available.
+//
+// Called only from the file branch. The Keychain needs no directory, so a Mac
+// with no home directory is not answered with a complaint about a path it would
+// never have read.
+func claudeCredentialsPath() (string, string) {
+	dir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if dir == "" {
+		home, err := os.UserHomeDir()
 		if err != nil {
-			continue
+			return "", "no Claude credentials — neither $CLAUDE_CONFIG_DIR nor a home directory is set"
 		}
-		// The credentials file is a JSON object; the OAuth token key is
-		// discovered at runtime rather than hardcoded. Look for the first key
-		// containing "oauth" (case-insensitive) whose value has a "token" field.
-		var raw map[string]json.RawMessage
-		if err := json.Unmarshal(data, &raw); err != nil {
-			continue
-		}
-		for key, val := range raw {
-			if !strings.Contains(strings.ToLower(key), "oauth") {
-				continue
-			}
-			var obj map[string]interface{}
-			if err := json.Unmarshal(val, &obj); err != nil {
-				continue
-			}
-			// Try multiple field names: the exact key the client uses is not
-			// pinned here.
-			for _, field := range []string{"token", "accessToken", "access_token"} {
-				if tok, ok := obj[field].(string); ok && tok != "" {
-					return tok, ""
-				}
-			}
-			// The credentials exist but the token value is empty or absent.
-			return "", fmt.Sprintf("credentials expired — re-run claude to refresh (read %s)", path)
-		}
-		// Found credentials.json but no OAuth key.
-		return "", fmt.Sprintf("no Claude OAuth credentials found in %s", path)
+		dir = filepath.Join(home, ".claude")
 	}
-	// macOS Keychain fallback: Claude Code stores credentials there, not on disk.
-	if out, err := exec.Command("security", "find-generic-password",
-		"-s", "Claude Code-credentials", "-w").Output(); err == nil {
-		var kc struct {
-			ClaudeAiOauth struct {
-				AccessToken string `json:"accessToken"`
-			} `json:"claudeAiOauth"`
-		}
-		if err := json.Unmarshal(out, &kc); err == nil && kc.ClaudeAiOauth.AccessToken != "" {
-			return kc.ClaudeAiOauth.AccessToken, ""
-		}
-	}
+	return filepath.Join(dir, claudeCredentialsFile), ""
+}
 
-	searched := strings.Join(dirs, ", ")
-	return "", fmt.Sprintf("no Claude credentials found (searched %s and macOS Keychain)", searched)
+// fileOAuthToken reads that one path, and nothing else.
+func fileOAuthToken() (string, string) {
+	path, reason := claudeCredentialsPath()
+	if reason != "" {
+		return "", reason
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Sprintf("no Claude credentials — %s does not exist (run claude to sign in)", path)
+		}
+		return "", fmt.Sprintf("no Claude credentials — cannot read %s: %v", path, err)
+	}
+	return parseClaudeCredentials(data, path, time.Now())
+}
+
+// keychainOAuthToken reads the login Keychain item, which is the whole of the
+// credential location on macOS.
+func keychainOAuthToken() (string, string) {
+	out, err := exec.Command("security", "find-generic-password",
+		"-s", keychainCredentialsItem, "-w").Output()
+	if err != nil {
+		return "", fmt.Sprintf("no Claude credentials — cannot read Keychain item %q: %v",
+			keychainCredentialsItem, err)
+	}
+	return parseClaudeCredentials(out, "Keychain item "+keychainCredentialsItem, time.Now())
+}
+
+// parseClaudeCredentials decodes the JSON both sources hold — {"claudeAiOauth":
+// {"accessToken": "...", "expiresAt": <unix ms>}} — and answers either the token
+// or the one reason the source it was read from did not yield one. source names
+// that place, so no failure has to be traced back to which branch produced it.
+//
+// The fields are stated, not discovered. A reader that scans for a key that
+// looks like it might name the token, and takes the first field that looks like
+// it might be one, returns a different answer on two hosts holding the same
+// account, and the failure is silent because each answer is individually
+// plausible (docs/environment.md § The agent account is a scope).
+func parseClaudeCredentials(data []byte, source string, now time.Time) (string, string) {
+	var creds struct {
+		ClaudeAiOauth struct {
+			AccessToken string `json:"accessToken"`
+			ExpiresAt   int64  `json:"expiresAt"` // unix milliseconds; 0 when absent
+		} `json:"claudeAiOauth"`
+	}
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return "", fmt.Sprintf("Claude credentials in %s are not readable JSON: %v", source, err)
+	}
+	oauth := creds.ClaudeAiOauth
+	if oauth.AccessToken == "" {
+		return "", fmt.Sprintf("Claude credentials in %s carry no claudeAiOauth.accessToken", source)
+	}
+	// An absent or zero expiresAt is unknown, not expired: nothing is inferred
+	// from a missing field. fetchUsage's 401/403 branch still catches a token
+	// that died without saying so here.
+	if oauth.ExpiresAt > 0 {
+		expiry := time.UnixMilli(oauth.ExpiresAt)
+		if now.After(expiry) {
+			return "", fmt.Sprintf("Claude credentials in %s expired at %s — re-run claude to refresh",
+				source, expiry.Format(time.RFC3339))
+		}
+	}
+	return oauth.AccessToken, ""
 }
 
 // agentAccount is the seam this file's account discovery is tested through,
@@ -217,9 +278,15 @@ var agentAccount = discoverAgentAccount
 // when nothing on disk says — an unknown account drops the line rather than
 // printing a guess.
 //
-// The shape discoverOAuthToken uses, for the same reasons: nothing is pinned in
-// flow's source, nothing is asked of a subprocess, and nothing touches the
-// network. What cannot be learned by reading is not learned here.
+// Nothing is asked of a subprocess and nothing touches the network: what cannot
+// be learned by reading configuration is not learned here, which is
+// discoverAPIBase's rule for the same reason.
+//
+// The key is still discovered rather than stated — the shape the token reader
+// used until #183 gave it up. docs/environment.md § The agent account is a scope
+// requires the opposite ("read from a stated field in a stated place, never
+// discovered"), so this reader has remaining work; it is not this change's, and
+// folding it in here would collide with the change that does it.
 func discoverAgentAccount() string {
 	for _, path := range agentAccountFiles() {
 		data, err := os.ReadFile(path)
