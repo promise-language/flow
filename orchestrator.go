@@ -1145,10 +1145,31 @@ type Worktree interface {
 	// base would otherwise be handed the same SHA twice and conclude the branch
 	// is empty.
 	//
-	// The guaranteed pair is what tells a branch carrying work from an empty
-	// one. Commit is a deliberate no-op when nothing is staged, so its nil
-	// return is not evidence anything was recorded.
+	// The guaranteed pair does NOT tell a branch carrying work from an empty
+	// one — that is CutPoint's question, three lines below. HEAD against the
+	// base branch's tip reads an empty branch on a base that has moved as work,
+	// and HEAD against itself reads a branch that already carries work as empty.
+	// Commit is a deliberate no-op when nothing is staged, so its nil return is
+	// not evidence anything was recorded either.
 	RevParse(ctx context.Context, rev Revision) (CommitSha, error)
+
+	// CutPoint is the commit the current branch left `base` at: the newest
+	// commit reachable from both HEAD and `base`.
+	//
+	// It answers what RevParse cannot on a branch that already carries commits:
+	// there HEAD is the base PLUS the work, and recording it as the base makes
+	// the work its own baseline. On a branch carrying nothing it IS HEAD,
+	// including when the base has advanced since the cut — which is why the
+	// answer is a merge base and not the base branch's tip.
+	//
+	// The base is an ARGUMENT, as on Branch: a cut point is only meaningful
+	// against the branch the work was actually cut from, which is the flow's
+	// base and not necessarily the backend's default branch.
+	//
+	// A base that will not resolve, or a history sharing no commit with it, is
+	// an ERROR rather than HEAD, for the reason RevParse's contract already
+	// gives: a caller handed HEAD would conclude the branch is empty.
+	CutPoint(ctx context.Context, base BranchName) (CommitSha, error)
 
 	// Run runs one of the three commands SupportedCommands() declares.
 	//

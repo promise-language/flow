@@ -71,6 +71,9 @@ func (stubWorktreeBase) Drift(context.Context) (Drift, error)              { ret
 func (stubWorktreeBase) RevParse(context.Context, Revision) (CommitSha, error) {
 	return "", nil
 }
+func (stubWorktreeBase) CutPoint(context.Context, BranchName) (CommitSha, error) {
+	return "", nil
+}
 func (stubWorktreeBase) Run(context.Context, CommandName) (CommandRun, error) {
 	return CommandRun{}, nil
 }

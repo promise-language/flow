@@ -353,3 +353,125 @@ func TestRevListLeftRight_UnresolvableRevisionErrors(t *testing.T) {
 		t.Errorf("RevListLeftRight(HEAD...HEAD) = (%d, %d), want (0, 0)", l, r)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// CutPoint — the commit the branch left the base at.
+// ---------------------------------------------------------------------------
+
+// cutRepo puts the worktree on a branch cut from the local `main` and reports
+// the commit it was cut from. Real git throughout, like the drift tests beside
+// it: the subject is what git says about a history, and a recorder asserting
+// arguments would only confirm what it was told.
+func cutRepo(t *testing.T) (*worktree, *gitOps, string) {
+	t.Helper()
+	wt, local, _ := driftRepo(t)
+	cut, err := local.RevParse(t.Context(), "HEAD")
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	if _, err := wt.Branch(t.Context(), "flow/issue-42", "main"); err != nil {
+		t.Fatalf("Branch: %v", err)
+	}
+	return wt, local, cut
+}
+
+// A branch just cut carries nothing, and there the cut point IS HEAD.
+func TestWorktreeCutPoint_FreshBranchIsHead(t *testing.T) {
+	wt, local, cut := cutRepo(t)
+
+	got, err := wt.CutPoint(t.Context(), "main")
+	if err != nil {
+		t.Fatalf("CutPoint: %v", err)
+	}
+	head, err := local.RevParse(t.Context(), "HEAD")
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	if string(got) != cut || string(got) != head {
+		t.Errorf("CutPoint = %q, want HEAD %q on a branch carrying nothing", got, head)
+	}
+}
+
+// The reported case. The branch carries work, so its HEAD is the cut point PLUS
+// that work — and recording HEAD here is what made a finished branch read as one
+// the agent changed nothing on.
+func TestWorktreeCutPoint_BranchCarryingWorkIsBehindHead(t *testing.T) {
+	wt, local, cut := cutRepo(t)
+	commitOn(t, local, "implementation")
+
+	got, err := wt.CutPoint(t.Context(), "main")
+	if err != nil {
+		t.Fatalf("CutPoint: %v", err)
+	}
+	head, err := local.RevParse(t.Context(), "HEAD")
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	if string(got) == head {
+		t.Errorf("CutPoint = HEAD %q on a branch carrying a commit; the work is not its own baseline", head)
+	}
+	if string(got) != cut {
+		t.Errorf("CutPoint = %q, want the commit the branch was cut from %q", got, cut)
+	}
+}
+
+// The case that rules out reading the base branch's tip: an empty branch whose
+// base advanced under it. The merge base is behind both sides, so it is still
+// HEAD — while the tip is a commit the branch was never cut from.
+func TestWorktreeCutPoint_EmptyBranchWhoseBaseAdvancedIsStillHead(t *testing.T) {
+	wt, local, cut := cutRepo(t)
+	ctx := t.Context()
+	if err := local.Checkout(ctx, "main", "", false); err != nil {
+		t.Fatalf("checkout main: %v", err)
+	}
+	commitOn(t, local, "someone-elses-work")
+	if err := local.Checkout(ctx, "flow/issue-42", "", false); err != nil {
+		t.Fatalf("checkout back: %v", err)
+	}
+
+	got, err := wt.CutPoint(ctx, "main")
+	if err != nil {
+		t.Fatalf("CutPoint: %v", err)
+	}
+	if string(got) != cut {
+		t.Errorf("CutPoint = %q, want the unmoved cut point %q", got, cut)
+	}
+	tip, err := local.RevParse(ctx, "main")
+	if err != nil {
+		t.Fatalf("rev-parse main: %v", err)
+	}
+	if string(got) == tip {
+		t.Errorf("CutPoint = the base branch's tip %q, a commit the branch was never cut from", tip)
+	}
+}
+
+// A base that will not resolve is an ERROR, never a SHA — the reason RevParse's
+// contract gives: a caller handed HEAD would conclude the branch is empty.
+func TestWorktreeCutPoint_UnresolvableBaseErrors(t *testing.T) {
+	wt, _, _ := cutRepo(t)
+
+	got, err := wt.CutPoint(t.Context(), "no-such-base")
+	if err == nil {
+		t.Fatalf("CutPoint = %q, want an error naming the base it could not resolve", got)
+	}
+	if got != "" {
+		t.Errorf("CutPoint returned %q alongside its error; want no SHA at all", got)
+	}
+	if !strings.Contains(err.Error(), "no-such-base") || !strings.Contains(err.Error(), "CutPoint") {
+		t.Errorf("error %q names neither the base nor the reading that failed", err)
+	}
+}
+
+// An empty base is refused rather than defaulted: a merge base against a
+// revision nobody named is not a question about this item's work.
+func TestWorktreeCutPoint_EmptyBaseIsRefused(t *testing.T) {
+	wt, _, _ := cutRepo(t)
+
+	got, err := wt.CutPoint(t.Context(), "")
+	if err == nil {
+		t.Fatalf("CutPoint = %q on an empty base, want a refusal", got)
+	}
+	if got != "" {
+		t.Errorf("CutPoint returned %q alongside its refusal; want no SHA at all", got)
+	}
+}

@@ -206,6 +206,8 @@ Mechanical, and it exists as its own step for three reasons. A branch that fails
 
 Recording the base is what makes the change answerable later: *what is this relative to* has one answer, fixed at the moment the branch was cut, rather than being re-derived against a base that has since moved.
 
+What it records is the **branch point** — where the branch left the base — and not the branch's own `HEAD`. The two are the same on a branch just cut, and they are not on a re-entered item: a branch already carrying an earlier execution's commits has a `HEAD` that is the branch point *plus* that work, so recording `HEAD` would record the work as the thing it was cut from, and the branch would read as carrying nothing at all. Recording the branch point is what makes the record fixed at the cut rather than moving with the work, which is what the paragraph above claims of it.
+
 ### Implement
 
 Makes the change work.

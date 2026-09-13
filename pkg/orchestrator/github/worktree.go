@@ -117,6 +117,32 @@ func (w *worktree) Drift(ctx context.Context) (flow.Drift, error) {
 	return flow.Drift{Ahead: ahead, Behind: behind, At: nowUTC()}, nil
 }
 
+// CutPoint is the merge base of HEAD and the item's base branch — the commit
+// this branch left that base at.
+//
+// Against the LOCAL base and with NO FETCH, unlike Drift: the branch was cut
+// from the local base, so the local base is what it left, and the step that
+// records a cut point is the one that opens the branch — acquiring a network
+// call there would make opening a branch fail wherever the remote is out of
+// reach. A base that has since advanced locally does not move the answer: a
+// merge base is behind both sides, not level with either.
+//
+// An empty base is REFUSED rather than defaulted to the backend's own idea of
+// one: `git merge-base` against a revision nobody named is not a question about
+// this item's work, and a caller handed HEAD in its place would conclude the
+// branch is empty.
+func (w *worktree) CutPoint(ctx context.Context, base flow.BranchName) (flow.CommitSha, error) {
+	if base == "" {
+		return "", errors.New("worktree.CutPoint: no base branch given; a cut point is only " +
+			"meaningful against the branch the work was cut from")
+	}
+	sha, err := w.b.git.MergeBase(ctx, string(base), "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("worktree.CutPoint: %w", err)
+	}
+	return flow.CommitSha(sha), nil
+}
+
 // Request exposes the pull-request surface. This orchestrator lands changes
 // through pull requests, so it returns the worktree itself — one capability,
 // not six.
