@@ -612,6 +612,14 @@ func TestStepOpenBranch_RecordsTheCommitTheBranchWasCutFrom(t *testing.T) {
 	if res.Payload.CommitHash != "base" {
 		t.Errorf("recorded %q, want the commit the branch sits on", res.Payload.CommitHash)
 	}
+	// Read against the item's RESOLVED base, which is the only thing that makes
+	// a merge base a cut point. Nothing else here would catch handing over the
+	// claim branch or a blank — the fake answers whatever it is asked — while a
+	// backend refuses a base nobody named, so the mistake surfaces only on a
+	// real run.
+	if wt.callIndex("cut-point:main") < 0 {
+		t.Errorf("calls = %v, want the cut point read against the item's base %q", wt.calls, "main")
+	}
 	// Mechanical: no prose, and no agent turn.
 	if res.Payload.Markdown != "" {
 		t.Errorf("produced markdown %q — this step produces a commit, not prose", res.Payload.Markdown)
