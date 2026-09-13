@@ -2012,6 +2012,38 @@ func TestStepOpenPR_AnExistingRequestIsUpdatedNotReopened(t *testing.T) {
 	}
 }
 
+// The other half of the one wording, which is the half nothing else asserts: a
+// FIRST round opened the request, and saying it was already open would put a
+// false account of what this dispatch did into the journal the maintainer reads
+// back. The two arms differ in the message and in nothing else the record keeps
+// — a signal step writes no payload — so the message is the only place the
+// route taken survives, and requestOpened interpolates it from a call site the
+// type system is happy to see given either string.
+func TestStepOpenPR_AFirstRoundSaysTheRequestIsOpenRatherThanAlreadyOpen(t *testing.T) {
+	wt := resumedWorktree()
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	res, err := testBuilder(t).stepOpenPR(ctx)
+	if err != nil {
+		t.Fatalf("stepOpenPR: %v", err)
+	}
+	if wt.callIndex("open") < 0 {
+		t.Fatalf("calls = %v, want the request this round opened", wt.calls)
+	}
+	if strings.Contains(res.Message, "already open") {
+		t.Errorf("message = %q — this dispatch opened the request; only a rework round finds "+
+			"one already there", res.Message)
+	}
+	if !strings.Contains(res.Message, "is open") {
+		t.Errorf("message = %q, want it to say the request is open", res.Message)
+	}
+	// And WHICH request: the branch is the half of the sentence that says what
+	// the successor is being told about, and the format string carries both.
+	if !strings.Contains(res.Message, testBranch) {
+		t.Errorf("message = %q, want it to name branch %q", res.Message, testBranch)
+	}
+}
+
 // The same ORDERING property the first round has, and for the same reasons: the
 // gate measures the branch exactly as it will be proposed, so after the
 // recording and before anything leaves the machine.
