@@ -72,6 +72,12 @@ type ghMock struct {
 	// read that does not show what was just written to it — selectively.
 	hideLabelOnRead func(name string) bool
 
+	// failIssueRead answers the issue endpoint with 500, for a caller whose
+	// correctness is in what it does when it CANNOT read the item. Endpoint-
+	// scoped, where `refusals` is served before routing: a test about one read
+	// failing must not depend on how many other requests happen to precede it.
+	failIssueRead bool
+
 	// comments
 	nextCommentID int64
 	comments      []ghMockComment
@@ -529,6 +535,10 @@ const rawContentPrefix = "/raw/"
 func (m *ghMock) handleIssue(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.failIssueRead {
+		http.Error(w, `{"message":"Server Error"}`, http.StatusInternalServerError)
+		return
+	}
 	// PATCH is how the editor lands title, body and labels — the three
 	// together, in one request, which is what makes them atomic. Applying it
 	// here is what lets a test assert that a refused edit wrote NOTHING: a mock
@@ -2905,6 +2915,42 @@ func TestBackend_Release_DirtyAndOffBaseReportsTheDirtyTree(t *testing.T) {
 		t.Errorf("Code = %q, want dirty-tree: the tree is what has to be dealt with first", refused.Code)
 	}
 	assertReleaseChangedNothing(t, b, mock)
+}
+
+// A git command that could not ANSWER is not a refusal, and the difference is
+// load-bearing at the seam above: the CLI renders a typed refusal as the failing
+// check with the porcelain indented under it, and an ordinary error as the
+// backend's own words. A `git status` that failed, reported as dirty-tree, would
+// name a check that never ran and send the operator to clean a tree git could
+// not read — and, since nothing overrides a release precondition, leave no way
+// out of it. Same for HEAD, which is why both are asserted here.
+func TestBackend_Release_AGitFailureIsAnErrorNotARefusal(t *testing.T) {
+	for _, c := range []struct {
+		name, sub, msg string
+	}{
+		{"status", "status --porcelain --untracked-files=normal", "fatal: not a git repository"},
+		{"head", "rev-parse --abbrev-ref HEAD", "fatal: ambiguous argument 'HEAD'"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b, mock, rec := releaseBackend(t)
+			rec.handlers[c.sub] = func([]string) ([]byte, error) {
+				return nil, errors.New(c.msg)
+			}
+
+			err := b.Release(t.Context(), b.refFromIssue(42))
+			if err == nil {
+				t.Fatal("Release must surface a git failure rather than proceeding")
+			}
+			var refused flow.ErrClaimRefused
+			if errors.As(err, &refused) {
+				t.Errorf("a git failure was dressed as the %q refusal; the condition was never read", refused.Code)
+			}
+			if !strings.Contains(err.Error(), c.msg) {
+				t.Errorf("error = %v, want git's own account of the failure", err)
+			}
+			assertReleaseChangedNothing(t, b, mock)
+		})
+	}
 }
 
 // A clean arena on the trunk releases, which is the condition the refusals

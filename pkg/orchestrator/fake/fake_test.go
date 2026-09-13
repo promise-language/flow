@@ -211,6 +211,17 @@ func TestBackend_ClaimRefusesASecondItemInAnOccupiedArena(t *testing.T) {
 		t.Errorf("Reason = %q, want it to name the item the arena holds", refused.Reason)
 	}
 
+	// An empty Override says no flag bypasses it; that every override is in
+	// fact refused is the other half of the same claim, and the half a caller
+	// could otherwise disprove. --force means "take this from another party",
+	// and the party here is us: forcing past it would overwrite our own lease
+	// with item 1's work still in the tree.
+	if _, err := b.Claim(ctx, itemRef("2"), []flow.ClaimOverride{
+		flow.OverrideAlreadyHeld, flow.OverrideDirtyTree, flow.OverrideStaleBase,
+	}); !errors.As(err, &refused) || refused.Code != "arena-occupied" {
+		t.Errorf("with every override: err = %v, want the arena-occupied refusal — no override reaches it", err)
+	}
+
 	// The refusal left the first claim standing.
 	active, err := b.LookupActiveClaim(ctx)
 	if err != nil || active == nil {

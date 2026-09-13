@@ -22,10 +22,45 @@ type releaseRefusing struct {
 
 func (b *releaseRefusing) Release(context.Context, flow.ItemRef) error { return b.err }
 
-func releaseTestApp(t *testing.T, be flow.Orchestrator) (*App, *bytes.Buffer) {
+func releaseTestApp(t *testing.T, be flow.Orchestrator) (*App, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	var out, errBuf bytes.Buffer
-	return &App{Orchestrator: be, Out: &out, Err: &errBuf}, &errBuf
+	return &App{Orchestrator: be, Out: &out, Err: &errBuf}, &out, &errBuf
+}
+
+// The positive control for the refusals below: a release that is NOT refused
+// names the item it dropped, exits 0, and leaves the arena holding nothing.
+// Without it every assertion here would still pass against a cmdRelease that
+// refused unconditionally — and the arena would be stuck, since release is the
+// only way a claim moves short of resolution (docs/cli.md § Releasing).
+func TestCmdRelease_DropsTheClaimAndNamesTheItem(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	if _, err := be.Claim(context.Background(), itemRefFor("1"), nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	app, out, errBuf := releaseTestApp(t, be)
+
+	if code := app.cmdRelease(context.Background(), nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if got, want := out.String(), "released 1\n"; got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+	// Reported, and done: a command that printed the line without reaching the
+	// backend leaves an arena that reads free and is not.
+	active, err := be.LookupActiveClaim(context.Background())
+	if err != nil {
+		t.Fatalf("LookupActiveClaim: %v", err)
+	}
+	if active != nil {
+		t.Errorf("active claim = %+v, want none — release reported a drop it did not make", active)
+	}
+	// And the arena is free for the next item, which is what the release was for.
+	be.AddItem("2", flow.Item{Type: "task", Title: "2"})
+	if _, err := be.Claim(context.Background(), itemRefFor("2"), nil); err != nil {
+		t.Errorf("the arena is still occupied after a reported release: %v", err)
+	}
 }
 
 // A refused release is rendered as a refusal, not as a bare error line: the
@@ -44,7 +79,7 @@ func TestCmdRelease_RendersATypedRefusal(t *testing.T) {
 		Detail: " M cli/cmd_release.go\n?? scratch.md",
 		Check:  "clean-tree",
 	}}
-	app, errBuf := releaseTestApp(t, be)
+	app, _, errBuf := releaseTestApp(t, be)
 
 	if code := app.cmdRelease(context.Background(), nil); code != 1 {
 		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
@@ -109,7 +144,7 @@ func TestCmdRelease_AnUntypedFailureKeepsThePlainLine(t *testing.T) {
 		t.Fatalf("Claim: %v", err)
 	}
 	be := &releaseRefusing{Orchestrator: inner, err: errors.New("the lease label would not come off")}
-	app, errBuf := releaseTestApp(t, be)
+	app, _, errBuf := releaseTestApp(t, be)
 
 	if code := app.cmdRelease(context.Background(), nil); code != 1 {
 		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
