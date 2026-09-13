@@ -698,6 +698,68 @@ func TestCompletion_ARevisedDispatchIsPricedAtEveryRoundItSpent(t *testing.T) {
 	}
 }
 
+// And the other end of that headroom: a refused round that ate the whole cap
+// leaves the revision nothing to spend, so the round stops at the treasurer's
+// gate before it reaches the substrate. This is the observed shape — the plan
+// refused here cost $7.82 — and what it must report is the axis a GRANT can
+// extend, charged as the dispatch it was, rather than a failure that sends an
+// operator looking for a defect. The refusal and the text it refused were
+// stashed before the round began, so what the grant buys is an amendment and
+// not the whole plan again.
+func TestCompletion_ARevisionRoundThatFindsTheCostCapSpentParksOnCost(t *testing.T) {
+	agent := &stubAgent{name: "stub", responses: []flow.AgentResponse{{LastText: "ok", CostUSD: 2}}}
+	var seen []string
+	app, be, claim := capturingApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			wip, err := ctx.WorkInProgress()
+			if err != nil {
+				return flow.StepResult{}, err
+			}
+			seen = append(seen, wip)
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"}); err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Finalize(flow.DispositionResolved, "the plan is written").
+				Markdown("the plan mentioning /home/someone/"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	})
+	app.Agent = agent
+	// The refused round's turn spends the cap exactly, which is what the
+	// revision round then finds on the ledger the gate reads.
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxCostUSD: 2}}
+	be.refusals = []error{refusedComment()}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkTreasurerRefused || res.Park.Axis != flow.AxisCost {
+		t.Fatalf("res = %+v, want a treasurer-refused park on the cost axis — the axis a grant extends", res)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("handler ran %d times, want 2 — the refused run and the round that found the cap spent", len(seen))
+	}
+	// The gate refuses before the substrate is asked, so the round that could
+	// not be afforded was not bought either.
+	if len(agent.reqs) != 1 {
+		t.Errorf("the agent saw %d requests, want 1 — the revision's prompt must not reach the substrate past the cap", len(agent.reqs))
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if row := state.Ledger.Row("plan"); row.Dispatches != 1 {
+		t.Errorf("Dispatches = %d, want 1 — the dispatch that ran out of money is an attempt, whichever round it ended in", row.Dispatches)
+	}
+	if len(state.Journal) != 0 {
+		t.Errorf("journal = %+v, want empty — nothing the guard accepted was ever produced", state.Journal)
+	}
+	wip, err := be.LoadWorkInProgress(context.Background(), claim.ItemRef, "plan")
+	if err != nil {
+		t.Fatalf("LoadWorkInProgress: %v", err)
+	}
+	if !strings.Contains(wip, guardAnswer) || !strings.Contains(wip, "the plan mentioning") {
+		t.Errorf("stash = %q, want the refusal and the refused text kept for the dispatch a grant buys", wip)
+	}
+}
+
 // The revision round ends however a handler ends, and a flapping runner in it
 // must not cost the item what the dispatch is holding. It parks infra-transient
 // on the round's own failure and burns no invocation — neither the refused

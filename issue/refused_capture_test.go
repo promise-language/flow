@@ -181,6 +181,78 @@ func TestARefusedPlanIsRevisedInTheSameDispatch(t *testing.T) {
 	}
 }
 
+// The round is bounded, and what is on the other side of the bound is a person.
+// A plan refused twice in one dispatch parks blocked — and the promise the park
+// makes is that the re-run a person buys is the cheap one: it amends the LATEST
+// refused plan rather than deriving a third.
+//
+// Only the shipped binary can show that. The gates a dispatch passes before the
+// handler runs are this package's, not the SDK's (answerGate, coverageGate), so
+// a gate that held a blocked item would strand the park the SDK tests prove is
+// re-runnable — every one of them would still pass, and the resolution would
+// need a person with no way for the person to help.
+func TestAPlanRefusedTwiceParksForAPersonAndTheReRunAmends(t *testing.T) {
+	ctx := context.Background()
+	be := fake.New(resolveSignals()...)
+	be.SetSupportedArtifacts(resolveArtifacts()...)
+	be.AddItem("42", flow.Item{Type: "task", Title: "widget is broken"})
+	arena := &refusingArena{Orchestrator: be, appendErrs: []error{planRefusal, planRefusal}}
+
+	// Both refused plans read as home paths without naming anyone ("someone" is
+	// a placeholder the real disclosure rules exempt), and they are different
+	// sentences, so the prompt the re-run gets can be said to carry the second
+	// rather than the first.
+	const firstPlan = "the parser lives at /home/someone/src/parser.go"
+	const secondPlan = "the tests live under /home/someone/src/testdata"
+	const thirdPlan = "the parser lives at src/parser.go"
+	agent := &scriptedAgent{replies: []string{planned(firstPlan), planned(secondPlan), planned(thirdPlan)}}
+	app, claim := atThePlan(t, arena, agent)
+
+	res := runStep(t, app)
+	if res.Park == nil || res.Park.Kind != flow.ParkBlocked {
+		t.Fatalf("plan: %s: %s (park %+v), want a blocked park once the round was spent", res.Status, res.Reason, res.Park)
+	}
+	if res.RedispatchMayClear == nil || *res.RedispatchMayClear {
+		t.Errorf("RedispatchMayClear = %v, want a present false — `resolve` must not buy a third round on its own", res.RedispatchMayClear)
+	}
+	if len(agent.prompts) != 2 {
+		t.Fatalf("the dispatch sent %d prompt(s), want 2 — the plan and its one revision round", len(agent.prompts))
+	}
+
+	// The person re-runs, which is what buys the next round.
+	res = runStep(t, app)
+	if res.Status != string(flow.StatusDone) {
+		t.Fatalf("the re-run: %s: %s (park %+v)", res.Status, res.Reason, res.Park)
+	}
+	if len(agent.prompts) != 3 {
+		t.Fatalf("the re-run sent %d prompt(s) in total, want 3 — it amended once and was done", len(agent.prompts))
+	}
+	third := agent.prompts[2]
+	for _, want := range []string{
+		planRefusal.Reason.Error(), // what the guard found
+		secondPlan,                 // the text it found it in, the second time
+		refusedResultFraming,       // amend this, do not re-plan
+	} {
+		if !strings.Contains(third, want) {
+			t.Errorf("the re-run's prompt does not carry %q:\n%s", want, third)
+		}
+	}
+	if strings.Contains(third, firstPlan) {
+		t.Errorf("the re-run is amending the FIRST refused plan; the record it reads is stale:\n%s", third)
+	}
+
+	state, err := arena.Load(ctx, claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.Journal) != 1 || state.Journal[0].Result.Markdown != planned(thirdPlan) {
+		t.Fatalf("journal = %+v, want the one entry the re-run's amendment appended", state.Journal)
+	}
+	if state.Park != nil {
+		t.Errorf("Park = %+v after the re-run landed, want none", state.Park)
+	}
+}
+
 // The other surface, through the same store, and the case that says the two are
 // told apart by what was refused rather than by the fact of a refusal.
 //
