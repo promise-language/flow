@@ -199,9 +199,27 @@ func (c *Client) turn(ctx context.Context, req flow.AgentRequest, resume string)
 		parseErr = fmt.Errorf("stdin write: %w", err)
 	}
 
+	// The session id the stream did name, whatever else went wrong. It is the
+	// difference between a turn that never started and one that was killed in the
+	// middle: `claude` announces its session in the init event, long before the
+	// result event the failure paths below are missing. Run reads exactly that to
+	// decide whether a handle it offered was declined, and a turn that got as far
+	// as saying which conversation it was in is never re-sent.
+	//
+	// It travels on EVERY failure path, and the cancelled one is why that is
+	// worth stating: a step killed on its deadline is the commonest interruption
+	// there is, and a turn whose conversation went unrecorded because the clock
+	// ran out is bought again on the resume — the re-buying docs/resolution.md
+	// § Nothing is bought twice forbids.
+	var session string
+	if resp != nil {
+		session = resp.SessionID
+	}
+
 	// Context cancellation overrides everything else.
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return &flow.AgentResponse{
+			SessionID: session,
 			Failure: &flow.AgentFailure{
 				Kind:    "cancelled",
 				Message: ctxErr.Error(),
@@ -210,16 +228,6 @@ func (c *Client) turn(ctx context.Context, req flow.AgentRequest, resume string)
 	}
 
 	if parseErr != nil {
-		// The session id the stream did name is kept, and it is the difference
-		// between a turn that never started and one that was killed in the middle:
-		// `claude` announces its session in the init event, long before the result
-		// event this path is missing. Run reads exactly that to decide whether a
-		// handle it offered was declined, and a turn that got as far as saying
-		// which conversation it was in is never re-sent.
-		var session string
-		if resp != nil {
-			session = resp.SessionID
-		}
 		return &flow.AgentResponse{
 			SessionID: session,
 			Failure: &flow.AgentFailure{
@@ -372,7 +380,11 @@ func parseStream(r io.Reader) (*flow.AgentResponse, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan: %w", err)
+		// The partial response travels with the error here too, for the reason it
+		// does below: there is no usable turn, but a stream that named its session
+		// before the read broke is a turn that STARTED, and the caller decides a
+		// declined resume from a killed one on exactly that.
+		return resp, fmt.Errorf("scan: %w", err)
 	}
 
 	if !resultEvent {

@@ -1106,3 +1106,68 @@ func TestRun_CancelledFailureIsNotTransient(t *testing.T) {
 		t.Errorf("Failure.Transient = true, want false for cancelled failures")
 	}
 }
+
+// A CANCELLED turn keeps the session it named, and this is the path where that
+// matters most: a step killed on its deadline parks, and the dispatch that picks
+// it up after a `grant --timeout` has to resume the conversation the dead turn
+// opened rather than buy it again (docs/resolution.md § Nothing is bought twice).
+//
+// The turn below never reaches a result event — the process was killed mid-turn —
+// but the init event already said which conversation it was in, which is the
+// whole of what the next dispatch needs.
+func TestRun_ACancelledTurnKeepsTheSessionItNamed(t *testing.T) {
+	const killedMidTurn = `{"type":"system","subtype":"init","session_id":"sess-9"}
+{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"working"}]},"session_id":"sess-9"}
+`
+	c := clientWith(&fakeCmd{stdoutStream: killedMidTurn, waitErr: errors.New("signal: killed")})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	resp, err := c.Run(ctx, flow.AgentRequest{Prompt: "x"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.Failure == nil || resp.Failure.Kind != "cancelled" {
+		t.Fatalf("Failure = %+v, want kind=cancelled", resp.Failure)
+	}
+	if resp.SessionID != "sess-9" {
+		t.Errorf("SessionID = %q, want sess-9 — a turn the clock killed still opened a conversation, and dropping the handle makes the resume pay for it twice", resp.SessionID)
+	}
+}
+
+// errAfter reads r to exhaustion and then fails, which is what a broken pipe
+// looks like to the scanner: some events arrived, the read did not end cleanly.
+type errAfter struct {
+	r   io.Reader
+	err error
+}
+
+func (e *errAfter) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err == io.EOF {
+		return n, e.err
+	}
+	return n, err
+}
+
+// A scan failure keeps the session the stream already named, for the same reason
+// the missing-result path does: the caller tells a declined resume from a turn
+// that broke by whether the turn ever said which conversation it was in, and a
+// read that failed after the init event is the second of those.
+func TestParseStream_AScanFailureKeepsTheSessionItNamed(t *testing.T) {
+	stream := &errAfter{
+		r:   strings.NewReader(`{"type":"system","subtype":"init","session_id":"sess-scan"}` + "\n"),
+		err: errors.New("broken pipe"),
+	}
+
+	resp, err := parseStream(stream)
+	if err == nil {
+		t.Fatal("parseStream returned no error; a failed read is not a usable turn")
+	}
+	if resp == nil {
+		t.Fatal("parseStream returned no response; the session the stream named is what the caller reads to know the turn started")
+	}
+	if resp.SessionID != "sess-scan" {
+		t.Errorf("SessionID = %q, want sess-scan", resp.SessionID)
+	}
+}
