@@ -168,6 +168,77 @@ func TestAllOriginsAndActs_CallerCannotMutateTheSet(t *testing.T) {
 	}
 }
 
+// A refused RESULT is recognisable by its shape, and by nothing else in the
+// store: the step that reads its work in progress back has to tell finished
+// work the guard refused (to be amended) from working-out on the way to it (to
+// be continued from), and everything in that store is the same string type.
+//
+// The two refused records are what the predicate exists to separate, so they
+// are the first two cases. A question the guard refused is stashed as a refusal
+// too, and by the time the step runs again it has been revised or answered —
+// so a predicate that answered "did a refusal write this" rather than "was the
+// RESULT refused" would tell a step resuming after an answer to produce its
+// result out of the question.
+func TestIsRefusedResultRecord(t *testing.T) {
+	result := ErrDisclosureRefused{Act: ActArtifactComment, Reason: errors.New("a home path")}
+	question := ErrDisclosureRefused{Act: ActQuestion, Reason: errors.New("a home path")}
+	for name, c := range map[string]struct {
+		record string
+		want   bool
+	}{
+		"a refused result":                 {RefusedResultRecord(result, "the plan mentioning /home/someone/"), true},
+		"a refused result of empty text":   {RefusedResultRecord(result, ""), true},
+		"a refused question":               {RefusedRecord(question, "Which base branch? /home/someone/"), false},
+		"a refused question of empty text": {RefusedRecord(question, ""), false},
+		"nothing stashed":                  {"", false},
+		"ordinary notes":                   {"half a plan\n\n- the parser\n- the fixture", false},
+		"notes that mention the preamble":  {"I remember that " + refusedResultRecordPreamble + " last time.", false},
+		// A record must open with the preamble; a refusal quoted after other
+		// text is notes about a refusal, not the refusal.
+		"the preamble on the second line": {"notes\n" + refusedResultRecordPreamble, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := IsRefusedResultRecord(c.record); got != c.want {
+				t.Errorf("IsRefusedResultRecord(%q) = %v, want %v", c.record, got, c.want)
+			}
+		})
+	}
+}
+
+// The predicate is a prefix check, so the two preambles have to be separable by
+// prefix: if either opened the other, one surface's record would read as the
+// other's and the predicate could not tell the writers apart at all. Pinned
+// here rather than left to whoever next edits the wording.
+func TestRefusedPreamblesAreSeparableByPrefix(t *testing.T) {
+	if strings.HasPrefix(refusedRecordPreamble, refusedResultRecordPreamble) ||
+		strings.HasPrefix(refusedResultRecordPreamble, refusedRecordPreamble) {
+		t.Errorf("one refused preamble opens the other, so a prefix check cannot separate them:\n%q\n%q",
+			refusedRecordPreamble, refusedResultRecordPreamble)
+	}
+}
+
+// Both records carry the same two things, because both are read back by
+// somebody who has to revise text: the guard's answer, which says what to
+// change, and the text itself, which without the answer would be re-offered
+// unchanged and refused identically.
+func TestRefusedRecordsCarryTheAnswerAndTheText(t *testing.T) {
+	refused := ErrDisclosureRefused{Act: ActArtifactComment, Reason: errors.New("a home path")}
+	const body = "the plan mentioning /home/someone/"
+	for name, record := range map[string]string{
+		"a refused result":   RefusedResultRecord(refused, body),
+		"a refused question": RefusedRecord(refused, body),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(record, refused.Error()) {
+				t.Errorf("record does not carry the guard's answer:\n%s", record)
+			}
+			if !strings.Contains(record, body) {
+				t.Errorf("record does not carry the text that was refused:\n%s", record)
+			}
+		})
+	}
+}
+
 // A refusal has to be recognisable without matching on a message, and must
 // never be mistaken for ErrTransient — which the orchestrator retries, and
 // retrying a refusal re-proposes the very text that was refused.

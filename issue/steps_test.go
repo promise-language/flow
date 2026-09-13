@@ -2422,6 +2422,48 @@ func TestQuestionDisclosureRevisionSucceedsOnFirstRetry(t *testing.T) {
 	}
 }
 
+// The stash holds the LATEST turn, and a refusal only while it is the latest
+// thing that happened. A refusal record is written on every refused round —
+// before exhaustion is even checked — so without replacing it on the way out
+// the record outlives the question it was about: the step parks awaiting an
+// answer with a refusal in its store, a person answers, and the run that
+// resumes is handed that refusal as its work in progress.
+//
+// Both ways an accepted revision leaves the loop are here, because they return
+// from different places and only one of them is the common path.
+func TestQuestionDisclosureAcceptedRevisionReplacesTheRefusalRecord(t *testing.T) {
+	const guardAnswer = "an absolute home path names the machine's user"
+	const disclosing = "The checkout is at /Users/someone/src.\n" +
+		"NEEDS-ANSWER: cache or new store?\n```\nboth are plausible\n```"
+	for name, revision := range map[string]string{
+		"the revision is accepted": "The checkout is this repository.\n" +
+			"NEEDS-ANSWER: cache or new store?\n```\nboth are plausible\n```",
+		"the revision drops the question": "Looking again, the cache path settles it. Continuing.",
+	} {
+		t.Run(name, func(t *testing.T) {
+			agent := &scriptedAgent{replies: []string{disclosing, revision}}
+			ctx := ctxWithPlan(resumedWorktree(), agent)
+			ctx.askErrs = []error{questionRefusal(guardAnswer)}
+
+			_, _ = testBuilder(t).stepReview(ctx)
+
+			if len(ctx.wipSaves) == 0 {
+				t.Fatal("nothing stashed at all")
+			}
+			last := ctx.wipSaves[len(ctx.wipSaves)-1]
+			if strings.Contains(last, guardAnswer) {
+				t.Errorf("the refusal outlived the question it was about; the stash is:\n%s", last)
+			}
+			if flow.IsRefusedResultRecord(last) {
+				t.Errorf("the question path stashed a record that reads as the step's refused RESULT:\n%s", last)
+			}
+			if last != revision {
+				t.Errorf("stash = %q, want the turn the revision produced", last)
+			}
+		})
+	}
+}
+
 // A question that cannot be made postable within the bound parks rather than
 // failing — the work is sound and a person has to decide.
 func TestQuestionDisclosureExhaustionParks(t *testing.T) {

@@ -230,13 +230,15 @@ func TestLabels_RetiredSuffixesAreNotVocabulary(t *testing.T) {
 	}
 }
 
-// A result the disclosure guard refuses at capture parks step-did-not-complete
-// rather than blocked (#325), and the move was made on one premise: the
+// A result the disclosure guard refuses at capture, whose refusal could not be
+// kept with the step, parks step-did-not-complete rather than blocked (#325;
+// one whose refusal was kept is revised inside the dispatch, and parks blocked
+// only when that round is spent), and the move was made on one premise: the
 // tracker's visible state does not change, because the kind is advertised by
 // the same flow:blocked label a blocked park carries (docs/github-schema.md §
 // Labels). This pins that premise. A label of the kind's own would move every
-// refused capture off the one label discover reads as "parked, do not offer",
-// and nothing else in the move would notice.
+// such park off the one label discover reads as "parked, do not offer", and
+// nothing else in the move would notice.
 func TestParkLabel_StepDidNotCompleteIsAdvertisedAsBlocked(t *testing.T) {
 	l := newLabels("flow:")
 	req := &flow.ParkRequest{

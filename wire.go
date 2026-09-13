@@ -20,9 +20,11 @@ const (
 	ParkTreasurerRefused ParkKind = "treasurer-refused"
 	// ParkStepDidNotComplete — the step returned without completing: it elected
 	// no route, or elected one and produced no result — or its result was
-	// refused at capture by the disclosure guard, so nothing could be journaled.
-	// A re-dispatch can still do the job, which is why it parks rather than
-	// fails.
+	// refused at capture by the disclosure guard and the refusal could not be
+	// kept with the step, so nothing could be journaled and the next dispatch
+	// starts over. (A refused result whose refusal WAS kept is revised inside
+	// the dispatch, and parks blocked only when that round is spent.) A
+	// re-dispatch can still do the job, which is why it parks rather than fails.
 	ParkStepDidNotComplete ParkKind = "step-did-not-complete"
 	// ParkInfraTransient — the step's failure was observed-infra (remote
 	// runner offline, transient 5xx, network timeout). The orchestrator
@@ -119,8 +121,8 @@ func (k ParkKind) RedispatchMayClear() bool {
 	case ParkStepDidNotComplete:
 		// A re-dispatch can still do the job, and the treasurer bounds the
 		// loop: the dispatch IS charged, and the one outcome that is not — a
-		// result refused at capture — is metered on the cost axis for every
-		// turn it spent.
+		// result refused at capture whose refusal could not be kept — is
+		// metered on the cost axis for every turn it spent.
 		return true
 	case ParkInfraTransient:
 		// Against a healthy runner.

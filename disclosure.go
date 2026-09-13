@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // Origin names the party standing behind a string that is about to be
@@ -210,17 +211,61 @@ type DisclosureGuard interface {
 // would be re-offered unchanged and refused identically, and the answer alone
 // does not say what to revise.
 //
-// One wording, in the package that owns the refusal, because two parties keep
-// this record — the SDK's capture path, when publishing a step's result is
-// refused, and a handler that offered text of its own — and a reader who has
-// learned to recognise one of them has learned to recognise the other.
+// This is the record for text a handler offered from INSIDE its invocation — a
+// question, most often — which is working-out on the way to a result, not the
+// result. The step's own result has a record of its own: RefusedResultRecord.
 //
 // It is stashed locally and NEVER published: the guard's answer quotes what it
 // caught (docs/disclosure.md § What a refusal carries), so a record repeating it
 // carries the refused fragment.
 func RefusedRecord(refused ErrDisclosureRefused, body string) string {
+	return refusedRecord(refusedRecordPreamble, refused, body)
+}
+
+// RefusedResultRecord is RefusedRecord for the one surface that is the step's
+// own RESULT: the payload it elected, refused when the SDK captured it.
+//
+// A record of its own rather than a flag beside the other, because the two land
+// in the same work-in-progress store and are read back by the same prompt, so
+// what tells them apart has to be in the record. They ask opposite things of
+// the step that reads one: a refused result is finished work to be amended and
+// offered again, while a refused question is superseded by the time the step
+// runs again — it was revised, or it was answered — and the result is still to
+// come. A reader that could not separate them would tell a step resuming after
+// an answered question to produce its result out of the question.
+func RefusedResultRecord(refused ErrDisclosureRefused, body string) string {
+	return refusedRecord(refusedResultRecordPreamble, refused, body)
+}
+
+// The preambles open their records, and are what a reader recognises one by.
+// Writer and reader of each shape sit side by side, here, and nothing else
+// parses them. Neither may be a prefix of the other: that is what lets one
+// predicate separate the two surfaces.
+const (
+	refusedRecordPreamble       = "An earlier run produced this text and the disclosure guard refused to publish it."
+	refusedResultRecordPreamble = "An earlier run of this step produced its result and the disclosure guard refused to publish it."
+)
+
+// refusedRecord is the body both records share: the guard's answer, then the
+// text it refused, under whichever preamble names the surface.
+func refusedRecord(preamble string, refused ErrDisclosureRefused, body string) string {
 	return fmt.Sprintf(
-		"An earlier run produced this text and the disclosure guard refused to publish it.\n\n"+
-			"The refusal:\n\n%s\n\nThe text that was refused:\n\n%s",
+		preamble+"\n\nThe refusal:\n\n%s\n\nThe text that was refused:\n\n%s",
 		refused.Error(), body)
+}
+
+// IsRefusedResultRecord reports whether a work-in-progress record is one that
+// RefusedResultRecord wrote — a refused RESULT, to be amended — rather than
+// anything else that lands in the same store: notes a step left itself, or a
+// question the guard refused. Both of those are working-out, continued from and
+// superseded; a refused result is finished, and a prompt that framed it as
+// notes would invite the step to start over on work that is only expressed
+// wrongly. Pointed the other way the mistake is worse: a step told to produce
+// its result from a question it has since had answered.
+//
+// A prefix check, deliberately. The preamble is the record's first line and
+// nothing a step writes as notes begins with it; text that merely mentions it
+// further in is notes quoting a refusal, not a refusal.
+func IsRefusedResultRecord(record string) bool {
+	return strings.HasPrefix(record, refusedResultRecordPreamble)
 }
