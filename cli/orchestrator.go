@@ -393,6 +393,14 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		sctx.setResolutionSession(flow.AgentSession{SessionID: sess.SessionID})
 	}
 
+	// The worktree state the step DECLARED it needs, put there mechanically —
+	// before the dispatch, and before the write-contract snapshot the
+	// establishment itself then takes. Nothing is dispatched and nothing is
+	// charged when it cannot be established.
+	if out, stop, err := establishNeeds(ctx, app, ref, sctx, li, result); stop {
+		return out, err
+	}
+
 	// Dispatch. The handler completes by RETURNING its election; res is read
 	// only on the completion path (translateHandlerError's nil-error branch),
 	// because every other way a dispatch ends is one where nothing was elected.
@@ -602,6 +610,108 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	return sctx.stampResult(translateHandlerError(ctx, app, ref, result, li, sctx, handlerErr))
 }
 
+// establishNeeds puts the worktree into the state the step declares it NEEDS,
+// mechanically and from durable state, before anything is dispatched
+// (docs/resolution.md § Steps and the worktree, docs/flow-registration.md
+// § Step configuration).
+//
+// The order is the whole point. The worktree is acquired, put into the declared
+// state, and only THEN snapshotted for the write-contract check — so the check
+// compares what the handler did against the state the SDK handed it, rather
+// than against wherever the worktree happened to be sitting. A step declaring
+// `item-branch` with no MayBranch used to reach its dispatch on whatever branch
+// the previous step left behind, and the flow's own checkout of the item branch
+// was then read back as the agent having switched it.
+//
+// A state that cannot be established BLOCKS the item, naming the step and the
+// state: "a state that cannot be established (the branch does not exist) blocks
+// the item naming the step and the missing state". That is ParkBlocked — a
+// condition only a person can lift — and the branch not being here is exactly
+// that: the work is not in this worktree, and no number of re-dispatches puts
+// it there. Not being ABLE TO ASK is a different answer: a base branch resolved
+// over the network, or a worktree the arena could not produce, are conditions a
+// re-dispatch may clear, so they park infra-transient.
+//
+// Nothing is charged in any of them. No handler ran, so there is no attempt at
+// the step to bill for.
+//
+// Returns stop=true when the item parked and the result is the caller's to
+// return.
+func establishNeeds(
+	ctx context.Context,
+	app *App,
+	ref flow.ItemRef,
+	sctx *stepCtx,
+	li flow.LifecycleItem,
+	result flow.InvocationResult,
+) (flow.InvocationResult, bool, error) {
+	if li.Needs == flow.NeedsAny {
+		// Nothing established, and deliberately nothing acquired either: the
+		// handler's own first Worktree() takes the snapshot, exactly as before.
+		return flow.InvocationResult{}, false, nil
+	}
+	park := func(kind flow.ParkKind, format string, a ...any) (flow.InvocationResult, bool, error) {
+		out, err := parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
+			Kind:   kind,
+			Step:   li.Result(),
+			Reason: fmt.Sprintf(format, a...),
+		})
+		return out, true, err
+	}
+	if app.ItemBranches == nil {
+		// Not reachable through the entry point — startup refuses a flow that
+		// declares a state nothing can resolve the names for (App.validate) —
+		// and reachable by a caller that assembled an App itself and dispatched
+		// through RunOne. Blocked, because wiring the resolver is a person's job.
+		return park(flow.ParkBlocked,
+			"step %q needs the worktree on the item's %s, and this binary resolves no branch names for the item "+
+				"(App.ItemBranches is nil)", li.Result(), li.Needs)
+	}
+	branches, err := app.ItemBranches(sctx.ctx, sctx.Item())
+	if err != nil {
+		return park(flow.ParkInfraTransient,
+			"step %q needs the worktree on the item's %s, and the item's branch names could not be resolved: %s",
+			li.Result(), li.Needs, err)
+	}
+	wt, err := sctx.acquireWorktree()
+	if err != nil {
+		return park(flow.ParkInfraTransient,
+			"step %q needs the worktree on the item's %s, and this arena's worktree could not be acquired: %s",
+			li.Result(), li.Needs, err)
+	}
+	// Worktree.Branch is the interface's own "check it out, and say whether it
+	// had to be created" primitive, and `created` IS the existence answer — the
+	// same one every other site in this codebase reads. No second existence
+	// mechanism, and no non-creating checkout to reach for: there is none, which
+	// is why a branch that was not here is left behind cut from the base once
+	// this reports it missing. That is #383, an orchestrator-surface change, and
+	// it is the shape stepCloseBranch has carried all along.
+	//
+	// The base is passed only for the item's branch. `base` is checked out from
+	// what is already there, so cutting it from itself would be meaningless.
+	target, from := branches.Item, branches.Base
+	if li.Needs == flow.NeedsBase {
+		target, from = branches.Base, ""
+	}
+	created, err := wt.Branch(sctx.ctx, target, from)
+	if err != nil {
+		return park(flow.ParkBlocked,
+			"step %q needs the worktree on the item's %s, which could not be established: %s",
+			li.Result(), li.Needs, err)
+	}
+	if created {
+		return park(flow.ParkBlocked,
+			"step %q needs the worktree on the item's %s, which could not be established: branch %q "+
+				"is not in this worktree, so there is nothing here to run the step against",
+			li.Result(), li.Needs, target)
+	}
+	// The snapshot, now that the worktree is where the step declared it needs to
+	// be. This is the one site that takes it for an establishing step; the
+	// handler's first Worktree() finds it already taken.
+	sctx.snapshotWrites()
+	return flow.InvocationResult{}, false, nil
+}
+
 // translateHandlerError converts a handler's non-nil error into an
 // InvocationResult, applying the appropriate Orchestrator.Park
 // as a side effect. A handler that returned no error completed, and that path
@@ -716,6 +826,23 @@ func completeStep(
 	res flow.StepResult,
 	state *flow.Item,
 ) (flow.InvocationResult, error) {
+	// The state the step declared it LEAVES, verified before anything is
+	// captured from the tree it left (docs/resolution.md § Steps and the
+	// worktree: "verified before its result is captured"). First act, so a step
+	// that ended somewhere it may not end journals nothing, captures nothing,
+	// and leaves its changes where they are for a person to judge.
+	if kind, reason := verifyLeaves(ctx, app, sctx, li); reason != "" {
+		// Charged: the handler ran and spent, unlike an establishment that
+		// refused before any dispatch.
+		if cerr := chargeDispatch(ctx, app, ref, state, li); cerr != nil {
+			return flow.InvocationResult{}, cerr
+		}
+		return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
+			Kind:   kind,
+			Step:   li.Result(),
+			Reason: reason,
+		})
+	}
 	body, err := res.Elect(li, app.artifactById[li.ArtifactId].Type)
 	if err != nil {
 		if cerr := chargeDispatch(ctx, app, ref, state, li); cerr != nil {
@@ -778,6 +905,85 @@ func completeStep(
 	// The route moved: what is pending now is the elected successor, or nothing
 	// on a finalizing route.
 	return stampNextAfter(result, sctx.flow, res.Route), nil
+}
+
+// verifyLeaves checks the worktree against the state the step declared it
+// LEAVES. Returns the park kind and the reason on a violation, and ("", "") when
+// the declaration holds — including the whole of `as-found`, which verifies
+// nothing because that is what the member means: whatever state the step was
+// handed is the state it may hand on.
+//
+// A violation is ParkBlocked, deliberately NOT ParkWriteContract. The
+// write-contract kind says the AGENT moved something it was not permitted to
+// move (docs/issue-flow.md § A step's write contract is checked), and a step
+// that ended on the wrong branch or over a dirty tree may have violated nothing
+// of the sort — it may simply have finished somewhere its declaration does not
+// allow it to finish. Mis-attributing that to the agent sends the operator to
+// inspect evidence of something that never happened.
+//
+// Failing to MEASURE is not the step's violation: a branch that could not be
+// read, or names that could not be resolved, park infra-transient, which a
+// re-dispatch may clear. The reads go through the parent context, like the
+// write-contract check's, because the step's own deadline may be spent.
+func verifyLeaves(ctx context.Context, app *App, sctx *stepCtx, li flow.LifecycleItem) (flow.ParkKind, string) {
+	if li.Leaves == flow.LeavesAsFound {
+		return "", ""
+	}
+	if app.ItemBranches == nil {
+		// establishNeeds' case, at the other end of the same step: unreachable
+		// through the entry point, and a person's job to wire where it is not.
+		return flow.ParkBlocked, fmt.Sprintf(
+			"step %q must leave the worktree on the item's %s, and this binary resolves no branch names for the item "+
+				"(App.ItemBranches is nil)", li.Result(), li.Leaves)
+	}
+	// The SAME resolver the establishment reads, for the same reason it is a
+	// hook at all: the state a step must end in and the state it had to start in
+	// are the same two branches, and two answers to which they are is how the
+	// two ends of one step come to disagree.
+	branches, err := app.ItemBranches(ctx, sctx.Item())
+	if err != nil {
+		return flow.ParkInfraTransient, fmt.Sprintf(
+			"step %q must leave the worktree on the item's %s, and the item's branch names could not be resolved: %s",
+			li.Result(), li.Leaves, err)
+	}
+	wt, err := sctx.acquireWorktree()
+	if err != nil {
+		return flow.ParkInfraTransient, fmt.Sprintf(
+			"step %q must leave the worktree on the item's %s, and this arena's worktree could not be acquired: %s",
+			li.Result(), li.Leaves, err)
+	}
+	want := branches.Item
+	if li.Leaves == flow.LeavesBase {
+		want = branches.Base
+	}
+	branch, err := wt.CurrentBranch(ctx)
+	if err != nil {
+		return flow.ParkInfraTransient, fmt.Sprintf(
+			"step %q must leave the worktree on the item's %s, and the current branch could not be read: %s",
+			li.Result(), li.Leaves, err)
+	}
+	if branch != want {
+		return flow.ParkBlocked, fmt.Sprintf(
+			"step %q must leave the worktree on the item's %s (%q) and left it on %q — nothing was journaled, "+
+				"and the worktree is left as the step left it",
+			li.Result(), li.Leaves, want, branch)
+	}
+	// Always clean, on both declared states. Cleanliness is the commit
+	// contract's guarantee rather than a fourth value (flow.LeavesState), so
+	// there is nothing to declare and nothing to opt out of.
+	dirty, err := wt.IsDirty(ctx)
+	if err != nil {
+		return flow.ParkInfraTransient, fmt.Sprintf(
+			"step %q must leave the worktree on the item's %s and clean, and whether the tree is dirty could not be read: %s",
+			li.Result(), li.Leaves, err)
+	}
+	if dirty {
+		return flow.ParkBlocked, fmt.Sprintf(
+			"step %q must leave the worktree on the item's %s (%q) and clean, and left uncommitted changes to "+
+				"tracked files — nothing was journaled, and the changes are left where they are",
+			li.Result(), li.Leaves, want)
+	}
+	return "", ""
 }
 
 // stampNext reports li as the lifecycle item the route now points at: its
@@ -1226,9 +1432,13 @@ type stepCtx struct {
 	// them a second way.
 	startedAt time.Time
 	budget    flow.StepBudget
-	// writeSnap is the worktree state captured when the handler first acquires
-	// the worktree. nil when no worktree was acquired (no check will run).
-	writeSnap *writeSnapshot
+	// writeSnap is the worktree state captured before the handler runs — after
+	// the step's declared Needs was established, where it declares one. nil when
+	// no worktree was acquired, or when the reads failed (no check will run).
+	// writeSnapTaken records that the attempt was made, so a failed read is not
+	// retried mid-handler.
+	writeSnap      *writeSnapshot
+	writeSnapTaken bool
 }
 
 func newStepCtx(ctx context.Context, app *App, claim flow.Claim, f *flow.Flow, li flow.LifecycleItem, state *flow.Item, budget flow.StepBudget) *stepCtx {
@@ -1598,7 +1808,29 @@ func (s *stepCtx) Notify(step, detail string) {
 
 func (s *stepCtx) Agent() flow.Agent { return s.agent }
 
+// Worktree is what a HANDLER asks for: the arena's worktree, with the
+// write-contract snapshot taken if nothing has taken it yet.
+//
+// The two halves are separate methods because the SDK needs them apart. A
+// step's declared Needs is established between them — acquired, put into the
+// declared state, and only then snapshotted — so that the snapshot records the
+// state the step was given rather than whatever the worktree happened to be on
+// before the SDK put it there (establishNeeds). A handler still sees exactly
+// today's behaviour: acquire, then snapshot.
 func (s *stepCtx) Worktree() (flow.Worktree, error) {
+	wt, err := s.acquireWorktree()
+	if err != nil {
+		return nil, err
+	}
+	s.snapshotWrites()
+	return wt, nil
+}
+
+// acquireWorktree memoises the arena's worktree and does nothing else. The
+// error is memoised too: an arena that could not produce a worktree will not
+// produce one a moment later, and asking again per call would pay for that
+// answer repeatedly.
+func (s *stepCtx) acquireWorktree() (flow.Worktree, error) {
 	if s.worktree != nil || s.wtErr != nil {
 		return s.worktree, s.wtErr
 	}
@@ -1606,15 +1838,27 @@ func (s *stepCtx) Worktree() (flow.Worktree, error) {
 	if s.wtErr != nil {
 		return nil, s.wtErr
 	}
-	// Capture a snapshot for the write-contract check. If either read
-	// fails, leave writeSnap nil — fail-open on infrastructure error,
-	// since the handler hasn't run yet.
+	return s.worktree, nil
+}
+
+// snapshotWrites takes the write-contract snapshot, once per dispatch and only
+// before the handler runs.
+//
+// If either read fails, writeSnap stays nil — fail-open on an infrastructure
+// error, since the handler has not run yet — and the attempt is NOT repeated:
+// a second attempt could only succeed later, and a snapshot taken mid-handler
+// would judge the contract against a state the handler itself had already
+// changed.
+func (s *stepCtx) snapshotWrites() {
+	if s.writeSnapTaken || s.worktree == nil {
+		return
+	}
+	s.writeSnapTaken = true
 	branch, berr := s.worktree.CurrentBranch(s.ctx)
 	sha, serr := s.worktree.RevParse(s.ctx, flow.HeadRevision)
 	if berr == nil && serr == nil {
 		s.writeSnap = &writeSnapshot{branch: branch, commitSHA: sha}
 	}
-	return s.worktree, nil
 }
 
 func (s *stepCtx) RefreshItem() error {

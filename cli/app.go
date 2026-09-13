@@ -80,6 +80,24 @@ type App struct {
 	// flow.ChainPreflight for composing multiple checks.
 	Preflight flow.PreflightFunc
 
+	// ItemBranches resolves the branch names one item's declared worktree states
+	// refer to: its resolution branch, and the base it is cut from. The SDK reads
+	// it at exactly two moments — establishing a step's Needs before dispatch,
+	// and verifying its Leaves before its result is captured
+	// (docs/resolution.md § Steps and the worktree) — and nowhere else.
+	//
+	// The naming convention stays with the BINARY, which already holds it: the
+	// same name is spelled by the orchestrator that looks for the claim branch,
+	// and a second spelling inside the SDK would be a second answer to one
+	// question, free to disagree with the first on some item nobody has thought
+	// about yet.
+	//
+	// Optional, and optional only for a flow that declares neither state: a step
+	// declaring Needs other than `any`, or Leaves other than `as-found`, names a
+	// state nothing could establish or verify without this, so startup refuses it
+	// (docs/cli.md § Startup).
+	ItemBranches func(context.Context, flow.Item) (flow.ItemBranches, error)
+
 	// Flow is the binary's one flow. A binary registers exactly one
 	// (docs/flow-registration.md § What a flow is): what differs by item is the
 	// route through the graph, never which graph — heterogeneous processing is
@@ -474,6 +492,31 @@ func (app *App) validate() error {
 			}
 		}
 	}
+	// A declared worktree state needs branch names, and App.ItemBranches is the
+	// one place they come from. A step declaring a state nothing can resolve the
+	// names for is a misconfiguration knowable from configuration alone: the
+	// state would be established or verified on every dispatch of that step, and
+	// discovering mid-item that nobody can say which branch it meant is the class
+	// of failure startup exists to move (docs/cli.md § Startup).
+	//
+	// Only the two non-default members. `any` establishes nothing and `as-found`
+	// verifies nothing, so a flow that declares neither never asks the question —
+	// which is what makes the field optional rather than required.
+	if app.ItemBranches == nil {
+		for _, li := range f.Items() {
+			switch {
+			case li.Needs != flow.NeedsAny:
+				return fmt.Errorf("flow %q step %q declares Needs %q, but App.ItemBranches is nil — "+
+					"the state is established before dispatch from the item's branch names, and nothing here can resolve them",
+					f.Name(), li.Description, li.Needs)
+			case li.Leaves != flow.LeavesAsFound:
+				return fmt.Errorf("flow %q step %q declares Leaves %q, but App.ItemBranches is nil — "+
+					"the state is verified before the result is captured from the item's branch names, and nothing here can resolve them",
+					f.Name(), li.Description, li.Leaves)
+			}
+		}
+	}
+
 	for _, sig := range f.RequireSignals() {
 		if _, ok := app.signalById[sig]; !ok {
 			return fmt.Errorf("flow %q RequireSignal(%q) is not declared in App.Signals", f.Name(), sig)

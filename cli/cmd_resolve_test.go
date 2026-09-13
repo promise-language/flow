@@ -864,8 +864,14 @@ func TestCmdResolve_ModeSplitHoldsOnEveryTerminalOutcome(t *testing.T) {
 		wantCode   int
 		wantStatus string
 	}{
-		// Returning without resolving the artifact parks the step.
-		{"parked", func(ctx flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, nil }, 0, "parked"},
+		// A park the run STOPS on: the kind decides that, and `blocked` is one
+		// of the five a re-dispatch cannot clear. A clearable kind would be
+		// re-dispatched under the bound (cmdResolve's parked arm) and put four
+		// results on the stream rather than one, which is a different property
+		// from the one this case is about.
+		{"parked", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, ctx.Park(flow.ParkRequest{Kind: flow.ParkBlocked, Reason: "a person must act"})
+		}, 0, "parked"},
 		{"failed", func(ctx flow.StepCtx) (flow.StepResult, error) { return flow.StepResult{}, errors.New("handler boom") }, 1, "failed"},
 	}
 	for _, c := range cases {
@@ -1306,7 +1312,11 @@ func TestCmdResolve_NonBudgetParkOmitsAxes(t *testing.T) {
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
-		return flow.StepResult{}, nil // returns without resolving → did-not-resolve park
+		// A non-budget park, under a kind the run stops on: a clearable one
+		// would be re-dispatched until the invocation cap parked it
+		// treasurer-refused, and the axes line this test forbids belongs to
+		// that park.
+		return flow.StepResult{}, ctx.Park(flow.ParkRequest{Kind: flow.ParkBlocked, Reason: "a person must act"})
 	})
 
 	code := app.cmdResolve(context.Background(), nil)
@@ -2223,5 +2233,289 @@ func TestCmdResolve_ARouteToAnUnregisteredStepStopsInsteadOfFinalizing(t *testin
 	if be.finalizeCalls != 0 {
 		t.Errorf("Finalize called %d time(s) — an item the flow cannot place is not a finished item",
 			be.finalizeCalls)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Re-dispatching a park the vocabulary says a re-dispatch clears
+//
+// docs/cli.md § Resolving. The classification is the PARK KIND's
+// (flow.ParkKind.RedispatchMayClear), published on every park and read here.
+// `resolve` is the driver the classification was written for: a driver that
+// stops on all nine kinds identically stops on four conditions the same
+// codebase says cure themselves.
+// ---------------------------------------------------------------------------
+
+// The shape the fitness wait one arm above already has: hold, try again, and
+// let the run continue when it clears. A step that did not complete is the
+// plainest case — "a re-dispatch is exactly what does the job it left undone".
+func TestCmdResolve_AClearableParkIsReDispatchedAndTheRunContinues(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	// Terminal on the tracker, so the finalize pass actually records the run
+	// complete — the tick asserted below is gated on that.
+	be.SetStatus("1", flow.StatusTerminal, "completed")
+	dispatches := 0
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+		dispatches++
+		if dispatches == 1 {
+			// Returns without deciding anything: step-did-not-complete.
+			return flow.StepResult{}, nil
+		}
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+	})
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if dispatches != 2 {
+		t.Errorf("the step was dispatched %d time(s), want 2 — the park was re-dispatched and cleared", dispatches)
+	}
+	out := errBuf.String()
+	if !strings.Contains(out, "re-dispatching (1/") {
+		t.Errorf("the retry was not narrated; got:\n%s", out)
+	}
+	if !strings.Contains(out, "finalized ✓") {
+		t.Errorf("the run did not carry on to finalization; got:\n%s", out)
+	}
+}
+
+// The bound is the fitness wait's, for the fitness wait's reason: a condition
+// that never clears must terminate the run rather than spin it to the runaway
+// guard. Exhausting it leaves the item PARKED — a wait bound is not a verdict —
+// and the message says how many attempts it stands on.
+func TestCmdResolve_AClearableParkThatNeverClearsStopsAtTheBound(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	dispatches := 0
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+		dispatches++
+		return flow.StepResult{}, fmt.Errorf("the runner is flapping: %w", flow.ErrTransient)
+	})
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0 — a park is not a failure; err=%q", code, errBuf.String())
+	}
+	if want := maxRedispatches + 1; dispatches != want {
+		t.Errorf("the step was dispatched %d time(s), want %d (the first, plus %d re-dispatches)",
+			dispatches, want, maxRedispatches)
+	}
+	out := errBuf.String()
+	if !strings.Contains(out, fmt.Sprintf("parked after %d re-dispatches", maxRedispatches)) {
+		t.Errorf("the stop does not name the bound it stands on; got:\n%s", out)
+	}
+}
+
+// The five kinds that are real reasons to stop, each dispatched exactly once.
+// A driver that re-dispatched any of them would be looping: the answer is the
+// same until a person, a grant or an answer arrives.
+func TestCmdResolve_ANonClearingParkStopsOnTheFirstDispatch(t *testing.T) {
+	for _, tc := range []struct {
+		kind flow.ParkKind
+		step func(*int) func(flow.StepCtx) (flow.StepResult, error)
+	}{
+		{flow.ParkBlocked, parkingStep(flow.ParkBlocked)},
+		{flow.ParkRefused, parkingStep(flow.ParkRefused)},
+		{flow.ParkTreasurerRefused, parkingStep(flow.ParkTreasurerRefused)},
+		{flow.ParkWriteContract, parkingStep(flow.ParkWriteContract)},
+		{flow.ParkQuestion, func(calls *int) func(flow.StepCtx) (flow.StepResult, error) {
+			return func(ctx flow.StepCtx) (flow.StepResult, error) {
+				*calls++
+				return flow.StepResult{}, ctx.AskQuestions(flow.AskText("base", "which base branch?"))
+			}
+		}},
+	} {
+		t.Run(string(tc.kind), func(t *testing.T) {
+			be := fake.New()
+			be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+			calls := 0
+			app, _, errBuf := resolveTestAppStep(t, be, tc.step(&calls))
+
+			if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+				t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+			}
+			if calls != 1 {
+				t.Errorf("the step was dispatched %d time(s), want 1: %q does not clear by re-dispatch", calls, tc.kind)
+			}
+			out := errBuf.String()
+			if !strings.Contains(out, "run `status 1` to inspect") {
+				t.Errorf("the stop does not send the operator to `status`; got:\n%s", out)
+			}
+			if strings.Contains(out, "re-dispatches") || strings.Contains(out, "re-dispatching") {
+				t.Errorf("a kind no re-dispatch clears was retried or reported as retried; got:\n%s", out)
+			}
+		})
+	}
+}
+
+// parkingStep is a handler that parks the given kind and counts its dispatches.
+// One definition, so the crosswalk below and the five cases above cannot park
+// two different ways.
+func parkingStep(kind flow.ParkKind) func(*int) func(flow.StepCtx) (flow.StepResult, error) {
+	return func(calls *int) func(flow.StepCtx) (flow.StepResult, error) {
+		return func(ctx flow.StepCtx) (flow.StepResult, error) {
+			*calls++
+			req := flow.ParkRequest{Kind: kind, Reason: "parked as " + string(kind)}
+			if kind == flow.ParkAccountExhausted {
+				// The only kind that knows when it clears carries the instant
+				// wherever it is written (wire.go), and the driver's answer is
+				// about the park it was handed.
+				at := time.Now().Add(2 * time.Hour)
+				req.ClearsAt = &at
+			}
+			return flow.StepResult{}, ctx.Park(req)
+		}
+	}
+}
+
+// The crosswalk, over the SDK's own enumeration: the arm re-dispatches exactly
+// the kinds the vocabulary classifies as cleared by a re-dispatch, less the one
+// that publishes the instant it clears at — that one exits with the claim held,
+// because the run does not sit in front of a window (docs/environment.md § The
+// agent account).
+//
+// Read off flow.AllParkKinds and flow.ParkKind.RedispatchMayClear rather than a
+// list written here, so a tenth kind cannot be added without this test speaking.
+func TestCmdResolve_ReDispatchesExactlyTheClearableKinds(t *testing.T) {
+	for _, kind := range flow.AllParkKinds() {
+		if kind == flow.ParkQuestion {
+			// ctx.Park refuses to raise a question park — it registers no
+			// question — so this kind is exercised through ctx.AskQuestions in
+			// the test above, where it stops on the first dispatch as its
+			// classification requires.
+			continue
+		}
+		t.Run(string(kind), func(t *testing.T) {
+			be := fake.New()
+			be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+			calls := 0
+			app, _, errBuf := resolveTestAppStep(t, be, parkingStep(kind)(&calls))
+			// A park raised through ctx.Park IS charged as a dispatch, so the
+			// default three invocations would stop a retried kind at the
+			// treasurer rather than at the bound this test is measuring.
+			app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxInvocations: 20}}
+
+			if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+				t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+			}
+			wantRetried := kind.RedispatchMayClear() && kind != flow.ParkAccountExhausted
+			retried := calls > 1
+			if retried != wantRetried {
+				t.Errorf("%q: dispatched %d time(s) (retried=%v), want retried=%v — RedispatchMayClear()=%v",
+					kind, calls, retried, wantRetried, kind.RedispatchMayClear())
+			}
+		})
+	}
+}
+
+// A park carrying no instant is not a park that clears at no time — it is one
+// whose reset could not be parsed (cli/orchestrator.go). It falls into the
+// bounded retry like any other clearable kind rather than exiting on an instant
+// nobody has.
+func TestCmdResolve_AnExhaustedWindowWithNoInstantTakesTheBoundedRetry(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	calls := 0
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+		calls++
+		return flow.StepResult{}, ctx.Park(flow.ParkRequest{
+			Kind:   flow.ParkAccountExhausted,
+			Reason: "agent account allowance exhausted",
+		})
+	})
+	// ctx.Park charges a dispatch, so the bound rather than the treasurer is
+	// what this test measures.
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxInvocations: 20}}
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if want := maxRedispatches + 1; calls != want {
+		t.Errorf("the step was dispatched %d time(s), want %d", calls, want)
+	}
+	if !strings.Contains(errBuf.String(), "re-dispatching (1/") {
+		t.Errorf("a park with no instant was not retried; got:\n%s", errBuf.String())
+	}
+}
+
+// A skip is unchanged: a preflight refusal says this cycle will not run, not
+// that the next one might, and there is nothing for a re-dispatch to clear.
+func TestCmdResolve_ASkippedItemIsUnchanged(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	calls := 0
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+		calls++
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+	})
+	app.Preflight = func(context.Context, *flow.Item) error {
+		return errors.New("the item is already finalized elsewhere")
+	}
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if calls != 0 {
+		t.Errorf("the step ran %d time(s) behind a preflight refusal, want 0", calls)
+	}
+	if !strings.Contains(errBuf.String(), "1 skipped — run `status 1` to inspect") {
+		t.Errorf("the skip narration changed; got:\n%s", errBuf.String())
+	}
+}
+
+// The wait is interruptible, like the pacing and fitness waits: a cancelled
+// context ends the run at 1 rather than sleeping out the interval.
+func TestCmdResolve_CancellingDuringTheReDispatchWaitExitsOne(t *testing.T) {
+	old := redispatchInterval
+	redispatchInterval = time.Hour // long enough to guarantee the cancel fires first
+	defer func() { redispatchInterval = old }()
+
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	ctx, cancel := context.WithCancel(context.Background())
+	app, _, errBuf := resolveTestAppStep(t, be, func(flow.StepCtx) (flow.StepResult, error) {
+		cancel()
+		return flow.StepResult{}, fmt.Errorf("the runner is flapping: %w", flow.ErrTransient)
+	})
+
+	if code := app.cmdResolve(ctx, []string{"1"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "interrupted while waiting to re-dispatch") {
+		t.Errorf("the interruption was not named; got:\n%s", errBuf.String())
+	}
+}
+
+// The instant is read WITH the classification, never instead of it. Only a kind
+// a re-dispatch can clear is asking "when would that be worth anything", so a
+// park that does not clear is reported as the stop it is even if something
+// wrote an instant on it — telling the operator the run resumes on its own at
+// that time would be telling them not to act on a park that needs them to.
+func TestCmdResolve_AnInstantOnANonClearingParkIsNotAWait(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	calls := 0
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+		calls++
+		at := time.Now().Add(2 * time.Hour)
+		return flow.StepResult{}, ctx.Park(flow.ParkRequest{
+			Kind:     flow.ParkBlocked,
+			Reason:   "a person must act",
+			ClearsAt: &at,
+		})
+	})
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if calls != 1 {
+		t.Errorf("the step was dispatched %d time(s), want 1", calls)
+	}
+	out := errBuf.String()
+	if strings.Contains(out, "nothing clears before") {
+		t.Errorf("a park a person must clear was reported as a wait; got:\n%s", out)
+	}
+	if !strings.Contains(out, "run `status 1` to inspect") {
+		t.Errorf("the stop does not send the operator to `status`; got:\n%s", out)
 	}
 }

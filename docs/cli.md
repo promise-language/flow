@@ -346,6 +346,16 @@ That refusal is not a lost race. A lost race is about an item and the answer is 
 
 `resolve` imposes no bounds of its own. What a step may spend — dispatches, cost, and the time allowance each dispatch runs within — is the treasurer's to decide, and `resolve` enforces the allowance it was handed rather than a judgement of its own about slowness.
 
+### A park is re-dispatched when the kind says a re-dispatch clears it
+
+**Whether a park is worth another dispatch is the park kind's own answer, and `resolve` reads it rather than deciding for itself.** Every park publishes `redispatch_may_clear` (§ One-shot reports), derived from the kind by the one classification the vocabulary holds ([orchestrator.md](orchestrator.md) § Vocabularies: "The kind also decides whether re-dispatch can clear it"). A driver that stopped on all of them identically would stop on conditions the same system says cure themselves; one that retried all of them would loop against an answer that does not change. There is no second table in the driver — two readings of one question is how the vocabulary and the driver come to disagree.
+
+- **A park whose `redispatch_may_clear` is true is re-dispatched, under a bound.** The run holds briefly, dispatches the same item again, and carries on if it clears. The bound is the fitness wait's, and it is there for the fitness wait's reason: a condition nobody is fixing must end the run rather than spin it to the runaway guard. **Exhausting the bound is still a park, never a verdict** — the run ends parked, exit 0, and the report says how many attempts it stands on.
+- **A park carrying `clears_at` is not re-dispatched at all.** The kind that knows when it clears says so, and re-dispatching before that instant is looping against an answer the system was already handed. The run exits, naming the instant, **with the claim and the arena held** — the draft, the session and the worktree stay where whatever returns at that instant resumes from ([environment.md](environment.md) § The agent account). The run does not sit in front of the window: it may be hours or days away, and nothing is served by a process waiting it out.
+- **The kinds that do not clear stop immediately**, as they always have: `blocked`, `question`, `treasurer-refused`, `refused` and `write-contract`. Those are the real reasons to stop, and the report sends the operator to `status`.
+
+A skip is unchanged. A preflight refusal says this cycle will not run, and there is nothing for a re-dispatch to clear.
+
 ## Reporting an outcome
 
 Every invocation reports exactly one status: `done`, `skipped`, `parked`, `blocked`, or `failed`.
@@ -358,7 +368,9 @@ The human narration includes duration and cost when present, as a parenthetical 
 
 ## Startup
 
-A binary refuses to start, with a named error and exit 2, when its configuration cannot produce correct behaviour: an artifact its backend cannot store, a signal its backend cannot observe, a flow with no steps, a route naming an undeclared step, a step from which finalization is unreachable, a step tagged with an undeclared role, a coverage naming an undeclared role or naming none at all, a missing agent.
+A binary refuses to start, with a named error and exit 2, when its configuration cannot produce correct behaviour: an artifact its backend cannot store, a signal its backend cannot observe, a flow with no steps, a route naming an undeclared step, a step from which finalization is unreachable, a step tagged with an undeclared role, a step declaring a worktree state the binary cannot resolve branch names for, a coverage naming an undeclared role or naming none at all, a missing agent.
+
+**A declared worktree state needs branch names.** A step's `Needs` is established before dispatch and its `Leaves` is verified before capture ([resolution.md](resolution.md) § Steps and the worktree), both from the one resolver the binary supplies — so a flow declaring any state but `any` and `as-found` without one names a state nothing can ever put the worktree into. It is knowable from configuration alone, and the refusal names the step and the field. A flow that declares neither asks the resolver nothing and starts without it.
 
 Coverage is the roles the binary declares it may assume ([resolution-standalone.md](resolution-standalone.md) § Declaring what a binary may do). It is checked against the flow's declared roles like every other reference to that vocabulary, and an empty coverage is refused rather than defaulted: a binary that has not said what it may do is misconfigured for every command, not started as one that quietly does everything its account permits.
 

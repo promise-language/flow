@@ -143,6 +143,25 @@ func AllLeavesStates() []LeavesState {
 // StepConfig.normalized resolves it to LeavesAsFound before it is stored.
 func (l LeavesState) Valid() bool { return slices.Contains(AllLeavesStates(), l) }
 
+// ItemBranches is what an item's declared worktree states NAME: the item's own
+// resolution branch, and the base it is cut from. `item-branch` and `base` are
+// the two states NeedsState and LeavesState can require, and this is the one
+// value that says which branches they are for a given item.
+//
+// The SDK cannot establish or verify either state without these names, and the
+// naming convention is not the SDK's to hold: the orchestrator's own claim
+// branch is the same name spelled on the far side, and a second spelling here
+// would be a second answer to one question, free to disagree with the first. So
+// the binary hands its existing resolver over (cli.App.ItemBranches), the way it
+// hands over a preflight, and the establishment before dispatch and the
+// verification at capture both read that one source.
+type ItemBranches struct {
+	// Item is the item's resolution branch — what `item-branch` names.
+	Item BranchName
+	// Base is the branch the item's work is cut from — what `base` names.
+	Base BranchName
+}
+
 // PromptPolicy is whether a step may prompt the agent at all
 // (docs/flow-registration.md § Step configuration). Closed at two, and one
 // axis with a restriction at one end rather than two categories of work: a

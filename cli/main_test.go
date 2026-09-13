@@ -6,6 +6,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestMain points the machine-wide quota cache (cli/quota_cache.go) at a
@@ -45,6 +46,12 @@ func TestMain(m *testing.M) {
 	agentAccount = func() (agentAccountRecord, error) {
 		return agentAccountRecord{}, errors.New("no agent account in tests")
 	}
+	// The re-dispatch wait, shortened package-wide for the reason the seams
+	// above are redirected here: a test that parks under a clearable kind waits
+	// this out up to maxRedispatches times, and thirty seconds a round would put
+	// minutes of sleep into the suite for a delay no test is about. A test that
+	// IS about the wait sets its own value and restores it.
+	redispatchInterval = time.Millisecond
 	code := m.Run()
 	// os.Exit skips deferred calls, so the cleanup is explicit.
 	os.RemoveAll(dir)

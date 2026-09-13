@@ -355,6 +355,14 @@ func TestAPromptFromTheRequestsDeclarationParksRefused(t *testing.T) {
 		Flow:         f,
 		Coverage:     []flow.RoleName{contributorRole},
 		VerifyCmd:    "make check",
+		// The step's declaration is the shipped one, so it declares
+		// Needs: item-branch — and the SDK establishes that before the dispatch
+		// this test is about. The worktree is already on the branch
+		// (resumedWorktree), so the establishment is a no-op checkout; without
+		// the resolver there would be no names for it to establish from.
+		ItemBranches: func(context.Context, flow.Item) (flow.ItemBranches, error) {
+			return flow.ItemBranches{Item: testBranch, Base: "main"}, nil
+		},
 	}
 	claim, err := be.Claim(context.Background(), be.Ref("42"), nil)
 	if err != nil {

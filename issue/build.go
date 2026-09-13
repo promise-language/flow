@@ -107,6 +107,12 @@ func BuildApp(ctx context.Context, cfg Config, deps Deps) (cli.App, error) {
 		Signals:      resolveSignals(),
 		Flow:         f,
 		Coverage:     covered,
+		// The one route the SDK has to this item's branch names. Every step but
+		// plan, review the proposal, merge and record declares a worktree state,
+		// and the SDK establishes it before dispatch and verifies it at capture
+		// through this — the naming convention stays here, where it already was
+		// (docs/resolution.md § Steps and the worktree).
+		ItemBranches: b.itemBranches,
 		// cli.App wants the display form (it reaches prompts and messages);
 		// cfg.VerifyCmd is argv because that is what a backend execs.
 		VerifyCmd: strings.Join(cfg.VerifyCmd, " "),
