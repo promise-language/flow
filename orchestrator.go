@@ -782,8 +782,11 @@ type Orchestrator interface {
 	Load(ctx context.Context, ref ItemRef) (*Item, error)
 
 	// Reset clears the flow's whole record on the item — journal, ledger, park,
-	// the questions' outstanding marker, drafts — so the next resolution starts
-	// from an empty journal.
+	// the questions' outstanding marker, drafts, AND the agent session — so the
+	// next resolution starts from an empty journal. The session goes with the
+	// record it belonged to: a conversation kept past the journal it accompanied
+	// has nothing left to continue, and the next dispatch would resume it
+	// against a wiped record.
 	//
 	// Operator-initiated only; the SDK never calls it automatically. An
 	// orchestrator that cannot clear its record refuses, and the refusal is
