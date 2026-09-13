@@ -388,6 +388,75 @@ func TestRun_ACancelledTurnIsNotRetried(t *testing.T) {
 	}
 }
 
+// WHICH ENDINGS COUNT AS "the handle was declined", one row per kind the
+// substrate can end a turn with. The retry exists for a turn that produced no
+// evidence of ever starting, and everything either side of that line is a turn
+// that DID: re-sending one of those runs the prompt a second time and bills it a
+// second time, against a step that has already been charged for the first
+// (docs/resolution.md § Nothing is bought twice).
+//
+// The cost-cap row is the expensive one. A turn the substrate stopped AT THE CAP
+// reports the stop and nothing else — no text, and no session id when the result
+// event carried none — so it is one predicate clause away from being re-sent
+// with the handle dropped, which spends the cap's worth again on a step the
+// caller is about to park for exceeding it.
+func TestRun_OnlyATurnThatNeverStartedDropsTheHandle(t *testing.T) {
+	cases := []struct {
+		name       string
+		stream     string
+		wantSpawns int
+	}{
+		{
+			// is_error with no budget subtype: the substrate reported a fault and
+			// named no conversation, which is what a refused `--resume` looks like
+			// when the CLI still emits a result event for it.
+			name:       "an error with nothing to show for it is resent without the handle",
+			stream:     `{"type":"result","subtype":"error_during_execution","is_error":true,"duration_ms":10,"total_cost_usd":0}` + "\n",
+			wantSpawns: 2,
+		},
+		{
+			name:       "a turn stopped at the cost cap is not resent",
+			stream:     `{"type":"result","subtype":"error_max_budget_usd","is_error":true,"duration_ms":10,"total_cost_usd":1.5}` + "\n",
+			wantSpawns: 1,
+		},
+		{
+			// A turn that ran, cost money and simply answered with nothing. There
+			// is no failure to read and no fault to attribute to the handle.
+			name:       "a clean turn that said nothing is not resent",
+			stream:     `{"type":"result","subtype":"success","is_error":false,"result":"","duration_ms":10,"total_cost_usd":0.2}` + "\n",
+			wantSpawns: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var argv [][]string
+			c := &Client{
+				Binary: "claude",
+				spawn: func(ctx context.Context, name string, args ...string) cmdHandle {
+					argv = append(argv, args)
+					if len(argv) == 1 {
+						return &fakeCmd{stdoutStream: tc.stream}
+					}
+					return &fakeCmd{stdoutStream: successStream}
+				},
+			}
+
+			if _, err := c.Run(context.Background(), flow.AgentRequest{Prompt: "go", ResumeSessionID: "held"}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(argv) != tc.wantSpawns {
+				t.Fatalf("spawned %d times, want %d", len(argv), tc.wantSpawns)
+			}
+			if !strings.Contains(strings.Join(argv[0], " "), "--resume held") {
+				t.Errorf("the first spawn did not offer the handle: %v", argv[0])
+			}
+			if tc.wantSpawns == 2 && strings.Contains(strings.Join(argv[1], " "), "--resume") {
+				t.Errorf("the retry offered the handle again: %v", argv[1])
+			}
+		})
+	}
+}
+
 func TestRun_MaxCostUSDBecomesMaxBudgetFlag(t *testing.T) {
 	var capturedArgs []string
 	c := &Client{

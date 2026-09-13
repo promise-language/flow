@@ -541,6 +541,38 @@ func TestSession_SaveFailureCostsTheHandleNotTheStep(t *testing.T) {
 	}
 }
 
+// A write the store REFUSED still binds for the rest of the dispatch. The
+// durable record is what a later dispatch reads, and losing it costs one
+// re-opened conversation; losing it for the prompts still to come in THIS
+// invocation costs one per prompt, which is the implement step's fix rounds each
+// starting from a verify tail with no memory of the edits they are fixing —
+// precisely the defect, reappearing wherever the store is unwell.
+func TestSession_AFailedWriteStillChainsTheRestOfTheDispatch(t *testing.T) {
+	agent := &sessionAgent{}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("implement the change", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			for range 3 {
+				if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"}); err != nil {
+					return flow.StepResult{}, err
+				}
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, agent)
+	app.Orchestrator = sessionSaveFailsBackend{Orchestrator: be, err: errors.New("disk went away")}
+
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
+		t.Fatalf("RunOne = (%+v, %v), want done", res, err)
+	}
+	wantFresh(t, agent, 0)
+	wantResume(t, agent, 1, "sess-1")
+	wantResume(t, agent, 2, "sess-1")
+	if agent.minted != 1 {
+		t.Errorf("the substrate opened %d sessions across 3 prompts, want 1 — a store that would not take the write is not a reason to buy the conversation again this turn", agent.minted)
+	}
+}
+
 // A handler cannot choose which conversation the resolution is having. Mirrors
 // the Worktree rule: the field the step wrote is overwritten, not narrowed.
 func TestSession_HandlerCannotChooseTheSession(t *testing.T) {
@@ -776,6 +808,67 @@ func TestSession_AnUnchangedHandleIsNotWrittenAgain(t *testing.T) {
 	}
 	if counting.saves != 1 {
 		t.Errorf("the store was written %d times across 3 prompts, want 1 — only the turn that opened the conversation changed anything", counting.saves)
+	}
+}
+
+// decliningAgent honours nothing: the first time it is OFFERED a handle it
+// answers with a conversation of its own instead, which is what a substrate that
+// pruned the session, expired it, or never recorded it on this machine does.
+// Every request still reaches the inner agent, so the same helpers read them.
+type decliningAgent struct {
+	inner    *sessionAgent
+	declined bool
+}
+
+func (a *decliningAgent) Name() string { return "declines-once" }
+
+func (a *decliningAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.AgentResponse, error) {
+	resp, err := a.inner.Run(ctx, req)
+	if req.ResumeSessionID != "" && !a.declined && resp != nil {
+		a.declined = true
+		a.inner.minted++
+		resp.SessionID = fmt.Sprintf("sess-%d", a.inner.minted)
+	}
+	return resp, err
+}
+
+// A handle the substrate DECLINED is replaced by the one it opened instead, and
+// the dead one is never offered again.
+//
+// This is the other half of "offered and never depended on": the SDK may not
+// fail when a resume is refused, and it may not keep offering a handle the
+// substrate has already answered by ignoring. A resolution that went on offering
+// the dead one would re-buy its context at every prompt for the rest of the item
+// while its record still claimed it was holding a conversation — and at the
+// substrate the same handle would cost an extra spawn each time
+// (claude.Client's declined-resume fallback), for a turn that can never resume.
+func TestSession_AHandleTheSubstrateDeclinedIsReplaced(t *testing.T) {
+	agent := &sessionAgent{}
+	declining := &decliningAgent{inner: agent}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			for range 3 {
+				if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"}); err != nil {
+					return flow.StepResult{}, err
+				}
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, declining)
+
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
+		t.Fatalf("RunOne = (%+v, %v), want done", res, err)
+	}
+	wantFresh(t, agent, 0)            // the entry opens sess-1
+	wantResume(t, agent, 1, "sess-1") // which is offered back, and declined
+	wantResume(t, agent, 2, "sess-2") // so the one the substrate opened is the resolution's now
+	got, err := be.LoadAgentSession(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("LoadAgentSession: %v", err)
+	}
+	if got.SessionID != "sess-2" {
+		t.Errorf("the stored handle = %+v, want sess-2 — the next dispatch must not resume a session the substrate has already refused", got)
 	}
 }
 
