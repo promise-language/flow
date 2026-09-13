@@ -1163,10 +1163,11 @@ func mirrorLedger(state *flow.Item, step flow.StepId, mutate func(*flow.LedgerRo
 //     third dispatch on it. The stash does not change that and is not consulted
 //     here: this dispatch composed the text twice and the guard refused it
 //     twice, and a park inviting a re-dispatch because the LAST record could
-//     not be written would hand the next dispatch a fresh round — making the
-//     bound per-dispatch rather than per-refusal, which is the loop again with
-//     an extra step in it. The reason says whether the record was kept, since
-//     that is what the re-run reads.
+//     not be written would hand an unwatched re-dispatch a fresh round, which
+//     is the loop again with an extra step in it. A person's re-run carries a
+//     round because a person chose to buy it; a park that invites one carries
+//     no such decision. The reason says whether the record was kept, since that
+//     is what the re-run reads.
 //   - A revision round is LEFT and the stash TOOK: return errReviseCapture,
 //     and RunOne re-runs the handler in this dispatch. Nothing is charged,
 //     journaled or parked. The step reads the record back as its work in

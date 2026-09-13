@@ -541,9 +541,11 @@ func TestCompletion_RefusedCaptureWhoseStashFailsParksWithoutARound(t *testing.T
 // The round is spent either way — this dispatch composed the text twice and the
 // guard refused it twice — so the park is the blocked one the bound exists to
 // reach. Parking step-did-not-complete here because the last record could not be
-// written would hand the next dispatch a fresh round and make the bound
-// per-dispatch rather than per-refusal, which is the loop again with an extra
-// step in it: nothing is charged for a refused round, so nothing else stops it.
+// written would hand an unwatched re-dispatch a fresh round, which is the loop
+// again with an extra step in it: nothing is charged for a refused round, so
+// nothing else stops it. A person's re-run carries a round because a person
+// chose to buy it (TestCompletion_TheReRunGetsItsOwnRevisionRound); a park that
+// invites a re-dispatch carries no such decision.
 //
 // What the failed stash does change is the reason, because the re-run reads the
 // record: it says the latest refusal was not kept, and what is still stored is
