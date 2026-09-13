@@ -746,6 +746,101 @@ func TestCompletion_ATransientFailureInTheRevisionRoundKeepsTheRefusedWork(t *te
 	}
 }
 
+// The round shares the dispatch's DEADLINE, and every round sees the same one.
+// The clock is the dispatch's because a grant is measured in it: a round that
+// renewed it would let a step refused repeatedly run for a multiple of the cap
+// the operator granted, on the axis the grant is denominated in. Read off the
+// context the handler is actually given, so a future refactor that took the
+// timeout inside the loop fails here rather than in production.
+func TestCompletion_TheRevisionRoundSharesTheDispatchDeadline(t *testing.T) {
+	var deadlines []time.Time
+	var seen []string
+	app, be, claim := capturingApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			wip, err := ctx.WorkInProgress()
+			if err != nil {
+				return flow.StepResult{}, err
+			}
+			seen = append(seen, wip)
+			dl, ok := ctx.Context().Deadline()
+			if !ok {
+				t.Error("the handler's context carries no deadline, so the dispatch has no timeout at all")
+			}
+			deadlines = append(deadlines, dl)
+			return ctx.Finalize(flow.DispositionResolved, "the plan is written").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	})
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {Timeout: time.Minute}}
+	be.refusals = []error{refusedComment()}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil || res.Status != "done" {
+		t.Fatalf("RunOne = (%+v, %v), want done", res, err)
+	}
+	if len(deadlines) != 2 {
+		t.Fatalf("handler ran %d times, want 2 — the refused run and its revision", len(deadlines))
+	}
+	if !deadlines[0].Equal(deadlines[1]) {
+		t.Errorf("the revision round was given a fresh deadline (%v, then %v): the rounds must spend one "+
+			"dispatch's timeout between them, not one each", deadlines[0], deadlines[1])
+	}
+}
+
+// And what that costs when the refused round has eaten the clock: the revision
+// runs out of time and parks on the TIMEOUT — charged the dispatch, reporting
+// the axis that actually bound it, which is not the axis a refusal reports.
+// That is the honest report, and it is a real difference from the park this
+// change replaced, which charged nothing. What it must not cost is the work:
+// the refusal and the text it refused are stashed BEFORE the round begins, so
+// the dispatch that picks the item up still amends rather than re-derives.
+func TestCompletion_ARevisionRoundThatRunsOutOfTimeParksOnTheTimeoutAndKeepsTheWork(t *testing.T) {
+	var seen []string
+	app, be, claim := capturingApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			wip, err := ctx.WorkInProgress()
+			if err != nil {
+				return flow.StepResult{}, err
+			}
+			seen = append(seen, wip)
+			if wip != "" {
+				// The round inherits what is left of the dispatch's clock, and
+				// spends it.
+				<-ctx.Context().Done()
+				return flow.StepResult{}, ctx.Context().Err()
+			}
+			return ctx.Finalize(flow.DispositionResolved, "the plan is written").
+				Markdown("the plan mentioning /home/someone/"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	})
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {Timeout: 50 * time.Millisecond}}
+	be.refusals = []error{refusedComment()}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkTreasurerRefused || res.Park.Axis != flow.AxisTimeout {
+		t.Fatalf("res = %+v, want a treasurer-refused park on the timeout axis", res)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("handler ran %d times, want 2 — the refused run and the round that ran out of time", len(seen))
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if row := state.Ledger.Row("plan"); row.Dispatches != 1 {
+		t.Errorf("Dispatches = %d, want 1 — a timeout IS an attempt at the step, whichever round it fell in", row.Dispatches)
+	}
+	if len(state.Journal) != 0 {
+		t.Errorf("journal = %+v, want empty — nothing the guard accepted was ever produced", state.Journal)
+	}
+	wip, err := be.LoadWorkInProgress(context.Background(), claim.ItemRef, "plan")
+	if err != nil {
+		t.Fatalf("LoadWorkInProgress: %v", err)
+	}
+	if !strings.Contains(wip, guardAnswer) || !strings.Contains(wip, "the plan mentioning") {
+		t.Errorf("stash = %q, want the refusal and the refused text kept for the next dispatch", wip)
+	}
+}
+
 // A person's re-run buys a whole round, not just one more attempt: the bound is
 // counted per dispatch, so a re-run refused again revises before it parks. A
 // bound counted off anything durable — the ledger, the executions, the stashed

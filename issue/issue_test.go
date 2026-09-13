@@ -1819,7 +1819,7 @@ func TestWorkInProgressBlock(t *testing.T) {
 	t.Run("a refused result is framed for revision, not continuation", func(t *testing.T) {
 		const guardAnswer = "an absolute home path names the machine's user"
 		const refusedText = "the plan mentioning /home/someone/"
-		record := flow.RefusedRecord(flow.ErrDisclosureRefused{
+		record := flow.RefusedResultRecord(flow.ErrDisclosureRefused{
 			Act:    flow.ActArtifactComment,
 			Reason: errors.New(guardAnswer),
 		}, refusedText)
@@ -1839,6 +1839,35 @@ func TestWorkInProgressBlock(t *testing.T) {
 			if strings.Contains(got, wrong) {
 				t.Errorf("refused-result block carries the notes framing %q — an invitation to re-plan:\n%s", wrong, got)
 			}
+		}
+	})
+	// A refused QUESTION is a refusal in the same store, written by the same
+	// SDK helper family — and it is not a result. resolveQuestion stashes one on
+	// every refused round, so a step that asked a question, had it refused once,
+	// revised it and parked on the answer resumes with that record in hand. Read
+	// as a result it would tell the step to produce its plan out of a question
+	// that has since been asked and answered: the same failure the revision
+	// framing exists to prevent, pointed the other way.
+	t.Run("a refused question is not a refused result", func(t *testing.T) {
+		const question = "Which base branch? The tree is at /home/someone/src."
+		record := flow.RefusedRecord(flow.ErrDisclosureRefused{
+			Act:    flow.ActQuestion,
+			Reason: errors.New("an absolute home path"),
+		}, question)
+		got := PromptContext{WorkInProgress: record}.WorkInProgressBlock()
+		if strings.Contains(got, refusedResultFraming) {
+			t.Errorf("a refused question is framed as the step's refused result:\n%s", got)
+		}
+		if strings.Contains(got, reviseGuidance) {
+			t.Errorf("a refused question is handed the result-revision guidance:\n%s", got)
+		}
+		// It is working-out, and gets the framing working-out gets: continue
+		// from it, and the step still owes its result.
+		if !strings.Contains(got, "not a result") {
+			t.Errorf("a refused question is not framed as working-out:\n%s", got)
+		}
+		if !strings.Contains(got, question) {
+			t.Errorf("the block drops the question it was about:\n%s", got)
 		}
 	})
 }

@@ -35,8 +35,9 @@ type PromptContext struct {
 	// WorkInProgress is what THIS step stashed on an earlier run that stopped
 	// without completing. Non-empty ONLY on a run that found a record: a
 	// resume, or a revision round inside the dispatch whose result was refused.
-	// Either notes the step left itself or a result the disclosure guard
-	// refused, which are read differently — see WorkInProgressBlock.
+	// Either the step's own RESULT, refused at capture, or working-out on the
+	// way to one — notes it left itself, or a question the guard refused. The
+	// two are read differently — see WorkInProgressBlock.
 	WorkInProgress string
 
 	// Refusal is the disclosure guard's own answer, carried unchanged: it
@@ -673,11 +674,11 @@ repository-relative path instead of an absolute one, for instance) rather than
 re-deriving anything or dropping the substance.`
 
 // refusedResultFraming opens the work-in-progress block when what was stashed
-// is a refused result rather than notes. It says what happened and, with
-// reviseGuidance, what is asked: the result again, amended from the refused
-// text, not a fresh attempt at the step.
-const refusedResultFraming = "An earlier run of this step produced its result, and the disclosure guard " +
-	"refused to publish it. The refusal and the refused text are below.\n\n" +
+// is the step's own result, refused. The record that follows says what happened
+// — it opens by saying so — and this says what is asked of the step now: the
+// result again, amended from the refused text, not a fresh attempt at the step.
+const refusedResultFraming = "What follows is this step's own result from an earlier run, which the " +
+	"disclosure guard refused to publish.\n\n" +
 	reviseGuidance + "\n\n" +
 	"Produce the step's result again from the refused text below, with what the " +
 	"guard found expressed another way and everything else kept as it was."
@@ -692,19 +693,26 @@ const refusedResultFraming = "An earlier run of this step produced its result, a
 // is the entire step.
 //
 // The framing is load-bearing, and there are two, because the stash holds one
-// of two things. NOTES the step left itself are its own working-out, not a
-// result: the step still has to produce its artifact, and anything the reply
-// supersedes should be dropped rather than defended. A REFUSED RESULT
-// (flow.RefusedRecord) is finished work whose expression the disclosure guard
-// refused: the step is to amend it, not re-derive it, and a block that framed
-// it as notes to be continued and corrected would invite exactly the re-plan
-// that makes a refusal cost the whole step over again.
+// of two things. A REFUSED RESULT (flow.RefusedResultRecord) is finished work
+// whose expression the disclosure guard refused: the step is to amend it, not
+// re-derive it, and a block that framed it as notes to be continued and
+// corrected would invite exactly the re-plan that makes a refusal cost the
+// whole step over again. EVERYTHING ELSE is working-out, not a result: the step
+// still has to produce its artifact, and anything the reply supersedes should
+// be dropped rather than defended.
+//
+// The test is which SURFACE was refused, not whether a refusal was recorded at
+// all. A refused QUESTION is stashed as a refusal too (resolveQuestion), and by
+// the time the step runs again that question has been revised or answered — so
+// a block that read it as a refused result would tell the step to produce its
+// result out of a superseded question. Notes are the honest framing for it: it
+// is the step's own working-out, and the result is still to come.
 func (c PromptContext) WorkInProgressBlock() string {
 	notes := strings.TrimSpace(c.WorkInProgress)
 	if notes == "" {
 		return ""
 	}
-	if flow.IsRefusedRecord(notes) {
+	if flow.IsRefusedResultRecord(notes) {
 		return refusedResultFraming + "\n\n" + notes
 	}
 	return "You stopped part-way through this step on an earlier run, and these " +

@@ -1150,17 +1150,19 @@ func (b *builder) runAgent(ctx flow.StepCtx, req flow.AgentRequest) (*flow.Agent
 // refusal and the refused text are stashed as the step's work in progress and
 // the whole handler is re-run in the same dispatch, reading them back through
 // WorkInProgressBlock, with its own bound and its own park.
+//
+// The stash holds the LATEST turn throughout, and a refusal only while it is
+// the latest thing that happened. That is the invariant, and it is what makes
+// the record safe to read back: what is stashed here is the step's working-out
+// on the way to a result — never the result — so it goes in under
+// flow.RefusedRecord rather than flow.RefusedResultRecord, and a run resuming
+// after a person answers reads it as notes to continue from rather than as a
+// result to amend.
 func (b *builder) resolveQuestion(ctx flow.StepCtx, resp *flow.AgentResponse, header, body string) (*flow.AgentResponse, error) {
 	// The turn that found the ambiguity is the turn that produced the
 	// reasoning behind it: stashing the whole final message is what makes the
 	// resumed step continue instead of re-deriving the question.
-	//
-	// Best-effort: a stash that failed costs a re-derivation, which is the
-	// old behaviour, and turning it into a step failure would lose the park
-	// as well as the work.
-	if err := ctx.RecordWorkInProgress(resp.LastText); err != nil {
-		ctx.Notify("", "could not record work in progress: "+err.Error())
-	}
+	recordTurn(ctx, resp.LastText)
 
 	questionText := header + "\n" + body
 
@@ -1224,6 +1226,18 @@ func (b *builder) resolveQuestion(ctx flow.StepCtx, resp *flow.AgentResponse, he
 
 		resp = newResp
 
+		// The revision turn is now the latest turn, so it is what the stash
+		// holds — replacing the refusal record written above. Without this the
+		// record outlives the question it was about: a question refused once and
+		// then accepted parks awaiting an answer with a REFUSAL in the store,
+		// and the run that resumes after the answer is handed it as its work in
+		// progress. Stashing here rather than on the way out covers both ways an
+		// accepted revision leaves the loop — the ask sentinel, and a revision
+		// that dropped the question — and a revision refused AGAIN overwrites
+		// this with its own record at the top of the next round, which is what
+		// the exhaustion park wants left behind.
+		recordTurn(ctx, newResp.LastText)
+
 		// Did the agent drop the question on revision?
 		newHeader, newBody, ok := detectQuestion(newResp.LastText)
 		if !ok {
@@ -1233,6 +1247,20 @@ func (b *builder) resolveQuestion(ctx flow.StepCtx, resp *flow.AgentResponse, he
 		header = newHeader
 		body = newBody
 		questionText = header + "\n" + body
+	}
+}
+
+// recordTurn stashes a turn as the step's work in progress, so a run that
+// picks the step up again continues from it rather than re-deriving it.
+//
+// Best-effort, at every call site: a stash that failed costs a re-derivation,
+// which is what happened before the record existed, and turning it into a step
+// failure would lose the park as well as the work. One function because both
+// sites want exactly that, and a second spelling of "best-effort" is how one of
+// them quietly becomes fatal.
+func recordTurn(ctx flow.StepCtx, text string) {
+	if err := ctx.RecordWorkInProgress(text); err != nil {
+		ctx.Notify("", "could not record work in progress: "+err.Error())
 	}
 }
 

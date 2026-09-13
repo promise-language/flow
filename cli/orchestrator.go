@@ -412,6 +412,20 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// purpose: the agent meter accumulates, the stash memo already holds what
 	// the handler is about to read back, and the write-contract snapshot taken
 	// before the first round still measures the tree the dispatch started from.
+	//
+	// The DEADLINE is shared too, and that is the point: it is the dispatch's,
+	// taken once above, so the rounds spend one budget between them rather than
+	// one each. A refused round that has already eaten the timeout leaves its
+	// revision little, and the revision can run out — parking on the timeout,
+	// charged the dispatch, reporting the axis that actually bound it. That is
+	// the honest report: the step had its time and spent it, and a round that
+	// renewed the clock would let a step refused repeatedly run for a multiple
+	// of the cap the operator granted, on the axis a grant is measured in. The
+	// work is not the casualty either way — the refusal and the refused text
+	// are stashed before the round begins, so the next dispatch amends rather
+	// than re-derives. The in-dispatch revision loop for a refused QUESTION
+	// shares its dispatch's deadline for the same reason (issue's
+	// resolveQuestion).
 	for round := 0; ; round++ {
 		// The handler completes by RETURNING its election; res is read only on
 		// the completion path (translateHandlerError's nil-error branch), because
@@ -1191,7 +1205,7 @@ func refusedCapture(
 	// The record first, whatever is decided after it: a round reads it, and so
 	// does the person who re-runs a step that has none left.
 	kept := true
-	if err := sctx.RecordWorkInProgress(flow.RefusedRecord(refused, refusedPayload(body))); err != nil {
+	if err := sctx.RecordWorkInProgress(flow.RefusedResultRecord(refused, refusedPayload(body))); err != nil {
 		// Reported, never fatal: turning the failed stash into a failure would
 		// lose the park as well as the work.
 		sctx.Notify("", "could not record refused text: "+err.Error())
