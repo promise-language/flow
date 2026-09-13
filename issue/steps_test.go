@@ -903,7 +903,8 @@ func TestStepImplement_RecordsTheCommitItProduced(t *testing.T) {
 // The refusal the old helper carried — the implementation is not in this
 // worktree — is not lost: the establishment blocks the item on it, before the
 // snapshot and before any dispatch is charged
-// (cli.TestRunOne_NeedsItemBranch_MissingBranchBlocks).
+// (cli.TestRunOne_NeedsItemBranch_ABranchThatIsNotHereBlocks, and on this
+// package's own shipped graph, TestReworkHandback_AMissingItemBranchBlocksBeforeImplementRuns).
 //
 // The worktree each case is handed sits on the BASE with the item's branch
 // present, which is the state the old helper corrected. Nothing corrects it

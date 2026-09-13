@@ -35,10 +35,16 @@ var fitnessWaitInterval = 30 * time.Second
 
 // maxRedispatches bounds how many times cmdResolve re-dispatches an item that
 // parked under a kind the vocabulary classifies as cleared by a re-dispatch
-// (flow.ParkKind.RedispatchMayClear). The bound is the fitness wait's, for the
+// (flow.ParkKind.RedispatchMayClear). It is the fitness wait's SHAPE, for the
 // fitness wait's reason: a condition that never clears must terminate the run
 // rather than spin it to the runaway guard, and exhausting the bound leaves the
 // item PARKED — a wait bound is not a verdict.
+//
+// Its own number, and lower than maxFitnessWaits, because the two wait on
+// different things. A fitness wait re-MEASURES and dispatches nothing, so
+// twenty of them cost twenty readings; a re-dispatch runs the step, spends one
+// of maxResolveSteps, and on a charged kind spends an invocation the treasurer
+// is counting — which bounds it below this one long before this one is reached.
 const maxRedispatches = 5
 
 // redispatchInterval is the delay between those re-dispatches. Var (not const)
