@@ -507,9 +507,12 @@ func (b *Orchestrator) refuseDirtyTree(ctx context.Context, override string) (*f
 //
 // The same two conditions Claim enforces, with the same typed codes, and with
 // NO override: a flag that dropped the claim and left the tree as it was would
-// produce exactly the orphaned state the refusal exists to prevent, and would
-// gain nothing, since the next claim refuses the same tree. The way past a
-// refused release is git, deliberately — commit the work to the item's branch
+// produce exactly the orphaned state the refusal exists to prevent — work no
+// item holds and no branch carries. Nor would it leave the arena usable: an
+// unforced Claim refuses that same tree, so the claim that would follow a
+// forced release is one carrying OverrideDirtyTree, which starts the second
+// item on the first one's leftovers. The way past a refused release is git,
+// deliberately — commit the work to the item's branch
 // or discard it, check out the base, release — because that is the moment
 // somebody decides what happens to the work. An arena that is GONE is recovered
 // from another arena with the already-held override on Claim; that emergency
