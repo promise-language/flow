@@ -77,8 +77,19 @@ versus merely claimable (available) — so the answer to "would resolve pick
 this?" belongs in the listing.`},
 	"claim": {name: "claim", syntax: "<item-id>", summary: "acquire a claim on an item", runsGates: true,
 		detail: "Acquires a claim (lease) on <item-id> so this owner can advance it.\nTakes exactly one item id."},
-	"release": {name: "release", summary: "drop the active claim",
-		detail: "Releases the claim currently held by this owner. Takes no arguments."},
+	"release": {name: "release", summary: "drop the active claim (refused while the worktree is dirty or off the base branch)",
+		detail: `Releases the claim currently held by this owner. Takes no arguments.
+
+Releasing is the exception to the claim's lifetime, not a step in it: a claim
+binds item to worktree until the item is resolved, and it survives a park, a
+stopped run and a restart. So a release has to leave the worktree free for the
+next item, and it is REFUSED while the tree is dirty (untracked files included)
+or while HEAD is off the base branch — otherwise the work in the tree belongs to
+nobody afterwards, and the next claim starts on the last item's leftovers.
+
+There is no override. Commit the work to the item's branch or discard it, check
+out the base branch, then release. Nothing is deleted either way: the branch
+stays where it is.`},
 	"reseed": {name: "reseed", syntax: "[--force]", summary: "clear the seed and start fresh",
 		detail: `Clears the active claim's artifact records, budget counters, and park
 state so the next run-step or resolve re-seeds from the current flow.

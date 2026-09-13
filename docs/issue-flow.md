@@ -160,7 +160,7 @@ The check costs two reads and turns an unenforceable instruction into an invaria
 
 Close branch runs when the contributor's part **completed**. A run that parked, was blocked, or failed leaves the worktree exactly where it stopped, because that state is what someone will resume from or diagnose.
 
-Returning the worktree is not the same act as releasing a claim. An operator who releases mid-work is stepping away and keeps their branch; a contributor role that finished is done with it and owes the arena a clean starting point for the next item.
+Returning the worktree is not the same act as releasing a claim. An operator releasing mid-work is stepping away and **keeps their branch** — release deletes nothing — but they still commit what is in the tree and return to the base before the claim can be dropped, because a release must leave the arena fit for the next item ([cli.md](cli.md) § Releasing). A contributor role that finished is done with the branch and owes the arena a clean starting point either way; the difference is what happens to the branch, not whether the worktree is returned.
 
 ### The implementation lives in the branch, and the record names it
 

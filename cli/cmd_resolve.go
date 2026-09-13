@@ -709,6 +709,16 @@ func (app *App) handOff(ctx context.Context, claim flow.Claim, awaits flow.Await
 	if err := app.Orchestrator.Release(ctx, claim.ItemRef); err != nil {
 		fmt.Fprintf(app.Err, "resolve: %s awaits %s, but the claim could not be released: %s\n",
 			claim.ItemRef.Display, awaits.Role, err)
+		// A refused release is typed, and its DETAIL is what tells the operator
+		// how to clear it — which files are in the way, or which branch HEAD is
+		// on (docs/cli.md § Releasing). The line above states the consequence
+		// and folds the error into one line; the renderer below is what carries
+		// the failing check and the verbatim output beneath it, the same shape
+		// `release` prints.
+		var refused flow.ErrClaimRefused
+		if errors.As(err, &refused) {
+			fmt.Fprintln(app.Err, formatClaimRefusal("release", refused))
+		}
 		app.reportSpend()
 		return 1
 	}

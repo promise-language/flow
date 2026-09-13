@@ -301,6 +301,10 @@ type ClaimRefusalCode string
 // the SDK's derivations, and no orchestrator is told about them
 // (docs/orchestrator.md § Identities).
 //
+// It also carries a refused Release: the two are the two halves of one lease
+// operation, refuse on the same arena conditions, and a second type would be a
+// second copy of this shape.
+//
 // Every other code is the refusing backend's own vocabulary (opaque to flow);
 // ItemScoped reports
 // whether a DIFFERENT item might succeed (true → retry the next ref in an

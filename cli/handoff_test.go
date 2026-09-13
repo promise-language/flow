@@ -547,6 +547,41 @@ func TestCmdResolve_AHandoffThatCannotReleaseTheClaimFails(t *testing.T) {
 	}
 }
 
+// A release refused on a worktree precondition is TYPED, and its detail is the
+// only thing that says how to clear it — which files are in the way, or which
+// branch HEAD is on. The one-line "could not be released" fold prints the error
+// but not the detail beneath it, so the refusal is rendered too.
+func TestCmdResolve_ARefusedReleaseIsRenderedWithItsDetail(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	inner.SetCapabilities("", flow.CapPush)
+	be := &refusingRelease{Orchestrator: inner, err: flow.ErrClaimRefused{
+		Code:   "dirty-tree",
+		Reason: "worktree has uncommitted or untracked changes",
+		Detail: " M cli/cmd_release.go\n?? scratch.md",
+		Check:  "clean-tree",
+	}}
+	app, errBuf := handoffTestApp(t, be)
+
+	code := app.cmdResolve(context.Background(), []string{"1"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 — the claim is still held; err=%q", code, errBuf.String())
+	}
+	out := errBuf.String()
+	if !strings.Contains(out, "the claim could not be released") {
+		t.Errorf("the consequence is not reported; got %q", out)
+	}
+	if !strings.Contains(out, `check "clean-tree"`) {
+		t.Errorf("the failing check is missing; got %q", out)
+	}
+	if !strings.Contains(out, "\n  ?? scratch.md") {
+		t.Errorf("the detail is missing or not indented under the refusal; got %q", out)
+	}
+	if strings.Contains(out, "override with") {
+		t.Errorf("offered an override for a release; nothing bypasses these checks. got %q", out)
+	}
+}
+
 // The announcement comes BEFORE the first dispatch — an operator learns how far
 // a run can take an item before it spends anything, rather than from where it
 // stops.

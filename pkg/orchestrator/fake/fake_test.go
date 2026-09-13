@@ -6,6 +6,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -170,6 +171,81 @@ func TestBackend_ClaimConflictIsTypedRefusal(t *testing.T) {
 	}
 	if !refused.ItemScoped {
 		t.Error("ItemScoped = false, want true (a different item could succeed)")
+	}
+}
+
+// The ARENA side of the one-to-one binding: an arena holding one item is not
+// free, so a claim on a second is refused. It is a different answer from
+// already-claimed and it asks for a different action — finish or release what
+// you hold, rather than take this over — so it carries a code of its own and no
+// override reaches it. Release is what makes the arena free again, which is the
+// second half here: without it the refusal would be a dead end rather than a
+// precondition.
+func TestBackend_ClaimRefusesASecondItemInAnOccupiedArena(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	_ = addItem(b, "1")
+	_ = addItem(b, "2")
+	if _, err := b.Claim(ctx, itemRef("1"), nil); err != nil {
+		t.Fatalf("first Claim: %v", err)
+	}
+
+	_, err := b.Claim(ctx, itemRef("2"), nil)
+	if err == nil {
+		t.Fatal("claiming a second item into an arena that holds one must refuse")
+	}
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is %T, want ErrClaimRefused", err)
+	}
+	if refused.Code != "arena-occupied" {
+		t.Errorf("Code = %q, want arena-occupied — distinct from already-claimed", refused.Code)
+	}
+	if refused.ItemScoped {
+		t.Error("ItemScoped = true; no other item fares better in an occupied arena")
+	}
+	if refused.Override != "" {
+		t.Errorf("Override = %q, want none", refused.Override)
+	}
+	if !strings.Contains(refused.Reason, "1") {
+		t.Errorf("Reason = %q, want it to name the item the arena holds", refused.Reason)
+	}
+
+	// The refusal left the first claim standing.
+	active, err := b.LookupActiveClaim(ctx)
+	if err != nil || active == nil {
+		t.Fatalf("active claim after the refusal = (%+v, %v), want item 1 still held", active, err)
+	}
+	if active.ItemRef.Display != "1" {
+		t.Errorf("active claim = %q, want 1 — the refused claim overwrote the lease", active.ItemRef.Display)
+	}
+
+	// Releasing the first is what frees the arena for the second.
+	if err := b.Release(ctx, itemRef("1")); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if _, err := b.Claim(ctx, itemRef("2"), nil); err != nil {
+		t.Fatalf("Claim of the second item after releasing the first: %v", err)
+	}
+}
+
+// Re-claiming the item this arena already holds is NOT the refusal above. It is
+// the idempotent case the contract requires, and it is what makes a retry safe
+// for a caller that does not know whether its first attempt landed.
+func TestBackend_ClaimIsIdempotentForTheHolder(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	_ = addItem(b, "1")
+	first, err := b.Claim(ctx, itemRef("1"), nil)
+	if err != nil {
+		t.Fatalf("first Claim: %v", err)
+	}
+	again, err := b.Claim(ctx, itemRef("1"), nil)
+	if err != nil {
+		t.Fatalf("re-claiming the held item must succeed: %v", err)
+	}
+	if again.ItemRef.Display != first.ItemRef.Display {
+		t.Errorf("re-claim returned %q, want %q", again.ItemRef.Display, first.ItemRef.Display)
 	}
 }
 
@@ -1405,11 +1481,11 @@ func TestBackend_WorkInProgressIsKeyedByItemAndStep(t *testing.T) {
 	_ = addItem(b, "1")
 	_ = addItem(b, "2")
 	ref1, ref2 := itemRef("1"), itemRef("2")
+	// Only item 1 is claimed: the work-in-progress methods take no lease, and an
+	// arena holding item 1 could not claim item 2 anyway — the binding is
+	// one-to-one. Item 2 is here to be READ under, which is the point.
 	if _, err := b.Claim(ctx, ref1, nil); err != nil {
 		t.Fatalf("Claim 1: %v", err)
-	}
-	if _, err := b.Claim(ctx, ref2, nil); err != nil {
-		t.Fatalf("Claim 2: %v", err)
 	}
 
 	if got, err := b.LoadWorkInProgress(ctx, ref1, "plan"); got != "" || err != nil {
@@ -1612,6 +1688,14 @@ func TestBackend_Finalize_StillRefusesANonTerminalItem(t *testing.T) {
 // --- The role predicate ---
 
 // awaitingRole is an item whose journal leaves it awaiting `role`.
+//
+// It claims only because AppendEntry requires the lease, and RELEASES again —
+// which is both what the state it is building actually is, and what lets a
+// caller build two of them. An item awaiting a role is one a run handed off,
+// and a handoff releases the claim (docs/cli.md § Resolving): an item held by
+// an arena that is done with it is one the next role cannot pick up. Left
+// claimed, the second call would be this arena claiming a second item, which
+// the one-to-one binding refuses.
 func awaitingRole(t *testing.T, b *fake.Orchestrator, id string, role flow.RoleName) flow.ItemRef {
 	t.Helper()
 	ref := claimed(t, b, id)
@@ -1619,6 +1703,9 @@ func awaitingRole(t *testing.T, b *fake.Orchestrator, id string, role flow.RoleN
 	e.Awaits = flow.Awaits{Role: role}
 	if err := b.AppendEntry(context.Background(), ref, e); err != nil {
 		t.Fatalf("AppendEntry: %v", err)
+	}
+	if err := b.Release(context.Background(), ref); err != nil {
+		t.Fatalf("Release: %v", err)
 	}
 	return ref
 }

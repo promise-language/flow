@@ -165,7 +165,7 @@ If the item has more than one outstanding question, the one being answered is na
 
 `claim` acquires an exclusive claim and is idempotent for the holder: re-claiming an item this worktree already holds succeeds and changes nothing.
 
-A claim is refused when the item is already held, when the target worktree is unfit, when the item awaits a role this account's detected capabilities cannot assume, when its placement restrictions exclude this arena, or when the backend's own preconditions are unmet. Every refusal is **typed** — the caller can tell the reasons apart without reading prose — and carries:
+A claim is refused when the item is already held, **when this worktree already holds a different item**, when the target worktree is unfit, when the item awaits a role this account's detected capabilities cannot assume, when its placement restrictions exclude this arena, or when the backend's own preconditions are unmet. Every refusal is **typed** — the caller can tell the reasons apart without reading prose — and carries:
 
 - a one-line human reason,
 - the failing check's own output, reproduced verbatim and unmodified,
@@ -173,7 +173,9 @@ A claim is refused when the item is already held, when the target worktree is un
 
 A refusal that another item might survive is distinguished from one that no item would survive, so `resolve`'s auto-selection knows whether trying the next item is meaningful.
 
-> Refusals are currently untyped prose, matched by substring — [#4](https://github.com/promise-language/flow/issues/4).
+**An occupied worktree is its own refusal, and it is not overridable.** A claim binds `item ↔ arena` until the item is resolved, and that binding survives a park, a stopped run and a restart — so a worktree holding one item is not free for a second, and the refusal names the item it holds and says to finish or release that one first. It reads as a distinct code from *already held*, because the two ask for opposite actions: an item another person holds can be taken over deliberately, where an item **this** worktree holds has nobody to take it from. That is also why `--force` does not reach it. Overriding here would not settle a dispute; it would overwrite this worktree's own claim record while the first item's uncommitted work, branch and build outputs stay in this tree — state that exists nowhere else and that nothing can recover by re-reading, so the first item is simply orphaned. An operator who wanted the ordinary path and got that would not be told.
+
+Re-claiming the item this worktree already holds is **not** that refusal; it is the idempotent case above and still succeeds unchanged.
 
 **Open blockers do not refuse a claim.** A claim is an arena reservation — this worktree, this item — and taking one does no work, so there is nothing for a dependency to stop: `claim` succeeds and **warns**, naming the blockers still open, so the operator hears it here rather than from the refusal the next advance will give.
 
@@ -181,9 +183,32 @@ A claim already held survives the item becoming blocked — a dependency declare
 
 `claim` never takes an item away from another person. An item assigned to, or owned by, someone else is refused unless the operator explicitly overrides, and the override is recorded.
 
-> The github backend currently takes over silently — [#5](https://github.com/promise-language/flow/issues/5).
-
 Overrides are named and independent. There is one option per thing being overridden, never a single flag meaning "ignore whatever refused".
+
+## Releasing
+
+`release` drops the active claim. It is the **only** way a claim moves off an arena short of the item being resolved, and it is the exception to the binding rather than a step in the lifecycle — so it must leave the worktree genuinely free for the next item.
+
+It touches the claim and nothing else: **no branch is deleted, no commit is made, no work is discarded**, and the item's recorded history is left as it stands. The branch stays where it is, for whoever comes back to it.
+
+Because of that, `release` is refused when the worktree is in no state to be handed on:
+
+| Refused when | Why it matters at a release |
+|---|---|
+| the worktree is dirty | uncommitted work would be silently orphaned — the item becomes unheld and selectable by any arena, while nothing points at the changes: no item holds them and no branch carries them |
+| HEAD is off the base branch | the arena is left on the released item's branch, so the next claim starts on the last item's leftovers |
+
+These are the same two conditions `claim` enforces, and they are typed with the same codes, exit **1**, and **the claim is kept** — a refused release changes nothing at all. Untracked files count as dirty: after a release there is no item left to attribute them to.
+
+**There is no override.** A flag that dropped the claim and left the tree as it was would produce exactly the orphaned state the refusal exists to prevent, and would gain nothing, because the next claim refuses the same tree. The way past a refused release is git, deliberately — commit the work to the item's branch, or discard it; return to the base branch; release. That is the moment somebody decides what happens to the work, instead of it becoming nobody's. A parked item legitimately has uncommitted work in the worktree, so releasing one means dealing with that work first. **That is the intended outcome, not an obstacle.**
+
+The emergency path for an arena that is genuinely gone — a machine that will not come back — is unchanged and is not this command: another arena takes the item over with `claim --force`, which is audited.
+
+A worktree whose item was taken over that way is **displaced**. Its `release` succeeds and clears only its own record, because the item's claim now belongs to the taker and is not this arena's to take apart.
+
+`release` with no active claim is refused, exit 1.
+
+Releasing reads the worktree's status, so **the project must ignore the CLI's own state directory**; a project that does not is already refused when a step stages a commit.
 
 ## Listing
 
