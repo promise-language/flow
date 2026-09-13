@@ -29,8 +29,13 @@ type capturingBackend struct {
 	// the second.
 	refusals []error
 	// saveErr models a backend that cannot write a work-in-progress record,
-	// which is the store the refused-capture path stashes into.
-	saveErr error
+	// which is the store the refused-capture path stashes into. saveErrAfter is
+	// how many saves it lets through first, so a test can fail the stash on the
+	// LAST round of a dispatch rather than on the first — the zero value fails
+	// every save, which is what a store that is simply gone does.
+	saveErr      error
+	saveErrAfter int
+	saves        int
 }
 
 func (b *capturingBackend) AppendEntry(ctx context.Context, ref flow.ItemRef, e flow.JournalEntry) error {
@@ -77,7 +82,8 @@ func revisingPlan(seen *[]string, first, revised string) func(*flow.Flow) {
 }
 
 func (b *capturingBackend) SaveWorkInProgress(ctx context.Context, ref flow.ItemRef, step flow.StepId, body string) error {
-	if b.saveErr != nil {
+	b.saves++
+	if b.saveErr != nil && b.saves > b.saveErrAfter {
 		return b.saveErr
 	}
 	return b.Orchestrator.SaveWorkInProgress(ctx, ref, step, body)
@@ -521,6 +527,63 @@ func TestCompletion_RefusedCaptureWhoseStashFailsParksWithoutARound(t *testing.T
 	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {
 		t.Errorf("Dispatches = %d, want 0 — the refusal is not charged whether or not it could be kept", row.Dispatches)
+	}
+}
+
+// A stash that fails on the LAST round does not buy the dispatch a re-dispatch.
+// The round is spent either way — this dispatch composed the text twice and the
+// guard refused it twice — so the park is the blocked one the bound exists to
+// reach. Parking step-did-not-complete here because the last record could not be
+// written would hand the next dispatch a fresh round and make the bound
+// per-dispatch rather than per-refusal, which is the loop again with an extra
+// step in it: nothing is charged for a refused round, so nothing else stops it.
+//
+// What the failed stash does change is the reason, because the re-run reads the
+// record: it says the latest refusal was not kept, and what is still stored is
+// the FIRST round's.
+func TestCompletion_RefusedCaptureTwiceWhoseLastStashFailsStillParksBlocked(t *testing.T) {
+	var seen []string
+	app, be, claim := capturingApp(t, revisingPlan(&seen, "attempt 1 mentioning /home/someone/", "attempt 2 mentioning /home/someone/"))
+	be.refusals = []error{refusedComment(), refusedComment()}
+	// The first round's stash takes, the revision's does not.
+	be.saveErr = errors.New("disk went away")
+	be.saveErrAfter = 1
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkBlocked {
+		t.Fatalf("res = %+v, want parked blocked — the round was spent whatever became of the stash", res)
+	}
+	if res.RedispatchMayClear == nil || *res.RedispatchMayClear {
+		t.Errorf("RedispatchMayClear = %v, want a present false: a dispatch that spent its round must not hand the next one a fresh one", res.RedispatchMayClear)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("handler ran %d times, want 2 — one revision round, then a person", len(seen))
+	}
+	for _, want := range []string{string(flow.ActArtifactComment), "round 1", "could not be kept"} {
+		if !strings.Contains(res.Park.Reason, want) {
+			t.Errorf("park reason = %q, want it to name %q", res.Park.Reason, want)
+		}
+	}
+	if strings.Contains(res.Park.Reason, guardAnswer) {
+		t.Errorf("park reason repeats the guard's answer: %q", res.Park.Reason)
+	}
+	// The first round's record survives, which is what the re-run will read.
+	wip, err := be.LoadWorkInProgress(context.Background(), claim.ItemRef, "plan")
+	if err != nil {
+		t.Fatalf("LoadWorkInProgress: %v", err)
+	}
+	if !strings.Contains(wip, "attempt 1 mentioning") {
+		t.Errorf("stash = %q, want the first round's refused text — the revision's could not be written", wip)
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if len(state.Journal) != 0 {
+		t.Errorf("journal = %+v after two refused captures, want empty", state.Journal)
+	}
+	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {
+		t.Errorf("Dispatches = %d, want 0 — a refused round is not an attempt, whichever round it is", row.Dispatches)
 	}
 }
 

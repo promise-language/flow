@@ -1138,28 +1138,33 @@ func mirrorLedger(state *flow.Item, step flow.StepId, mutate func(*flow.LedgerRo
 // docs/disclosure.md § What a refusal carries requires: the party that composed
 // the text is the only one that can revise it, and a refusal recorded where it
 // never looks produces the same text from the same context until the budget is
-// gone. What happens next turns on whether that stash took, and on how many
-// rounds this dispatch has spent already:
+// gone. What happens next turns on how many rounds this dispatch has spent
+// already, and then on whether that stash took:
 //
-//   - The stash FAILED: park STEP-DID-NOT-COMPLETE, as a step that decided
-//     nothing does, and report the failure. A round without the record could
-//     not differ from the attempt before it — the handler would compose the
-//     same text from the same context — so there is no round, and the next
-//     dispatch starts over. The kind is the honest one: nobody has to act, and
-//     a re-dispatch is what does the job, so it classifies as re-dispatchable
-//     (flow.ParkKind.RedispatchMayClear).
-//   - A revision round is LEFT (maxCaptureRevisions): return errReviseCapture,
-//     and RunOne re-runs the handler in this dispatch. Nothing is charged,
-//     journaled or parked. The step reads the record back as its work in
-//     progress and amends the refused text rather than re-planning, which is
-//     what has made every retry of a refused result cheap.
 //   - The rounds are SPENT: park BLOCKED, the kind for a refusal a person must
 //     decide on (docs/resolution.md § Parking) and the one every other site
 //     with exhausted revision rounds parks under. A second refusal of the same
 //     work is a loop, not a transient, and a blocked park classifies as not
 //     clearing by re-dispatch — which is what stops a driver from spending a
-//     third dispatch on it. The record is kept for whoever re-runs the step,
-//     and that re-run buys the next round.
+//     third dispatch on it. The stash does not change that and is not consulted
+//     here: this dispatch composed the text twice and the guard refused it
+//     twice, and a park inviting a re-dispatch because the LAST record could
+//     not be written would hand the next dispatch a fresh round — making the
+//     bound per-dispatch rather than per-refusal, which is the loop again with
+//     an extra step in it. The reason says whether the record was kept, since
+//     that is what the re-run reads.
+//   - A revision round is LEFT and the stash TOOK: return errReviseCapture,
+//     and RunOne re-runs the handler in this dispatch. Nothing is charged,
+//     journaled or parked. The step reads the record back as its work in
+//     progress and amends the refused text rather than re-planning, which is
+//     what has made every retry of a refused result cheap.
+//   - A revision round is left and the stash FAILED: park STEP-DID-NOT-COMPLETE,
+//     as a step that decided nothing does, and report the failure. A round
+//     without the record could not differ from the attempt before it — the
+//     handler would compose the same text from the same context — so there is
+//     no round, and the next dispatch starts over. The kind is the honest one:
+//     nobody has to act, and a re-dispatch is what does the job, so it
+//     classifies as re-dispatchable (flow.ParkKind.RedispatchMayClear).
 //
 // The refusal is priced as a round, not a dispatch, in every outcome
 // (chargeDispatch): the turn that produced the refused text was metered on
@@ -1183,10 +1188,33 @@ func refusedCapture(
 	body flow.ArtifactBody,
 	round int,
 ) (flow.InvocationResult, error) {
+	// The record first, whatever is decided after it: a round reads it, and so
+	// does the person who re-runs a step that has none left.
+	kept := true
 	if err := sctx.RecordWorkInProgress(flow.RefusedRecord(refused, refusedPayload(body))); err != nil {
-		// Reported, then parked: turning the failed stash into a failure would
+		// Reported, never fatal: turning the failed stash into a failure would
 		// lose the park as well as the work.
 		sctx.Notify("", "could not record refused text: "+err.Error())
+		kept = false
+	}
+	if round >= maxCaptureRevisions {
+		reason := fmt.Sprintf(
+			"the disclosure guard refused this step's result (%s) again, after revision round %d; "+
+				"what it refused and why are kept with the step for the next run",
+			refused.Act, round)
+		if !kept {
+			reason = fmt.Sprintf(
+				"the disclosure guard refused this step's result (%s) again, after revision round %d, "+
+					"and what it refused this time could not be kept with the step",
+				refused.Act, round)
+		}
+		return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
+			Kind:   flow.ParkBlocked,
+			Step:   li.Result(),
+			Reason: reason,
+		})
+	}
+	if !kept {
 		return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
 			Kind: flow.ParkStepDidNotComplete,
 			Step: li.Result(),
@@ -1196,20 +1224,10 @@ func refusedCapture(
 				refused.Act),
 		})
 	}
-	if round < maxCaptureRevisions {
-		sctx.Notify("", fmt.Sprintf(
-			"the disclosure guard refused this step's result (%s) — revising (round %d)",
-			refused.Act, round+1))
-		return flow.InvocationResult{}, errReviseCapture
-	}
-	return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
-		Kind: flow.ParkBlocked,
-		Step: li.Result(),
-		Reason: fmt.Sprintf(
-			"the disclosure guard refused this step's result (%s) again, after revision round %d; "+
-				"what it refused and why are kept with the step for the next run",
-			refused.Act, round),
-	})
+	sctx.Notify("", fmt.Sprintf(
+		"the disclosure guard refused this step's result (%s) — revising (round %d)",
+		refused.Act, round+1))
+	return flow.InvocationResult{}, errReviseCapture
 }
 
 // refusedPayload renders a refused payload as the text to stash beside the

@@ -32,9 +32,11 @@ type PromptContext struct {
 	// when rendering PromptImplementFix.
 	VerifyOutput string
 
-	// WorkInProgress is what THIS step stashed on an earlier invocation that
-	// stopped without completing. Non-empty ONLY on a resume that found a
-	// record; a first run sees "". Notes, not a result — see WorkInProgressBlock.
+	// WorkInProgress is what THIS step stashed on an earlier run that stopped
+	// without completing. Non-empty ONLY on a run that found a record: a
+	// resume, or a revision round inside the dispatch whose result was refused.
+	// Either notes the step left itself or a result the disclosure guard
+	// refused, which are read differently — see WorkInProgressBlock.
 	WorkInProgress string
 
 	// Refusal is the disclosure guard's own answer, carried unchanged: it
