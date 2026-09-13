@@ -823,6 +823,36 @@ func TestStepImplement_AcceptsAReenteredBranchTheBranchStepRecorded(t *testing.T
 	}
 }
 
+// The guard direction of the pairing above, over the same two steps and one
+// worktree: a branch an earlier attempt cut and died on, still empty, on a base
+// that has moved since. What the branch step records has to still EQUAL HEAD
+// here or the empty-branch check stops firing altogether — a cut point that
+// never matched HEAD would make every branch read as work and send an empty one
+// on to `gh pr create`. Neither accepting test could tell that apart from a fix.
+func TestStepImplement_RefusesAnEmptyBranchTheBranchStepRecorded(t *testing.T) {
+	wt := resumedWorktree()
+	wt.head = "cut-from"      // where the earlier attempt cut it
+	wt.base = "base-moved-on" // the base branch has advanced since
+	wt.noCommit = true        // and this round changes nothing
+	b := testBuilder(t)
+	ctx := ctxWithPlan(wt, &scriptedAgent{})
+
+	branch, err := b.stepOpenBranch(ctx)
+	if err != nil {
+		t.Fatalf("stepOpenBranch: %v", err)
+	}
+	ctx.arts["branch"] = flow.ArtifactRecord{
+		Resolved: true, Type: flow.ArtifactCommitHash, CommitHash: branch.Payload.CommitHash}
+
+	res, err := b.stepImplement(ctx)
+	if err == nil || !strings.Contains(err.Error(), "no commits beyond") {
+		t.Fatalf("err = %v, want a refusal — the branch carries nothing", err)
+	}
+	if res.Payload != nil {
+		t.Error("resolved an implementation for a branch that carries nothing")
+	}
+}
+
 func TestStepImplement_RefusesWithoutAPlan(t *testing.T) {
 	// A resolved artifact whose body did not load reads as present. Implementing
 	// against a blank plan produces something plausible and reports nothing.

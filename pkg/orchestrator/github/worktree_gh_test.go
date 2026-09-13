@@ -475,3 +475,92 @@ func TestWorktreeCutPoint_EmptyBaseIsRefused(t *testing.T) {
 		t.Errorf("CutPoint returned %q alongside its refusal; want no SHA at all", got)
 	}
 }
+
+// Histories sharing no commit are an error too, and they are the case an
+// unresolvable base does not reach: here both revisions resolve and it is `git
+// merge-base` itself that has no answer — it exits non-zero and prints NOTHING.
+// An implementation tolerating that exit returns a blank SHA and no error, which
+// the branch step would record as the commit the branch was cut from.
+func TestWorktreeCutPoint_UnrelatedHistoriesError(t *testing.T) {
+	wt, local, _ := cutRepo(t)
+	ctx := t.Context()
+	// A root commit of its own, with no ancestor in common with the branch.
+	if _, stderr, err := local.run(ctx, "checkout", "--orphan", "unrelated"); err != nil {
+		t.Fatalf("git checkout --orphan: %v (%s)", err, string(stderr))
+	}
+	commitOn(t, local, "nothing-in-common")
+	if err := local.Checkout(ctx, "flow/issue-42", "", false); err != nil {
+		t.Fatalf("checkout back: %v", err)
+	}
+
+	got, err := wt.CutPoint(ctx, "unrelated")
+	if err == nil {
+		t.Fatalf("CutPoint = %q across unrelated histories, want an error — there is no cut point", got)
+	}
+	if got != "" {
+		t.Errorf("CutPoint returned %q alongside its error; want no SHA at all", got)
+	}
+	if !strings.Contains(err.Error(), "CutPoint") {
+		t.Errorf("error %q does not name the reading that failed", err)
+	}
+}
+
+// The base is an ARGUMENT, as on Branch. Every case above passes "main", which
+// IS this mock's default branch, so none of them separates "reads the base it
+// was given" from "resolves the backend's default the way Drift does" — and an
+// item cut from a release line would then be measured against a commit it was
+// never cut from.
+func TestWorktreeCutPoint_ReadsTheBaseItIsGiven(t *testing.T) {
+	wt, local, _ := driftRepo(t)
+	ctx := t.Context()
+	mainTip, err := local.RevParse(ctx, "HEAD")
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	// A release line off main, carrying a commit of its own, and the item's
+	// branch cut from THAT rather than from the default branch.
+	if err := local.Checkout(ctx, "release", "main", true); err != nil {
+		t.Fatalf("checkout -b release: %v", err)
+	}
+	commitOn(t, local, "release-only")
+	releaseTip, err := local.RevParse(ctx, "HEAD")
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	if err := local.Checkout(ctx, "flow/issue-42", "release", true); err != nil {
+		t.Fatalf("checkout -b flow/issue-42 release: %v", err)
+	}
+	commitOn(t, local, "the-work")
+
+	got, err := wt.CutPoint(ctx, "release")
+	if err != nil {
+		t.Fatalf("CutPoint: %v", err)
+	}
+	if string(got) == mainTip {
+		t.Errorf("CutPoint = %q, the merge base against the DEFAULT branch; the base is the one passed in", got)
+	}
+	if string(got) != releaseTip {
+		t.Errorf("CutPoint = %q, want the release tip %q the branch was cut from", got, releaseTip)
+	}
+}
+
+// Answered against the LOCAL base, with NO FETCH — unlike Drift, which the test
+// above breaks the remote to make fail. The step that records a cut point is the
+// one that opens the branch, and a network call there would make opening a
+// branch fail wherever the remote is out of reach.
+func TestWorktreeCutPoint_NeedsNoRemote(t *testing.T) {
+	wt, local, cut := cutRepo(t)
+	ctx := t.Context()
+	commitOn(t, local, "implementation")
+	if _, stderr, err := local.run(ctx, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone")); err != nil {
+		t.Fatalf("git remote set-url: %v (%s)", err, string(stderr))
+	}
+
+	got, err := wt.CutPoint(ctx, "main")
+	if err != nil {
+		t.Fatalf("CutPoint with the remote out of reach: %v — opening a branch must not need the network", err)
+	}
+	if string(got) != cut {
+		t.Errorf("CutPoint = %q, want the local cut point %q", got, cut)
+	}
+}
