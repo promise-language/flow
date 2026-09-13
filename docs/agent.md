@@ -115,7 +115,7 @@ Each step declares what permission mode it needs. A step calling an agent withou
 | `ToolsUsed` | `[]string` | Tools the agent invoked. |
 | `CostUSD` | `float64` | Cost of this prompt. |
 | `DurationSeconds` | `float64` | Wall-clock time. |
-| `SessionID` | `string` | For chaining via `Request.ResumeSessionID`. |
+| `SessionID` | `string` | The conversation this turn ran in. **Reported whether the turn finished or died mid-way**: a substrate that named its session opened one, and that conversation holds everything the dead turn paid for — a turn killed by a deadline or a broken stream that reported no handle is bought again on the resume ([resolution.md](resolution.md) § Nothing is bought twice). The SDK records it as the resolution's and offers it back as `Request.ResumeSessionID` at the chokepoint; no step chains it itself. Empty where the substrate has no such notion. |
 | `Failure` | `*AgentFailure` | Nil on success; non-nil carries structured failure info. |
 
 ## AgentFailure

@@ -228,7 +228,11 @@ That is the whole boundary, and it is worth stating because the two steps otherw
 
 **The boundary is physical: two commits.** Implement's work and review's work are separate commits on the branch, so what each step did is visible rather than inferred. A reader asking "what did the review change" reads a commit, not a diff between two states nobody recorded.
 
-**It fixes what it finds.** It has the change and the context loaded; leaving a fault for someone else costs another prompt to rediscover what this step already knows.
+**The boundary is also conversational: this is the one step in this flow that begins a new agent session.** A resolution is one conversation and its steps continue it, so `review` is the single place an author declared `Session: fresh` ([flow-registration.md](flow-registration.md) § Session continuity) — declared for **independence**, not for hygiene: review answers to the code, and an agent still holding the deliberations that produced what it judges reliably agrees with them. Everything else on the route continues, the mechanical steps included — open branch runs between plan and implement precisely so the implementing conversation picks up where the planning one left off.
+
+So this step arrives at a conversation that has never heard of the item, and its prompt names the item for that reason. That is the handle staying an optimisation: it decides what a dispatch costs and never what it produces ([resolution.md](resolution.md) § The agent session).
+
+**It fixes what it finds.** It is reading the change right now; leaving a fault for someone else costs another prompt to rediscover what this step is looking at.
 
 Its result is a briefing for the person who will review the proposal — what was looked for, what was changed, what still needs a human decision.
 

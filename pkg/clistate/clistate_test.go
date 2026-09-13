@@ -377,6 +377,39 @@ func TestLoadSessionRefusesACorruptRecord(t *testing.T) {
 	}
 }
 
+// The record is READABLE BY ITS OWNER AND NOBODY ELSE. The handle names a
+// conversation holding the resolution's whole reasoning — everything the draft
+// holds and everything the agent was told besides — so on a shared machine it is
+// worth exactly as much to a reader as the draft is, and it is written to a path
+// another account can otherwise walk to.
+//
+// The directory carries the same restriction, and it is the one that would be
+// missed: a 0o600 file under a 0o755 directory still leaks which items this
+// checkout is holding conversations about.
+func TestSessionRecordIsReadableOnlyByItsOwner(t *testing.T) {
+	dir := t.TempDir()
+	flowDir := filepath.Join(dir, ".flow")
+	t.Setenv("FLOW_DIR", flowDir)
+
+	if err := clistate.SaveSession("42", "sess-1", "review"); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	st, err := os.Stat(filepath.Join(flowDir, "session", "42.json"))
+	if err != nil {
+		t.Fatalf("stat the record: %v", err)
+	}
+	if perm := st.Mode().Perm(); perm != 0o600 {
+		t.Errorf("the record is mode %o, want 600", perm)
+	}
+	dst, err := os.Stat(filepath.Join(flowDir, "session"))
+	if err != nil {
+		t.Fatalf("stat the session directory: %v", err)
+	}
+	if perm := dst.Mode().Perm(); perm != 0o700 {
+		t.Errorf("the session directory is mode %o, want 700", perm)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Running-step record.
 // ---------------------------------------------------------------------------

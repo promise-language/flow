@@ -1478,6 +1478,35 @@ func TestBackend_ReleaseDropsTheAgentSession(t *testing.T) {
 	}
 }
 
+// ClearAgentSession takes ONE item's record. Nothing in the SDK calls it — the
+// session is cleared by releasing the claim or resetting the record — so it is
+// reached only by whoever is driving this double, and a method that quietly did
+// nothing would let their test assert a conversation was given up when the fake
+// was still holding it.
+func TestBackend_ClearAgentSessionTakesOneItemsRecord(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	one, two := addItem(b, "1"), addItem(b, "2")
+	for _, ref := range []flow.ItemRef{one, two} {
+		if err := b.SaveAgentSession(ctx, ref, flow.AgentSession{SessionID: "sess-" + ref.Display}); err != nil {
+			t.Fatalf("SaveAgentSession(%s): %v", ref.Display, err)
+		}
+	}
+
+	if err := b.ClearAgentSession(ctx, one); err != nil {
+		t.Fatalf("ClearAgentSession: %v", err)
+	}
+	if got, err := b.LoadAgentSession(ctx, one); got != (flow.AgentSession{}) || err != nil {
+		t.Errorf("Load after Clear = (%+v, %v), want the zero value and nil", got, err)
+	}
+	if got, _ := b.LoadAgentSession(ctx, two); got.SessionID != "sess-"+two.Display {
+		t.Errorf("the other item's session = %+v; clearing one item took another resolution's conversation", got)
+	}
+	if err := b.ClearAgentSession(ctx, one); err != nil {
+		t.Errorf("second Clear = %v, want nil — clearing what is not there is not an error", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // DetectCapabilities.
 // ---------------------------------------------------------------------------

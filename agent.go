@@ -90,8 +90,15 @@ type AgentResponse struct {
 	ToolsUsed       []string
 	CostUSD         float64
 	DurationSeconds float64
-	SessionID       string // for chaining via Request.ResumeSessionID
-	Failure         *AgentFailure
+	// SessionID is the conversation this turn ran in, reported whether the
+	// turn finished or died mid-way — a substrate that named its session
+	// opened one, and the conversation holds what the dead turn paid for. The
+	// SDK records it as the RESOLUTION's and offers it back as
+	// Request.ResumeSessionID at the chokepoint; no handler chains it itself
+	// (docs/resolution.md § The agent session). Empty where the substrate has
+	// no such notion.
+	SessionID string
+	Failure   *AgentFailure
 }
 
 // FailureCostCap is the AgentFailure.Kind for a turn the substrate stopped
