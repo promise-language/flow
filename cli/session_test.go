@@ -605,6 +605,180 @@ func TestSession_MechanicalPromptIsRefusedAndWritesNoSession(t *testing.T) {
 	}
 }
 
+// A dispatch the TREASURER REFUSED discards nothing. The boundary is applied
+// after the pre-dispatch gate for exactly this: the step never ran, so the
+// resolution did not reach the moment its author said the conversation ends —
+// and giving the conversation up anyway would throw away context already paid
+// for, on behalf of a step that was not allowed to speak.
+//
+// The refusal is a park a person clears with `grant`, or routes around. Either
+// way the handle has to still be there when they do.
+func TestSession_ARefusedDispatchDoesNotDiscardTheSession(t *testing.T) {
+	agent := &sessionAgent{}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", promptingStep("implementation", asPlan),
+			flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true,
+				Next: []flow.StepId{"implementation"}})
+		f.AddStep("review the work", "implementation", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"}); err != nil {
+				return flow.StepResult{}, err
+			}
+			return asPatch(ctx.Finalize(flow.DispositionResolved, "done")), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor",
+			Session: flow.SessionFresh, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, agent)
+	// The declaring step is over its cost cap before it is ever dispatched, so
+	// the gate refuses it with nothing spent on it.
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"implementation": {MaxCostUSD: 1}}
+	if err := be.AddCost(context.Background(), claim.ItemRef, "implementation", 2); err != nil {
+		t.Fatalf("AddCost: %v", err)
+	}
+
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
+		t.Fatalf("first RunOne = (%+v, %v), want the plan to complete", res, err)
+	}
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("second RunOne: %v", err)
+	}
+	if res.Status != "parked" {
+		t.Fatalf("res = %+v, want parked — the step is over its cost cap", res)
+	}
+	if len(agent.reqs) != 1 {
+		t.Fatalf("the agent saw %d requests, want 1 — the refused step never prompted", len(agent.reqs))
+	}
+	got, err := be.LoadAgentSession(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("LoadAgentSession: %v", err)
+	}
+	if got.SessionID != "sess-1" {
+		t.Errorf("session after the refusal = %+v, want the plan's conversation still held", got)
+	}
+	if got.Boundary != "" {
+		t.Errorf("Boundary = %q, want none — a step that did not run honoured no declaration", got.Boundary)
+	}
+}
+
+// sessionLoadFailsBackend has a store that will not answer a read.
+type sessionLoadFailsBackend struct {
+	*fake.Orchestrator
+	err error
+}
+
+func (b sessionLoadFailsBackend) LoadAgentSession(context.Context, flow.ItemRef) (flow.AgentSession, error) {
+	return flow.AgentSession{}, b.err
+}
+
+// A store that CANNOT ANSWER reads as absence and is said out loud. Absence is
+// the only answer the chokepoint can act on — the handle is offered and never
+// depended on, so nothing here may turn a missing one into a failed dispatch —
+// but this absence costs a re-opened conversation, and a resolution paying that
+// silently would look exactly like one with no store at all.
+func TestSession_AStoreThatCannotAnswerIsAbsenceAndIsReported(t *testing.T) {
+	agent := &sessionAgent{}
+	tel := &recordingTelemetry{}
+	wantErr := errors.New("the store is on fire")
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"}); err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, agent)
+	app.Orchestrator = sessionLoadFailsBackend{Orchestrator: be, err: wantErr}
+	app.Telemetry = tel
+
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
+		t.Fatalf("RunOne = (%+v, %v), want done — a store that cannot answer must not stop a step", res, err)
+	}
+	wantFresh(t, agent, 0)
+	var reported int
+	for _, e := range tel.events {
+		if strings.Contains(e.Detail, wantErr.Error()) {
+			reported++
+		}
+	}
+	if reported != 1 {
+		t.Errorf("the read failure was reported %d times, want once: %+v", reported, tel.events)
+	}
+}
+
+// And a backend that simply HAS NO STORE says nothing. The distinction is the
+// implementation of "the mechanism is absent rather than broken": a store that
+// was asked and could not answer is worth a line on every dispatch, and one that
+// never existed would be the same line on every dispatch of every item, saying
+// only that the operator chose a backend without the feature.
+func TestSession_ABackendWithNoStoreReportsNothing(t *testing.T) {
+	agent := &sessionAgent{}
+	tel := &recordingTelemetry{}
+	app, _, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"}); err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, agent)
+	app.Orchestrator = noSessionBackend{app.Orchestrator}
+	app.Telemetry = tel
+
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
+		t.Fatalf("RunOne = (%+v, %v), want done", res, err)
+	}
+	for _, e := range tel.events {
+		if strings.Contains(e.Detail, "agent session") {
+			t.Errorf("a backend with no store reported %q; absent is not failed", e.Detail)
+		}
+	}
+}
+
+// sessionSaveCountingBackend counts what the store was actually asked to write.
+type sessionSaveCountingBackend struct {
+	*fake.Orchestrator
+	saves int
+}
+
+func (b *sessionSaveCountingBackend) SaveAgentSession(ctx context.Context, ref flow.ItemRef, s flow.AgentSession) error {
+	b.saves++
+	return b.Orchestrator.SaveAgentSession(ctx, ref, s)
+}
+
+// A handle the store ALREADY HOLDS is not written again. The implement step
+// prompts once per fix round, and a substrate that honours the handle answers
+// every one of them with the same id: a write per prompt would be a write that
+// cannot change anything, repeated against a store that can still fail — and
+// each failure is a line of telemetry saying a handle was lost that was never
+// at risk.
+func TestSession_AnUnchangedHandleIsNotWrittenAgain(t *testing.T) {
+	agent := &sessionAgent{}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			for range 3 {
+				if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"}); err != nil {
+					return flow.StepResult{}, err
+				}
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, agent)
+	counting := &sessionSaveCountingBackend{Orchestrator: be}
+	app.Orchestrator = counting
+
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
+		t.Fatalf("RunOne = (%+v, %v), want done", res, err)
+	}
+	if len(agent.reqs) != 3 {
+		t.Fatalf("the agent saw %d requests, want 3", len(agent.reqs))
+	}
+	if counting.saves != 1 {
+		t.Errorf("the store was written %d times across 3 prompts, want 1 — only the turn that opened the conversation changed anything", counting.saves)
+	}
+}
+
 // runSteps dispatches n times, failing on the first dispatch that errors. The
 // multi-step fixtures above need the route walked, and none of them is about
 // how a dispatch ends.

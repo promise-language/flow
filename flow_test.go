@@ -445,6 +445,15 @@ func TestAddStep_PanicsWhenTheEntryStepDeclaresContinued(t *testing.T) {
 			f.AddSignalStep("create pr", "pr-open", noopHandler,
 				StepConfig{Entry: true, Prompts: PromptsAgent, Session: SessionContinued})
 		}},
+		// The third registrar, so the one rule cannot become three that disagree.
+		// A wait declares no Prompts — it dispatches nothing — and that is exactly
+		// why the session rule has to be checked here separately: Prompts and
+		// Session are independent axes, so the absence of one says nothing about
+		// the other.
+		{"flow.AwaitSignal:", func(f *Flow) {
+			f.AwaitSignal("wait for the pr", "pr-open",
+				StepConfig{Entry: true, Session: SessionContinued})
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.registrar, func(t *testing.T) {

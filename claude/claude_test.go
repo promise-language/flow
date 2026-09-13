@@ -322,6 +322,72 @@ func TestRun_NoHandleMeansNoRetry(t *testing.T) {
 	}
 }
 
+// The retry drops THE HANDLE AND NOTHING ELSE. It is the same turn, sent again,
+// so every other term the caller set still binds — and the cost ceiling is the
+// one that matters: a retry that lost `--max-budget-usd` would spend unbounded
+// on a step that had been granted a fixed amount, and nothing downstream would
+// notice, because the ceiling is enforced by the process that no longer has it.
+func TestRun_TheRetryDropsTheHandleAndNothingElse(t *testing.T) {
+	var argv [][]string
+	c := &Client{
+		Binary: "claude",
+		spawn: func(ctx context.Context, name string, args ...string) cmdHandle {
+			argv = append(argv, args)
+			if len(argv) == 1 {
+				return &fakeCmd{waitErr: errors.New("exit 1")}
+			}
+			return &fakeCmd{stdoutStream: successStream}
+		},
+	}
+
+	if _, err := c.Run(context.Background(), flow.AgentRequest{
+		Prompt:          "go",
+		ResumeSessionID: "gone",
+		Model:           "claude-opus-4-7",
+		PermissionMode:  "acceptEdits",
+		MaxCostUSD:      1.5,
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(argv) != 2 {
+		t.Fatalf("spawned %d times, want 2", len(argv))
+	}
+	retry := strings.Join(argv[1], " ")
+	for _, want := range []string{"--model claude-opus-4-7", "--permission-mode acceptEdits", "--max-budget-usd 1.5"} {
+		if !strings.Contains(retry, want) {
+			t.Errorf("the retry does not carry %q: %v", want, argv[1])
+		}
+	}
+}
+
+// A turn the CALLER cancelled is not retried. The failure is the context's, not
+// the substrate's: the handle was never judged, a second spawn would be refused
+// the same way, and a run stopping on a deadline must not spend twice on its way
+// out.
+func TestRun_ACancelledTurnIsNotRetried(t *testing.T) {
+	spawns := 0
+	c := &Client{
+		Binary: "claude",
+		spawn: func(ctx context.Context, name string, args ...string) cmdHandle {
+			spawns++
+			return &fakeCmd{waitErr: errors.New("signal: killed")}
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	resp, err := c.Run(ctx, flow.AgentRequest{Prompt: "go", ResumeSessionID: "sess-1"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if spawns != 1 {
+		t.Errorf("spawned %d times, want 1 — a cancelled turn says nothing about the handle", spawns)
+	}
+	if resp.Failure == nil || resp.Failure.Kind != "cancelled" {
+		t.Errorf("Failure = %+v, want the cancellation reported as itself", resp.Failure)
+	}
+}
+
 func TestRun_MaxCostUSDBecomesMaxBudgetFlag(t *testing.T) {
 	var capturedArgs []string
 	c := &Client{
