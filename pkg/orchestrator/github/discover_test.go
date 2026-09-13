@@ -707,3 +707,35 @@ func TestBackend_ListAutoSelectable_OmitsBlockedItems(t *testing.T) {
 		})
 	}
 }
+
+// The two conditions that clear on their own are both waits-on-condition —
+// nobody must act and there is nothing addressable to go work — and each says
+// WHICH condition. An exhausted account reported as "a transient
+// infrastructure condition" sends an operator to look at healthy
+// infrastructure for as long as the window lasts.
+func TestBackend_BlockednessDerivesWaitsOnConditionFromEachClearingLabel(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+
+	tests := []struct {
+		labels []string
+		want   string
+	}{
+		{[]string{"flow:implement", "flow:infra-transient"}, "waiting on a transient infrastructure condition"},
+		{[]string{"flow:implement", "flow:account-exhausted"}, "waiting on the agent account's allowance to return"},
+	}
+	for _, tt := range tests {
+		blocked, kind, got := b.blockedness(nil, tt.labels)
+		if !blocked {
+			t.Errorf("blockedness(%v) reported not blocked", tt.labels)
+		}
+		if kind != flow.WaitsOnCondition {
+			t.Errorf("blockedness(%v) kind = %q, want %q", tt.labels, kind, flow.WaitsOnCondition)
+		}
+		if got != tt.want {
+			t.Errorf("blockedness(%v) reason = %q, want %q", tt.labels, got, tt.want)
+		}
+	}
+}

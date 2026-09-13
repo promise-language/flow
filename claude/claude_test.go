@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/promise-language/flow"
 )
@@ -1238,5 +1240,244 @@ func TestParseStream_AScanFailureKeepsTheSessionItNamed(t *testing.T) {
 	}
 	if resp.SessionID != "sess-scan" {
 		t.Errorf("SessionID = %q, want sess-scan", resp.SessionID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The exhausted agent account
+//
+// The substrate emits a dedicated rate_limit_event before the turn dies: that
+// it refused, which window refused, and when that window resets. It is the
+// only evidence this condition may be classified from — the turn's own ending
+// carries none of the three, and docs/environment.md forbids keying on an
+// error taxonomy that varies between versions.
+// ---------------------------------------------------------------------------
+
+// rejectedEvent is the substrate's refusal, in the shape it arrives in.
+func rejectedEvent(window string, resetsAt int64) string {
+	return fmt.Sprintf(
+		`{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":%q,"resetsAt":%d}}`,
+		window, resetsAt)
+}
+
+// The exact shape a classifier keyed on the result's subtype gets wrong: the
+// turn ends is_error with subtype "success", which names nothing and is the
+// reason the outcome is not the evidence.
+func TestRun_AnExhaustedAccountIsClassifiedFromTheRefusalNotTheSubtype(t *testing.T) {
+	const resets = 1789153635
+	stream := `{"type":"system","subtype":"init","session_id":"s"}
+` + rejectedEvent("seven_day", resets) + `
+{"type":"result","subtype":"success","is_error":true,"session_id":"s","duration_ms":100}
+`
+	resp, err := clientWith(&fakeCmd{stdoutStream: stream}).Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.Failure == nil || resp.Failure.Kind != flow.FailureAccountExhausted {
+		t.Fatalf("Failure = %+v, want kind=%s", resp.Failure, flow.FailureAccountExhausted)
+	}
+	if !resp.Failure.Transient {
+		t.Error("Transient = false: a refusal that never reached an agent must not be billed or counted")
+	}
+	if resp.Failure.Window != "seven_day" {
+		t.Errorf("Window = %q, want seven_day — the window the substrate named", resp.Failure.Window)
+	}
+	if resp.Failure.ClearsAt == nil {
+		t.Fatal("ClearsAt is absent: the instant is the one fact a driver needs and the substrate published it")
+	}
+	if got := resp.Failure.ClearsAt.Unix(); got != resets {
+		t.Errorf("ClearsAt = %d, want %d", got, resets)
+	}
+	if !strings.Contains(resp.Failure.Message, "seven_day") ||
+		!strings.Contains(resp.Failure.Message, resp.Failure.ClearsAt.Format(time.RFC3339)) {
+		t.Errorf("Message = %q, want the window and the instant: %q is not actionable",
+			resp.Failure.Message, "agent failure")
+	}
+}
+
+// A refused turn ends WITHOUT a result event — the case reported as `no-result`
+// today, which loses the window and the instant and bills the refusal. The
+// classification must therefore beat the no-result path as well as the
+// is_error one.
+func TestRun_AnExhaustedAccountIsClassifiedWithNoResultEventAtAll(t *testing.T) {
+	stream := `{"type":"system","subtype":"init","session_id":"s"}
+` + rejectedEvent("five_hour", 1789153635) + `
+`
+	resp, err := clientWith(&fakeCmd{stdoutStream: stream}).Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.Failure == nil {
+		t.Fatal("Failure = nil, want an account-exhausted refusal")
+	}
+	if resp.Failure.Kind != flow.FailureAccountExhausted {
+		t.Fatalf("Kind = %q, want %q — a turn that died without a result is not a no-result when the substrate said why",
+			resp.Failure.Kind, flow.FailureAccountExhausted)
+	}
+	if resp.Failure.Window != "five_hour" {
+		t.Errorf("Window = %q, want five_hour", resp.Failure.Window)
+	}
+}
+
+// `status` is a field reporting a standing, not an occurrence: a turn that was
+// throttled and then let through was not refused, so the LAST event wins.
+func TestRun_ALaterAllowedSupersedesAnEarlierRejection(t *testing.T) {
+	stream := `{"type":"system","subtype":"init","session_id":"s"}
+` + rejectedEvent("five_hour", 1789153635) + `
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}
+{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"s","total_cost_usd":0.5}
+`
+	resp, err := clientWith(&fakeCmd{stdoutStream: stream}).Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.Failure != nil {
+		t.Fatalf("Failure = %+v, want nil: the substrate let the turn through", resp.Failure)
+	}
+	if resp.LastText != "done" {
+		t.Errorf("LastText = %q, want the turn's answer", resp.LastText)
+	}
+}
+
+// An allowed standing on its own changes nothing about how the turn reads.
+func TestRun_AnAllowedRateLimitEventLeavesTheTurnUntouched(t *testing.T) {
+	stream := `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour","resetsAt":1789153635}}
+` + successStream
+	resp, err := clientWith(&fakeCmd{stdoutStream: stream}).Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.Failure != nil {
+		t.Fatalf("Failure = %+v, want nil", resp.Failure)
+	}
+	if resp.LastText != "Hello World" || resp.CostUSD != 0.42 {
+		t.Errorf("resp = %+v, want the ordinary successful turn", resp)
+	}
+}
+
+// A refusal that names no reset still classifies: the condition is the status,
+// and the instant is what the park carries WHEN there is one. Absent reads as
+// "no instant" — never as the epoch, which would read as an instant long past
+// and send a driver straight back into the same refusal. An undecodable event
+// is skipped like any other malformed line and leaves the standing alone.
+func TestRun_AnExhaustedAccountWithNoResetInstantCarriesNone(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stream string
+	}{
+		{
+			name:   "no resetsAt field",
+			stream: `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour"}}`,
+		},
+		{
+			name: "an undecodable event does not clear the refusal",
+			stream: `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour"}}
+{"type":"rate_limit_event","rate_limit_info":["not","an","object"]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := tc.stream + "\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"session_id\":\"s\"}\n"
+			resp, err := clientWith(&fakeCmd{stdoutStream: stream}).Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if resp.Failure == nil || resp.Failure.Kind != flow.FailureAccountExhausted {
+				t.Fatalf("Failure = %+v, want kind=%s", resp.Failure, flow.FailureAccountExhausted)
+			}
+			if resp.Failure.ClearsAt != nil {
+				t.Errorf("ClearsAt = %v, want absent: the substrate named no reset", resp.Failure.ClearsAt)
+			}
+			if strings.Contains(resp.Failure.Message, "resets") {
+				t.Errorf("Message = %q, want no reset claimed when none was published", resp.Failure.Message)
+			}
+		})
+	}
+}
+
+// An unknown status is not a refusal. A later release adding one must not park
+// every step on the machine.
+func TestRun_AnUnknownRateLimitStatusIsNotARefusal(t *testing.T) {
+	stream := `{"type":"rate_limit_event","rate_limit_info":{"status":"warning","rateLimitType":"five_hour"}}
+` + successStream
+	resp, err := clientWith(&fakeCmd{stdoutStream: stream}).Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.Failure != nil {
+		t.Fatalf("Failure = %+v, want nil: only %q is the refusal", resp.Failure, "rejected")
+	}
+}
+
+// A refused turn also ENDS BADLY — no result, a non-zero exit, nothing on
+// stdout but the refusal itself. That ending is not the evidence: read as an
+// exit-error it parks as infrastructure and loses the window and the instant
+// the substrate had already handed over.
+func TestRun_ARefusalOutranksHowTheTurnDied(t *testing.T) {
+	const resets = 1789153635
+	f := &fakeCmd{
+		stdoutStream: rejectedEvent("seven_day", resets) + "\n",
+		stderrStream: "error: exiting\n",
+		waitErr:      errors.New("exit status 1"),
+	}
+	resp, err := clientWith(f).Run(context.Background(), flow.AgentRequest{Prompt: "go"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.Failure == nil {
+		t.Fatal("Failure = nil, want the refusal the substrate stated")
+	}
+	if resp.Failure.Kind != flow.FailureAccountExhausted {
+		t.Fatalf("Kind = %q, want %q — the non-zero exit is the wreckage, not the evidence",
+			resp.Failure.Kind, flow.FailureAccountExhausted)
+	}
+	if resp.Failure.Window != "seven_day" {
+		t.Errorf("Window = %q, want seven_day", resp.Failure.Window)
+	}
+	if resp.Failure.ClearsAt == nil || resp.Failure.ClearsAt.Unix() != resets {
+		t.Errorf("ClearsAt = %v, want the published instant", resp.Failure.ClearsAt)
+	}
+}
+
+// brokenAfter yields its contents and then FAILS instead of ending — a pipe
+// cut rather than a stream closed, which is how a turn the substrate refused
+// tends to end.
+type brokenAfter struct {
+	r   io.Reader
+	err error
+}
+
+func (b brokenAfter) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		return n, b.err
+	}
+	return n, err
+}
+
+// A statement already read is not unread by the stream breaking after it. The
+// refusal is classified AHEAD of the scan error for that reason: reported as a
+// scan failure it becomes a `no-result`, which parks as infrastructure and
+// discards the window and the instant the substrate had already handed over —
+// the exact loss this change exists to stop, arriving by the one route that
+// does not depend on the turn producing a result at all.
+func TestParseStream_ARefusalOutlivesTheStreamBreakingAfterIt(t *testing.T) {
+	const resets = 1789153635
+	stream := brokenAfter{
+		r:   strings.NewReader(rejectedEvent("seven_day", resets) + "\n"),
+		err: errors.New("read |0: file already closed"),
+	}
+
+	resp, err := parseStream(stream)
+	if err != nil {
+		t.Fatalf("parseStream: %v — a broken pipe after the refusal is not a reason to lose it", err)
+	}
+	if resp.Failure == nil || resp.Failure.Kind != flow.FailureAccountExhausted {
+		t.Fatalf("Failure = %+v, want kind=%s", resp.Failure, flow.FailureAccountExhausted)
+	}
+	if resp.Failure.Window != "seven_day" {
+		t.Errorf("Window = %q, want seven_day", resp.Failure.Window)
+	}
+	if resp.Failure.ClearsAt == nil || resp.Failure.ClearsAt.Unix() != resets {
+		t.Errorf("ClearsAt = %v, want the published instant", resp.Failure.ClearsAt)
 	}
 }

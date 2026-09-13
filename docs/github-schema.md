@@ -118,10 +118,12 @@ When present, the `park` object:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `kind` | string | One of: `blocked`, `question`, `treasurer-refused`, `step-did-not-complete`, `infra-transient`, `remote-unreachable`, `refused`, `write-contract`. |
+| `kind` | string | One of: `blocked`, `question`, `treasurer-refused`, `step-did-not-complete`, `infra-transient`, `remote-unreachable`, `refused`, `write-contract`, `account-exhausted`. |
 | `step` | string | The pending step's result id (artifact or signal id). |
 | `axis` | string | The treasurer's axis when `kind=treasurer-refused`. |
 | `axes` | array | Full spend snapshot at park time, in the treasurer's vocabulary (each with `axis`, `used`, `granted`, `exhausted`). |
+| `clears_at` | timestamp | When `kind=account-exhausted`: the instant the agent account's allowance returns, as the substrate published it ([environment.md](environment.md) § The agent account). **Persisted rather than recomputed** — the run exits, and the arena resumes at this instant; one that did not survive the exit is one nobody can wait out. Absent on every other kind, and **absent never means *soon***. |
+| `account` | string | When `kind=account-exhausted`: the agent account the spent allowance belongs to, as the **substrate's opaque identifier and never a readable name** — [disclosure.md](disclosure.md) closes "Host and account identifiers", and this record is published as an issue comment. Absent when nothing on the host could name the account; the park is still written, scoped to nothing rather than to a synthesized key. |
 | `reason` | string | Human-readable reason. |
 | `details` | string | Additional detail (e.g. question timestamp marker). |
 | `parked_at` | timestamp | When the park was recorded. |
@@ -188,6 +190,7 @@ All labels use a configurable prefix (default `flow:`). The label set is closed:
 | `flow:disabled` | The item is excluded from processing. Claim is refused. |
 | `flow:manual` | An operator has taken hand control (`ItemEditor.SetManual`). Nothing dispatches the item underneath the person driving it. |
 | `flow:infra-transient` | The item is parked due to infrastructure failure. |
+| `flow:account-exhausted` | The item is parked because the **agent account's** allowance is spent ([environment.md](environment.md) § The agent account). Its own label rather than `flow:infra-transient`: the two parks share their treatment — nothing billed, no dispatch counted — and differ in what a human scanning the list should do, which is go look at the infrastructure for one and nothing at all for the other. The label says only that the condition holds; **when it clears is in the park record**, because a label cannot carry an instant without becoming a value nobody can query and everybody must parse. |
 | `flow:treasurer-refused:<id>` | The treasurer refused further spend on the step producing `<id>`. |
 | `flow:type:<type>` | Item type derivation label. |
 | `flow:<binary-name>` | The binary that owns this item. |

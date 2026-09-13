@@ -280,6 +280,49 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		}
 	}
 
+	// The agent account, before anything is dispatched. Before a dispatch
+	// there is no refusal to read, so the account's PUBLISHED USAGE is the
+	// only source — and a window already exhausted withholds the dispatch
+	// rather than spending a turn to be refused (docs/environment.md § Two
+	// moments read two sources). A host that has not yet dispatched must not
+	// learn this by spending.
+	//
+	// Here rather than in `resolve`'s loop so it covers `run-step` too: both
+	// commands dispatch through RunOne, and a check in one of them is a check
+	// the other driver does not get.
+	//
+	// A MECHANICAL step is exempt, for the reason the pacing wait skips one:
+	// no agent is dispatched, so there is no allowance to spend and no refusal
+	// to pre-empt. Holding a free step against a window it cannot touch stalls
+	// the resolution against nothing.
+	//
+	// A quota error does NOTHING. The reading is informational and this check
+	// is the weaker of the two moments: where published usage is unreachable
+	// the in-band refusal still classifies the turn, which is a pre-check's
+	// correct behaviour rather than a hole. Nil Quota is the same case — it
+	// means no reading of any kind, and that is the contract of the field.
+	if !li.Mechanical() && app.Quota != nil {
+		if usage, qerr := app.Quota(); qerr == nil {
+			// Which window binds — and whether one binds at all — is
+			// bindingExhaustedWindow's, shared with the pacing wait that runs
+			// just before this on `resolve`'s loop. Two readings of the same
+			// figures is how the wait and the gate come to disagree.
+			if binding := bindingExhaustedWindow(usage, time.Now()); binding != nil {
+				// A reading whose reset did not parse carries NO instant
+				// rather than the zero time: absent reads as "no instant",
+				// where the epoch reads as one long past and sends a driver
+				// straight back.
+				var clearsAt *time.Time
+				if !binding.ResetsAt.IsZero() {
+					at := binding.ResetsAt
+					clearsAt = &at
+				}
+				return parkAndReturn(ctx, app, ref, result,
+					accountExhaustedPark(li.Result(), binding.Label, clearsAt))
+			}
+		}
+	}
+
 	// Wrap a context for this invocation on the same effective timeout the gate
 	// above judged by, so `grant --timeout` lands on the deadline as well as on
 	// the check.
@@ -375,6 +418,30 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 			Step:   li.Result(),
 			Reason: err.Error(),
 		}))
+	}
+
+	// The agent ACCOUNT's allowance is spent: the substrate refused the turn,
+	// named the window and published when it returns.
+	//
+	// Read off the chokepoint for the reason refusedPrompt is, and it matters
+	// more here: a handler that swallowed the error, or re-wrapped it without
+	// %w, would otherwise report a failed step — `resolve` exits non-zero and
+	// an unattended runner halts on a condition that clears by itself at a
+	// time the system was already handed.
+	//
+	// BEFORE the deadline and ErrTransient branches. A refused turn ends fast,
+	// so the deadline is not normally reached, but a handler that waited would
+	// otherwise park on timeout and be charged for it; and ErrTransient would
+	// park it as infrastructure, which is not what failed.
+	//
+	// No chargeDispatch: an allowance that refused to spend has not bought an
+	// attempt. The claim, the worktree and the draft stay exactly where they
+	// are — the arena is not idle, it is holding the most expensive thing the
+	// resolution owns (docs/environment.md § The arena holds the valuable
+	// state).
+	if exhausted := sctx.agent.accountExhausted; exhausted != nil {
+		return sctx.stampResult(parkAndReturn(ctx, app, ref, result,
+			accountExhaustedPark(li.Result(), exhausted.Window, exhausted.ClearsAt)))
 	}
 
 	// Timeout (deadline reached during handler). Counts as an invocation —
@@ -1032,7 +1099,51 @@ func parkAndReturn(
 	// outward once and no site can forget it.
 	mayClear := req.Kind.RedispatchMayClear()
 	result.RedispatchMayClear = &mayClear
+	// The instant, beside the classification it accompanies, for the same
+	// reason and at the same one write site: only account-exhausted sets it,
+	// and a park site that forgot to copy it would report a condition a driver
+	// must wait out with no way to know until when. nil on every other kind,
+	// where the field is absent from the wire entirely.
+	result.ClearsAt = req.ClearsAt
 	return result, nil
+}
+
+// accountExhaustedPark is the ONE park an exhausted agent account is reported
+// through — from the substrate's own refusal mid-dispatch, and from the
+// published usage read before one. Both moments report one condition, so they
+// build one request: the kind, the instant, the account it is scoped to, and a
+// reason that names all three.
+//
+// The reason is what docs/environment.md § The report names the account, the
+// window, and the instant requires: "agent account exhausted — 5h window,
+// resets 18:42Z" is actionable, where "agent failure" omits the one fact a
+// driver needs. The account is carried as the IDENTIFIER and never the
+// readable name — the park record is published as an issue comment, and
+// docs/disclosure.md closes account identifiers.
+func accountExhaustedPark(step flow.StepId, window string, clearsAt *time.Time) flow.ParkRequest {
+	reason := "agent account allowance exhausted"
+	if window != "" {
+		reason += " — " + window + " window"
+	}
+	if clearsAt != nil {
+		if window != "" {
+			reason += ","
+		} else {
+			reason += " —"
+		}
+		reason += " resets " + clearsAt.UTC().Format(time.RFC3339)
+	}
+	return flow.ParkRequest{
+		Kind:     flow.ParkAccountExhausted,
+		Step:     step,
+		ClearsAt: clearsAt,
+		// Empty when this host cannot name the account. The park is still
+		// written: the condition is real whether or not anybody could say
+		// whose allowance it is, and a synthesized key would be worse than
+		// none.
+		Account: agentAccountID(),
+		Reason:  reason,
+	}
 }
 
 func questionReason(qs []flow.AgentQuestion) string {
@@ -1531,6 +1642,17 @@ type meteredAgent struct {
 	// Prompts: none — kept so RunOne parks on it whatever the handler did with
 	// the error it was handed. nil until a mechanical step asks.
 	refusedPrompt error
+
+	// accountExhausted is the first turn the substrate REFUSED for the agent
+	// account's spent allowance, kept for the same reason refusedPrompt is:
+	// RunOne parks on it whatever the handler did with the error. The first
+	// and not the last, because every refusal in one dispatch is the same
+	// condition — the one that stopped the work is the one reported.
+	//
+	// It holds the failure itself rather than a bool, because the park needs
+	// the two facts only the failure carries: which window refused, and the
+	// instant it returns. nil until a turn is refused.
+	accountExhausted *flow.AgentFailure
 }
 
 func (m *meteredAgent) Name() string { return m.inner.Name() }
@@ -1642,6 +1764,16 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 	// flapping runner must not burn the cost axis any more than it burns the
 	// invocations axis.
 	transient := resp != nil && resp.Failure != nil && resp.Failure.Transient
+	// An exhausted ACCOUNT is recorded on the chokepoint here, beside the
+	// classification that already decides what it costs. The turn is Transient
+	// — so the skip below bills nothing, and RunOne's own skip counts no
+	// dispatch — and this is what lets RunOne park it under its own kind
+	// instead of as infrastructure: an operator told to re-run "once the
+	// infrastructure is back" would be looking at healthy infrastructure for
+	// as long as the window lasts.
+	if transient && resp.Failure.Kind == flow.FailureAccountExhausted && m.accountExhausted == nil {
+		m.accountExhausted = resp.Failure
+	}
 	if err == nil && resp != nil && resp.CostUSD > 0 && !transient {
 		_ = m.orch.AddCost(ctx, m.claim.ItemRef, step, resp.CostUSD)
 		// Update the local mirror so subsequent calls, and the park snapshot,

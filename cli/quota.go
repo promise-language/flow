@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/promise-language/flow"
 )
 
 // readQuota fetches subscription window usage. Returns the windows on success,
@@ -92,8 +94,16 @@ func reportQuota(w io.Writer) {
 	// the run's standing deliberately: it is detected for no capability, backs
 	// no role, and paying for a run is a different question from being
 	// permitted to perform it.
-	if acct := agentAccount(); acct != "" {
-		fmt.Fprintf(w, "agent account: %s\n", acct)
+	//
+	// An account this host cannot name is REPORTED as unidentified, with what
+	// was looked for and where — not dropped. The line is the one place an
+	// operator learns that a park written now will be scoped to nothing, and a
+	// missing line says nothing at all (docs/environment.md § It is never
+	// synthesized).
+	if rec, err := agentAccount(); err == nil {
+		fmt.Fprintf(w, "agent account: %s\n", rec.Display())
+	} else {
+		fmt.Fprintf(w, "agent account: unidentified — %s\n", err)
 	}
 
 	now := time.Now()
@@ -267,75 +277,174 @@ func parseClaudeCredentials(data []byte, source string, now time.Time) (string, 
 	return oauth.AccessToken, ""
 }
 
-// agentAccount is the seam this file's account discovery is tested through,
+// agentAccount is the seam this file's account reader is tested through,
 // alongside quotaFetch and quotaCacheDir. A test must never read the
 // developer's own account: redirected in TestMain, so a test added later
 // cannot forget to.
-var agentAccount = discoverAgentAccount
+var agentAccount = readAgentAccount
 
-// discoverAgentAccount names the account the agent substrate spends as: the
-// OAuth account object in the installed client's own configuration. Returns ""
-// when nothing on disk says — an unknown account drops the line rather than
-// printing a guess.
+// agentAccountRecord is what the client's configuration says about the account
+// the substrate spends as: the identifier everything is keyed by, and the
+// display name it is read by.
 //
-// Nothing is asked of a subprocess and nothing touches the network: what cannot
-// be learned by reading configuration is not learned here, which is
-// discoverAPIBase's rule for the same reason.
-//
-// The key is still discovered rather than stated — the shape the token reader
-// used until #183 gave it up. docs/environment.md § The agent account is a scope
-// requires the opposite ("read from a stated field in a stated place, never
-// discovered"), so this reader has remaining work; it is not this change's, and
-// folding it in here would collide with the change that does it.
-func discoverAgentAccount() string {
-	for _, path := range agentAccountFiles() {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var raw map[string]json.RawMessage
-		if err := json.Unmarshal(data, &raw); err != nil {
-			continue
-		}
-		// The key naming the OAuth account is discovered rather than
-		// hardcoded, as the token's is — and a file whose OAuth object carries
-		// no account (the credentials file does not) falls through to the next
-		// candidate instead of answering empty for all of them.
-		for key, val := range raw {
-			if !strings.Contains(strings.ToLower(key), "oauth") {
-				continue
-			}
-			var obj map[string]any
-			if err := json.Unmarshal(val, &obj); err != nil {
-				continue
-			}
-			// The e-mail first: it is what an operator recognises. The account
-			// id is the fallback, because an id names the account exactly even
-			// when nothing human-readable is stored.
-			for _, field := range []string{"emailAddress", "email", "account_email", "accountUuid", "account_id", "accountId"} {
-				if v, ok := obj[field].(string); ok && v != "" {
-					return v
-				}
-			}
-		}
-	}
-	return ""
+// The two are separate fields because they are separate kinds of thing
+// (docs/environment.md § The account is identified by the stable identifier).
+// Id is what a park is scoped to and what two hosts compare; Email is for a
+// person reading a report and is never compared, never published, and never
+// substituted for the Id when the Id is missing.
+type agentAccountRecord struct {
+	Id    flow.AgentAccountId
+	Email string
 }
 
-// agentAccountFiles lists the configuration files that may carry the OAuth
-// account, in priority order.
+// Display renders the record for a person: the readable name with the
+// identifier it stands for, or the identifier alone when the configuration
+// carries no readable name. The identifier is always present — a record
+// without one is never returned.
+func (r agentAccountRecord) Display() string {
+	if r.Email == "" {
+		return string(r.Id)
+	}
+	return fmt.Sprintf("%s (%s)", r.Email, r.Id)
+}
+
+// The stated place and the stated fields. Named constants because the whole
+// point is that they ARE stated: a reader that scans for a key that looks like
+// it might name an account, and takes the first field that looks like it might
+// be one, answers an e-mail on one host and a UUID on another for the same
+// account — and the divergence is silent, because each answer is individually
+// plausible (docs/environment.md § It is read from a stated field in a stated
+// place).
+const (
+	agentAccountFile    = ".claude.json"
+	agentAccountObject  = "oauthAccount"
+	agentAccountIdField = "accountUuid"
+)
+
+// errAgentAccountFileAbsent marks the one failure that is not an answer about
+// this host: the candidate simply is not there. It is skipped so a later
+// candidate can answer, and it is never what the caller is told when some
+// other candidate had something to say.
+var errAgentAccountFileAbsent = errors.New("no such file")
+
+// readAgentAccount names the account the agent substrate spends as, read from
+// the stated field in the stated place: the client's .claude.json, its
+// oauthAccount object, its accountUuid.
+//
+// It returns a record or an ERROR, never a synthesized identifier. A reader
+// that cannot establish the identity says so and does not fall back to a host
+// name, a configuration path, a token, or the e-mail address sitting next to
+// the field it wanted — an unidentified account is not an identity and must
+// never be used as one.
+//
+// Nothing here is pinned beyond those names, and nothing is asked of a
+// subprocess or the network: what cannot be learned by reading is not learned
+// here.
+func readAgentAccount() (agentAccountRecord, error) {
+	paths := agentAccountFiles()
+	var firstFailure error
+	for _, path := range paths {
+		rec, err := readAgentAccountFile(path)
+		if err == nil {
+			return rec, nil
+		}
+		// A candidate that answers nothing — absent, or there and naming no
+		// account — says only that this is not where the configuration is: a
+		// host spends as ONE account, so the search goes on and the account it
+		// finds is the account. What a non-absent candidate does decide is the
+		// REASON, when no candidate answers at all: the highest-priority one's
+		// is what the operator is told, so a person is pointed at the
+		// directory they configured rather than at $HOME.
+		if errors.Is(err, errAgentAccountFileAbsent) {
+			continue
+		}
+		if firstFailure == nil {
+			firstFailure = err
+		}
+	}
+	if firstFailure != nil {
+		return agentAccountRecord{}, firstFailure
+	}
+	return agentAccountRecord{}, fmt.Errorf("no %s naming %s.%s (searched %s)",
+		agentAccountFile, agentAccountObject, agentAccountIdField, strings.Join(paths, ", "))
+}
+
+// readAgentAccountFile reads one candidate. Each way of not finding the
+// account gets its OWN reason: an operator reading "unidentified" has to know
+// whether to install the client, log it in, or look at a file that is there
+// and wrong.
+func readAgentAccountFile(path string) (agentAccountRecord, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return agentAccountRecord{}, errAgentAccountFileAbsent
+		}
+		return agentAccountRecord{}, fmt.Errorf("%s cannot be read", path)
+	}
+	// The stated shape, spelled as tags because that is what a decoder reads:
+	// oauthAccount.accountUuid is the identity, and oauthAccount.emailAddress
+	// accompanies it for display only.
+	var doc struct {
+		OAuthAccount *struct {
+			AccountUuid  string `json:"accountUuid"`
+			EmailAddress string `json:"emailAddress"`
+		} `json:"oauthAccount"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return agentAccountRecord{}, fmt.Errorf("%s is not readable JSON", path)
+	}
+	if doc.OAuthAccount == nil {
+		return agentAccountRecord{}, fmt.Errorf("%s carries no %s object — the client is installed but not logged in",
+			path, agentAccountObject)
+	}
+	if doc.OAuthAccount.AccountUuid == "" {
+		// The e-mail is NOT the fallback. It is a display name: it changes
+		// while the account does not, and it is missing on hosts where the
+		// account is perfectly usable — so an account known only by one is an
+		// account this host cannot name.
+		return agentAccountRecord{}, fmt.Errorf("%s.%s is empty in %s — a display name is not an identity",
+			agentAccountObject, agentAccountIdField, path)
+	}
+	return agentAccountRecord{
+		Id:    flow.AgentAccountId(doc.OAuthAccount.AccountUuid),
+		Email: doc.OAuthAccount.EmailAddress,
+	}, nil
+}
+
+// agentAccountID is the identifier a park is scoped to, or the empty one when
+// this host cannot name the account.
+//
+// Empty is a legitimate answer and the park is still written: the condition is
+// real whether or not anybody could name whose allowance it is. What must not
+// happen is a stand-in — a park scoped to a synthesized key compares equal to
+// itself and will eventually compare equal to something else, which is worse
+// than a park scoped to nothing.
+func agentAccountID() flow.AgentAccountId {
+	rec, err := agentAccount()
+	if err != nil {
+		return ""
+	}
+	return rec.Id
+}
+
+// agentAccountFiles lists where the client's .claude.json may be, in priority
+// order. The FILE and the FIELD are stated; only which directory holds them is
+// resolved, because that is a property of the installation rather than of the
+// account.
 //
 // $HOME is searched as well as the config directories, because the client's
 // account lives beside its config directory rather than inside it — and the
 // config directories come first, so a caller pointed at one by
-// CLAUDE_CONFIG_DIR is answered from there.
+// CLAUDE_CONFIG_DIR is answered from there. A host driving two accounts under
+// two config directories is exactly the case a fallback to $HOME would answer
+// wrongly.
 func agentAccountFiles() []string {
 	var paths []string
 	for _, dir := range claudeConfigDirs() {
-		paths = append(paths, filepath.Join(dir, ".claude.json"), filepath.Join(dir, "config.json"))
+		paths = append(paths, filepath.Join(dir, agentAccountFile))
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		paths = append(paths, filepath.Join(home, ".claude.json"))
+		paths = append(paths, filepath.Join(home, agentAccountFile))
 	}
 	return paths
 }
@@ -523,6 +632,48 @@ func parseUsageResponse(body []byte) ([]windowUsage, error) {
 		return nil, fmt.Errorf("transport — usage response contained no window data")
 	}
 	return result, nil
+}
+
+// bindingExhaustedWindow returns the window whose allowance is spent and that
+// decides when the account is usable again — or nil when none is spent.
+//
+// One predicate, two callers: RunOne's pre-dispatch check parks on it, and
+// `resolve`'s pacing wait declines to pace against it. A second reading of
+// "the allowance is spent" is how the gate that withholds a dispatch and the
+// wait that precedes it come to disagree about the same figures.
+//
+// THE BINDING WINDOW IS THE ONE THAT RESETS LAST. With two windows flat, the
+// allowance returns when the later one does, and reporting the earlier instant
+// hands a driver a time the system already knew was too early — which is the
+// one thing clears_at exists to prevent.
+//
+// A window whose PUBLISHED RESET HAS PASSED is not spent, whatever the figure
+// beside it says: the window it describes is over, and the reading is simply
+// older than it. This is the ordinary case rather than a corner — a reading is
+// served from the machine-wide cache for minutes after it was taken, and a
+// driver that waits to the published instant and resumes there arrives inside
+// exactly that interval. Parking on it would report a condition that has
+// ended, with an instant already in the past, which tells that driver to come
+// straight back and be told the same thing. The in-band refusal classifies the
+// turn if the allowance really is still spent.
+//
+// Used is a fraction in [0,1], or -1 when the endpoint reported none; -1 is
+// below the floor and reads as "not spent", which is the right direction for a
+// figure nobody has.
+func bindingExhaustedWindow(usage []windowUsage, now time.Time) *windowUsage {
+	var binding *windowUsage
+	for i := range usage {
+		if usage[i].Used < 1.0 {
+			continue
+		}
+		if !usage[i].ResetsAt.IsZero() && !usage[i].ResetsAt.After(now) {
+			continue
+		}
+		if binding == nil || usage[i].ResetsAt.After(binding.ResetsAt) {
+			binding = &usage[i]
+		}
+	}
+	return binding
 }
 
 // paceTargets holds the per-window target fractions for pacing.

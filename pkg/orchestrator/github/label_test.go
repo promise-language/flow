@@ -248,3 +248,26 @@ func TestParkLabel_StepDidNotCompleteIsAdvertisedAsBlocked(t *testing.T) {
 		t.Errorf("parkLabel(step-did-not-complete) = %q, want %q — the label a refused capture was advertised under before it left the blocked kind", got, l.Blocked())
 	}
 }
+
+// An exhausted agent account gets its own label rather than infra-transient's.
+// The two parks share their treatment — nothing billed, no dispatch counted —
+// and differ in what a human scanning the issue list should do: go look at the
+// infrastructure for one, and nothing at all for the other until the window
+// resets.
+func TestParkLabel_AccountExhaustedIsItsOwnLabel(t *testing.T) {
+	l := newLabels("flow:")
+	req := &flow.ParkRequest{Kind: flow.ParkAccountExhausted, Step: "plan"}
+	got := parkLabel(l, req)
+	if got != l.AccountExhausted() {
+		t.Errorf("parkLabel(account-exhausted) = %q, want %q", got, l.AccountExhausted())
+	}
+	if got == l.InfraTransient() {
+		t.Error("an exhausted account is advertised as an infrastructure failure: the infrastructure is healthy")
+	}
+	if got == l.Blocked() {
+		t.Error("an exhausted account fell through to the generic blocked label")
+	}
+	if want := "flow:account-exhausted"; got != want {
+		t.Errorf("the wire spelling is %q, want %q — it matches the park kind", got, want)
+	}
+}

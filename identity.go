@@ -39,6 +39,31 @@ type AccountId string
 // TagId: non-empty, single-line, no edge whitespace.
 func (a AccountId) Valid() bool { return validName(string(a)) }
 
+// AgentAccountId is the account the AGENT SUBSTRATE spends as, in the
+// substrate's own namespace — the stable identifier the substrate issues, and
+// nothing else (docs/environment.md § The agent account).
+//
+// NOT AccountId. That one is the orchestrator's login: it credits claims,
+// stamps journal entries, and backs the roles a run may assume. This one pays
+// for the turns. docs/cli.md § The announcement names the run's standing keeps
+// them separate axes deliberately — "paying for a run and being permitted to
+// perform it are different questions, and one account answering the first says
+// nothing about the second" — and a host may drive several of these under one
+// of those. They are a distinct type so neither can be passed where the other
+// belongs.
+//
+// It is READ from a stated field in a stated place, never discovered by
+// scanning configuration for something that looks like an account, and never
+// synthesized from a host name, a path or a token. A reader that does not find
+// the stated field has not found the account and says so: the EMPTY value is
+// not an identity and must never be compared as one. Two runs that cannot name
+// the account they spend as are not thereby spending as the same account.
+//
+// A display name — an e-mail, an alias — is not this. It may accompany the
+// identifier so a person can read a report; it is never what a comparison is
+// made on, and it is never what crosses the wire.
+type AgentAccountId string
+
 // HostId is the machine an arena lives on: the host's SHORT NAME — its first
 // dotted segment — normalized.
 //

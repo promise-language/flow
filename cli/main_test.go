@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -37,11 +38,13 @@ func TestMain(m *testing.M) {
 	quotaCacheDir = func() (string, bool) { return dir, true }
 	quotaCredential = func() (string, string) { return "cli-test-credential", "" }
 	// The agent account (cli/quota.go) is redirected here for the same reason
-	// and one step further: its discovery reads $HOME, which no CLAUDE_CONFIG_DIR
+	// and one step further: the reader consults $HOME, which no CLAUDE_CONFIG_DIR
 	// a test sets can shadow, so an unstubbed read would print the developer's
-	// own account into a test's expected output. A test about discovery itself
-	// restores it with useStubAgentAccount.
-	agentAccount = func() string { return "" }
+	// own account into a test's expected output. A test about the reader itself
+	// restores it with useStubAgentAccount or isolateAgentAccountRead.
+	agentAccount = func() (agentAccountRecord, error) {
+		return agentAccountRecord{}, errors.New("no agent account in tests")
+	}
 	code := m.Run()
 	// os.Exit skips deferred calls, so the cleanup is explicit.
 	os.RemoveAll(dir)
@@ -49,12 +52,12 @@ func TestMain(m *testing.M) {
 }
 
 // useStubAgentAccount points the agent-account seam at a fixed answer for one
-// test, restoring TestMain's empty one afterwards. Tests that assert on the
-// account line take it; everything else keeps the package-wide silence.
-func useStubAgentAccount(t *testing.T, account string) {
+// test, restoring TestMain's unidentified one afterwards. Tests that assert on
+// the account line take it; everything else keeps the package-wide silence.
+func useStubAgentAccount(t *testing.T, rec agentAccountRecord, err error) {
 	t.Helper()
 	prev := agentAccount
-	agentAccount = func() string { return account }
+	agentAccount = func() (agentAccountRecord, error) { return rec, err }
 	t.Cleanup(func() { agentAccount = prev })
 }
 

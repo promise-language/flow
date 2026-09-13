@@ -608,6 +608,13 @@ func (b *Orchestrator) blockedness(blockers []flow.Blocker, lblNames []string) (
 	if hasLabel(lblNames, b.labels.InfraTransient()) {
 		return true, flow.WaitsOnCondition, "waiting on a transient infrastructure condition"
 	}
+	// An exhausted agent account is the same kind of block by a different
+	// cause, and reported as its own: the reason names the allowance rather
+	// than the infrastructure, because an operator sent to look at healthy
+	// infrastructure has been sent to look at nothing.
+	if hasLabel(lblNames, b.labels.AccountExhausted()) {
+		return true, flow.WaitsOnCondition, "waiting on the agent account's allowance to return"
+	}
 	return false, "", ""
 }
 

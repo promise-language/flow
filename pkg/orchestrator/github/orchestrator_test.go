@@ -4031,3 +4031,51 @@ func TestBackend_DetectCapabilities_ForbiddenIsAnError(t *testing.T) {
 		t.Fatalf("DetectCapabilities(bob) = %v, want an error rather than an empty set", got)
 	}
 }
+
+// The label lifecycle for the ninth kind: Park advertises it, and whatever
+// clears the park removes it. A park label that outlives its condition is
+// worse than no label — it is read as current, and this one is read as "do not
+// offer this item" by selection.
+func TestBackend_AccountExhaustedParkLabelIsWrittenAndCleared(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+
+	ctx := t.Context()
+	claim, err := b.Claim(ctx, b.refFromIssue(42), nil)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	at := time.Date(2026, 9, 13, 18, 42, 0, 0, time.UTC)
+	if err := b.Park(ctx, claim.ItemRef, flow.ParkRequest{
+		Kind: flow.ParkAccountExhausted, Step: "plan", ClearsAt: &at, Account: "uuid-1",
+		Reason: "agent account allowance exhausted — 5h window, resets 2026-09-13T18:42:00Z",
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+
+	want := b.labels.AccountExhausted()
+	if !hasLabel(mock.labelNames(), want) {
+		t.Fatalf("labels = %v, want %q", mock.labelNames(), want)
+	}
+	// The instant and the account survive the write: the run exits here, and
+	// whatever resumes reads them back off the item.
+	state, err := b.Load(ctx, claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.Park == nil || state.Park.ClearsAt == nil || !state.Park.ClearsAt.Equal(at) {
+		t.Errorf("park = %+v, want the published instant %v", state.Park, at)
+	}
+	if state.Park.Account != flow.AgentAccountId("uuid-1") {
+		t.Errorf("park account = %q, want uuid-1", state.Park.Account)
+	}
+
+	if err := b.clearPark(ctx, claim.ItemRef); err != nil {
+		t.Fatalf("clearPark: %v", err)
+	}
+	if hasLabel(mock.labelNames(), want) {
+		t.Errorf("labels = %v, want %q removed — a park label that outlives its condition is read as current", mock.labelNames(), want)
+	}
+}

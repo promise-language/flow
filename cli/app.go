@@ -89,15 +89,20 @@ type App struct {
 	// recording why.
 	Flow *flow.Flow
 
-	// Quota reads the subscription windows `resolve` paces against. **Nil means
-	// no pacing**, and that is what makes pacing safe to have at all: it reaches
-	// live account state, so a caller that has not asked for it does not get it.
+	// Quota reads the subscription windows `resolve` paces against, and that
+	// RunOne checks before a dispatch for an already-exhausted agent account
+	// (docs/environment.md § Two moments read two sources). **Nil means no
+	// reading of any kind**, and that is what makes both safe to have at all:
+	// it reaches live account state, so a caller that has not asked for it does
+	// not get it — no pacing, and no pre-dispatch check.
 	//
-	// A test must never set this. Pacing sleeps for as long as the account says,
-	// so a test that paced would take a length of time nobody chose and would
-	// make the gate's result a function of usage rather than of the tree — which
-	// is what once took bin/verify past its ten-minute package timeout with the
-	// tree perfectly sound.
+	// A test must never set this ON A PATH THAT PACES. Pacing sleeps for as
+	// long as the account says, so a test that paced would take a length of
+	// time nobody chose and would make the gate's result a function of usage
+	// rather than of the tree — which is what once took bin/verify past its
+	// ten-minute package timeout with the tree perfectly sound. The
+	// pre-dispatch check sleeps for nothing and reaches nothing: a RunOne test
+	// may install a stub reading to exercise it.
 	//
 	// Run installs the real reader when it is nil, so the binary paces and a
 	// unit test calling a command directly does not. That reader reads through

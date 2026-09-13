@@ -889,6 +889,13 @@ func parkLabel(l labels, req *flow.ParkRequest) string {
 		return l.TreasurerRefused(string(req.Step))
 	case flow.ParkInfraTransient:
 		return l.InfraTransient()
+	case flow.ParkAccountExhausted:
+		// Its own label, not the infra-transient one: a human scanning the
+		// issue list must be able to tell a runner that fell over from an
+		// allowance that is spent — the first wants somebody to go look at the
+		// infrastructure, the second wants nobody to do anything until the
+		// window resets.
+		return l.AccountExhausted()
 	case flow.ParkRefused:
 		// A deterministic refusal is blocked until the environment changes;
 		// the generic "blocked" label is correct — no budget grant clears it.

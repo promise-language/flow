@@ -55,6 +55,23 @@ const (
 	// may be wanted — and the step is NOT retried (same prompt, same result).
 	// A human inspects the evidence and either widens the contract or reverts.
 	ParkWriteContract ParkKind = "write-contract"
+	// ParkAccountExhausted — the AGENT ACCOUNT's allowance is spent: the
+	// substrate refused the turn, said which window refused, and published
+	// the instant it returns (docs/environment.md § The agent account).
+	//
+	// Its own member rather than a reading of ParkInfraTransient: nothing
+	// about the infrastructure failed, and an operator told to re-run "once
+	// the infrastructure is back" would be looking at healthy infrastructure
+	// for as long as the window lasts. Like that kind it consumes no
+	// invocation and is not billed — an allowance that refused to spend has
+	// not bought an attempt.
+	//
+	// THE ONLY KIND THAT KNOWS WHEN IT CLEARS. Every other condition ends
+	// when it ends and is rediscovered by measuring; a window states its own
+	// reset, so the park carries that instant and the account it belongs to,
+	// and a driver that re-dispatches before it is looping against an answer
+	// it was already given.
+	ParkAccountExhausted ParkKind = "account-exhausted"
 )
 
 // AllParkKinds returns every ParkKind, in declaration order. Downstream
@@ -64,6 +81,7 @@ func AllParkKinds() []ParkKind {
 		ParkBlocked, ParkQuestion, ParkTreasurerRefused,
 		ParkStepDidNotComplete, ParkInfraTransient,
 		ParkRemoteUnreachable, ParkRefused, ParkWriteContract,
+		ParkAccountExhausted,
 	}
 }
 
@@ -117,6 +135,11 @@ func (k ParkKind) RedispatchMayClear() bool {
 	case ParkWriteContract:
 		// Same prompt, same result; a human widens the contract or reverts.
 		return false
+	case ParkAccountExhausted:
+		// Once the window has reset. The park carries that instant, which
+		// says when a re-dispatch is worth anything — it does not narrow the
+		// classification, and a caller reads the two together.
+		return true
 	}
 	return false
 }
@@ -185,6 +208,29 @@ type ParkRequest struct {
 	Axes    []AxisReport `json:"axes,omitempty"`
 	Reason  string       `json:"reason,omitempty"`
 	Details string       `json:"details,omitempty"`
+
+	// ClearsAt is the instant the condition ends, for the one kind whose end
+	// is PUBLISHED rather than observed: ParkAccountExhausted, where the
+	// substrate named the window's reset (docs/environment.md § The agent
+	// account). Set on that kind alone — a machine recovering is not knowable
+	// in advance and a remote returns when it returns, so every other kind
+	// leaves it nil and is waited out by re-measuring.
+	//
+	// A pointer for the reason InvocationResult.CostUSD is one: a zero
+	// time.Time is not omitted by omitempty, and an absent instant must read
+	// as "no instant", never as "soon".
+	ClearsAt *time.Time `json:"clears_at,omitempty"`
+	// Account is the agent account the exhausted allowance belongs to — the
+	// substrate's own stable identifier, carried because the scope is the
+	// ACCOUNT and not this machine: one account spends across many hosts, and
+	// a park naming no account is scoped to nothing.
+	//
+	// The IDENTIFIER only, never the readable name: docs/disclosure.md closes
+	// "Host and account identifiers", and the park record is published as an
+	// issue comment. Empty when nothing could name the account — an
+	// unidentified account is not an identity, so the park is written scoped
+	// to nothing rather than to a synthesized key.
+	Account AgentAccountId `json:"account,omitempty"`
 }
 
 // AxisReport is one budget axis's meter and cap at the moment a step parked.
@@ -543,6 +589,19 @@ type InvocationResult struct {
 	// classification that matters most here, and a plain bool with omitempty
 	// would put it on the wire identically to absent.
 	RedispatchMayClear *bool `json:"redispatch_may_clear,omitempty"`
+
+	// ClearsAt is the instant the agent account's allowance returns, as the
+	// substrate published it, on a result reporting an account-exhausted park
+	// (docs/cli.md § One-shot reports). It ACCOMPANIES redispatch_may_clear:
+	// true rather than qualifying it — re-dispatch is what clears this park,
+	// and this says when attempting it is worth anything. A driver that
+	// re-dispatches before it spends an invocation to be told what it already
+	// knew; one that backs off incrementally toward it is guessing at a
+	// published answer.
+	//
+	// Absent on every other kind of stop, and ABSENT NEVER MEANS SOON. A
+	// pointer for the reason ParkRequest.ClearsAt is one.
+	ClearsAt *time.Time `json:"clears_at,omitempty"`
 
 	// NextStep names the lifecycle item the route now points at, and
 	// NextMechanical reports whether dispatching it invokes no agent — true for

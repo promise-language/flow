@@ -737,6 +737,14 @@ func remedyFor(kind flow.ParkKind) string {
 		return "Nothing to grant — the failure is deterministic and consumed no budget, so re-running reproduces it until its cause is changed. The park's reason (`status` prints it) names the cause: a precondition or environment the handler found unmet, or a step declaring Prompts: none whose handler asked for a prompt — which is fixed in the source, not the environment."
 	case flow.ParkWriteContract:
 		return "The step modified the worktree outside its declared contract. Inspect the changes; if they are wanted, widen the step's contract — if not, revert and re-run."
+	case flow.ParkAccountExhausted:
+		// Its own arm, and deliberately not the infra-transient one: nothing
+		// about the infrastructure failed, and an operator told to re-run
+		// "once the infrastructure is back" would be looking at healthy
+		// infrastructure for as long as the window lasts. The park's own
+		// reason carries the window and the instant; this says what to do
+		// about them, which is nothing.
+		return "Nothing to grant — this park consumed no budget and no grant clears it: the agent account's allowance is spent. The park's reason (`status` prints it) names the window and the instant it resets; re-run the step then."
 	}
 	return "Clear the blocker on the item, then re-run the step."
 }

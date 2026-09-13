@@ -760,6 +760,13 @@ func (b *Orchestrator) blockednessOf(rec *itemRecord) (bool, flow.BlockKind, str
 			}
 		case flow.ParkTreasurerRefused:
 			return true, flow.WaitsOnPerson, "the treasurer refused the next dispatch"
+		case flow.ParkAccountExhausted:
+			// waits-on-condition: nobody must act, and there is nothing
+			// addressable to go work — the allowance returns on its own at an
+			// instant the park records. Safe for resumption, because
+			// blockedFromAdvancing stops only on waits-on-items: the owning
+			// arena still picks the item up and runs the step.
+			return true, flow.WaitsOnCondition, "the agent account's allowance is spent"
 		}
 	}
 	return false, "", ""
