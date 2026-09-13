@@ -1145,8 +1145,11 @@ func (b *builder) runAgent(ctx flow.StepCtx, req flow.AgentRequest) (*flow.Agent
 //
 // The loop lives HERE and not on the step's own result: a question is offered
 // from inside the invocation, so a refusal can still be revised inside it. A
-// step's result is offered by the SDK after the handler has returned, and a
-// refusal there is stashed and parked (cli's capture path) rather than revised.
+// step's result is offered by the SDK after the handler has returned, so a
+// refusal there is revised by the SDK instead (cli's capture path): the
+// refusal and the refused text are stashed as the step's work in progress and
+// the whole handler is re-run in the same dispatch, reading them back through
+// WorkInProgressBlock, with its own bound and its own park.
 func (b *builder) resolveQuestion(ctx flow.StepCtx, resp *flow.AgentResponse, header, body string) (*flow.AgentResponse, error) {
 	// The turn that found the ambiguity is the turn that produced the
 	// reasoning behind it: stashing the whole final message is what makes the

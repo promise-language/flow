@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // Origin names the party standing behind a string that is about to be
@@ -220,7 +221,25 @@ type DisclosureGuard interface {
 // carries the refused fragment.
 func RefusedRecord(refused ErrDisclosureRefused, body string) string {
 	return fmt.Sprintf(
-		"An earlier run produced this text and the disclosure guard refused to publish it.\n\n"+
-			"The refusal:\n\n%s\n\nThe text that was refused:\n\n%s",
+		refusedRecordPreamble+"\n\nThe refusal:\n\n%s\n\nThe text that was refused:\n\n%s",
 		refused.Error(), body)
+}
+
+// refusedRecordPreamble opens every RefusedRecord, and is what IsRefusedRecord
+// recognises one by. Writer and reader of the shape sit side by side, here,
+// and nothing else parses it.
+const refusedRecordPreamble = "An earlier run produced this text and the disclosure guard refused to publish it."
+
+// IsRefusedRecord reports whether a work-in-progress record is one that
+// RefusedRecord wrote — a refusal and the text it refused — rather than notes a
+// step left itself. The two ask different things of the step that reads them
+// back: notes are continued, a refused record is amended, and a prompt that
+// framed the second as the first would invite the step to start over on work
+// that is finished and only expressed wrongly.
+//
+// A prefix check, deliberately. The preamble is the record's first line and
+// nothing a step writes as notes begins with it; text that merely mentions it
+// further in is notes quoting a refusal, not a refusal.
+func IsRefusedRecord(record string) bool {
+	return strings.HasPrefix(record, refusedRecordPreamble)
 }

@@ -1805,7 +1805,66 @@ func TestWorkInProgressBlock(t *testing.T) {
 		if !strings.Contains(got, "not a result") {
 			t.Errorf("block does not say the notes are scaffolding: %q", got)
 		}
+		// And the other framing is not this one: notes are continued, and
+		// nothing here asks the agent to revise a refusal it never had.
+		if strings.Contains(got, reviseGuidance) {
+			t.Errorf("ordinary notes rendered with the revision guidance: %q", got)
+		}
 	})
+	// A refused result is finished work whose expression was refused, and the
+	// block says so: what the guard found, the text it found it in, and the
+	// shared guidance that the work stands. What it must NOT say is that these
+	// are notes to continue from and correct — that framing is the one that
+	// turns a refused sentence into a re-plan of the whole step.
+	t.Run("a refused result is framed for revision, not continuation", func(t *testing.T) {
+		const guardAnswer = "an absolute home path names the machine's user"
+		const refusedText = "the plan mentioning /home/someone/"
+		record := flow.RefusedRecord(flow.ErrDisclosureRefused{
+			Act:    flow.ActArtifactComment,
+			Reason: errors.New(guardAnswer),
+		}, refusedText)
+		got := PromptContext{WorkInProgress: record}.WorkInProgressBlock()
+		for _, want := range []string{
+			refusedResultFraming,            // what happened, and what is asked
+			reviseGuidance,                  // the work stands; its expression changes
+			guardAnswer,                     // what the guard found
+			refusedText,                     // what it found it in
+			string(flow.ActArtifactComment), // which write was refused
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("refused-result block is missing %q:\n%s", want, got)
+			}
+		}
+		for _, wrong := range []string{"notes you left yourself", "discard", "Continue from them"} {
+			if strings.Contains(got, wrong) {
+				t.Errorf("refused-result block carries the notes framing %q — an invitation to re-plan:\n%s", wrong, got)
+			}
+		}
+	})
+}
+
+// The guidance is one text in two re-prompts: the revise prompt for a refused
+// question renders the same const the work-in-progress block renders for a
+// refused result, so the two cannot drift into asking for different things.
+func TestReviseGuidanceIsSharedByBothRefusalReprompts(t *testing.T) {
+	pc := PromptContext{
+		Prior:       map[StepID]flow.ArtifactRecord{},
+		Refusal:     "found a home path",
+		RefusedText: "the question",
+	}
+	if err := pc.Context.Render(); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	got, err := renderPrompt(Config{}, PromptRevise, pc)
+	if err != nil {
+		t.Fatalf("renderPrompt: %v", err)
+	}
+	if !strings.Contains(got, reviseGuidance) {
+		t.Errorf("the revise prompt does not carry the shared guidance:\n%s", got)
+	}
+	if !strings.Contains(refusedResultFraming, reviseGuidance) {
+		t.Errorf("the refused-result framing does not carry the shared guidance:\n%s", refusedResultFraming)
+	}
 }
 
 // The revise prompt has one job, and its reply is recorded verbatim. Anything

@@ -168,6 +168,33 @@ func TestAllOriginsAndActs_CallerCannotMutateTheSet(t *testing.T) {
 	}
 }
 
+// A refused record is recognisable by its shape, and by nothing else in the
+// store: the step that reads its work in progress back has to tell finished
+// work the guard refused (to be amended) from notes it left itself (to be
+// continued), and the two are the same string type in the same store.
+func TestIsRefusedRecord(t *testing.T) {
+	refused := ErrDisclosureRefused{Act: ActArtifactComment, Reason: errors.New("a home path")}
+	for name, c := range map[string]struct {
+		record string
+		want   bool
+	}{
+		"a refused record":                {RefusedRecord(refused, "the plan mentioning /home/someone/"), true},
+		"a refused record of empty text":  {RefusedRecord(refused, ""), true},
+		"nothing stashed":                 {"", false},
+		"ordinary notes":                  {"half a plan\n\n- the parser\n- the fixture", false},
+		"notes that mention the preamble": {"I remember that " + refusedRecordPreamble + " last time.", false},
+		// A record must open with the preamble; a refusal quoted after other
+		// text is notes about a refusal, not the refusal.
+		"the preamble on the second line": {"notes\n" + refusedRecordPreamble, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := IsRefusedRecord(c.record); got != c.want {
+				t.Errorf("IsRefusedRecord(%q) = %v, want %v", c.record, got, c.want)
+			}
+		})
+	}
+}
+
 // A refusal has to be recognisable without matching on a message, and must
 // never be mistaken for ErrTransient — which the orchestrator retries, and
 // retrying a refusal re-proposes the very text that was refused.

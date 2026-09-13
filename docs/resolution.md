@@ -249,6 +249,8 @@ So an attempt stopped by something correctable hands the correction back. A refu
 
 **A correction round is priced as a round, not as a dispatch.** A dispatch is an attempt at the step; a refused *expression* of finished work is not a failed attempt, and a treasurer that charged it as one would report exhaustion after three refused sentences — naming the wrong problem, which is exactly what this section is about. It must cost something: a correction that were free is a loop against whatever refused it, with nothing bounding it at all.
 
+**A correction round for a refused result runs inside the dispatch that was refused, once.** The step is re-run in the same dispatch with what was refused and why in hand (§ Drafts: the text to keep *is* the refused text), and nothing is journaled until the guard accepts what it produces. A result refused again after that round **parks for a person**: a second refusal of the same work is a loop, not a transient, and the park says so by classifying as one no re-dispatch clears. What was refused is kept with the step, unpublished, and a person's re-run buys the next round. A dispatch that could not keep what was refused parks without a round — a round without the record could not differ from the attempt before it — and the next dispatch starts over.
+
 ## Parking
 
 A park records that a step stopped without completing, and why. Every park names the step it belongs to — always the pending step, since no other is running. A park is not a journal entry: the route is untouched, and when the park clears, the same step runs again, its resumption counted and the park's reason in hand.

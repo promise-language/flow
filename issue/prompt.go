@@ -610,10 +610,7 @@ flow writes outward before it is sent, and it refused this:
 {{.Refusal}}
 ` + "```" + `
 
-This is not a judgement on the work — the work is done and paid for, and only
-its expression is wrong. Express the refused detail another way (a
-repository-relative path instead of an absolute one, for instance) rather than
-re-deriving anything or dropping the substance.
+` + reviseGuidance + `
 
 This is what was refused:
 
@@ -662,8 +659,29 @@ func (c PromptContext) AnswersBlock() string {
 	return strings.TrimSpace(b.String())
 }
 
-// WorkInProgressBlock renders the notes this step left itself on an earlier
-// invocation that stopped without completing, or "" when there are none.
+// reviseGuidance is what every re-prompt over a refused text says about the
+// relationship between the refusal and the work: the work stands, and only its
+// expression is to change. One wording, carried by PromptRevise for a refused
+// question and by WorkInProgressBlock for a refused result, because the two
+// re-prompts ask for the same thing and a step that has learned to answer one
+// has learned to answer the other.
+const reviseGuidance = `This is not a judgement on the work — the work is done and paid for, and only
+its expression is wrong. Express the refused detail another way (a
+repository-relative path instead of an absolute one, for instance) rather than
+re-deriving anything or dropping the substance.`
+
+// refusedResultFraming opens the work-in-progress block when what was stashed
+// is a refused result rather than notes. It says what happened and, with
+// reviseGuidance, what is asked: the result again, amended from the refused
+// text, not a fresh attempt at the step.
+const refusedResultFraming = "An earlier run of this step produced its result, and the disclosure guard " +
+	"refused to publish it. The refusal and the refused text are below.\n\n" +
+	reviseGuidance + "\n\n" +
+	"Produce the step's result again from the refused text below, with what the " +
+	"guard found expressed another way and everything else kept as it was."
+
+// WorkInProgressBlock renders what this step stashed on an earlier invocation
+// that stopped without completing, or "" when there is nothing.
 //
 // A method rather than leaving `{{.WorkInProgress}}` to every project, for the
 // same reason as AnswersBlock: this text is what makes a resumed step continue
@@ -671,13 +689,21 @@ func (c PromptContext) AnswersBlock() string {
 // everything the earlier invocation already paid for — which for the plan step
 // is the entire step.
 //
-// The framing is load-bearing. These are notes, not a result: the step still
-// has to produce its artifact, and anything the reply supersedes should be
-// dropped rather than defended.
+// The framing is load-bearing, and there are two, because the stash holds one
+// of two things. NOTES the step left itself are its own working-out, not a
+// result: the step still has to produce its artifact, and anything the reply
+// supersedes should be dropped rather than defended. A REFUSED RESULT
+// (flow.RefusedRecord) is finished work whose expression the disclosure guard
+// refused: the step is to amend it, not re-derive it, and a block that framed
+// it as notes to be continued and corrected would invite exactly the re-plan
+// that makes a refusal cost the whole step over again.
 func (c PromptContext) WorkInProgressBlock() string {
 	notes := strings.TrimSpace(c.WorkInProgress)
 	if notes == "" {
 		return ""
+	}
+	if flow.IsRefusedRecord(notes) {
+		return refusedResultFraming + "\n\n" + notes
 	}
 	return "You stopped part-way through this step on an earlier run, and these " +
 		"are the notes you left yourself. They are your own working-out, not a " +

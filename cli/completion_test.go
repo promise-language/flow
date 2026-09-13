@@ -22,7 +22,12 @@ type capturingBackend struct {
 	// entries is what was appended, whole: the capture is now one write with
 	// the route, so a test that only saw the body could not tell the two apart.
 	entries []flow.JournalEntry
-	refuse  error
+	// refusals scripts what each successive append answers before the fake is
+	// consulted: a nil entry accepts, and an exhausted script accepts. A script
+	// rather than one error, because the revision round is a SECOND append in
+	// the same dispatch, and the tests here have to refuse the first and accept
+	// the second.
+	refusals []error
 	// saveErr models a backend that cannot write a work-in-progress record,
 	// which is the store the refused-capture path stashes into.
 	saveErr error
@@ -31,10 +36,44 @@ type capturingBackend struct {
 func (b *capturingBackend) AppendEntry(ctx context.Context, ref flow.ItemRef, e flow.JournalEntry) error {
 	b.captures = append(b.captures, e.Result)
 	b.entries = append(b.entries, e)
-	if b.refuse != nil {
-		return b.refuse
+	if len(b.refusals) > 0 {
+		err := b.refusals[0]
+		b.refusals = b.refusals[1:]
+		if err != nil {
+			return err
+		}
 	}
 	return b.Orchestrator.AppendEntry(ctx, ref, e)
+}
+
+// refusedComment is the refusal the guard returns for a result it will not
+// publish as a comment, with the answer a test can look for in the stash and
+// must not find in anything published.
+const guardAnswer = "an absolute home path names the machine's user"
+
+func refusedComment() flow.ErrDisclosureRefused {
+	return flow.ErrDisclosureRefused{Act: flow.ActArtifactComment, Reason: errors.New(guardAnswer)}
+}
+
+// revisingPlan is a plan step that records what it read as its work in
+// progress on each run, and produces `first` on a run that found nothing
+// stashed and `revised` on one that did — the shape of a step amending a
+// refused result rather than re-deriving it.
+func revisingPlan(seen *[]string, first, revised string) func(*flow.Flow) {
+	return func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			wip, err := ctx.WorkInProgress()
+			if err != nil {
+				return flow.StepResult{}, err
+			}
+			*seen = append(*seen, wip)
+			text := first
+			if wip != "" {
+				text = revised
+			}
+			return ctx.Finalize(flow.DispositionResolved, "the plan is written").Markdown(text), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}
 }
 
 func (b *capturingBackend) SaveWorkInProgress(ctx context.Context, ref flow.ItemRef, step flow.StepId, body string) error {
@@ -211,152 +250,44 @@ func TestCompletion_DeadlineCapturesNothing(t *testing.T) {
 	}
 }
 
-// AppendEntry publishes, so it can refuse. With capture after the handler
-// returns there is no in-invocation revision left, so the refusal is stashed
-// and the item parks step-did-not-complete — the next dispatch is the revision
-// round, nobody has to act — and the park reason carries the ACT and nothing
-// the guard said, because a park is published through that same guard.
-func TestCompletion_DisclosureRefusalParksAndKeepsTheWork(t *testing.T) {
-	const guardAnswer = "an absolute home path names the machine's user"
-	app, be, claim := capturingApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
-			return ctx.Finalize(flow.DispositionResolved, "the plan is written").
-				Markdown("the plan mentioning /home/someone/"), nil
-		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
-	})
-	be.refuse = flow.ErrDisclosureRefused{
-		Act:    flow.ActArtifactComment,
-		Reason: errors.New(guardAnswer),
-	}
-
-	res, err := RunOne(context.Background(), app, claim)
-	if err != nil {
-		t.Fatalf("RunOne: %v", err)
-	}
-	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkStepDidNotComplete {
-		t.Fatalf("res = %+v, want parked step-did-not-complete", res)
-	}
-	// No revision has been attempted, so the next dispatch is the first one:
-	// the kind's classification is what a scheduler reads, and a `blocked` park
-	// here told it to stop on a condition whose designed cure is a re-dispatch.
-	if res.RedispatchMayClear == nil || !*res.RedispatchMayClear {
-		t.Errorf("RedispatchMayClear = %v, want a present true on a refused capture: the next dispatch is the revision round", res.RedispatchMayClear)
-	}
-	if !strings.Contains(res.Park.Reason, string(flow.ActArtifactComment)) {
-		t.Errorf("park reason = %q, want it to name the refused act", res.Park.Reason)
-	}
-	if strings.Contains(res.Park.Reason, guardAnswer) {
-		t.Errorf("park reason repeats the guard's answer, which is the one text that cannot be published: %q",
-			res.Park.Reason)
-	}
-	// The work is not the casualty: what was refused, and why, is where the
-	// next dispatch's prompt reads it.
-	wip, err := be.LoadWorkInProgress(context.Background(), claim.ItemRef, "plan")
-	if err != nil {
-		t.Fatalf("LoadWorkInProgress: %v", err)
-	}
-	if !strings.Contains(wip, guardAnswer) {
-		t.Errorf("stash = %q, want it to carry the guard's reason", wip)
-	}
-	if !strings.Contains(wip, "the plan mentioning /home/someone/") {
-		t.Errorf("stash = %q, want it to carry the refused text", wip)
-	}
-	state, _ := be.Load(context.Background(), claim.ItemRef)
-	if rec := state.Artifact("plan"); rec.Resolved {
-		t.Errorf("plan artifact = %+v, want unresolved after a refused capture", rec)
-	}
-	// Nothing was journaled: result and route land together or not at all, and
-	// the refusal is the "not at all".
-	if len(state.Journal) != 0 {
-		t.Errorf("journal = %+v after a refused capture, want empty", state.Journal)
-	}
-	// "A correction round is priced as a round, not as a dispatch"
-	// (docs/resolution.md § The treasurer). Charged as one, three refused
-	// sentences would exhaust the default three invocations and park on the
-	// budget — reporting a budget cap for a problem no grant can fix.
-	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {
-		t.Errorf("invocations = %d after a refused capture, want 0 — a refused expression of "+
-			"finished work is not a failed attempt at the step", row.Dispatches)
-	}
-}
-
-// The stash is best-effort, and it has to be: a backend that cannot write the
-// record must not cost the item its park as well as its work. Losing the park
-// would end the run with nobody told anything, which is the outcome the whole
-// refusal path exists to avoid.
-func TestCompletion_DisclosureRefusalParksEvenWhenTheStashFails(t *testing.T) {
-	tel := &recordingTelemetry{}
-	app, be, claim := capturingApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
-			return ctx.Finalize(flow.DispositionResolved, "the plan is written").Markdown("the plan"), nil
-		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
-	})
-	app.Telemetry = tel
-	be.refuse = flow.ErrDisclosureRefused{Act: flow.ActArtifactComment, Reason: errors.New("a home path")}
-	be.saveErr = errors.New("disk went away")
-
-	res, err := RunOne(context.Background(), app, claim)
-	if err != nil {
-		t.Fatalf("RunOne: %v", err)
-	}
-	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkStepDidNotComplete {
-		t.Fatalf("res = %+v, want parked step-did-not-complete despite the failed stash", res)
-	}
-	var reported bool
-	for _, e := range tel.events {
-		if e.Detail == "could not record refused text: disk went away" {
-			reported = true
-		}
-	}
-	if !reported {
-		t.Errorf("the failed stash was never reported; events = %+v", tel.events)
-	}
-}
-
-// The park is cleared by the dispatch it asks for. The next dispatch reads the
-// stash — the guard's answer and the text it refused — as its work in progress,
-// revises, and completes: one journal entry, one charged dispatch (the revising
-// one; the refused round is not an attempt), one resumption, and no park left
-// on the item.
-func TestCompletion_RefusedCaptureIsRevisedByTheNextDispatch(t *testing.T) {
-	const guardAnswer = "an absolute home path names the machine's user"
+// AppendEntry publishes, so it can refuse. A refused capture is revised INSIDE
+// the dispatch: the refusal and the refused text are stashed as the step's work
+// in progress, the handler runs again in the same dispatch, reads them back,
+// amends, and the second append lands. One journal entry — the revised one —
+// one charged dispatch (a correction round is priced as a round, not as a
+// dispatch), no park anywhere, and the stash cleared by the completion.
+func TestCompletion_RefusedCaptureIsRevisedInTheSameDispatch(t *testing.T) {
 	const refusedText = "the plan mentioning /home/someone/"
-	var seen []string // what each dispatch read as its work in progress
-	app, be, claim := capturingApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
-			wip, err := ctx.WorkInProgress()
-			if err != nil {
-				return flow.StepResult{}, err
-			}
-			seen = append(seen, wip)
-			text := refusedText
-			if wip != "" {
-				text = "the plan, revised"
-			}
-			return ctx.Finalize(flow.DispositionResolved, "the plan is written").Markdown(text), nil
-		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
-	})
-	be.refuse = flow.ErrDisclosureRefused{Act: flow.ActArtifactComment, Reason: errors.New(guardAnswer)}
+	tel := &recordingTelemetry{}
+	var seen []string // what each handler run read as its work in progress
+	app, be, claim := capturingApp(t, revisingPlan(&seen, refusedText, "the plan, revised"))
+	app.Telemetry = tel
+	be.refusals = []error{refusedComment()} // the first append only
 
 	res, err := RunOne(context.Background(), app, claim)
-	if err != nil || res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkStepDidNotComplete {
-		t.Fatalf("first RunOne = (%+v, %v), want parked step-did-not-complete", res, err)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
 	}
-	if len(seen) != 1 || seen[0] != "" {
-		t.Fatalf("first dispatch read %q as work in progress, want nothing stashed yet", seen)
+	if res.Status != "done" {
+		t.Fatalf("res = %+v, want done — the revision landed in this dispatch", res)
 	}
-
-	// The revision satisfies the guard.
-	be.refuse = nil
-	res, err = RunOne(context.Background(), app, claim)
-	if err != nil || res.Status != "done" {
-		t.Fatalf("second RunOne = (%+v, %v), want done", res, err)
+	if res.Park != nil || res.RedispatchMayClear != nil {
+		t.Errorf("res = %+v, want no park and no classification on a dispatch that completed", res)
 	}
 	if len(seen) != 2 {
-		t.Fatalf("handler ran %d times, want 2", len(seen))
+		t.Fatalf("handler ran %d times, want 2 — the refused run and its revision", len(seen))
 	}
+	if seen[0] != "" {
+		t.Errorf("first run read %q as work in progress, want nothing stashed yet", seen[0])
+	}
+	// The second run is answering something the first did not know: the
+	// guard's answer and the text it refused, which is what makes the revision
+	// an amendment rather than a re-derivation.
 	if !strings.Contains(seen[1], guardAnswer) || !strings.Contains(seen[1], refusedText) {
-		t.Errorf("second dispatch read %q, want the guard's reason and the refused text — what it is revising", seen[1])
+		t.Errorf("revision read %q, want the guard's reason and the refused text", seen[1])
+	}
+	if len(be.entries) != 2 {
+		t.Fatalf("appended %d times, want 2 — the refused attempt and the revision", len(be.entries))
 	}
 	state, _ := be.Load(context.Background(), claim.ItemRef)
 	if len(state.Journal) != 1 {
@@ -365,28 +296,53 @@ func TestCompletion_RefusedCaptureIsRevisedByTheNextDispatch(t *testing.T) {
 	if got := state.Journal[0].Result.Markdown; got != "the plan, revised" {
 		t.Errorf("journaled %q, want the revised text", got)
 	}
+	// "A correction round is priced as a round, not as a dispatch"
+	// (docs/resolution.md § The treasurer): the dispatch that completed is
+	// charged once, whatever rounds it spent getting there.
 	row := state.Ledger.Row("plan")
 	if row.Dispatches != 1 {
-		t.Errorf("Dispatches = %d, want 1 — the revising dispatch is charged, the refused round is not", row.Dispatches)
+		t.Errorf("Dispatches = %d, want 1 — the round is not an attempt", row.Dispatches)
 	}
-	if row.Resumptions != 1 {
-		t.Errorf("Resumptions = %d, want 1 — the second dispatch picked the item up from the park", row.Resumptions)
+	if row.Resumptions != 0 {
+		t.Errorf("Resumptions = %d, want 0 — nothing was parked, so nothing was resumed", row.Resumptions)
 	}
 	if state.Park != nil {
-		t.Errorf("Park = %+v after the revision completed, want none", state.Park)
+		t.Errorf("Park = %+v, want none — the revision landed without a park", state.Park)
+	}
+	// The step has a result now, so its scaffolding — the refused record — is
+	// done with, cleared by the same write that recorded the result.
+	wip, err := be.LoadWorkInProgress(context.Background(), claim.ItemRef, "plan")
+	if err != nil {
+		t.Fatalf("LoadWorkInProgress: %v", err)
+	}
+	if wip != "" {
+		t.Errorf("stash = %q after the revision completed, want it cleared", wip)
+	}
+	// The round is reported, naming the act and the round — and nothing the
+	// guard said, because a notice can reach the tracker too.
+	var noticed bool
+	for _, e := range tel.events {
+		if strings.Contains(e.Detail, string(flow.ActArtifactComment)) && strings.Contains(e.Detail, "round 1") {
+			noticed = true
+		}
+		if strings.Contains(e.Detail, guardAnswer) {
+			t.Errorf("a notice repeats the guard's answer: %q", e.Detail)
+		}
+	}
+	if !noticed {
+		t.Errorf("the revision round was never reported; events = %+v", tel.events)
 	}
 }
 
-// The error path: the revision is refused too. The item parks again under the
-// same kind, still asking for a re-dispatch, with the stash refreshed to the
-// newer refusal — and again no dispatch is charged. A refused expression of
-// finished work is a round, not an attempt, on the second refusal exactly as on
-// the first (chargeDispatch), so it is not the invocations cap that ends a run
-// of refused rounds: every turn a revision spends is metered on the cost axis
-// whether or not the guard accepts the result (docs/resolution.md § The
-// treasurer), which a zero-cost stub cannot show here.
-func TestCompletion_RefusedCaptureAgainParksAgainUncharged(t *testing.T) {
-	const guardAnswer = "an absolute home path names the machine's user"
+// The bound. A result refused again after its revision round parks BLOCKED:
+// a second refusal of the same work is a loop, not a transient, and the kind
+// classifies as one no re-dispatch clears — which is what stops a driver from
+// buying a third round on its own. Exactly two handler runs, nothing journaled,
+// no dispatch charged (a refused round is not an attempt, whichever round it
+// is), the stash holding the LATEST refusal for whoever re-runs the step, and a
+// reason that names the act and the round and nothing the guard said, because
+// a park is published through that same guard.
+func TestCompletion_RefusedCaptureTwiceParksBlocked(t *testing.T) {
 	var seen []string
 	app, be, claim := capturingApp(t, func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
@@ -401,51 +357,214 @@ func TestCompletion_RefusedCaptureAgainParksAgainUncharged(t *testing.T) {
 				Markdown(fmt.Sprintf("attempt %d mentioning /home/someone/", len(seen))), nil
 		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	})
-	be.refuse = flow.ErrDisclosureRefused{Act: flow.ActArtifactComment, Reason: errors.New(guardAnswer)}
+	be.refusals = []error{refusedComment(), refusedComment()}
 
-	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "parked" {
-		t.Fatalf("first RunOne = (%+v, %v), want parked", res, err)
-	}
 	res, err := RunOne(context.Background(), app, claim)
-	if err != nil || res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkStepDidNotComplete {
-		t.Fatalf("second RunOne = (%+v, %v), want parked step-did-not-complete again", res, err)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
 	}
-	if res.RedispatchMayClear == nil || !*res.RedispatchMayClear {
-		t.Errorf("RedispatchMayClear = %v on the second refusal, want a present true: the next revision may still satisfy the guard", res.RedispatchMayClear)
+	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkBlocked {
+		t.Fatalf("res = %+v, want parked blocked after the revision round was spent", res)
 	}
-	if len(seen) != 2 || !strings.Contains(seen[1], "attempt 1 mentioning") {
-		t.Errorf("second dispatch read %q, want the first attempt's refusal", seen)
+	if res.RedispatchMayClear == nil || *res.RedispatchMayClear {
+		t.Errorf("RedispatchMayClear = %v, want a present false: a second refusal of the same work is a loop, and a driver must not buy a third round", res.RedispatchMayClear)
 	}
+	if len(seen) != 2 {
+		t.Fatalf("handler ran %d times, want exactly 2 — one revision round, then a person", len(seen))
+	}
+	if !strings.Contains(seen[1], "attempt 1 mentioning") {
+		t.Errorf("revision read %q, want the first attempt's refusal", seen[1])
+	}
+	for _, want := range []string{string(flow.ActArtifactComment), "round 1"} {
+		if !strings.Contains(res.Park.Reason, want) {
+			t.Errorf("park reason = %q, want it to name %q", res.Park.Reason, want)
+		}
+	}
+	if strings.Contains(res.Park.Reason, guardAnswer) {
+		t.Errorf("park reason repeats the guard's answer, which is the one text that cannot be published: %q", res.Park.Reason)
+	}
+	// The work is not the casualty: what was refused, and why, is where the
+	// re-run's prompt reads it — and it is the SECOND attempt, the one a person
+	// re-running the step is answering for.
 	wip, err := be.LoadWorkInProgress(context.Background(), claim.ItemRef, "plan")
 	if err != nil {
 		t.Fatalf("LoadWorkInProgress: %v", err)
 	}
 	if !strings.Contains(wip, guardAnswer) || !strings.Contains(wip, "attempt 2 mentioning") {
-		t.Errorf("stash = %q after the second refusal, want the guard's reason and the second attempt's text", wip)
+		t.Errorf("stash = %q, want the guard's reason and the second attempt's text", wip)
 	}
 	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if rec := state.Artifact("plan"); rec.Resolved {
+		t.Errorf("plan artifact = %+v, want unresolved after two refused captures", rec)
+	}
+	// Nothing was journaled: result and route land together or not at all, and
+	// both refusals are the "not at all".
 	if len(state.Journal) != 0 {
 		t.Errorf("journal = %+v after two refused captures, want empty", state.Journal)
 	}
-	if state.Park == nil || state.Park.Kind != flow.ParkStepDidNotComplete {
-		t.Errorf("Park = %+v on the loaded item, want the second refusal's park", state.Park)
+	if state.Park == nil || state.Park.Kind != flow.ParkBlocked {
+		t.Errorf("Park = %+v on the loaded item, want the blocked park", state.Park)
+	}
+	// Charged as one, three refused sentences would exhaust the default three
+	// invocations and park on the budget — reporting a budget cap for a problem
+	// no grant can fix.
+	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {
+		t.Errorf("Dispatches = %d after two refused captures, want 0 — a refused expression of "+
+			"finished work is not a failed attempt at the step", row.Dispatches)
+	}
+}
+
+// A person's re-run buys the next round. The dispatch after the blocked park
+// reads the second refusal's record as its work in progress, revises, and
+// completes: one resumption, one charged dispatch, the park cleared.
+func TestCompletion_ReRunAfterTheBlockedParkRevisesFromTheKeptRefusal(t *testing.T) {
+	var seen []string
+	app, be, claim := capturingApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			wip, err := ctx.WorkInProgress()
+			if err != nil {
+				return flow.StepResult{}, err
+			}
+			seen = append(seen, wip)
+			return ctx.Finalize(flow.DispositionResolved, "the plan is written").
+				Markdown(fmt.Sprintf("attempt %d", len(seen))), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	})
+	be.refusals = []error{refusedComment(), refusedComment()}
+
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Park == nil || res.Park.Kind != flow.ParkBlocked {
+		t.Fatalf("first RunOne = (%+v, %v), want parked blocked", res, err)
+	}
+
+	// The re-run: the script is exhausted, so the append is accepted.
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil || res.Status != "done" {
+		t.Fatalf("second RunOne = (%+v, %v), want done", res, err)
+	}
+	if len(seen) != 3 {
+		t.Fatalf("handler ran %d times across both dispatches, want 3", len(seen))
+	}
+	if !strings.Contains(seen[2], guardAnswer) || !strings.Contains(seen[2], "attempt 2") {
+		t.Errorf("the re-run read %q, want the second refusal's record — the latest refusal, not the first", seen[2])
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if len(state.Journal) != 1 || state.Journal[0].Result.Markdown != "attempt 3" {
+		t.Errorf("journal = %+v, want the one entry the re-run appended", state.Journal)
 	}
 	row := state.Ledger.Row("plan")
-	if row.Dispatches != 0 {
-		t.Errorf("Dispatches = %d after two refused captures, want 0 — a refused round is not an attempt, whichever round it is", row.Dispatches)
+	if row.Dispatches != 1 {
+		t.Errorf("Dispatches = %d, want 1 — the dispatch that completed, and neither refused round", row.Dispatches)
 	}
 	if row.Resumptions != 1 {
-		t.Errorf("Resumptions = %d, want 1 — the second dispatch picked the item up from the first park", row.Resumptions)
+		t.Errorf("Resumptions = %d, want 1 — the re-run picked the item up from the blocked park", row.Resumptions)
+	}
+	if state.Park != nil {
+		t.Errorf("Park = %+v after the re-run completed, want none", state.Park)
+	}
+}
+
+// The stash is best-effort, and it has to be: a backend that cannot write the
+// record must not cost the item its park as well as its work. Losing the park
+// would end the run with nobody told anything, which is the outcome the whole
+// refusal path exists to avoid.
+//
+// And there is NO revision round without the record: the handler would compose
+// the same text from the same context and be refused identically, so the round
+// is not spent. The item parks step-did-not-complete — the kind under which a
+// re-dispatch does the job — and the reason names the guard, so the remedy can
+// tell this site from a handler that decided nothing.
+func TestCompletion_RefusedCaptureWhoseStashFailsParksWithoutARound(t *testing.T) {
+	tel := &recordingTelemetry{}
+	runs := 0
+	app, be, claim := capturingApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			runs++
+			return ctx.Finalize(flow.DispositionResolved, "the plan is written").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	})
+	app.Telemetry = tel
+	be.refusals = []error{refusedComment()}
+	be.saveErr = errors.New("disk went away")
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkStepDidNotComplete {
+		t.Fatalf("res = %+v, want parked step-did-not-complete despite the failed stash", res)
+	}
+	if runs != 1 {
+		t.Errorf("handler ran %d times, want 1 — a round without the record could not differ from the attempt before it", runs)
+	}
+	// Nobody has to act, and a re-dispatch is what does the job: the kind's
+	// classification is what a scheduler reads.
+	if res.RedispatchMayClear == nil || !*res.RedispatchMayClear {
+		t.Errorf("RedispatchMayClear = %v, want a present true: the next dispatch starts over", res.RedispatchMayClear)
+	}
+	for _, want := range []string{"disclosure guard", string(flow.ActArtifactComment)} {
+		if !strings.Contains(res.Park.Reason, want) {
+			t.Errorf("park reason = %q, want it to name %q", res.Park.Reason, want)
+		}
+	}
+	if strings.Contains(res.Park.Reason, guardAnswer) {
+		t.Errorf("park reason repeats the guard's answer: %q", res.Park.Reason)
+	}
+	var reported bool
+	for _, e := range tel.events {
+		if e.Detail == "could not record refused text: disk went away" {
+			reported = true
+		}
+	}
+	if !reported {
+		t.Errorf("the failed stash was never reported; events = %+v", tel.events)
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {
+		t.Errorf("Dispatches = %d, want 0 — the refusal is not charged whether or not it could be kept", row.Dispatches)
+	}
+}
+
+// A mechanical step gets the same round. It is free and deterministic, so a
+// mechanical result refused twice reaches the blocked park in seconds with no
+// agent called — a more honest end than a re-dispatchable park on a refusal
+// that cannot change.
+func TestCompletion_MechanicalStepRefusedTwiceParksBlockedWithNoPrompt(t *testing.T) {
+	runs := 0
+	agent := &stubAgent{name: "stub"}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("record the base", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			runs++
+			return ctx.Finalize(flow.DispositionResolved, "recorded").CommitHash("deadbeef"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsNone, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, agent)
+	cap := &capturingBackend{Orchestrator: be, refusals: []error{refusedComment(), refusedComment()}}
+	app.Orchestrator = cap
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkBlocked {
+		t.Fatalf("res = %+v, want parked blocked", res)
+	}
+	if runs != 2 {
+		t.Errorf("handler ran %d times, want 2 — the round is the same for a mechanical step", runs)
+	}
+	if agent.calls != 0 || len(agent.reqs) != 0 {
+		t.Errorf("the agent was asked %d times by a step declaring Prompts: none", len(agent.reqs))
+	}
+	if res.CostUSD == nil || *res.CostUSD != 0 {
+		t.Errorf("cost_usd = %v, want a present zero — the round cost nothing", res.CostUSD)
 	}
 }
 
 // Two sites park under step-did-not-complete — a handler that returned without
-// completing, and a result the disclosure guard refused at capture — and the
-// grant remedy sends the operator to the park's reason to tell which
-// (remedyFor). So the refused one must name the guard, and the other must not:
-// a reason merged into a generic "did not complete" leaves an operator
-// re-running a step whose text is refused identically each time, with nothing
-// saying why.
+// completing, and a result the disclosure guard refused at capture whose
+// refusal could not be kept with the step — and the grant remedy sends the
+// operator to the park's reason to tell which (remedyFor). So the refused one
+// must name the guard, and the other must not: a reason merged into a generic
+// "did not complete" leaves an operator re-running a step whose text is refused
+// identically each time, with nothing saying why.
 func TestCompletion_StepDidNotCompleteReasonNamesTheSite(t *testing.T) {
 	refusedAtCapture := func(f *flow.Flow) {
 		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
@@ -457,10 +576,11 @@ func TestCompletion_StepDidNotCompleteReasonNamesTheSite(t *testing.T) {
 			return flow.StepResult{}, nil
 		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	}
-	parkOf := func(t *testing.T, configure func(*flow.Flow), refuse error) *flow.ParkRequest {
+	parkOf := func(t *testing.T, configure func(*flow.Flow), refusals []error, saveErr error) *flow.ParkRequest {
 		t.Helper()
 		app, be, claim := capturingApp(t, configure)
-		be.refuse = refuse
+		be.refusals = refusals
+		be.saveErr = saveErr
 		res, err := RunOne(context.Background(), app, claim)
 		if err != nil || res.Park == nil || res.Park.Kind != flow.ParkStepDidNotComplete {
 			t.Fatalf("RunOne = (%+v, %v), want parked step-did-not-complete", res, err)
@@ -468,11 +588,13 @@ func TestCompletion_StepDidNotCompleteReasonNamesTheSite(t *testing.T) {
 		return res.Park
 	}
 
-	refused := parkOf(t, refusedAtCapture, flow.ErrDisclosureRefused{Act: flow.ActArtifactComment, Reason: errors.New("a home path")})
+	// The refused-capture site reaches this kind only when the stash failed;
+	// with the record kept it revises, and parks blocked if that fails too.
+	refused := parkOf(t, refusedAtCapture, []error{refusedComment()}, errors.New("disk went away"))
 	if !strings.Contains(refused.Reason, "disclosure guard") {
 		t.Errorf("refused-capture park reason = %q, want it to name the disclosure guard — the remedy sends the operator here to learn which site parked", refused.Reason)
 	}
-	forgetful := parkOf(t, decidedNothing, nil)
+	forgetful := parkOf(t, decidedNothing, nil, nil)
 	if strings.Contains(forgetful.Reason, "disclosure guard") {
 		t.Errorf("zero-result park reason = %q, want no mention of a guard that refused nothing", forgetful.Reason)
 	}
@@ -549,7 +671,9 @@ func TestCompletion_EveryOtherOutcomeCountsTheDispatch(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			app, be, claim := capturingApp(t, tc.configure)
-			be.refuse = tc.refuse
+			if tc.refuse != nil {
+				be.refusals = []error{tc.refuse}
+			}
 			res, err := RunOne(context.Background(), app, claim)
 			if err != nil {
 				t.Fatalf("RunOne: %v", err)

@@ -401,213 +401,233 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 		return out, err
 	}
 
-	// Dispatch. The handler completes by RETURNING its election; res is read
-	// only on the completion path (translateHandlerError's nil-error branch),
-	// because every other way a dispatch ends is one where nothing was elected.
-	res, handlerErr := li.Handler(sctx)
+	// Dispatch, and the revision rounds a refused capture buys. Everything above
+	// this loop happens ONCE per dispatch — the budget gate, the resumption, the
+	// running record, the step context — and the loop re-runs only the handler
+	// and what judges its return. Every branch inside returns, except the one
+	// completion outcome that asks for another round (refusedCapture): the
+	// disclosure guard refused the result at capture, the refusal and the text
+	// are in the step's own store, and the same handler runs again in this same
+	// dispatch with them in hand. The step context is shared across rounds on
+	// purpose: the agent meter accumulates, the stash memo already holds what
+	// the handler is about to read back, and the write-contract snapshot taken
+	// before the first round still measures the tree the dispatch started from.
+	for round := 0; ; round++ {
+		// The handler completes by RETURNING its election; res is read only on
+		// the completion path (translateHandlerError's nil-error branch), because
+		// every other way a dispatch ends is one where nothing was elected.
+		res, handlerErr := li.Handler(sctx)
 
-	// A prompt refused because the step declared Prompts: none. First among the
-	// post-handler branches, and read off the chokepoint rather than off
-	// handlerErr: a handler that swallowed the refusal, re-wrapped it without
-	// %w, or turned it into ErrTransient would otherwise complete, fail as
-	// charged, or park as infra-transient and be re-dispatched forever. The
-	// declaration holds whatever the handler did with the error.
-	//
-	// The step PARKS rather than fails, so journal position and the claim
-	// survive for whoever corrects it, and it parks ParkRefused — the kind that
-	// classifies itself as not clearing by re-dispatch, because a mis-declared
-	// step answers identically every time. No chargeDispatch: nothing was sent,
-	// so nothing is billed for the violation, which is the guarantee the
-	// declaration exists to give (docs/flow-registration.md § Step
-	// configuration).
-	if err := sctx.agent.refusedPrompt; err != nil {
-		return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
-			Kind:   flow.ParkRefused,
-			Step:   li.Result(),
-			Reason: err.Error(),
-		}))
-	}
-
-	// The agent ACCOUNT's allowance is spent: the substrate refused the turn,
-	// named the window and published when it returns.
-	//
-	// Read off the chokepoint for the reason refusedPrompt is, and it matters
-	// more here: a handler that swallowed the error, or re-wrapped it without
-	// %w, would otherwise report a failed step — `resolve` exits non-zero and
-	// an unattended runner halts on a condition that clears by itself at a
-	// time the system was already handed.
-	//
-	// BEFORE the deadline and ErrTransient branches. A refused turn ends fast,
-	// so the deadline is not normally reached, but a handler that waited would
-	// otherwise park on timeout and be charged for it; and ErrTransient would
-	// park it as infrastructure, which is not what failed.
-	//
-	// No chargeDispatch: an allowance that refused to spend has not bought an
-	// attempt. The claim, the worktree and the draft stay exactly where they
-	// are — the arena is not idle, it is holding the most expensive thing the
-	// resolution owns (docs/environment.md § The arena holds the valuable
-	// state).
-	if exhausted := sctx.agent.accountExhausted; exhausted != nil {
-		return sctx.stampResult(parkAndReturn(ctx, app, ref, result,
-			accountExhaustedPark(li.Result(), exhausted.Window, exhausted.ClearsAt)))
-	}
-
-	// Timeout (deadline reached during handler). Counts as an invocation —
-	// the handler ran, it just didn't finish in time.
-	if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
-		// No patch is captured here. A deadline kill says nothing about the
-		// state of the worktree: verify never went green (that is what the
-		// step ran out of time doing), so an attached diff is unverified
-		// work that a resume would apply on top of a broken tree. And the
-		// common shape — a step that commits and then runs a long verify —
-		// leaves `git diff HEAD` empty, so the capture uploaded a zero-byte
-		// patch carrying no diagnostic value at all. Park only; the work
-		// stays in the worktree where the rerun picks it up.
-		if err := chargeDispatch(ctx, app, ref, state, li); err != nil {
-			return flow.InvocationResult{}, err
+		// A prompt refused because the step declared Prompts: none. First among
+		// the post-handler branches, and read off the chokepoint rather than off
+		// handlerErr: a handler that swallowed the refusal, re-wrapped it without
+		// %w, or turned it into ErrTransient would otherwise complete, fail as
+		// charged, or park as infra-transient and be re-dispatched forever. The
+		// declaration holds whatever the handler did with the error.
+		//
+		// The step PARKS rather than fails, so journal position and the claim
+		// survive for whoever corrects it, and it parks ParkRefused — the kind
+		// that classifies itself as not clearing by re-dispatch, because a
+		// mis-declared step answers identically every time. No chargeDispatch:
+		// nothing was sent, so nothing is billed for the violation, which is the
+		// guarantee the declaration exists to give (docs/flow-registration.md
+		// § Step configuration).
+		if err := sctx.agent.refusedPrompt; err != nil {
+			return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
+				Kind:   flow.ParkRefused,
+				Step:   li.Result(),
+				Reason: err.Error(),
+			}))
 		}
-		return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
-			Kind: flow.ParkTreasurerRefused,
-			Step: li.Result(),
-			Axis: flow.AxisTimeout,
-			// The charge above is already counted here: a timeout park that
-			// under-reported dispatches is exactly what sent the operator back
-			// for a second grant.
-			Axes:   sctx.axisReports(),
-			Reason: fmt.Sprintf("step %q exceeded %s", li.Result(), timeout),
-		}))
-	}
 
-	// Machine unfit (handler returned flow.ErrUnfit). The machine is not
-	// fit to perform work — e.g. disk full. No park (a machine condition
-	// has no step and ends on its own), no dispatch counted (a condition is
-	// not a failure), status blocked. The claim is kept.
-	if handlerErr != nil && errors.Is(handlerErr, flow.ErrUnfit) {
-		result.Status = string(flow.StatusBlocked)
-		result.Reason = handlerErr.Error()
-		return sctx.stampResult(result, nil)
-	}
-
-	// Transient infra failure (handler returned flow.ErrTransient OR the
-	// metered agent observed AgentResponse.Failure.Transient and surfaced
-	// it through the wrapped error). Park with ParkInfraTransient and
-	// SKIP the dispatch count — a flapping runner must not burn the
-	// step's invocation budget.
-	//
-	// flow.ErrUnavailable lands here too, and it is the SAME condition by the
-	// other name: errs.go defines it for "a service is down, a lease is held
-	// elsewhere, a rate limit is in force. Retrying is what a caller should
-	// do". A GitHub rate limit reached this branch as an ordinary failure
-	// before — so it was BILLED a dispatch to report that nothing could be
-	// done, and an unattended runner stopped on a condition that clears itself
-	// in minutes. infra-transient is the kind docs/orchestrator.md says a
-	// re-dispatch may clear, and the reset instant rides in the reason, where
-	// ParkKind's contract puts it: clears_at belongs to account-exhausted
-	// alone.
-	if handlerErr != nil && (errors.Is(handlerErr, flow.ErrTransient) || errors.Is(handlerErr, flow.ErrUnavailable)) {
-		return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
-			Kind:   flow.ParkInfraTransient,
-			Step:   li.Result(),
-			Reason: handlerErr.Error(),
-		}))
-	}
-
-	// Deterministic refusal (handler returned flow.ErrRefused): the failure
-	// provably cannot change on re-run, so retrying is pointless. Park with
-	// ParkRefused and SKIP the dispatch count — symmetric with the
-	// ErrTransient branch above. The park reason is the refusal's own
-	// message so the operator sees what was refused.
-	if handlerErr != nil && errors.Is(handlerErr, flow.ErrRefused) {
-		return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
-			Kind:   flow.ParkRefused,
-			Step:   li.Result(),
-			Reason: handlerErr.Error(),
-		}))
-	}
-
-	// The step declared the blockers it found (handler returned
-	// flow.ErrWaitsOnItems through ctx.WaitOnItems) and stopped on them. Not a
-	// park, not a failure, not a refusal: the same clean stop the check before
-	// dispatch makes, reported from the same derivation — the item is reloaded
-	// so the report carries what the orchestrator now says, blockers and
-	// statuses included. No dispatch counted: the work exists elsewhere and will
-	// land, and charging the wait would spend the budget on nothing. The
-	// artifact stays unresolved, and work in progress is kept for the resume,
-	// as with a question.
-	//
-	// The reload decides, under the same condition as the check before
-	// dispatch. A step can declare items that have all finished already — the
-	// orchestrator accepts those, since naming an item that has landed is not
-	// an error — and the item then reads unblocked. That is not a stop on
-	// anything: nothing waits, the next advance would run the step, and a
-	// `blocked` report on an item nothing blocks would tell the operator to
-	// wait for nothing (docs/resolution.md § Reporting names the kind, and
-	// there is none). It is the step not doing its job — a turn spent to
-	// declare a wait that does not hold — and it falls through as the failure
-	// it is, charged as one, the reason naming what was declared.
-	var waits flow.ErrWaitsOnItems
-	if errors.As(handlerErr, &waits) {
-		state, err = app.Orchestrator.Load(ctx, ref)
-		if err != nil {
-			return flow.InvocationResult{}, fmt.Errorf("reload after declaring blockers: %w", err)
+		// The agent ACCOUNT's allowance is spent: the substrate refused the turn,
+		// named the window and published when it returns.
+		//
+		// Read off the chokepoint for the reason refusedPrompt is, and it matters
+		// more here: a handler that swallowed the error, or re-wrapped it without
+		// %w, would otherwise report a failed step — `resolve` exits non-zero and
+		// an unattended runner halts on a condition that clears by itself at a
+		// time the system was already handed.
+		//
+		// BEFORE the deadline and ErrTransient branches. A refused turn ends fast,
+		// so the deadline is not normally reached, but a handler that waited would
+		// otherwise park on timeout and be charged for it; and ErrTransient would
+		// park it as infrastructure, which is not what failed.
+		//
+		// No chargeDispatch: an allowance that refused to spend has not bought an
+		// attempt. The claim, the worktree and the draft stay exactly where they
+		// are — the arena is not idle, it is holding the most expensive thing the
+		// resolution owns (docs/environment.md § The arena holds the valuable
+		// state).
+		if exhausted := sctx.agent.accountExhausted; exhausted != nil {
+			return sctx.stampResult(parkAndReturn(ctx, app, ref, result,
+				accountExhaustedPark(li.Result(), exhausted.Window, exhausted.ClearsAt)))
 		}
-		if blockedFromAdvancing(state) {
-			return sctx.stampResult(blockedOnItems(state, result), nil)
-		}
-		handlerErr = fmt.Errorf(
-			"step declared it %s, but every item it named has already finished and nothing blocks the item — the step stopped on no wait",
-			waits.Error())
-	}
 
-	// Post-handler fitness catch-all: any unclassified handler failure on an
-	// unfit machine is reported as blocked, not charged. This catches
-	// environment failures (ENOSPC, etc.) from ANY handler in ANY flow,
-	// without each handler having to classify them. Runs after the sentinel
-	// branches (already classified) and before write-contract / the charge.
-	if handlerErr != nil && sctx.worktree != nil {
-		if fitErr := flow.CheckFit(ctx, sctx.worktree); fitErr != nil {
-			result.Status = string(flow.StatusBlocked)
-			// Both, and the handler's first. CheckFit fails CLOSED — a fit gate
-			// that could not run, timed out or died reports unfit — so this
-			// branch is also reached when the fit gate is the broken thing.
-			// Reporting the fitness verdict alone would then throw away the only
-			// account of what actually failed, and blame the machine for it.
-			result.Reason = fmt.Sprintf("%s (and the machine is unfit: %s)", handlerErr, fitErr)
-			return sctx.stampResult(result, nil)
-		}
-	}
-
-	// Write-contract check. Runs after the transient/refused early returns
-	// (which skip budget) but BEFORE the normal charge. Only when the handler
-	// acquired a worktree (writeSnap != nil). On violation: charge the
-	// invocation (the handler ran), park with ParkWriteContract, do NOT revert
-	// changes.
-	if sctx.writeSnap != nil {
-		if reason := checkWriteContract(ctx, sctx.worktree, sctx.writeSnap, li.Writes); reason != "" {
+		// Timeout (deadline reached during handler). Counts as an invocation —
+		// the handler ran, it just didn't finish in time.
+		if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
+			// No patch is captured here. A deadline kill says nothing about the
+			// state of the worktree: verify never went green (that is what the
+			// step ran out of time doing), so an attached diff is unverified
+			// work that a resume would apply on top of a broken tree. And the
+			// common shape — a step that commits and then runs a long verify —
+			// leaves `git diff HEAD` empty, so the capture uploaded a zero-byte
+			// patch carrying no diagnostic value at all. Park only; the work
+			// stays in the worktree where the rerun picks it up.
 			if err := chargeDispatch(ctx, app, ref, state, li); err != nil {
 				return flow.InvocationResult{}, err
 			}
 			return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
-				Kind:   flow.ParkWriteContract,
-				Step:   li.Result(),
-				Reason: reason,
+				Kind: flow.ParkTreasurerRefused,
+				Step: li.Result(),
+				Axis: flow.AxisTimeout,
+				// The charge above is already counted here: a timeout park that
+				// under-reported dispatches is exactly what sent the operator
+				// back for a second grant.
+				Axes:   sctx.axisReports(),
+				Reason: fmt.Sprintf("step %q exceeded %s", li.Result(), timeout),
 			}))
 		}
-	}
 
-	// The completion path counts its own dispatch, at each of its outcomes,
-	// because one of them must not be counted at all — see chargeDispatch.
-	if handlerErr == nil {
-		return sctx.stampResult(completeStep(ctx, app, ref, result, li, sctx, res, state))
-	}
+		// Machine unfit (handler returned flow.ErrUnfit). The machine is not
+		// fit to perform work — e.g. disk full. No park (a machine condition
+		// has no step and ends on its own), no dispatch counted (a condition is
+		// not a failure), status blocked. The claim is kept.
+		if handlerErr != nil && errors.Is(handlerErr, flow.ErrUnfit) {
+			result.Status = string(flow.StatusBlocked)
+			result.Reason = handlerErr.Error()
+			return sctx.stampResult(result, nil)
+		}
 
-	// Non-transient: the invocation produced a result (a park, or a real
-	// failure). Count it.
-	if err := chargeDispatch(ctx, app, ref, state, li); err != nil {
-		return flow.InvocationResult{}, err
-	}
+		// Transient infra failure (handler returned flow.ErrTransient OR the
+		// metered agent observed AgentResponse.Failure.Transient and surfaced
+		// it through the wrapped error). Park with ParkInfraTransient and
+		// SKIP the dispatch count — a flapping runner must not burn the
+		// step's invocation budget.
+		//
+		// flow.ErrUnavailable lands here too, and it is the SAME condition by the
+		// other name: errs.go defines it for "a service is down, a lease is held
+		// elsewhere, a rate limit is in force. Retrying is what a caller should
+		// do". A GitHub rate limit reached this branch as an ordinary failure
+		// before — so it was BILLED a dispatch to report that nothing could be
+		// done, and an unattended runner stopped on a condition that clears itself
+		// in minutes. infra-transient is the kind docs/orchestrator.md says a
+		// re-dispatch may clear, and the reset instant rides in the reason, where
+		// ParkKind's contract puts it: clears_at belongs to account-exhausted
+		// alone.
+		if handlerErr != nil && (errors.Is(handlerErr, flow.ErrTransient) || errors.Is(handlerErr, flow.ErrUnavailable)) {
+			return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
+				Kind:   flow.ParkInfraTransient,
+				Step:   li.Result(),
+				Reason: handlerErr.Error(),
+			}))
+		}
 
-	return sctx.stampResult(translateHandlerError(ctx, app, ref, result, li, sctx, handlerErr))
+		// Deterministic refusal (handler returned flow.ErrRefused): the failure
+		// provably cannot change on re-run, so retrying is pointless. Park with
+		// ParkRefused and SKIP the dispatch count — symmetric with the
+		// ErrTransient branch above. The park reason is the refusal's own
+		// message so the operator sees what was refused.
+		if handlerErr != nil && errors.Is(handlerErr, flow.ErrRefused) {
+			return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
+				Kind:   flow.ParkRefused,
+				Step:   li.Result(),
+				Reason: handlerErr.Error(),
+			}))
+		}
+
+		// The step declared the blockers it found (handler returned
+		// flow.ErrWaitsOnItems through ctx.WaitOnItems) and stopped on them. Not
+		// a park, not a failure, not a refusal: the same clean stop the check
+		// before dispatch makes, reported from the same derivation — the item is
+		// reloaded so the report carries what the orchestrator now says,
+		// blockers and statuses included. No dispatch counted: the work exists
+		// elsewhere and will land, and charging the wait would spend the budget
+		// on nothing. The artifact stays unresolved, and work in progress is
+		// kept for the resume, as with a question.
+		//
+		// The reload decides, under the same condition as the check before
+		// dispatch. A step can declare items that have all finished already —
+		// the orchestrator accepts those, since naming an item that has landed
+		// is not an error — and the item then reads unblocked. That is not a
+		// stop on anything: nothing waits, the next advance would run the step,
+		// and a `blocked` report on an item nothing blocks would tell the
+		// operator to wait for nothing (docs/resolution.md § Reporting names the
+		// kind, and there is none). It is the step not doing its job — a turn
+		// spent to declare a wait that does not hold — and it falls through as
+		// the failure it is, charged as one, the reason naming what was
+		// declared.
+		var waits flow.ErrWaitsOnItems
+		if errors.As(handlerErr, &waits) {
+			state, err = app.Orchestrator.Load(ctx, ref)
+			if err != nil {
+				return flow.InvocationResult{}, fmt.Errorf("reload after declaring blockers: %w", err)
+			}
+			if blockedFromAdvancing(state) {
+				return sctx.stampResult(blockedOnItems(state, result), nil)
+			}
+			handlerErr = fmt.Errorf(
+				"step declared it %s, but every item it named has already finished and nothing blocks the item — the step stopped on no wait",
+				waits.Error())
+		}
+
+		// Post-handler fitness catch-all: any unclassified handler failure on an
+		// unfit machine is reported as blocked, not charged. This catches
+		// environment failures (ENOSPC, etc.) from ANY handler in ANY flow,
+		// without each handler having to classify them. Runs after the sentinel
+		// branches (already classified) and before write-contract / the charge.
+		if handlerErr != nil && sctx.worktree != nil {
+			if fitErr := flow.CheckFit(ctx, sctx.worktree); fitErr != nil {
+				result.Status = string(flow.StatusBlocked)
+				// Both, and the handler's first. CheckFit fails CLOSED — a fit
+				// gate that could not run, timed out or died reports unfit — so
+				// this branch is also reached when the fit gate is the broken
+				// thing. Reporting the fitness verdict alone would then throw
+				// away the only account of what actually failed, and blame the
+				// machine for it.
+				result.Reason = fmt.Sprintf("%s (and the machine is unfit: %s)", handlerErr, fitErr)
+				return sctx.stampResult(result, nil)
+			}
+		}
+
+		// Write-contract check. Runs after the transient/refused early returns
+		// (which skip budget) but BEFORE the normal charge. Only when the
+		// handler acquired a worktree (writeSnap != nil). On violation: charge
+		// the invocation (the handler ran), park with ParkWriteContract, do NOT
+		// revert changes.
+		if sctx.writeSnap != nil {
+			if reason := checkWriteContract(ctx, sctx.worktree, sctx.writeSnap, li.Writes); reason != "" {
+				if err := chargeDispatch(ctx, app, ref, state, li); err != nil {
+					return flow.InvocationResult{}, err
+				}
+				return sctx.stampResult(parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
+					Kind:   flow.ParkWriteContract,
+					Step:   li.Result(),
+					Reason: reason,
+				}))
+			}
+		}
+
+		// The completion path counts its own dispatch, at each of its outcomes,
+		// because one of them must not be counted at all — see chargeDispatch.
+		// That same outcome is the one that can ask for another round.
+		if handlerErr == nil {
+			r, err := completeStep(ctx, app, ref, result, li, sctx, res, state, round)
+			if errors.Is(err, errReviseCapture) {
+				continue
+			}
+			return sctx.stampResult(r, err)
+		}
+
+		// Non-transient: the invocation produced a result (a park, or a real
+		// failure). Count it.
+		if err := chargeDispatch(ctx, app, ref, state, li); err != nil {
+			return flow.InvocationResult{}, err
+		}
+
+		return sctx.stampResult(translateHandlerError(ctx, app, ref, result, li, sctx, handlerErr))
+	}
 }
 
 // establishNeeds puts the worktree into the state the step declares it NEEDS,
@@ -712,6 +732,21 @@ func establishNeeds(
 	return flow.InvocationResult{}, false, nil
 }
 
+// maxCaptureRevisions bounds the revision rounds one dispatch spends on a
+// result the disclosure guard refused at capture. One: the step is re-run once
+// in the same dispatch with what was refused and why in hand, and a result
+// refused again after that parks for a person (docs/resolution.md § The
+// treasurer). The same bound the push repair takes, for the same reason — a
+// second refusal of the same work is a loop, not a transient, and a human
+// re-run buys the next round.
+const maxCaptureRevisions = 1
+
+// errReviseCapture is the completion path's answer when a refused capture has a
+// revision round left: RunOne re-runs the handler in this dispatch. It never
+// leaves RunOne, and it is never a result — nothing was journaled, charged or
+// parked when it is returned.
+var errReviseCapture = errors.New("revise the refused capture")
+
 // translateHandlerError converts a handler's non-nil error into an
 // InvocationResult, applying the appropriate Orchestrator.Park
 // as a side effect. A handler that returned no error completed, and that path
@@ -809,10 +844,14 @@ func translateHandlerError(
 // without a capture: a step that decided nothing PARKS, because a re-dispatch
 // can still do the job; a step that decided something it may not decide FAILS,
 // because only a change to the handler or the registration will help; and a
-// result the disclosure guard refused at capture PARKS under the same kind as
-// the step that decided nothing, for the same reason — the next dispatch is
-// what does the job this one left undone (refusedCapture). Nothing is
-// journaled and nothing is published in any of the three.
+// result the disclosure guard refused at capture is REVISED — the step is
+// re-run in this same dispatch with what was refused and why in hand, once,
+// and parks for a person only when that round is spent or the refusal could
+// not be kept (refusedCapture). Nothing is journaled and nothing is published
+// in any of the three.
+//
+// round is which run of the handler this dispatch is completing, 0-based; it
+// is what refusedCapture judges the bound by.
 //
 // It counts the dispatch itself, at each outcome, because one outcome does not
 // count it: see chargeDispatch.
@@ -825,6 +864,7 @@ func completeStep(
 	sctx *stepCtx,
 	res flow.StepResult,
 	state *flow.Item,
+	round int,
 ) (flow.InvocationResult, error) {
 	// The state the step declared it LEAVES, verified before anything is
 	// captured from the tree it left (docs/resolution.md § Steps and the
@@ -889,7 +929,7 @@ func completeStep(
 			// The ONE outcome that is not charged — the correction round
 			// chargeDispatch names. AppendEntry publishes, so it can still
 			// refuse, and nothing is journaled when it does.
-			return refusedCapture(ctx, app, ref, result, li, sctx, refused, body)
+			return refusedCapture(ctx, app, ref, result, li, sctx, refused, body, round)
 		}
 		if cerr := chargeDispatch(ctx, app, ref, state, li); cerr != nil {
 			return flow.InvocationResult{}, cerr
@@ -1089,30 +1129,41 @@ func mirrorLedger(state *flow.Item, step flow.StepId, mutate func(*flow.LedgerRo
 	return row
 }
 
-// refusedCapture is what a disclosure refusal at capture leaves behind.
+// refusedCapture is what a disclosure refusal at capture leads to, and it has
+// three outcomes.
 //
-// AppendEntry publishes, so it can refuse — and with capture after the
-// handler returns there is no in-invocation revision loop to catch it any more.
-// So the capture path does what that loop did on its last round: stash the
-// refusal and the text it refused in the step's work-in-progress record, which
-// is local and never published, and park. The next dispatch renders both into
-// its prompt, so the author is answering something this one did not know — and
-// that dispatch, not this refusal, is what the treasurer counts (chargeDispatch).
+// AppendEntry publishes, so it can refuse. The refusal and the text it refused
+// are stashed in the step's work-in-progress record first — local, never
+// published, and the one channel back to the author that
+// docs/disclosure.md § What a refusal carries requires: the party that composed
+// the text is the only one that can revise it, and a refusal recorded where it
+// never looks produces the same text from the same context until the budget is
+// gone. What happens next turns on whether that stash took, and on how many
+// rounds this dispatch has spent already:
 //
-// It parks STEP-DID-NOT-COMPLETE, not blocked. The step produced nothing the
-// journal could record, and nobody has to act: no revision has been attempted
-// yet, so the next dispatch IS the first revision round — the re-prompt with
-// what was refused, why, and what would satisfy the rule that
-// docs/disclosure.md § What a refusal carries requires. A blocked park says the
-// opposite, that a person must decide (docs/resolution.md § Parking), and every
-// other site that parks under it has exhausted its own revision rounds first.
-// The kind's classification (flow.ParkKind.RedispatchMayClear) is what a
-// scheduler reads, so blocked here told it to stop on a condition whose
-// designed cure is a re-dispatch. The loop is bounded the way a correction
-// round is priced (docs/resolution.md § The treasurer): the refusal costs no
-// dispatch, the revising dispatch is charged at every outcome but another
-// refusal, and every turn a revision spends is metered on the cost axis whether
-// or not the guard accepts what it produced.
+//   - The stash FAILED: park STEP-DID-NOT-COMPLETE, as a step that decided
+//     nothing does, and report the failure. A round without the record could
+//     not differ from the attempt before it — the handler would compose the
+//     same text from the same context — so there is no round, and the next
+//     dispatch starts over. The kind is the honest one: nobody has to act, and
+//     a re-dispatch is what does the job, so it classifies as re-dispatchable
+//     (flow.ParkKind.RedispatchMayClear).
+//   - A revision round is LEFT (maxCaptureRevisions): return errReviseCapture,
+//     and RunOne re-runs the handler in this dispatch. Nothing is charged,
+//     journaled or parked. The step reads the record back as its work in
+//     progress and amends the refused text rather than re-planning, which is
+//     what has made every retry of a refused result cheap.
+//   - The rounds are SPENT: park BLOCKED, the kind for a refusal a person must
+//     decide on (docs/resolution.md § Parking) and the one every other site
+//     with exhausted revision rounds parks under. A second refusal of the same
+//     work is a loop, not a transient, and a blocked park classifies as not
+//     clearing by re-dispatch — which is what stops a driver from spending a
+//     third dispatch on it. The record is kept for whoever re-runs the step,
+//     and that re-run buys the next round.
+//
+// The refusal is priced as a round, not a dispatch, in every outcome
+// (chargeDispatch): the turn that produced the refused text was metered on
+// the cost axis when it ran, and so is the turn the revision spends.
 //
 // The park reason carries NOTHING the guard said. A park IS published — the
 // orchestrator posts the request through the same guard — and a refusal names
@@ -1120,7 +1171,7 @@ func mirrorLedger(state *flow.Item, step flow.StepId, mutate func(*flow.LedgerRo
 // a reason repeating the guard's answer carries the refused fragment into the
 // park and gets the park itself refused: the run would die with nobody told
 // anything. The act is the SDK's own closed vocabulary and is safe to publish;
-// the guard's answer stays in the stash, which the next dispatch's prompt reads.
+// the guard's answer stays in the stash, which the step's prompt reads.
 func refusedCapture(
 	ctx context.Context,
 	app *App,
@@ -1130,19 +1181,34 @@ func refusedCapture(
 	sctx *stepCtx,
 	refused flow.ErrDisclosureRefused,
 	body flow.ArtifactBody,
+	round int,
 ) (flow.InvocationResult, error) {
-	// Best-effort: a stash that failed costs the next run a re-derivation, and
-	// turning it into a failure would lose the park as well as the work.
 	if err := sctx.RecordWorkInProgress(flow.RefusedRecord(refused, refusedPayload(body))); err != nil {
+		// Reported, then parked: turning the failed stash into a failure would
+		// lose the park as well as the work.
 		sctx.Notify("", "could not record refused text: "+err.Error())
+		return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
+			Kind: flow.ParkStepDidNotComplete,
+			Step: li.Result(),
+			Reason: fmt.Sprintf(
+				"the disclosure guard refused this step's result (%s), and what it refused "+
+					"could not be kept with the step; the next run starts over",
+				refused.Act),
+		})
+	}
+	if round < maxCaptureRevisions {
+		sctx.Notify("", fmt.Sprintf(
+			"the disclosure guard refused this step's result (%s) — revising (round %d)",
+			refused.Act, round+1))
+		return flow.InvocationResult{}, errReviseCapture
 	}
 	return parkAndReturn(ctx, app, ref, result, flow.ParkRequest{
-		Kind: flow.ParkStepDidNotComplete,
+		Kind: flow.ParkBlocked,
 		Step: li.Result(),
 		Reason: fmt.Sprintf(
-			"the disclosure guard refused this step's result (%s); "+
+			"the disclosure guard refused this step's result (%s) again, after revision round %d; "+
 				"what it refused and why are kept with the step for the next run",
-			refused.Act),
+			refused.Act, round),
 	})
 }
 
