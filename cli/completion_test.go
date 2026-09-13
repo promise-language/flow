@@ -81,6 +81,23 @@ func revisingPlan(seen *[]string, first, revised string) func(*flow.Flow) {
 	}
 }
 
+// numberedPlan is revisingPlan for a refusal that recurs: it records what it
+// read and numbers every run of the step, so a test spanning several rounds and
+// several dispatches can say which run produced what.
+func numberedPlan(seen *[]string) func(*flow.Flow) {
+	return func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			wip, err := ctx.WorkInProgress()
+			if err != nil {
+				return flow.StepResult{}, err
+			}
+			*seen = append(*seen, wip)
+			return ctx.Finalize(flow.DispositionResolved, "the plan is written").
+				Markdown(fmt.Sprintf("attempt %d", len(*seen))), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}
+}
+
 func (b *capturingBackend) SaveWorkInProgress(ctx context.Context, ref flow.ItemRef, step flow.StepId, body string) error {
 	b.saves++
 	if b.saveErr != nil && b.saves > b.saveErrAfter {
@@ -425,17 +442,7 @@ func TestCompletion_RefusedCaptureTwiceParksBlocked(t *testing.T) {
 // completes: one resumption, one charged dispatch, the park cleared.
 func TestCompletion_ReRunAfterTheBlockedParkRevisesFromTheKeptRefusal(t *testing.T) {
 	var seen []string
-	app, be, claim := capturingApp(t, func(f *flow.Flow) {
-		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
-			wip, err := ctx.WorkInProgress()
-			if err != nil {
-				return flow.StepResult{}, err
-			}
-			seen = append(seen, wip)
-			return ctx.Finalize(flow.DispositionResolved, "the plan is written").
-				Markdown(fmt.Sprintf("attempt %d", len(seen))), nil
-		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
-	})
+	app, be, claim := capturingApp(t, numberedPlan(&seen))
 	be.refusals = []error{refusedComment(), refusedComment()}
 
 	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Park == nil || res.Park.Kind != flow.ParkBlocked {
@@ -618,6 +625,160 @@ func TestCompletion_MechanicalStepRefusedTwiceParksBlockedWithNoPrompt(t *testin
 	}
 	if res.CostUSD == nil || *res.CostUSD != 0 {
 		t.Errorf("cost_usd = %v, want a present zero — the round cost nothing", res.CostUSD)
+	}
+}
+
+// The round is not a dispatch, but every turn it spends is real money, and the
+// dispatch that completes has to report all of it. The step context is shared
+// across the rounds precisely so the meter accumulates: a meter reset per round
+// would price the journal entry at a fraction of what the work cost, leave the
+// item's cost axis — the treasurer's bound on a step that keeps spending —
+// blind to the refused round, and hand the revision turn a ceiling the dispatch
+// had already eaten into.
+func TestCompletion_ARevisedDispatchIsPricedAtEveryRoundItSpent(t *testing.T) {
+	agent := &stubAgent{name: "stub", responses: []flow.AgentResponse{
+		{LastText: "ok", CostUSD: 2},
+		{LastText: "ok", CostUSD: 0.5},
+	}}
+	var seen []string
+	app, be, claim := capturingApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			wip, err := ctx.WorkInProgress()
+			if err != nil {
+				return flow.StepResult{}, err
+			}
+			seen = append(seen, wip)
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"}); err != nil {
+				return flow.StepResult{}, err
+			}
+			text := "the plan mentioning /home/someone/"
+			if wip != "" {
+				text = "the plan, revised"
+			}
+			return ctx.Finalize(flow.DispositionResolved, "the plan is written").Markdown(text), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	})
+	app.Agent = agent
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxCostUSD: 10}}
+	be.refusals = []error{refusedComment()}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "done" || len(seen) != 2 {
+		t.Fatalf("res = %+v after %d handler runs, want done after 2", res, len(seen))
+	}
+	if res.CostUSD == nil {
+		t.Errorf("cost_usd is absent, want the dispatch's $2.50")
+	} else if *res.CostUSD != 2.5 {
+		t.Errorf("cost_usd = %v, want $2.50 — the refused round's turn and the revision's", *res.CostUSD)
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	row := state.Ledger.Row("plan")
+	if row.CostUSD != 2.5 {
+		t.Errorf("ledger CostUSD = %v, want $2.50 — the axis the treasurer bounds a spending step by", row.CostUSD)
+	}
+	if row.Dispatches != 1 {
+		t.Errorf("Dispatches = %d, want 1 — priced as one dispatch whatever it spent", row.Dispatches)
+	}
+	if len(state.Journal) != 1 || state.Journal[0].Spend.CostUSD != 2.5 {
+		t.Errorf("journaled spend = %+v, want the whole dispatch's $2.50 — what this result cost to express", state.Journal)
+	}
+	// The revision turn is handed the headroom the refused round left, not the
+	// whole grant: the substrate stops it at the cap the step is actually
+	// approaching.
+	if len(agent.reqs) != 2 {
+		t.Fatalf("the agent saw %d requests, want 2", len(agent.reqs))
+	}
+	if agent.reqs[1].MaxCostUSD != 8 {
+		t.Errorf("the revision turn's MaxCostUSD = %v, want 8 — the $10 grant less the refused round's $2", agent.reqs[1].MaxCostUSD)
+	}
+}
+
+// The revision round ends however a handler ends, and a flapping runner in it
+// must not cost the item what the dispatch is holding. It parks infra-transient
+// on the round's own failure and burns no invocation — neither the refused
+// round nor the failed one was an attempt at the step — and the refusal and the
+// text it refused stay in the stash, so the dispatch that picks the item up
+// amends rather than re-derives.
+func TestCompletion_ATransientFailureInTheRevisionRoundKeepsTheRefusedWork(t *testing.T) {
+	var seen []string
+	app, be, claim := capturingApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			wip, err := ctx.WorkInProgress()
+			if err != nil {
+				return flow.StepResult{}, err
+			}
+			seen = append(seen, wip)
+			if wip != "" {
+				return flow.StepResult{}, fmt.Errorf("the runner went away: %w", flow.ErrTransient)
+			}
+			return ctx.Finalize(flow.DispositionResolved, "the plan is written").
+				Markdown("the plan mentioning /home/someone/"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	})
+	be.refusals = []error{refusedComment()}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "parked" || res.Park == nil || res.Park.Kind != flow.ParkInfraTransient {
+		t.Fatalf("res = %+v, want parked infra-transient — the revision round met a flapping runner", res)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("handler ran %d times, want 2 — the refused run and the round that failed", len(seen))
+	}
+	wip, err := be.LoadWorkInProgress(context.Background(), claim.ItemRef, "plan")
+	if err != nil {
+		t.Fatalf("LoadWorkInProgress: %v", err)
+	}
+	if !strings.Contains(wip, guardAnswer) || !strings.Contains(wip, "the plan mentioning") {
+		t.Errorf("stash = %q, want the refusal and the refused text still there for the next dispatch", wip)
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if len(state.Journal) != 0 {
+		t.Errorf("journal = %+v, want empty — neither round produced a recordable result", state.Journal)
+	}
+	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {
+		t.Errorf("Dispatches = %d, want 0 — a flapping runner must not burn the invocations axis", row.Dispatches)
+	}
+}
+
+// A person's re-run buys a whole round, not just one more attempt: the bound is
+// counted per dispatch, so a re-run refused again revises before it parks. A
+// bound counted off anything durable — the ledger, the executions, the stashed
+// record — would park the re-run on its first refusal with no round spent, and
+// the item would then need a person for every refused sentence rather than one
+// for every refusal a revision could not fix.
+func TestCompletion_TheReRunGetsItsOwnRevisionRound(t *testing.T) {
+	var seen []string
+	app, be, claim := capturingApp(t, numberedPlan(&seen))
+	be.refusals = []error{refusedComment(), refusedComment(), refusedComment()}
+
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Park == nil || res.Park.Kind != flow.ParkBlocked {
+		t.Fatalf("first RunOne = (%+v, %v), want parked blocked", res, err)
+	}
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil || res.Status != "done" {
+		t.Fatalf("second RunOne = (%+v, %v), want done — the re-run's own round satisfied the guard", res, err)
+	}
+	if len(seen) != 4 {
+		t.Fatalf("handler ran %d times across both dispatches, want 4 — two rounds each", len(seen))
+	}
+	if !strings.Contains(seen[3], "attempt 3") {
+		t.Errorf("the re-run's second round read %q, want the refusal its own first round earned", seen[3])
+	}
+	state, _ := be.Load(context.Background(), claim.ItemRef)
+	if len(state.Journal) != 1 || state.Journal[0].Result.Markdown != "attempt 4" {
+		t.Errorf("journal = %+v, want the one entry the re-run's revision appended", state.Journal)
+	}
+	if row := state.Ledger.Row("plan"); row.Dispatches != 1 {
+		t.Errorf("Dispatches = %d, want 1 — three refusals bought nothing, and only the dispatch that completed is charged", row.Dispatches)
+	}
+	if state.Park != nil {
+		t.Errorf("Park = %+v after the re-run completed, want none", state.Park)
 	}
 }
 

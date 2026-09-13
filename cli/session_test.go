@@ -396,6 +396,45 @@ func TestSession_SignalStepIsHandedItAndRecordsIt(t *testing.T) {
 	}
 }
 
+// A result the disclosure guard refused is revised INSIDE the dispatch, and the
+// revision round continues the conversation that composed the refused text.
+// That is what makes the round cheap: the turn is amending a sentence it can
+// still see, not re-deriving a plan it has forgotten. A fresh session here would
+// buy the whole step's context over again and cost what the refusal cost.
+func TestSession_TheRevisionRoundContinuesTheRefusedTurnsConversation(t *testing.T) {
+	agent := &sessionAgent{}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			wip, err := ctx.WorkInProgress()
+			if err != nil {
+				return flow.StepResult{}, err
+			}
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"}); err != nil {
+				return flow.StepResult{}, err
+			}
+			text := "the plan mentioning /home/someone/"
+			if wip != "" {
+				text = "the plan, revised"
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown(text), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, agent)
+	app.Orchestrator = &capturingBackend{Orchestrator: be, refusals: []error{refusedComment()}}
+
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
+		t.Fatalf("RunOne = (%+v, %v), want done — the revision landed in this dispatch", res, err)
+	}
+	if len(agent.reqs) != 2 {
+		t.Fatalf("the agent saw %d requests, want 2 — the refused turn and its revision", len(agent.reqs))
+	}
+	wantFresh(t, agent, 0)
+	wantResume(t, agent, 1, "sess-1")
+	if agent.minted > 1 {
+		t.Errorf("the substrate opened %d sessions, want 1 — the revision started over instead of amending", agent.minted)
+	}
+}
+
 // A turn that FAILED still opened a conversation, and the handle it named is
 // kept. The next dispatch resumes it instead of buying the same context again:
 // a transient failure suspends the cost and dispatch axes because a flapping
