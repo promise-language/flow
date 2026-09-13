@@ -348,10 +348,13 @@ func readAgentAccount() (agentAccountRecord, error) {
 		if err == nil {
 			return rec, nil
 		}
-		// An absent candidate says nothing about this host: a machine has one
-		// client configuration, and the others in the list are where it might
-		// have been. A candidate that EXISTS and does not name the account is
-		// the answer, and it is the one reported.
+		// A candidate that answers nothing — absent, or there and naming no
+		// account — says only that this is not where the configuration is: a
+		// host spends as ONE account, so the search goes on and the account it
+		// finds is the account. What a non-absent candidate does decide is the
+		// REASON, when no candidate answers at all: the highest-priority one's
+		// is what the operator is told, so a person is pointed at the
+		// directory they configured rather than at $HOME.
 		if errors.Is(err, errAgentAccountFileAbsent) {
 			continue
 		}

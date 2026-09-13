@@ -240,3 +240,52 @@ func TestReadAgentAccount_LooksPastACandidateThatIsNotThere(t *testing.T) {
 		t.Errorf("Id = %q, want the account the candidate that exists names", rec.Id)
 	}
 }
+
+// A candidate that is there and does NOT name the account is not the end of
+// the search either. A host spends as one account, so a client directory
+// standing empty — installed and never logged in — says where the account is
+// not, and the reader goes on and answers with the one that is there. It is
+// the account the substrate will spend, wherever its configuration sits.
+func TestReadAgentAccount_LooksPastACandidateThatNamesNoAccount(t *testing.T) {
+	dir := isolateAgentAccountRead(t)
+	writeJSON(t, filepath.Join(dir, ".claude.json"), `{"numStartups":4}`)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	writeJSON(t, filepath.Join(home, ".claude.json"), `{"oauthAccount":{"accountUuid":"uuid-home"}}`)
+
+	rec, err := readAgentAccount()
+	if err != nil {
+		t.Fatalf("readAgentAccount: %v", err)
+	}
+	if rec.Id != flow.AgentAccountId("uuid-home") {
+		t.Errorf("Id = %q, want the account the candidate that names one holds", rec.Id)
+	}
+}
+
+// When NOTHING names the account, the reason the operator is given is the
+// highest-priority candidate's. The reasons differ in what they ask for —
+// install the client, log it in, look at a file that is there and wrong — so
+// reporting the last candidate's instead would point a person at $HOME over
+// the directory they configured, and at the wrong remedy.
+func TestReadAgentAccount_ReportsTheHighestPriorityCandidatesReason(t *testing.T) {
+	dir := isolateAgentAccountRead(t)
+	writeJSON(t, filepath.Join(dir, ".claude.json"), "not json")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	writeJSON(t, filepath.Join(home, ".claude.json"), `{"numStartups":4}`)
+
+	rec, err := readAgentAccount()
+	if err == nil {
+		t.Fatalf("readAgentAccount() = %+v, want a refusal: nothing names the account", rec)
+	}
+	if !strings.Contains(err.Error(), filepath.Join(dir, ".claude.json")) {
+		t.Errorf("reason = %q, want the configured directory's candidate", err)
+	}
+	if strings.Contains(err.Error(), filepath.Join(home, ".claude.json")) {
+		t.Errorf("reason = %q, want the configured directory's candidate, not $HOME's", err)
+	}
+}

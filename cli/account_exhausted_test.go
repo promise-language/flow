@@ -595,3 +595,62 @@ func TestRunOne_AnUnparsedResetCarriesNoInstantRatherThanTheEpoch(t *testing.T) 
 		t.Errorf("Reason = %q, want no reset claimed when none could be read", res.Park.Reason)
 	}
 }
+
+// The OTHER transient failure. Both kinds are Transient — that is the field
+// that decides what is billed and counted, and they share it deliberately —
+// so the kind is the only thing separating them, and it is read at exactly one
+// place. A chokepoint that recorded every transient turn as an exhausted
+// account would tell an operator a healthy runner's flap resets at an instant
+// nobody published, and would file it under a label that says "do nothing".
+func TestRunOne_AnOrdinaryTransientAgentFailureStillParksInfraTransient(t *testing.T) {
+	a := &stubAgent{name: "stub", responses: []flow.AgentResponse{{
+		Failure: &flow.AgentFailure{Kind: "no-result", Transient: true, Message: "runner flapped"},
+	}}}
+	app, _, claim := testApp(t, promptingStep(surfacing), a)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkInfraTransient {
+		t.Fatalf("res = %+v, want an infra-transient park: nothing said the allowance was spent", res)
+	}
+	// No instant, on either half of the report: infrastructure ends when it
+	// ends, and an instant on a park that cannot know one is a fabrication.
+	if res.Park.ClearsAt != nil || res.ClearsAt != nil {
+		t.Errorf("park=%v result=%v, want no instant on a kind whose end nobody published",
+			res.Park.ClearsAt, res.ClearsAt)
+	}
+}
+
+// The substrate may refuse WITHOUT naming a window — the field is documented
+// empty for exactly that — and the reset it published is still the fact a
+// driver needs. The condition is the refusal, never the window: a report that
+// needed both would drop the instant whenever the substrate named only one.
+func TestRunOne_ARefusalThatNamesNoWindowStillReportsTheInstant(t *testing.T) {
+	at := windowResetsAt
+	a := &stubAgent{name: "stub", responses: []flow.AgentResponse{{
+		Failure: &flow.AgentFailure{
+			Kind: flow.FailureAccountExhausted, Transient: true, ClearsAt: &at,
+			Message: "agent account allowance exhausted, resets 2026-09-13T18:42:00Z",
+		},
+	}}}
+	app, _, claim := testApp(t, promptingStep(surfacing), a)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkAccountExhausted {
+		t.Fatalf("res = %+v, want an account-exhausted park", res)
+	}
+	if res.ClearsAt == nil || !res.ClearsAt.Equal(windowResetsAt) {
+		t.Errorf("result.ClearsAt = %v, want the published instant %v", res.ClearsAt, windowResetsAt)
+	}
+	// The reason is read by a person, and it is assembled from parts that may
+	// each be missing. Written whole rather than by substring, because what
+	// goes wrong here is punctuation left behind by an absent part.
+	if want := "agent account allowance exhausted — resets 2026-09-13T18:42:00Z"; res.Park.Reason != want {
+		t.Errorf("Reason = %q, want %q", res.Park.Reason, want)
+	}
+}

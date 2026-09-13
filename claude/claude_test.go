@@ -1437,3 +1437,47 @@ func TestRun_ARefusalOutranksHowTheTurnDied(t *testing.T) {
 		t.Errorf("ClearsAt = %v, want the published instant", resp.Failure.ClearsAt)
 	}
 }
+
+// brokenAfter yields its contents and then FAILS instead of ending — a pipe
+// cut rather than a stream closed, which is how a turn the substrate refused
+// tends to end.
+type brokenAfter struct {
+	r   io.Reader
+	err error
+}
+
+func (b brokenAfter) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		return n, b.err
+	}
+	return n, err
+}
+
+// A statement already read is not unread by the stream breaking after it. The
+// refusal is classified AHEAD of the scan error for that reason: reported as a
+// scan failure it becomes a `no-result`, which parks as infrastructure and
+// discards the window and the instant the substrate had already handed over —
+// the exact loss this change exists to stop, arriving by the one route that
+// does not depend on the turn producing a result at all.
+func TestParseStream_ARefusalOutlivesTheStreamBreakingAfterIt(t *testing.T) {
+	const resets = 1789153635
+	stream := brokenAfter{
+		r:   strings.NewReader(rejectedEvent("seven_day", resets) + "\n"),
+		err: errors.New("read |0: file already closed"),
+	}
+
+	resp, err := parseStream(stream)
+	if err != nil {
+		t.Fatalf("parseStream: %v — a broken pipe after the refusal is not a reason to lose it", err)
+	}
+	if resp.Failure == nil || resp.Failure.Kind != flow.FailureAccountExhausted {
+		t.Fatalf("Failure = %+v, want kind=%s", resp.Failure, flow.FailureAccountExhausted)
+	}
+	if resp.Failure.Window != "seven_day" {
+		t.Errorf("Window = %q, want seven_day", resp.Failure.Window)
+	}
+	if resp.Failure.ClearsAt == nil || resp.Failure.ClearsAt.Unix() != resets {
+		t.Errorf("ClearsAt = %v, want the published instant", resp.Failure.ClearsAt)
+	}
+}
