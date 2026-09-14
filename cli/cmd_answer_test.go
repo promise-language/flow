@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -50,6 +51,12 @@ func answerTestSetup(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer, *fake.Or
 	var out, errBuf bytes.Buffer
 	app.Out = &out
 	app.Err = &errBuf
+	// A non-file stdin, so every test here is NON-INTERACTIVE unless it says
+	// otherwise. Left nil it would be whatever `go test` hands the process —
+	// /dev/null on macOS, which is a character device and so reads as a
+	// terminal, making the interactive branch fire in a test that never asked
+	// for it.
+	app.In = strings.NewReader("")
 	return app, &out, &errBuf, be, claim.ItemRef.Display
 }
 
@@ -146,27 +153,65 @@ func TestCmdAnswer_NoPendingQuestions(t *testing.T) {
 	}
 }
 
-func TestCmdAnswer_WrongArity_Zero(t *testing.T) {
-	app, _, errBuf, _, _ := answerTestSetup(t)
+// ZERO POSITIONALS IS THE BARE FORM, and with no claim held it is the one
+// invocation that cannot be resolved: there is no item for an answer to be
+// about. It refuses by saying what to type, exit 1 — a condition to clear, not
+// a malformed invocation.
+func TestCmdAnswer_BareWithNoClaimNamesTheMissingItem(t *testing.T) {
+	app, _, errBuf, be, itemID := answerTestSetup(t)
+	releaseClaim(t, be, itemID)
 
 	code := app.cmdAnswer(context.Background(), nil)
-	if code != 2 {
-		t.Fatalf("cmdAnswer = %d, want 2", code)
+	if code != 1 {
+		t.Fatalf("cmdAnswer = %d, want 1", code)
 	}
-	if !strings.Contains(errBuf.String(), "need") {
-		t.Errorf("stderr = %q, want usage error", errBuf.String())
+	if !strings.Contains(errBuf.String(), "no active claim") {
+		t.Errorf("stderr = %q, want the missing claim named", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "answer <item-id>") {
+		t.Errorf("stderr = %q, want it to say what to type instead", errBuf.String())
 	}
 }
 
-func TestCmdAnswer_WrongArity_One(t *testing.T) {
-	app, _, errBuf, _, _ := answerTestSetup(t)
+// ONE POSITIONAL WITH NO CLAIM IS THE ITEM ID. There is no held item for an
+// answer to be about, so the argument can only be naming one — and what
+// follows is the read form, which prints the question rather than posting it.
+func TestCmdAnswer_OnePositionalWithNoClaimIsTheItemId(t *testing.T) {
+	app, out, errBuf, be, itemID := answerTestSetup(t)
+	releaseClaim(t, be, itemID)
 
-	code := app.cmdAnswer(context.Background(), []string{"1"})
-	if code != 2 {
-		t.Fatalf("cmdAnswer = %d, want 2", code)
+	code := app.cmdAnswer(context.Background(), []string{itemID})
+	if code != 0 {
+		t.Fatalf("cmdAnswer = %d, want 0; stderr=%q", code, errBuf.String())
 	}
-	if !strings.Contains(errBuf.String(), "need") {
-		t.Errorf("stderr = %q, want usage error", errBuf.String())
+	if !strings.Contains(out.String(), "should we re-plan?") {
+		t.Errorf("the question was not printed:\n%s", out.String())
+	}
+	// It READ; it did not answer. Nothing was posted.
+	ref, err := be.ResolveRef(context.Background(), itemID)
+	if err != nil {
+		t.Fatalf("ResolveRef: %v", err)
+	}
+	item, err := be.Load(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(item.PendingQuestions()) != 1 {
+		t.Errorf("a read posted an answer: %+v", item.Questions)
+	}
+}
+
+// releaseClaim drops the arena's lease, for the tests about an operator who
+// holds nothing — a maintainer or a passer-by, who `answer` is required to
+// serve from any machine.
+func releaseClaim(t *testing.T, be *fake.Orchestrator, itemID string) {
+	t.Helper()
+	ref, err := be.ResolveRef(context.Background(), itemID)
+	if err != nil {
+		t.Fatalf("ResolveRef: %v", err)
+	}
+	if err := be.Release(context.Background(), ref); err != nil {
+		t.Fatalf("Release: %v", err)
 	}
 }
 
@@ -302,4 +347,216 @@ type failingAnswerBackend struct {
 
 func (b failingAnswerBackend) PostAnswer(_ context.Context, _ flow.ItemRef, _ flow.QuestionId, _ string) error {
 	return fmt.Errorf("backend broke")
+}
+
+// asTerminal makes the app read `reply` from what it treats as an operator's
+// terminal.
+//
+// The interactivity test is substituted rather than faked with a pipe: a pipe
+// is not a character device, which is the whole distinction the real check
+// makes, so a pipe would silently exercise the NON-interactive branch and the
+// test would pass while proving nothing.
+func asTerminal(t *testing.T, app *App, reply string) {
+	t.Helper()
+	app.In = strings.NewReader(reply)
+	prev := isTerminal
+	isTerminal = func(r io.Reader) bool { return r == app.In }
+	t.Cleanup(func() { isTerminal = prev })
+}
+
+// BARE ANSWER, NON-INTERACTIVE, PRINTS AND NEVER BLOCKS. A prompt on a piped
+// stdin waits for input that is not coming, which is a hang rather than a
+// report — so the questions are printed and the command returns.
+func TestCmdAnswer_BareNonInteractivePrintsAndDoesNotPost(t *testing.T) {
+	app, out, errBuf, be, itemID := answerTestSetup(t)
+
+	if code := app.cmdAnswer(context.Background(), nil); code != 0 {
+		t.Fatalf("cmdAnswer = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "should we re-plan?") {
+		t.Errorf("the pending question was not printed:\n%s", out.String())
+	}
+	// The unanswered one shows an EMPTY answer rather than being omitted: what
+	// the operator is looking for is the question still waiting.
+	if !strings.Contains(out.String(), "answer:") {
+		t.Errorf("the empty answer line is missing:\n%s", out.String())
+	}
+	assertStillPending(t, be, itemID, 1)
+}
+
+// BARE ANSWER ON A TERMINAL shows the question and takes the reply: one
+// command, with no item id and no question id to copy from anywhere.
+func TestCmdAnswer_BareInteractiveReadsAndPosts(t *testing.T) {
+	app, out, errBuf, be, itemID := answerTestSetup(t)
+	asTerminal(t, app, "yes, re-plan\n")
+
+	if code := app.cmdAnswer(context.Background(), nil); code != 0 {
+		t.Fatalf("cmdAnswer = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "should we re-plan?") {
+		t.Errorf("the question was not shown before the prompt:\n%s", out.String())
+	}
+	assertStillPending(t, be, itemID, 0)
+	if got := answerOn(t, be, itemID); got != "yes, re-plan" {
+		t.Errorf("recorded answer = %q, want the operator's reply", got)
+	}
+}
+
+// An operator who was asked and said NOTHING has decided not to answer.
+// Recording an empty answer would clear the park on a question nobody settled,
+// so the question stays pending and the exit code says so.
+func TestCmdAnswer_AnEmptyReplyRecordsNothing(t *testing.T) {
+	app, _, errBuf, be, itemID := answerTestSetup(t)
+	asTerminal(t, app, "\n")
+
+	if code := app.cmdAnswer(context.Background(), nil); code != 1 {
+		t.Fatalf("cmdAnswer = %d, want 1", code)
+	}
+	if !strings.Contains(errBuf.String(), "nothing was recorded") {
+		t.Errorf("stderr = %q, want it to say nothing was recorded", errBuf.String())
+	}
+	assertStillPending(t, be, itemID, 1)
+}
+
+// ONE POSITIONAL WITH A CLAIM IS THE ANSWER TEXT. The arena holds the item, so
+// there is nothing for an id to disambiguate — and requiring one is exactly the
+// friction the bare form removes.
+func TestCmdAnswer_OnePositionalWithAClaimIsTheAnswerText(t *testing.T) {
+	app, _, errBuf, be, itemID := answerTestSetup(t)
+
+	if code := app.cmdAnswer(context.Background(), []string{"yes, re-plan"}); code != 0 {
+		t.Fatalf("cmdAnswer = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	assertStillPending(t, be, itemID, 0)
+	if got := answerOn(t, be, itemID); got != "yes, re-plan" {
+		t.Errorf("recorded answer = %q, want the positional", got)
+	}
+}
+
+// …unless it NAMES AN ITEM, which is how a different item stays reachable while
+// a claim is held. The explicit id wins, and what follows is the read form.
+func TestCmdAnswer_OnePositionalNamingAnItemWinsOverTheClaim(t *testing.T) {
+	app, out, errBuf, be, itemID := answerTestSetup(t)
+
+	if code := app.cmdAnswer(context.Background(), []string{itemID}); code != 0 {
+		t.Fatalf("cmdAnswer = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "should we re-plan?") {
+		t.Errorf("the named item's question was not printed:\n%s", out.String())
+	}
+	assertStillPending(t, be, itemID, 1)
+}
+
+// --answered PRINTS THE WHOLE HISTORY: every question and its answer, in order,
+// not only the outstanding one. A question already answered once, in different
+// words, is invisible otherwise — to the operator and to the asking step alike.
+func TestCmdAnswer_AnsweredPrintsTheWholeHistoryInOrder(t *testing.T) {
+	app, out, errBuf, be, itemID := answerTestSetup(t)
+	ref := refFor(t, be, itemID)
+
+	// The first question, answered; then a second still waiting.
+	item, err := be.Load(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := be.PostAnswer(context.Background(), ref, item.Questions[0].ID, "yes, re-plan"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+	if _, err := be.AskQuestion(context.Background(), ref, flow.AskText("which base?", "main or release?")); err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+
+	if code := app.cmdAnswer(context.Background(), []string{"--answered"}); code != 0 {
+		t.Fatalf("cmdAnswer --answered = %d; stderr=%q", code, errBuf.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "should we re-plan?") || !strings.Contains(got, "yes, re-plan") {
+		t.Errorf("the answered question and its answer are missing:\n%s", got)
+	}
+	if !strings.Contains(got, "which base?") {
+		t.Errorf("the outstanding question is missing:\n%s", got)
+	}
+	// IN ORDER: the history is a sequence, and out of order it answers a
+	// different question about what was decided when.
+	if strings.Index(got, "should we re-plan?") > strings.Index(got, "which base?") {
+		t.Errorf("the history is out of order:\n%s", got)
+	}
+}
+
+// The read forms reach --json too, so a tool can read what the flow is waiting
+// on without parsing prose.
+func TestCmdAnswer_JSONCarriesTheQuestions(t *testing.T) {
+	app, out, _, _, _ := answerTestSetup(t)
+
+	if code := app.cmdAnswer(context.Background(), []string{"--answered", "--json"}); code != 0 {
+		t.Fatalf("cmdAnswer = %d", code)
+	}
+	var payload answerPayload
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal %s: %v", out.String(), err)
+	}
+	if len(payload.Questions) != 1 {
+		t.Fatalf("questions = %d, want 1", len(payload.Questions))
+	}
+	if payload.Questions[0].Text != "should we re-plan?" || payload.Questions[0].Answered {
+		t.Errorf("question payload wrong: %+v", payload.Questions[0])
+	}
+}
+
+// An item with NO QUESTIONS AT ALL has nothing to show, and says so rather than
+// printing an empty list a reader would take for an answered one.
+func TestCmdAnswer_AnsweredOnAnItemWithNoQuestions(t *testing.T) {
+	app, _, errBuf, be, itemID := answerTestSetup(t)
+	ref := refFor(t, be, itemID)
+	item, err := be.Load(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// Answer the only question, then ask about an item that has none.
+	if err := be.PostAnswer(context.Background(), ref, item.Questions[0].ID, "yes"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+	be.AddItem("2", flow.Item{Type: "task", Title: "untouched"})
+
+	if code := app.cmdAnswer(context.Background(), []string{"2", "--answered"}); code != 1 {
+		t.Fatalf("cmdAnswer = %d, want 1", code)
+	}
+	if !strings.Contains(errBuf.String(), "no questions") {
+		t.Errorf("stderr = %q, want it to say there are none", errBuf.String())
+	}
+}
+
+// refFor resolves a display id the fixture handed back.
+func refFor(t *testing.T, be *fake.Orchestrator, itemID string) flow.ItemRef {
+	t.Helper()
+	ref, err := be.ResolveRef(context.Background(), itemID)
+	if err != nil {
+		t.Fatalf("ResolveRef: %v", err)
+	}
+	return ref
+}
+
+// assertStillPending checks how many questions the item is still waiting on.
+func assertStillPending(t *testing.T, be *fake.Orchestrator, itemID string, want int) {
+	t.Helper()
+	item, err := be.Load(context.Background(), refFor(t, be, itemID))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := len(item.PendingQuestions()); got != want {
+		t.Errorf("pending questions = %d, want %d", got, want)
+	}
+}
+
+// answerOn returns the recorded answer to the item's first question.
+func answerOn(t *testing.T, be *fake.Orchestrator, itemID string) string {
+	t.Helper()
+	item, err := be.Load(context.Background(), refFor(t, be, itemID))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(item.Questions) == 0 {
+		t.Fatal("no questions on the item")
+	}
+	return item.Questions[0].Answer
 }

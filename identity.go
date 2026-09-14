@@ -249,6 +249,24 @@ type Arena struct {
 // so a pair missing either one identifies no arena.
 func (a Arena) Empty() bool { return a.Host == "" || a.Id == "" }
 
+// ArenaAt names the arena a checkout at root is: the machine's derived HostId
+// and the checkout's own absolute path as the ArenaId, which is stable across
+// restarts and unique within the host — exactly what docs/orchestrator.md asks
+// of the pair.
+//
+// It is here rather than inside an orchestrator because two parties need the
+// answer and must not disagree about it. An orchestrator builds its own arena
+// to stamp a lease; a caller holding an ItemInfo asks whether the arena named
+// on it is THIS one. A second derivation would be a second answer, and the two
+// would differ on the first machine where they were spelled differently.
+//
+// The root is taken as it stands — DeriveArenaRoot, or whatever the orchestrator
+// was configured with. Nothing here reads the process working directory, for the
+// reason DeriveArenaRoot gives at length.
+func ArenaAt(root string) Arena {
+	return Arena{Host: DeriveHostId(), Id: ArenaId(root)}
+}
+
 // Holder is who holds an item: the arena the lease binds to, and the account
 // credited for it. The account is attribution; the arena is the lease.
 type Holder struct {

@@ -185,16 +185,24 @@ func (i *Item) SignalSet(id SignalId) bool {
 // ItemInfo is the orchestrator's standing on an item, returned by List and Get.
 //
 // It is the listing projection: cheap enough to return hundreds of, so it omits
-// artifacts, signals, questions and park. Where it and Item overlap they mean
-// the same thing and MUST agree — a field that read one way through List and
-// another through Load would make the two calls into two answers about one
-// item.
+// artifacts, signals, questions and the park RECORD — the park's kind alone it
+// does carry, which is one closed-vocabulary value and costs nothing like the
+// record does. Where it and Item overlap they mean the same thing and MUST
+// agree — a field that read one way through List and another through Load
+// would make the two calls into two answers about one item.
 type ItemInfo struct {
 	Ref   ItemRef
 	Type  ItemType
 	Title string
 	Body  string
 	URL   string
+
+	// FiledAt is when the item was filed — the same instant SelectionKey.Age
+	// orders by. The listing projection carries it because `list` sorts what
+	// List returns and ItemRef carries no axis at all: without it neither
+	// `--sort newest` nor the age tiebreak of `--sort resolution` can be
+	// computed from a listing (docs/cli.md § Listing).
+	FiledAt time.Time
 
 	// Creator is the account that filed the item, the same fact Item carries
 	// and with the same meaning. A listing projection needs it because the
@@ -236,6 +244,16 @@ type ItemInfo struct {
 	Blocked     bool
 	BlockKind   BlockKind
 	BlockReason string
+
+	// ParkKind is the kind of the item's CURRENT park, empty when it is not
+	// parked. The KIND alone, never the park record: the record is Item's and
+	// costs a read, while the kind is one value from a closed vocabulary and
+	// is what the listing's work mark is derived from (docs/cli.md § Listing).
+	//
+	// It is NOT the block. A blocked item waits on other items or on a
+	// condition; a parked item waits on what its kind names, and both can be
+	// true at once.
+	ParkKind ParkKind
 
 	Manual bool
 }

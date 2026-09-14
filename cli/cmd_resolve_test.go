@@ -1834,64 +1834,66 @@ func TestCmdResolve_PreflightBlockPrintsNoBlockedByLine(t *testing.T) {
 	}
 }
 
-func TestCmdResolve_QuotaPrintedAtStartAndFinalize(t *testing.T) {
-	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	be := fake.New()
-	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
-	app, _, errBuf := resolveTestApp(t, be)
-
-	code := app.cmdResolve(context.Background(), nil)
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
-	}
-	output := errBuf.String()
-	// Quota should appear at least twice: once at start, once at finalize.
-	count := strings.Count(output, "quota:")
-	if count < 2 {
-		t.Errorf("expected quota line at start and at finalize (≥2 occurrences); got %d in:\n%s", count, output)
-	}
-}
-
-func TestCmdResolve_QuotaPrintedOnFailedStep(t *testing.T) {
-	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	be := fake.New()
-	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
-	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
-		return flow.StepResult{}, errors.New("boom")
-	})
-
-	code := app.cmdResolve(context.Background(), nil)
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
-	}
-	output := errBuf.String()
-	if !strings.Contains(output, "stopped on a failed step") {
-		t.Errorf("expected failure message; got %q", output)
-	}
-	// Quota should appear at start + on the failed exit path.
-	count := strings.Count(output, "quota:")
-	if count < 2 {
-		t.Errorf("expected quota line at start and on failure (≥2 occurrences); got %d in:\n%s", count, output)
-	}
-}
-
-func TestCmdResolve_QuotaPrintedOnParked(t *testing.T) {
-	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	be := fake.New()
-	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
-	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
-		// Return nil without resolving → parks the step.
+// THE QUOTA BLOCK PRINTS ONCE, AT THE START, where it answers the question it
+// is there to answer: does this run have headroom? Reprinted after the outcome
+// it buries the park or the finalized line — the one line an operator must act
+// on — under pacing detail they have already read and cannot act on.
+//
+// The three exits are checked together because "once" is a property of the run
+// and not of any one of them: a finalize, a failure and a park each used to add
+// their own copy, and dropping two of the three would leave the rule true of
+// some runs and not others. `quota` is the command that answers the question
+// deliberately now (docs/cli.md).
+func TestCmdResolve_QuotaBlockPrintsOnceAtTheStart(t *testing.T) {
+	parked := func(ctx flow.StepCtx) (flow.StepResult, error) {
+		// Returns nil without resolving, which parks the step.
 		return flow.StepResult{}, nil
-	})
-
-	code := app.cmdResolve(context.Background(), nil)
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
 	}
-	output := errBuf.String()
-	count := strings.Count(output, "quota:")
-	if count < 2 {
-		t.Errorf("expected quota line at start and on park (≥2 occurrences); got %d in:\n%s", count, output)
+	failed := func(ctx flow.StepCtx) (flow.StepResult, error) {
+		return flow.StepResult{}, errors.New("boom")
+	}
+
+	for _, tc := range []struct {
+		name string
+		step func(flow.StepCtx) (flow.StepResult, error)
+		code int
+		want string
+	}{
+		{"finalize", nil, 0, "not finalized"},
+		{"failed step", failed, 1, "stopped on a failed step"},
+		// "→ parked", not "parked": the driving line says "until finalized or
+		// parked" BEFORE the quota block, so the bare word would find that one
+		// and the ordering check below would pass on any output at all.
+		{"park", parked, 0, "→ parked"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+			be := fake.New()
+			be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+			var app *App
+			var errBuf *bytes.Buffer
+			if tc.step == nil {
+				app, _, errBuf = resolveTestApp(t, be)
+			} else {
+				app, _, errBuf = resolveTestAppStep(t, be, tc.step)
+			}
+
+			if code := app.cmdResolve(context.Background(), nil); code != tc.code {
+				t.Fatalf("exit code = %d, want %d; err=%q", code, tc.code, errBuf.String())
+			}
+			output := errBuf.String()
+			if !strings.Contains(output, tc.want) {
+				t.Errorf("expected %q in the narration; got:\n%s", tc.want, output)
+			}
+			if count := strings.Count(output, "quota:"); count != 1 {
+				t.Errorf("quota block printed %d times, want exactly 1 — at the start; got:\n%s", count, output)
+			}
+			// At the START: before the first step is announced, not after the
+			// outcome. A single print in the wrong place is the same defect.
+			if at := strings.Index(output, "quota:"); at > strings.Index(output, tc.want) {
+				t.Errorf("the quota block prints after the outcome, not at the start; got:\n%s", output)
+			}
+		})
 	}
 }
 
@@ -1920,12 +1922,12 @@ func TestCmdResolve_QuotaPrintedWhateverTheEnvironmentHolds(t *testing.T) {
 				t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
 			}
 			output := errBuf.String()
-			// Both sites this run reaches — the start and the finalize — as
-			// TestCmdResolve_QuotaPrintedAtStartAndFinalize counts them. One
-			// occurrence would pass a re-gating that left the terminal site
-			// behind the environment.
-			if n := strings.Count(output, "quota:"); n < 2 {
-				t.Errorf("the quota block must print at start and at finalize whatever the environment holds; got %d in:\n%s", n, output)
+			// The one site the block prints at, as
+			// TestCmdResolve_QuotaBlockPrintsOnceAtTheStart counts it. Zero
+			// occurrences would be a re-gating that put the print behind the
+			// environment, which is what this test exists to catch.
+			if n := strings.Count(output, "quota:"); n != 1 {
+				t.Errorf("the quota block must print at the start whatever the environment holds; got %d in:\n%s", n, output)
 			}
 			if !strings.Contains(output, "quota unreadable") {
 				t.Errorf("pacing must still be attempted (and show the unreadable warning); got:\n%s", output)
@@ -1955,10 +1957,10 @@ func TestCmdResolve_QuotaPrintedOnBlocked(t *testing.T) {
 	if !strings.Contains(output, "is blocked") {
 		t.Errorf("expected 'is blocked' in stderr; got %q", output)
 	}
-	// Quota should appear at start + on the blocked exit path.
-	count := strings.Count(output, "quota:")
-	if count < 2 {
-		t.Errorf("expected quota line at start and on block (≥2 occurrences); got %d in:\n%s", count, output)
+	// Once, at the start — the blocked exit adds no second copy, as no exit
+	// does. See TestCmdResolve_QuotaBlockPrintsOnceAtTheStart.
+	if count := strings.Count(output, "quota:"); count != 1 {
+		t.Errorf("quota block printed %d times, want exactly 1 — at the start; got:\n%s", count, output)
 	}
 }
 
@@ -2565,4 +2567,262 @@ func TestCmdResolve_TheReDispatchBoundIsOneAllowanceForTheWholeRun(t *testing.T)
 	if !strings.Contains(errBuf.String(), fmt.Sprintf("parked after %d re-dispatches", maxRedispatches)) {
 		t.Errorf("the stop does not stand on the run's whole allowance; got:\n%s", errBuf.String())
 	}
+}
+
+// WHICH BINARY drove the run. A binary that cannot say what it is cannot be
+// the subject of a bug report, and `-version` only answers somebody who thinks
+// to ask — this is the line that gets pasted into the report.
+func TestCmdResolve_AnnouncementNamesTheBinaryVersion(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "a task"})
+	app, _, errBuf := resolveTestApp(t, be)
+	app.Version = "source build 5a9a603 (modified)"
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d; err=%q", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "source build 5a9a603 (modified)") {
+		t.Errorf("the narration does not name the binary's version; got:\n%s", errBuf.String())
+	}
+}
+
+// An empty App.Version prints NOTHING AT ALL rather than a gap — the way the
+// standing leaves out the filer line rather than printing an empty one. The
+// SDK is a library and has no version of its own to fall back on, so inventing
+// a placeholder would put a fact in the transcript that is not one.
+func TestCmdResolve_AnEmptyVersionPrintsNoLine(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "a task"})
+	app, _, errBuf := resolveTestApp(t, be)
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d; err=%q", code, errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "version:") {
+		t.Errorf("an empty App.Version printed a line anyway; got:\n%s", errBuf.String())
+	}
+}
+
+// WHICH ITEM. A bare owner/repo#N is not something an operator can check — one
+// who typed 275 meaning 276 learns it from the first prompt or from the pull
+// request, after the run has spent. The title goes through titleLine like every
+// other piece of free backend prose.
+func TestCmdResolve_AnnouncementNamesTheItemTitle(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "Pin bump flow to head\tand migrate issueflow"})
+	app, _, errBuf := resolveTestApp(t, be)
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d; err=%q", code, errBuf.String())
+	}
+	// Collapsed onto one line by titleLine, and carried beside the ref so the
+	// two read as one fact about one item.
+	if !strings.Contains(errBuf.String(), "1: Pin bump flow to head and migrate issueflow\n") {
+		t.Errorf("the narration does not name the item; got:\n%s", errBuf.String())
+	}
+	// Before the driving line, which is what an operator reads first.
+	out := errBuf.String()
+	if strings.Index(out, "1: Pin bump") > strings.Index(out, "driving") {
+		t.Errorf("the item line comes after the driving line; got:\n%s", out)
+	}
+}
+
+// A title that is empty or all whitespace drops the SEGMENT, rather than
+// printing a ref with a dangling colon.
+func TestCmdResolve_AWhitespaceTitleDropsTheItemLine(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: " \n\t "})
+	app, _, errBuf := resolveTestApp(t, be)
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d; err=%q", code, errBuf.String())
+	}
+	for _, line := range strings.Split(errBuf.String(), "\n") {
+		if strings.HasPrefix(line, "1: ") || line == "1:" {
+			t.Errorf("a whitespace-only title printed an item line anyway: %q", line)
+		}
+	}
+}
+
+// The title costs NO ADDITIONAL REQUEST. The standing announcement already
+// loads the item to read Creator and discarded the rest, so the title rides out
+// on that load — a second one here would be a request for a value the first
+// already fetched.
+//
+// announceStanding is exercised directly rather than through a whole resolve,
+// because a resolution legitimately loads the item several times (the claim,
+// the peek before each dispatch) and a count over all of them would not isolate
+// the one this is about.
+func TestAnnounceStanding_LoadsTheItemOnceForBothFacts(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "a task"})
+	counter := &loadCountingBackend{Orchestrator: be}
+	app, _, _ := resolveTestApp(t, counter)
+	ref, err := be.ResolveRef(t.Context(), "1")
+	if err != nil {
+		t.Fatalf("ResolveRef: %v", err)
+	}
+
+	stand := app.announceStanding(t.Context(), flow.Claim{ItemRef: ref, Account: "acct"})
+
+	if counter.loads != 1 {
+		t.Errorf("the announcement made %d loads, want 1", counter.loads)
+	}
+	if stand.title != "a task" {
+		t.Errorf("title = %q, want the item's", stand.title)
+	}
+}
+
+// The load is BEST-EFFORT: a read that fails prints the ref alone, exactly as
+// it did before the title was printed at all. An announcement is not worth
+// failing a resolution over, and the standing — which is what says how far the
+// run can get — must not be withheld because an unrelated read failed.
+func TestAnnounceStanding_AFailedLoadStillAnnounces(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "a task"})
+	ref, err := be.ResolveRef(t.Context(), "1")
+	if err != nil {
+		t.Fatalf("ResolveRef: %v", err)
+	}
+	app, _, errBuf := resolveTestApp(t, &loadAlwaysFailsBackend{Orchestrator: be})
+	app.Version = "v1.2.3"
+
+	stand := app.announceStanding(t.Context(), flow.Claim{ItemRef: ref, Account: "acct"})
+
+	if stand.title != "" {
+		t.Errorf("title = %q, want empty when the load failed", stand.title)
+	}
+	out := errBuf.String()
+	if !strings.Contains(out, "driving 1 to completion") {
+		t.Errorf("the run did not announce itself; got:\n%s", out)
+	}
+	if !strings.Contains(out, "acting as acct") {
+		t.Errorf("the standing was withheld because an unrelated read failed; got:\n%s", out)
+	}
+	// The version is the host's own string and needs no read at all, so it
+	// prints whatever the backend is doing.
+	if !strings.Contains(out, "v1.2.3") {
+		t.Errorf("the version needs no read and must print regardless; got:\n%s", out)
+	}
+}
+
+// THE PROGRESS LINE NEVER NAMES A STEP THAT WILL NOT RUN. When the advance
+// stops before dispatch because the item waits on unfinished dependencies,
+// `running "plan"…` is simply false: nothing ran. The peek already holds the
+// loaded item and its block, so it says what is actually about to happen.
+func TestCmdResolve_BlockedItemIsNotAnnouncedAsRunning(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "waits"})
+	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
+	item, err := be.ResolveRef(t.Context(), "1")
+	if err != nil {
+		t.Fatalf("ResolveRef: %v", err)
+	}
+	blocker, err := be.ResolveRef(t.Context(), "2")
+	if err != nil {
+		t.Fatalf("ResolveRef: %v", err)
+	}
+	blockOn(t, be, item, blocker)
+	app, _, errBuf := resolveTestApp(t, be)
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1 — a blocked item is a condition somebody must clear; err=%q", code, errBuf.String())
+	}
+	out := errBuf.String()
+	if strings.Contains(out, `running "`) {
+		t.Errorf("a step was announced as running before a dispatch that never happened; got:\n%s", out)
+	}
+	if !strings.Contains(out, "waits on unfinished dependencies — not dispatching") {
+		t.Errorf("the narration does not say why nothing is being dispatched; got:\n%s", out)
+	}
+	// The blockers are named by reference, so the operator has something to go
+	// work instead.
+	if !strings.Contains(out, "blocked by: 2") {
+		t.Errorf("the narration does not name the open blockers; got:\n%s", out)
+	}
+}
+
+// THE OUTCOME LINE IS SET OFF by an empty line before and after, so the one
+// line an operator must act on does not sit flush between progress lines.
+func TestCmdResolve_TheOutcomeLineIsSetOff(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "a task"})
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+		return flow.StepResult{}, nil // parks
+	})
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d; err=%q", code, errBuf.String())
+	}
+	lines := strings.Split(errBuf.String(), "\n")
+	found := false
+	for i, line := range lines {
+		if !strings.Contains(line, "→ parked") {
+			continue
+		}
+		found = true
+		if i == 0 || lines[i-1] != "" {
+			t.Errorf("no empty line before the outcome:\n%s", errBuf.String())
+		}
+		// The indented detail lines belong to the outcome; the empty line comes
+		// after the last of them.
+		j := i + 1
+		for j < len(lines) && strings.HasPrefix(lines[j], "  ") {
+			j++
+		}
+		if j >= len(lines) || lines[j] != "" {
+			t.Errorf("no empty line after the outcome and its detail:\n%s", errBuf.String())
+		}
+		break
+	}
+	if !found {
+		t.Fatalf("no outcome line at all:\n%s", errBuf.String())
+	}
+}
+
+// A PARK NAMES THE ACT THAT RESUMES IT. docs/cli.md already requires a refusal
+// to carry the overriding flag where one exists, and a park is held to the same
+// standard — an operator who answered a parked question, re-ran, and hit the
+// same budget park made a round trip this line prevents.
+//
+// The act is derived from the park KIND, so this checks the kind reaches the
+// table rather than re-checking the table itself, which
+// TestParkKindTable_CoversEveryKind owns.
+func TestCmdResolve_AParkNamesItsResumingAct(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "a task"})
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+		return flow.StepResult{}, nil // parks step-did-not-complete
+	})
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d; err=%q", code, errBuf.String())
+	}
+	out := errBuf.String()
+	if !strings.Contains(out, "to resume:") {
+		t.Errorf("the park does not name what resumes it; got:\n%s", out)
+	}
+	if !strings.Contains(out, "a re-dispatch is what finishes the job it left") {
+		t.Errorf("the resuming act does not match the park kind; got:\n%s", out)
+	}
+}
+
+// loadCountingBackend counts Loads, so a read added for a display fact shows up
+// as a request rather than as nothing at all.
+type loadCountingBackend struct {
+	*fake.Orchestrator
+	loads int
+}
+
+func (b *loadCountingBackend) Load(ctx context.Context, ref flow.ItemRef) (*flow.Item, error) {
+	b.loads++
+	return b.Orchestrator.Load(ctx, ref)
+}
+
+// loadAlwaysFailsBackend refuses every Load, which is what a backend that has
+// gone away looks like to a best-effort read.
+type loadAlwaysFailsBackend struct{ *fake.Orchestrator }
+
+func (b *loadAlwaysFailsBackend) Load(ctx context.Context, ref flow.ItemRef) (*flow.Item, error) {
+	return nil, errors.New("backend unavailable (injected)")
 }

@@ -397,11 +397,19 @@ func measureCovered(repoRoot string) ([]Metric, string, error) {
 	defer os.RemoveAll(dir)
 	profile := filepath.Join(dir, "coverage.out")
 
-	_, testErr := gateOutput(repoRoot, repoRoot, "go", "test", "-coverprofile="+profile, "./...")
+	// The profile's real path is passed to the child and ELIDED on the progress
+	// line: the line is progress, not a reproduction recipe, and nobody can
+	// re-run this command anyway — the directory is made fresh each time and
+	// removed on the way out. See gateOutputAs.
+	_, testErr := gateOutputAs(repoRoot, repoRoot,
+		[]string{"test", "-coverprofile=" + profilePlaceholder, "./..."},
+		"go", "test", "-coverprofile="+profile, "./...")
 	if _, err := os.Stat(profile); err != nil {
 		return nil, "", fmt.Errorf("coverage: no profile was produced: %w", testErr)
 	}
-	out, err := gateOutput(repoRoot, repoRoot, "go", "tool", "cover", "-func="+profile)
+	out, err := gateOutputAs(repoRoot, repoRoot,
+		[]string{"tool", "cover", "-func=" + profilePlaceholder},
+		"go", "tool", "cover", "-func="+profile)
 	if err != nil {
 		return nil, "", fmt.Errorf("go tool cover: %w: %s", err, firstLine(out))
 	}
@@ -533,6 +541,12 @@ const announceColumn = 28
 // called on a progress line — a fixed string, never a path.
 const outsideRepo = "outside the repository"
 
+// profilePlaceholder stands in for the coverage profile's temp path on a
+// progress line. A fixed string, never a path, for the reason outsideRepo is
+// one — and a NAME rather than an abbreviation, so a reader can tell it is
+// standing in for something rather than wonder what was cut off.
+const profilePlaceholder = "<profile>"
+
 // announce writes the one progress line a gate prints before each child it
 // runs. Both runners come through here because the format has to exist in one
 // place: the two lines this naming exists to tell apart stop being comparable
@@ -581,7 +595,30 @@ func relToRepo(repoRoot, dir string) string {
 // child's progress as it happens — silence and a hang look the same from
 // outside.
 func gateOutput(repoRoot, dir, name string, args ...string) (string, error) {
-	announce(repoRoot, dir, name, args)
+	return gateOutputAs(repoRoot, dir, args, name, args...)
+}
+
+// gateOutputAs is gateOutput with the announced argument list given separately
+// from the one the child is actually run with. The two differ in exactly one
+// case, and it is worth the parameter: an argument carrying a path OUTSIDE the
+// repository.
+//
+// The coverage profile is the case. It is deliberately written to a temp
+// directory — a gate that dropped it in the worktree would have modified the
+// subject it was measuring — so the path cannot be made relative to the
+// repository, and it lands verbatim on the progress line: sixty characters of
+// per-run noise that makes two transcripts of the same command un-diffable, and
+// on the platforms where TMPDIR sits under the user's home, a path the commit
+// guard refuses outright. A transcript pasted into an issue has been refused
+// for exactly this twice.
+//
+// The elision happens HERE rather than in announce, so there stays exactly one
+// printer for the line and it goes on rendering whatever it is handed, whole.
+// A rule inside announce that shortened arguments to taste would drop precisely
+// the arguments that tell two runs of one program apart, which is the confusion
+// the line exists to end rather than move.
+func gateOutputAs(repoRoot, dir string, display []string, name string, args ...string) (string, error) {
+	announce(repoRoot, dir, name, display)
 	bw := newBoundedWriter(maxToolOutput)
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir

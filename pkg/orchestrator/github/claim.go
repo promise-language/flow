@@ -407,7 +407,7 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 // thing it could add is the process working directory — which is what it did
 // add, turning "." into the operator's cwd and calling that the arena (#286).
 func (b *Orchestrator) arena() flow.Arena {
-	return flow.Arena{Host: flow.DeriveHostId(), Id: flow.ArenaId(b.cfg.WorktreeDir)}
+	return flow.ArenaAt(b.cfg.WorktreeDir)
 }
 
 // fingerprintArena reduces an arena to the opaque, comparable value that goes

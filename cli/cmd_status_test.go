@@ -144,12 +144,15 @@ func TestTitleLine_ClipsRunesNotBytes(t *testing.T) {
 	}
 }
 
-// The ask convention puts the QUESTION on the sentinel line (the Header) and
-// the evidence for it in a fenced block (the Text). A checklist entry rendered
-// from Text therefore shows the evidence and not the question, and a
-// multi-line block breaks the listing apart. The human line takes the header;
-// JSON keeps both verbatim, so nothing that needs the block loses it.
-func TestStatusHuman_QuestionLineShowsTheQuestionNotTheEvidence(t *testing.T) {
+// AN UNANSWERED QUESTION PRINTS IN FULL: header AND text, unclipped, each on
+// the lines the asker wrote them on.
+//
+// The one-line form is right for a listing of many questions and wrong for the
+// one the item is PARKED ON, which is what the operator opened `status` to
+// read. Clipped to the header, the options, the evidence and the
+// recommendation reached --json only — and reading them meant `gh api` against
+// the raw comment, which is the round trip this removes.
+func TestStatusHuman_AnUnansweredQuestionPrintsInFull(t *testing.T) {
 	env := newParkGrantEnv(t)
 	if _, err := askAll(env.be, context.Background(), env.claim, []flow.AgentQuestion{
 		flow.AskText("should docs/release.md be amended?",
@@ -165,16 +168,21 @@ func TestStatusHuman_QuestionLineShowsTheQuestionNotTheEvidence(t *testing.T) {
 	if !strings.Contains(out, "should docs/release.md be amended?") {
 		t.Errorf("status did not print the question:\n%s", out)
 	}
-	if strings.Contains(out, "Recommendation: amend.") {
-		t.Errorf("status spliced the evidence block into the checklist:\n%s", out)
+	// The evidence and the recommendation are the point: an operator must never
+	// need `gh`, the web UI, or --json to read what the flow is waiting on.
+	if !strings.Contains(out, "Recommendation: amend.") {
+		t.Errorf("status withheld the recommendation:\n%s", out)
 	}
-	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, "should docs/release.md be amended?") && !strings.HasPrefix(line, "  [ ] ") {
-			t.Errorf("question line is not a checklist entry: %q", line)
-		}
+	if !strings.Contains(out, "§11 step 1 says") {
+		t.Errorf("status withheld the evidence:\n%s", out)
+	}
+	// The text keeps ITS OWN line structure: a fenced block collapsed onto one
+	// line is unreadable, which is why this is not titleLine's job.
+	if !strings.Contains(out, "\n\n") {
+		t.Errorf("the question's blank line was collapsed away:\n%s", out)
 	}
 
-	// The machine contract is unclipped: both halves reach a tool whole.
+	// The machine contract is unchanged: both halves reach a tool whole.
 	env.out.Reset()
 	if code := env.app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
 		t.Fatalf("cmdStatus --json = %d; stderr=%q", code, env.err.String())
@@ -194,10 +202,40 @@ func TestStatusHuman_QuestionLineShowsTheQuestionNotTheEvidence(t *testing.T) {
 	}
 }
 
-// A question with no header falls back to the text — bounded the same way, so
-// a handler that called ctx.AskQuestions directly with a multi-line prompt
-// still cannot break the listing.
-func TestStatusHuman_QuestionLineBoundsAHeaderlessQuestion(t *testing.T) {
+// An ANSWERED question stays on one line. It is history: the whole history
+// unrolled in full would bury the question that is still waiting, which is the
+// one the operator came for.
+func TestStatusHuman_AnAnsweredQuestionStaysOnOneLine(t *testing.T) {
+	env := newParkGrantEnv(t)
+	asked, err := askAll(env.be, context.Background(), env.claim, []flow.AgentQuestion{
+		flow.AskText("should docs/release.md be amended?",
+			"§11 step 1 says \"`--yes` skips\".\n\nRecommendation: amend."),
+	})
+	if err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+	if err := env.be.PostAnswer(context.Background(), env.claim.ItemRef, asked[0].ID, "yes, amend it"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
+
+	if code := env.app.cmdStatus(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	out := env.out.String()
+	if strings.Contains(out, "Recommendation: amend.") {
+		t.Errorf("an answered question unrolled its evidence:\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "should docs/release.md be amended?") && !strings.HasPrefix(line, "  [x] ") {
+			t.Errorf("answered question line is not a one-line checklist entry: %q", line)
+		}
+	}
+}
+
+// A question with NO HEADER prints its text in full, on its own lines — the
+// headerless case is the one where the text is all there is, so clipping it
+// would leave the operator nothing at all.
+func TestStatusHuman_AHeaderlessQuestionPrintsItsTextInFull(t *testing.T) {
 	env := newParkGrantEnv(t)
 	if _, err := askAll(env.be, context.Background(), env.claim, []flow.AgentQuestion{
 		{Text: "which base branch?\nmain, or the release branch?"},
@@ -209,8 +247,8 @@ func TestStatusHuman_QuestionLineBoundsAHeaderlessQuestion(t *testing.T) {
 		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
 	}
 	out := env.out.String()
-	if !strings.Contains(out, "which base branch? main, or the release branch?") {
-		t.Errorf("headerless question did not collapse onto one line:\n%s", out)
+	if !strings.Contains(out, "which base branch?") || !strings.Contains(out, "main, or the release branch?") {
+		t.Errorf("headerless question was not printed in full:\n%s", out)
 	}
 }
 

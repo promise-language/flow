@@ -336,13 +336,48 @@ func TestListItemPayload_EmbeddedBlockKeysStayFlat(t *testing.T) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatalf("unmarshal %s: %v", b, err)
 	}
+	// filed_at joins the always-present keys: it is the actual timestamp
+	// `--sort newest` orders by, and a listing that dropped it for the items
+	// with no explicit one would make the two renderings two reports.
+	// arena / in_progress / park_kind are omitempty — they say something only
+	// about an item that is held, running or parked, and this fixture is none
+	// of the three, so their absence here is itself the assertion.
 	want := []string{
 		"availability", "block_kind", "block_reason", "blocked", "blocked_by",
-		"display", "orchestrator", "owner", "priority", "tags", "title", "urgency",
+		"display", "filed_at", "orchestrator", "owner", "priority", "tags", "title", "urgency",
 	}
 	got := slices.Sorted(maps.Keys(m))
 	if !slices.Equal(got, want) {
 		t.Errorf("listing keys = %v, want %v — the embed must flatten, not nest", got, want)
+	}
+}
+
+// The three facts the work mark is derived from reach --json as the ACTUAL
+// values, never as the words the human column renders them into: the holder's
+// arena as the orchestrator reports it, the park kind from the closed
+// vocabulary, and whether a run was OBSERVED in progress. A consumer reading
+// "another arena" or "parked: waiting on an answer" would be reading a
+// rendering, and the two modes are one report (docs/cli.md § Output).
+func TestListItemPayload_WorkMarkFactsAreActualValues(t *testing.T) {
+	b, err := json.Marshal(listItemPayload{
+		Display: "1", Backend: "fake", Owner: "acct",
+		Arena: "somehost/some/path", InProgress: true, ParkKind: string(flow.ParkQuestion),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal %s: %v", b, err)
+	}
+	for key, want := range map[string]any{
+		"arena":       "somehost/some/path",
+		"in_progress": true,
+		"park_kind":   "question",
+	} {
+		if m[key] != want {
+			t.Errorf("%s = %v, want %v", key, m[key], want)
+		}
 	}
 }
 

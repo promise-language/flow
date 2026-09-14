@@ -614,6 +614,7 @@ func (b *Orchestrator) itemInfoFor(rec *itemRecord, acceptsType func(flow.ItemTy
 		Ref:         b.refFor(rec.id),
 		Type:        rec.item.Type,
 		Title:       rec.item.Title,
+		FiledAt:     rec.created,
 		Creator:     rec.creator,
 		Body:        rec.item.Body,
 		URL:         rec.item.URL,
@@ -629,10 +630,21 @@ func (b *Orchestrator) itemInfoFor(rec *itemRecord, acceptsType func(flow.ItemTy
 		Blocked:     blocked,
 		BlockKind:   kind,
 		BlockReason: reason,
+		ParkKind:    parkKindOf(rec),
 		Manual:      rec.item.Manual,
 	}
 	info.Availability = b.availabilityOf(rec, blocked, acceptsType, assumesRole)
 	return info
+}
+
+// parkKindOf is the KIND of the item's current park, empty when it is not
+// parked. It reads the same record Load projects onto Item.Park, so a listing
+// and a load cannot disagree about why the item stopped.
+func parkKindOf(rec *itemRecord) flow.ParkKind {
+	if rec.parkRequest == nil {
+		return ""
+	}
+	return rec.parkRequest.Kind
 }
 
 // awaitsOf is the item's stored marker, with the account of record filled in

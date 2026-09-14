@@ -24,6 +24,24 @@ type App struct {
 	// labeling and by status output.
 	Name string
 
+	// Version is the EMBEDDING BINARY's own version, printed verbatim as the
+	// first line of a resolution's narration. Optional; empty prints nothing at
+	// all rather than a gap.
+	//
+	// It exists because a binary that cannot say what it is cannot be the
+	// subject of a bug report (docs/org/cli-guide.md §7), and a `-version` flag
+	// only answers somebody who thinks to ask — the narration is what gets
+	// pasted into the report. A modified local build and a tagged release are
+	// different facts about a transcript, and without this a transcript records
+	// neither.
+	//
+	// IT IS PRINTED, NEVER CHECKED. The SDK does no freshness comparison, no
+	// update notice, no marker read and no network call on this value: it is a
+	// string the host already holds, and nothing about it may fail, delay or
+	// refuse before a run starts. The version belongs to the binary because the
+	// SDK is a library and has no version of its own to report.
+	Version string
+
 	// Orchestrator is what the SDK talks to: it leases items to arenas, holds
 	// their state, runs gates and commands in a worktree, and lands what those
 	// produce. Required.
@@ -141,6 +159,14 @@ type App struct {
 	// os.Stderr respectively.
 	Out io.Writer
 	Err io.Writer
+
+	// In is where an operator's reply is read from — `answer`'s interactive
+	// form, and nothing else. nil means os.Stdin.
+	//
+	// It is a field for the reason Out and Err are: a test must be able to hand
+	// the command an answer without a terminal, and whether there IS a terminal
+	// is what decides between prompting and printing.
+	In io.Reader
 
 	// Coverage is the roles this binary may assume: the declaration of what it
 	// intends to perform, named from Flow's own role vocabulary. Required, and
@@ -364,6 +390,8 @@ func RunWithArgs(app App, args []string) int {
 		return app.cmdRun(ctx, rest)
 	case "answer":
 		return app.cmdAnswer(ctx, rest)
+	case "quota":
+		return app.cmdQuota(ctx, rest)
 	case "resolve":
 		return app.cmdResolve(ctx, rest)
 	default:
@@ -756,8 +784,9 @@ func usage(bin string) string {
 
 usage:
   %[1]s doctor                       is this environment fit to be given an item?
+  %[1]s quota                        report the agent account's quota state
   %[1]s list [--scope SCOPE] [--tag T] list items this flow can process
-  %[1]s answer <item-id> <text>       answer a question a step is parked on
+  %[1]s answer [<item-id>] [<text>]    read the parked question; answer it
   %[1]s claim <item-id>              acquire a claim on an item
   %[1]s run-step                     advance ONE lifecycle item (one prompt → one artifact)
   %[1]s resolve [<item-id>]          run ALL steps until finalized or parked.
@@ -774,7 +803,7 @@ usage:
                                      or off the base branch)
   %[1]s reseed [--force]              clear seed state (artifacts, budgets, park) on the active claim
 
-answer, status, list, grant, run-step, and resolve print human-readable text on a terminal and
+answer, status, list, quota, grant, run-step, and resolve print human-readable text on a terminal and
 JSON when piped or redirected; --json / --human (or FLOW_OUTPUT=json|human)
 force one. resolve's human text is its progress narration on stderr, which it
 prints in both modes — in human mode it writes nothing to stdout at all.`, bin)

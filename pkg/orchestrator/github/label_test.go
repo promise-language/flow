@@ -273,3 +273,34 @@ func TestParkLabel_AccountExhaustedIsItsOwnLabel(t *testing.T) {
 		t.Errorf("the wire spelling is %q, want %q — it matches the park kind", got, want)
 	}
 }
+
+// hasParkLabel is parkLabel's inverse over the whole vocabulary: every kind's
+// label must be one it recognises as advertising a park.
+//
+// The crosswalk walks AllParkKinds() rather than listing the five spellings,
+// because the two functions are what decide whether the state comment is read
+// for an item's park kind at all. A kind given a label of its own, with
+// hasParkLabel left alone, would leave every item parked that way reporting no
+// kind — silently, and only on the backend where it matters.
+func TestParkLabels_AreAllRecognisedAsParks(t *testing.T) {
+	l := newLabels("flow:")
+	for _, kind := range flow.AllParkKinds() {
+		req := &flow.ParkRequest{Kind: kind, Step: "plan"}
+		label := parkLabel(l, req)
+		if label == "" {
+			t.Errorf("park kind %q advertises no label", kind)
+			continue
+		}
+		if !hasParkLabel(l, []string{label}) {
+			t.Errorf("hasParkLabel does not recognise %q, the label parkLabel gives park kind %q", label, kind)
+		}
+	}
+	// Labels that are not park labels do not make an item read as parked —
+	// otherwise the state comment would be fetched for every item in the
+	// listing, which is the cost the index exists to avoid.
+	for _, name := range []string{l.Manual(), l.Binary("issue"), "flow:awaits:contributor", "cli", ""} {
+		if hasParkLabel(l, []string{name}) {
+			t.Errorf("hasParkLabel(%q) = true, but that label advertises no park", name)
+		}
+	}
+}

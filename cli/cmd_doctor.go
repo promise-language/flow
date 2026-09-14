@@ -78,16 +78,16 @@ func (app *App) cmdDoctor(ctx context.Context, args []string, startupErr error) 
 	// something absent says so instead.
 	var checks []check
 	if startupErr != nil {
-		checks = append(checks, check{name: "startup", status: checkFail, detail: startupErr.Error()})
+		checks = append(checks, check{name: doctorCheckStartup, status: checkFail, detail: startupErr.Error()})
 	}
 	if app.Orchestrator == nil {
-		checks = append(checks, check{name: "orchestrator", status: checkFail,
+		checks = append(checks, check{name: doctorCheckOrchestrator, status: checkFail,
 			detail: "no orchestrator is configured (App.Orchestrator is nil)"})
 	} else {
 		checks = append(checks, app.checkOrchestrator(ctx))
 	}
 	if app.Agent == nil {
-		checks = append(checks, check{name: "agent", status: checkFail,
+		checks = append(checks, check{name: doctorCheckAgent, status: checkFail,
 			detail: "no agent is configured (App.Agent is nil)"})
 	} else {
 		checks = append(checks, app.checkAgent(ctx))
@@ -119,10 +119,61 @@ func (app *App) cmdDoctor(ctx context.Context, args []string, startupErr error) 
 	return 0
 }
 
+// doctorCheckDef is one row of doctor's closed set: the name it reports under,
+// and the one line `doctor --help` describes it with.
+type doctorCheckDef struct {
+	name string
+	// summary says what the check establishes, for an operator deciding from
+	// the help whether `doctor` covers what they are debugging.
+	summary string
+}
+
+// doctorChecks IS the closed set docs/cli.md § Doctor states, in the order the
+// command reports it. cmdDoctor names every row it emits from here and
+// `doctor --help` lists it, so the help cannot be a second list kept by hand —
+// which is exactly what went stale: the help named two of these six.
+//
+// Some rows are conditional (startup appears only when startup refused;
+// commands and gates need an orchestrator to ask). The help lists the whole set
+// regardless, because what it answers is "what does this command check", not
+// "what did this run check".
+var doctorChecks = []doctorCheckDef{
+	{doctorCheckStartup, "the binary's configuration is valid — reported only when it is not"},
+	{doctorCheckOrchestrator, "the orchestrator is reachable and usable"},
+	{doctorCheckAgent, "the agent can be invoked — established WITHOUT sending a prompt"},
+	{doctorCheckCommands, "the project's commands are available, `verify` included"},
+	{doctorCheckGates, "the project's gates are available, `fit` and `integration` included"},
+	{doctorCheckDocs, "normative documentation is present in the arena's checkout"},
+}
+
+// The names, as constants, so the check functions and the table cannot spell a
+// row differently — which would leave the help describing a row the report
+// never emits.
+const (
+	doctorCheckStartup      = "startup"
+	doctorCheckOrchestrator = "orchestrator"
+	doctorCheckAgent        = "agent"
+	doctorCheckCommands     = "commands"
+	doctorCheckGates        = "gates"
+	doctorCheckDocs         = "normative docs"
+)
+
+// doctorCheckList renders the table for `doctor --help`, one row per line,
+// names padded to a column through the same renderer the listing uses.
+func doctorCheckList() string {
+	rows := make([][]string, 0, len(doctorChecks))
+	for _, d := range doctorChecks {
+		rows = append(rows, []string{"  " + d.name, d.summary})
+	}
+	var b strings.Builder
+	alignedRows(&b, rows, nil)
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // checkOrchestrator is the connectivity check: the orchestrator's own Doctor
 // hook when it has one, else ListAutoSelectable as a probe.
 func (app *App) checkOrchestrator(ctx context.Context) check {
-	const name = "orchestrator"
+	const name = doctorCheckOrchestrator
 	if d, ok := app.Orchestrator.(Doctor); ok {
 		if err := d.Doctor(ctx); err != nil {
 			return check{name: name, status: checkFail, detail: err.Error()}
@@ -160,7 +211,7 @@ func (app *App) checkOrchestrator(ctx context.Context) check {
 // quota and model availability are answered only by spending. The detail line
 // says what was checked, so the report never implies more than it looked at.
 func (app *App) checkAgent(ctx context.Context) check {
-	const name = "agent"
+	const name = doctorCheckAgent
 	d, ok := app.agentImpl().(flow.AgentDoctor)
 	if !ok {
 		return check{name: name, status: checkSkip, detail: fmt.Sprintf(
@@ -207,7 +258,7 @@ func (app *App) checkAgent(ctx context.Context) check {
 // reported a name it cannot address as ok would send its reader to a report
 // where everything is green while `resolve` keeps refusing.
 func (app *App) checkCommands() check {
-	const name = "commands"
+	const name = doctorCheckCommands
 	declared := app.Orchestrator.SupportedCommands()
 	if missing := missingCommands(declared); len(missing) > 0 {
 		return check{name: name, status: checkFail, detail: fmt.Sprintf(
@@ -227,7 +278,7 @@ func (app *App) checkCommands() check {
 }
 
 func (app *App) checkGates() check {
-	const name = "gates"
+	const name = doctorCheckGates
 	declared := app.Orchestrator.SupportedGates()
 	if missing := missingGates(declared); len(missing) > 0 {
 		return check{name: name, status: checkFail, detail: fmt.Sprintf(
@@ -269,7 +320,7 @@ func (app *App) checkGates() check {
 // definition of correct it cannot read — and that failure is invisible until
 // review, because what comes back is plausible rather than wrong.
 func checkDocs(root string) check {
-	const name = "normative docs"
+	const name = doctorCheckDocs
 	if root == "" {
 		return check{name: name, status: checkSkip,
 			detail: "the arena's checkout is not known: the orchestrator declares no local checkout, or none is configured"}

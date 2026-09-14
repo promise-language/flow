@@ -17,8 +17,9 @@ Every binary built on `cli.Run` exposes exactly this surface.
 | `run-step` | Advance the claimed item by at most one step — the dispatch may instead park, skip, block, or fail |
 | `resolve [<item-id>]` | Drive an item, one step at a time, until it finalizes, hands off, or stops |
 | `status [<item-id>]` | Report an item's route: the journal so far, the pending step, and whose move it is |
+| `quota` | Report the agent account's quota state |
 | `list` | Report items and where each stands — this binary's remit by default, everything the backend holds at its widest |
-| `answer <item-id> <text>` | Answer a question a step is parked on |
+| `answer [<item-id>] [<text>]` | Read the question a step is parked on, and answer it |
 | `grant <step> <axis> <amount>` | Extend the treasurer's allowance for a step and clear a matching treasurer park |
 | `doctor` | Report whether this environment is fit to be given an item |
 
@@ -51,7 +52,7 @@ Passing both `--json` and `--human` is a usage error, detected before the comman
 
 Commands fall into two shapes, and the shape determines the streams.
 
-### One-shot reports — `list`, `status`, `grant`, `doctor`, `run-step`
+### One-shot reports — `list`, `status`, `quota`, `grant`, `doctor`, `run-step`
 
 The report *is* the output. It goes to **stdout**, rendered in the selected mode.
 
@@ -121,7 +122,11 @@ A step that parks exits 0 — parking is a designed outcome, not a failure. A st
 
 `status` reports an item's route: the journal so far — each completed execution with who ran it, in which role, electing what and why — the **pending step** and its declared ways forward, **whose move it is** (the awaited role, or the awaited signal), the park when there is one with what would clear it, the treasurer's spend so far — cost and active time, with time spent waiting on exclusions reported apart — and **which step is running right now**.
 
-The journal is reported in order, and the pending step in exactly one state — parked, waiting, ready, or running. A step being actively worked on is not the same thing as one that has yet to start, and reporting both as pending loses the distinction an operator most often needs.
+The journal is reported in order, and the pending step in exactly one state — parked, waiting, ready, running, or **executing elsewhere**. A step being actively worked on is not the same thing as one that has yet to start, and reporting both as pending loses the distinction an operator most often needs.
+
+**Executing elsewhere is its own state, not different prose.** `status <item-id>` inspects without claiming, so the item may be leased on another host — and a process identity on another machine is not knowable from here, in principle. The report therefore comes from the **claim**: who holds it, and where (`LookupClaim`). It is a distinct value because the correct operator response is the opposite of the one `pending` invites — leave the item alone, rather than go start it or look for a stalled process. `running` is never said of it, because `running` is said only of a process this machine has observed.
+
+**A run that is alive and deliberately idle is reported as waiting**, with what it waits on and, where the run knows, until when. A run holding before a dispatch — pacing against quota, or re-measuring an unfit machine — has a claim and no step process, and reporting nothing for it is indistinguishable from a stalled run, which is what an operator reads it as. A wait that ends on a re-measurement rather than a clock reports no instant: inventing one would be a prediction. The wait is **observed like every other liveness claim** — the registration must name the item and its holder must be alive at the moment `status` runs, because a record left behind by a dead process would invite the operator to keep waiting too.
 
 For a running step, `status` reports what is running: the step, and the identity of the process executing it, so an operator can find it, watch it, or end it.
 
@@ -150,6 +155,16 @@ The mechanism is not normative. Only the requirement is: `status` reports the ru
 ## Answering
 
 A step that needs a human decision asks a question and parks. `answer` is how that decision is given.
+
+**The bare form is the one an operator reaches for.** With no arguments, `answer` prints the question the item is parked on **in full** — header and text, unclipped — and, when stdin is a terminal, reads the answer and posts it. One command, with no item id and no question id to copy from anywhere. Requiring both up front meant the operator had to know the question before they could read it, which is a circle.
+
+**The item id is optional.** It is required only when no lease is held, or to name a different item; when the arena holds a claim, that is the item. An explicit id is still accepted and **wins**. One positional is read as the item when this arena holds nothing — there is no item for an answer to be about — and as the answer text when it does, unless it names an item that exists.
+
+**`--answered` prints the whole history**: every question and its answer, in order, not only the outstanding one. A question already answered once, in different words, is otherwise invisible to the operator and to the asking step alike.
+
+**Non-interactive, the bare form never blocks.** With stdin not a terminal it prints every question and its answer — the unanswered one with an empty answer — and returns. A prompt on a piped stdin waits for input that is not coming, which is a hang rather than a report.
+
+**An operator who is asked and says nothing has answered nothing.** The question stays pending: recording an empty answer would clear the park on a question nobody settled.
 
 **It requires no claim.** The arena holding the item is not the party who answers — a maintainer, the reporter, or a passer-by can all unblock a step, which is the point of asking in the open. `answer` therefore addresses the item by id, like `status`, and works from any machine.
 
@@ -288,6 +303,43 @@ A tag is a free-form label carried by an item. Each backend maps its own vocabul
 
 `list --tag <t> [--tag <t>…]` filters conjunctively, matching `resolve`.
 
+### Order and length
+
+`list --sort <order>` chooses the order, over a closed set of three:
+
+| `--sort` | Order |
+|---|---|
+| `resolution` *(default)* | The order `resolve` takes work in: urgency, then priority, then oldest first |
+| `newest` | Filing time, newest first |
+| `oldest` | Filing time, oldest first |
+
+The default is `resolution` because *what would run next* is what a listing is nearly always being asked, and a backend's own order answers it only by coincidence.
+
+**`resolution` is the SDK's comparison, never a second copy of it.** The SDK owns what `critical` outranks and each orchestrator owns the sort ([orchestrator.md](orchestrator.md) § Priority and urgency); a CLI ordering with rules of its own would be the rule with two owners that forbids. At scope `auto` it therefore reproduces exactly the order `List` already returns there.
+
+**Every order is total**, so two runs over one set print one order. Items that tie fall back to the order the orchestrator returned — the sort is stable — which is the only tiebreak that can be right here: the comparison deliberately answers 0 for two items filed at the same instant and leaves the tiebreak to the orchestrator, and a tiebreak invented in the CLI would reorder scope `auto`.
+
+**An unknown value is rejected by name** (§ Invocation errors). **Both renderings come out in the same order**: what `--json` keeps unchanged is the values, not the order.
+
+`list --limit <n>` bounds how much is printed. **The default is unlimited.**
+
+- It takes the first `n` items **in the chosen order**, after `--scope` and `--tag` have filtered and `--sort` has ordered. It limits what is PRINTED, not what is fetched: the order has to be computed over the whole set.
+- `n` is a **positive integer**. Zero, a negative number and a non-number are each rejected by name.
+- **A cut listing says it was cut.** The human rendering ends with how many items were shown out of how many matched, and `--json` carries the matching count beside the items. A limit that silently dropped items would make a partial listing read as complete.
+- **Both renderings are limited alike.**
+
+### Whether an item is being worked
+
+Each row carries a **work mark**: whether a run is advancing the item right now, where, and why it stopped — the question an operator otherwise has to open `status` on every row to answer.
+
+- **In progress** — a run is advancing it. **Never guessed**: this arena's run registration must name the item and its holder must be observed alive, the same evidence `status` reports a running step on. It is knowable only for an item **this arena holds**; a run on another machine is not observable from here, so an item held elsewhere reads `leased`, never `in progress`.
+- **Leased** — an arena holds the claim and nothing here shows it running.
+- **Parked** — a step stopped without completing, in the words of the park's **kind**. The kind is a closed set with a fixed meaning per member; the one-line reason stays `status`'s.
+
+**Where** is the holding arena, as far as the orchestrator can honestly name it: an item this arena holds reads `here`, and anything else reads `another arena` — a backend that publishes only an arena fingerprint, never a machine name ([disclosure.md](disclosure.md)), cannot say more, and nothing is invented in its place. The account is always shown.
+
+A claim survives a park, so a parked item is usually also leased and **the marks combine**. **Parked is not blocked**: a blocked item waits on other items or on a condition, a parked item waits on what its kind names, and both can show at once.
+
 ### Priority and urgency
 
 Every item carries two values, and `list` and `status` report both.
@@ -305,6 +357,24 @@ An item nothing has said anything about is `medium` and `default`. That is the o
 
 Where the two decide what runs, and in what order, is `resolve`.
 
+## Quota
+
+`quota` reports the agent account's current quota state: the subscription windows, how much of each is spent, and when each resets — the same figures `resolve` prints before it starts.
+
+It exists because `resolve` prints that block **once, at the start** (§ Resolving), where it answers whether the run has headroom. With the trailing prints gone, the question needs a way to be asked deliberately rather than by starting a run.
+
+It is a one-shot report: the report is the output, on stdout, in the selected mode (§ Output). The human rendering is the one `resolve` narrates with, so the two cannot come to describe the same windows differently.
+
+**It spends nothing and changes nothing** — it reads the substrate's published figures, through whatever cache the reading is already served from, and reports them.
+
+| Exit | When |
+|---|---|
+| 0 | The figures were read and reported |
+| 1 | No reading could be taken — no credential, or the substrate refused |
+| 2 | The invocation was malformed |
+
+A reading that could not be taken is a command that could not complete, unlike the same failure beside a `resolve` that carries on regardless: here the reading **is** the command.
+
 ## Advancing one step
 
 `run-step` advances the claim this arena holds by at most one step. It is the primitive an external scheduler drives — `claim`, then `run-step` repeatedly — when it wants to hold a slot for one step rather than for a whole resolution, so that a critical item is not waiting out a low one that merely started first.
@@ -321,7 +391,10 @@ Where the two decide what runs, and in what order, is `resolve`.
 
 > **An operator learns how far a run can take an item before it spends anything, rather than from where it stops.**
 
-Before the first dispatch, `resolve` names the **repository account** it acts as, the roles that account can assume, and — when it differs from that one — the account that filed the item.
+Before the first dispatch, `resolve` names **what is running it**, **what it is working on**, the **repository account** it acts as, the roles that account can assume, and — when it differs from that one — the account that filed the item.
+
+- **Which binary.** The embedding binary's own version, printed verbatim and omitted entirely when it has none. A binary that cannot say what it is cannot be the subject of a bug report ([org/cli-guide.md](org/cli-guide.md) §7), and a `-version` flag answers only somebody who thinks to ask — the narration is what gets pasted into the report, and a modified local build and a tagged release are different facts about a transcript. It is a **print, not a check**: the value is one the host already holds, and nothing about it may read a marker, reach a network, or fail before the run starts.
+- **Which item.** Its title, through the same one-line bound every other free backend text goes through, dropped when the item has none. `owner/repo#N` is not something an operator can check, and the one line before a run that spends real money is where a mistyped number should be caught — not at the first prompt, or in the pull request. The title costs no additional request: the standing announcement already loads the item to read the filer. The load is best-effort, and a failed read prints the ref alone. **It prints; it does not ask** — an interactive acknowledgement would break every unattended `resolve`.
 
 Each answers a question whose only other answer is to run the command and watch.
 
@@ -377,6 +450,12 @@ That refusal is not a lost race. A lost race is about an item and the answer is 
 
 - **A park whose `redispatch_may_clear` is true is re-dispatched, under a bound.** The run holds briefly, dispatches the same item again, and carries on if it clears. The bound has the fitness wait's shape and is there for the fitness wait's reason: a condition nobody is fixing must end the run rather than spin it to the runaway guard. It is its own number, and a smaller one, because the two wait on different things — a fitness wait re-measures and dispatches nothing, while a re-dispatch runs the step, and on a kind that charges its dispatch the treasurer's invocation cap stops it sooner than this bound does. **Exhausting the bound is still a park, never a verdict** — the run ends parked, exit 0, and the report says how many attempts it stands on.
 - **A park carrying `clears_at` is not re-dispatched at all.** The kind that knows when it clears says so, and re-dispatching before that instant is looping against an answer the system was already handed. The run exits, naming the instant, **with the claim and the arena held** — the draft, the session and the worktree stay where whatever returns at that instant resumes from ([environment.md](environment.md) § The agent account). The run does not sit in front of the window: it may be hours or days away, and nothing is served by a process waiting it out.
+**A park names the act that resumes it**, derived from the kind: a treasurer-refused park sends the operator to `grant`, a question park to `answer`, a kind that clears on its own to `resolve` once it has. A refusal already carries the failing check's output and the overriding flag where one exists (§ Claiming), and a park is held to the same standard — an operator who answers a parked question, re-runs, and meets the same budget park has made a round trip one line would have prevented.
+
+**The outcome line is set off by an empty line before and after.** It is the one line an operator must act on, and flush between progress lines it reads as one more of them.
+
+**The quota block prints once, at the start**, where it answers whether the run has headroom. Reprinted after the outcome it buries the park or finalized line under pacing detail the operator has already read and cannot act on. `quota` is how the question is asked deliberately the rest of the time.
+
 - **The kinds that do not clear stop immediately**, as they always have: `blocked`, `question`, `treasurer-refused`, `refused` and `write-contract`. Those are the real reasons to stop, and the report sends the operator to `status`.
 
 A skip is unchanged. A preflight refusal says this cycle will not run, and there is nothing for a re-dispatch to clear.

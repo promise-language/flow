@@ -441,12 +441,29 @@ func RunningJSONPath() (string, error) {
 	return filepath.Join(dir, runningJSONRel), nil
 }
 
-// RunningRecord identifies the process executing a step.
+// RunningRecord identifies the process advancing an item.
+//
+// It answers two questions, because they are one question asked at two moments
+// and a second record for the other would be a second answer free to disagree:
+// WHICH STEP is executing (Step), and — when none is — WHAT THE RUN IS WAITING
+// ON before it dispatches one (Waiting). A run holding before a dispatch has a
+// claim and no step process, and without the second half `status` reports
+// nothing for it, which is exactly the signature of a stalled run.
 type RunningRecord struct {
 	Item string `json:"item"`
+	// Step is the step executing right now, empty while the run is waiting
+	// rather than dispatching.
 	Step string `json:"step"`
 	PID  int    `json:"pid"`
 	Exe  string `json:"exe"`
+
+	// Waiting is why the run is holding before a dispatch, in words — "quota
+	// headroom", "the machine to become fit". Empty while a step is executing.
+	Waiting string `json:"waiting,omitempty"`
+	// WaitUntil is when the hold ends. Zero when the run does not know, which
+	// is the honest answer for a wait that ends on a measurement rather than on
+	// a clock.
+	WaitUntil time.Time `json:"wait_until,omitempty"`
 }
 
 // SaveRunning writes the running record to `.flow/running.json`, creating the

@@ -1329,8 +1329,9 @@ func TestRunWithArgs_InstallsTheCacheBackedReader(t *testing.T) {
 func TestRunWithArgs_OneResolveMakesOneRequest(t *testing.T) {
 	// The defect, end to end: one resolve made up to 52 requests — a display
 	// print at startup, one per step, another on the terminal outcome. It makes
-	// one now, and the display sites still print the figures they printed
-	// before.
+	// one now, and the one display site still prints the figures it printed
+	// before. (The terminal prints are gone entirely since: the block says
+	// whether the run has headroom, which is a question about its start.)
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
 	app, _, errBuf := resolveTestApp(t, be)
@@ -1344,8 +1345,8 @@ func TestRunWithArgs_OneResolveMakesOneRequest(t *testing.T) {
 		t.Errorf("fetches = %d over one whole resolve, want 1", s.count())
 	}
 	out := errBuf.String()
-	if n := strings.Count(out, "42% used"); n < 2 {
-		t.Errorf("want the quota block at startup and on the outcome (≥2); got %d in:\n%s", n, out)
+	if n := strings.Count(out, "42% used"); n != 1 {
+		t.Errorf("want the quota block once, at startup; got %d in:\n%s", n, out)
 	}
 	if strings.Contains(out, "quota unreadable") {
 		t.Errorf("pacing was disabled on a run that had a reading; got:\n%s", out)

@@ -909,6 +909,32 @@ func parkLabel(l labels, req *flow.ParkRequest) string {
 	}
 }
 
+// hasParkLabel reports whether these labels advertise a park of any kind. It is
+// parkLabel's INVERSE, and it is deliberately only that: it answers "is this
+// item parked" and never "parked on what", because the mapping is nine kinds
+// onto five labels and four of them share `flow:blocked`. The kind comes out of
+// the state comment (stateFactsOfIssue).
+//
+// It is an INDEX over the cheap answer — the labels are already in hand — so
+// the state comment is fetched only for an item that could have a park in it.
+// TestParkLabels_AreAllRecognisedAsParks walks AllParkKinds() and holds the two
+// functions together, so a kind added with a label of its own cannot make this
+// one silently answer false.
+func hasParkLabel(l labels, names []string) bool {
+	for _, name := range names {
+		switch name {
+		case l.Blocked(), l.NeedsAnswer(), l.InfraTransient(), l.AccountExhausted():
+			return true
+		}
+		// The treasurer's label carries the step it refused on, so it is a
+		// prefix rather than a name.
+		if strings.HasPrefix(name, l.named(labelSuffixTreasurerRefPref)) {
+			return true
+		}
+	}
+	return false
+}
+
 // Park records a park in the state comment's "park" field — the machine-
 // readable copy LoadState returns — plus a flow:blocked / flow:needs-answer /
 // flow:treasurer-refused:<step-id> label and a timeline comment, so a human
