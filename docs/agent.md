@@ -3,7 +3,7 @@
 > **Tag:** `agent` — remaining work to complete this document: the query named in
 > [`docs/index.md`](index.md).
 
-**Normative.** This document defines the agent interface, the metered chokepoint, permission modes, effort levels, failure kinds, and the lifecycle of a prompt — where it runs, what contains it, how it ends, and what it may leave behind. Every statement is a requirement. This is the normative home for the per-step permission requirement described in [#19](https://github.com/promise-language/flow/issues/19).
+**Normative.** This document defines the agent interface, what a substrate must provide to sit behind it, the metered chokepoint, permission modes, effort levels, failure kinds, and the lifecycle of a prompt — where it runs, what contains it, how it ends, and what it may leave behind. Every statement is a requirement. This is the normative home for the per-step permission requirement described in [#19](https://github.com/promise-language/flow/issues/19).
 
 ## The interface
 
@@ -15,7 +15,7 @@ type Agent interface {
 }
 ```
 
-Concrete implementations live in subpackages (the reference is `flow/claude`). The root package carries zero transitive dependencies on any agent substrate. **The process handling behind every implementation is this library's**, both ends of a prompt run on another host included (§ Where a prompt runs).
+Concrete implementations live in subpackages, one per substrate, each with its own specification — `flow/claude` over the Claude Code CLI ([claude-agent.md](claude-agent.md)), `flow/codex` over the Codex CLI ([codex-agent.md](codex-agent.md)). The root package carries zero transitive dependencies on any agent substrate. **The process handling behind every implementation is this library's**, both ends of a prompt run on another host included (§ Where a prompt runs).
 
 > **A prompt is one `Agent.Run` call.**
 
@@ -24,6 +24,50 @@ The request goes out, the agent works — reading, editing, calling tools, as ma
 **"While the agent works" is the span inside one prompt**: after the request goes out, before the call returns. It is when the agent reads and edits, when tool calls happen, when a guard refuses an action and the agent adapts to the refusal instead of losing what it has done, and when a gate has nothing to say yet because the result does not exist. Wherever this corpus says a thing happens while an agent works, it means inside that span — one dispatch, one prompt, no journal entry yet, and the step's result not written until the call comes back.
 
 **The word is `prompt`, and it is not `turn`.** A turn in this corpus is a position in a queue — whose move it is, an exclusion arriving inside a running dispatch ([resolution.md](resolution.md) § The treasurer) — and a single word carrying both senses left every reader deciding which was meant. `Prompts` is also what a step declares when it says whether it may do this at all ([flow-registration.md](flow-registration.md) § Step configuration).
+
+## Substrates
+
+A **substrate** is the agent harness an implementation drives — the process that holds the conversation, calls the model, and runs the tools. Each has its own flags, its own event stream, its own permission vocabulary, its own credentials, and its own way of saying it refused.
+
+> **The SDK names no substrate. Every fact particular to one lives in that substrate's package, and nowhere else.**
+
+The request vocabulary, the chokepoint, the treasurer, `doctor`, the pacer, the account report, and every flow are written once, against this interface. **A substrate-specific fact outside its package is wrong the moment a second substrate exists, and wrong silently**: a pacer that reads one substrate's published usage while a run spends through another withholds dispatches for an account that is not spending, and never withholds one for the account that is. Nothing in such a run looks broken until the second account is refused mid-prompt.
+
+**How one substrate's flags, events and files map onto this interface is that substrate's specification** — its invocation, its request mapping, how its stream is read, where its account and allowance are found, how the guards stand in front of it, and which optional obligations below it meets. This document states what every mapping must preserve, and names no harness's flag, event or file; a substrate's specification restates none of what is here ([org/normative.md](org/normative.md) § 4).
+
+### A flow does not choose its substrate
+
+**What pays for a resolution is the agent account, and the substrate comes with the account** ([cli.md](cli.md) § The agent account is a separate axis). Neither is a property of the work: a flow is written once and runs on every conformant substrate, and a step declares what it needs from a prompt — a permission mode, an effort — never whose harness provides it.
+
+**A `Model` identifier is the one field that binds a substrate**, because model names are the substrate's vocabulary. A step that names a model has chosen its substrate, and is refused on any other (§ Refuse, never substitute). A flow meant to run on more than one substrate names no model, and leaves the choice to the substrate's configuration.
+
+### What a substrate must provide
+
+| Obligation | Required | Where it cannot |
+|---|---|---|
+| Run one prompt non-interactively in the stamped `Worktree` and return one aggregated `AgentResponse` | **Yes** | It is not a substrate |
+| Enforce the restriction of every `PermissionMode` it accepts (§ Permission modes) | **Yes**, per mode | The mode is refused before anything is sent |
+| Accept a value for `Effort` and `Model`, or refuse it | **Yes** | Refused before anything is sent |
+| A pre-tool interception point that sees every tool call it can make (§ The action guard) | **Yes** | It is not a conformant substrate |
+| Classify a refusal for an exhausted allowance from its own statement (§ The agent account) | **Yes** | Published usage is consulted instead, where it names a reset |
+| Identify its account from a stated field in a stated place | **Yes** | The account is reported unidentified, and scoped to nothing |
+| Measure what a prompt cost | No | The cost is reported **unmeasured**, never zero (§ Cost) |
+| Stop a prompt at `MaxCostUSD` | No | Declared, and announced by every run that grants a cost allowance (§ Cost) |
+| Resume a session from a handle | No | Every dispatch opens a session — expensive, not incorrect ([resolution.md](resolution.md) § The agent session) |
+| A plan-submission tool | No | `PlanSubmitted` is always false and the plan is `LastText` |
+| A free invocability check (`AgentDoctor`) | No | `doctor` reports the agent row **skipped** |
+
+**The required rows are what make a flow substrate-neutral; the optional rows are what make one substrate cheaper or better-reported than another.** An optional row a substrate does not meet costs money or visibility, and is declared so that it costs them openly. A required row it does not meet costs correctness, and no declaration pays for that.
+
+### Refuse, never substitute
+
+> **A request a substrate cannot honour is refused before anything is sent. It is never quietly mapped to a neighbour.**
+
+A substitution is a declaration nothing checked. A step that declared `plan` and was run under a substrate's full-write mode, because the substrate had no plan mode and full-write was nearest, has edited the tree while claiming it only read it — and every record says it planned. An `Effort` passed through to a harness that has no such level dies after spawning, reads as an `exit-error`, and is billed as an attempt.
+
+**A stated equivalent is not a substitution.** A mapping that preserves what the request restricts — `plan` onto a read-only execution mode — is how a substrate honours the request, and it is written down in the substrate's package. What is forbidden is choosing a value that restricts less, or silently dropping one.
+
+The refusal is `AgentFailure{Kind: "unsupported"}`: nothing was sent, so nothing is billed, and re-dispatching changes nothing, so it parks with a kind that says re-dispatch cannot clear it ([orchestrator.md](orchestrator.md) § Vocabularies). The message names the field, the value, and the substrate.
 
 ## The chokepoint
 
@@ -34,6 +78,14 @@ The chokepoint also **stamps the request's `Worktree`** with the arena's checkou
 It stamps **the session** for the same reason. `ResumeSessionID` and `FreshSession` are set here from the resolution's own session ([resolution.md](resolution.md) § The agent session), overwriting whatever the step put there: which conversation a prompt continues is a property of the resolution, and a step choosing its own would be choosing what the resolution is having. A prompt resumes the handle the resolution is holding; where there is none it spawns a clean slate, which is also why the empty handle is stamped as `FreshSession` rather than left blank — an empty `ResumeSessionID` alone lets a substrate attach to whatever it last cached, and for an entry step that is another item's reasoning. A step that needs a new conversation declares `Session: fresh` ([flow-registration.md](flow-registration.md) § Session continuity), and the machinery does the rest.
 
 It stamps **what the prompt serves** — `Item` and `Step` — because a prompt that cannot name its item and step cannot be observed, refused in favour of, or collected for by anything that did not start it (§ The lifecycle of a prompt). And **every dispatch collects any ending the arena's previous prompt left uncollected, before it dispatches anything**, so the session and cost of a call nobody received reach the resolution first (§ The requester disappearing).
+
+### A handle belongs to the substrate that issued it
+
+> **A session handle is offered only to the substrate that issued it.**
+
+A handle is an identifier in one harness's namespace. An item parked while spending through one substrate and resumed through another would hand the second a handle it has never seen: the better case is a refusal and a re-sent prompt, and the worse is a harness that attaches to whatever conversation of its own the identifier happens to name.
+
+So the resolution keeps the handle **with the name of the substrate that issued it**, and the chokepoint stamps it only onto a request going to that substrate. For any other, the handle is **unavailable** — which is not a new session being declared: the conversation ended somewhere nobody chose, and the treasurer approves and counts it as it does any handle that was gone ([resolution.md](resolution.md) § The agent session).
 
 ## Nothing mechanical may spend
 
@@ -47,7 +99,7 @@ This is enforced in three places, because the mistake arrives in three shapes:
 |---|---|
 | The commit gate's approved list (`tools/build/common/agentturns.go`) | A new call site. The list is exact — file, function, and how many prompts each asks for — and **adding an entry is the maintainer's decision**. Removing one when the call goes away is ordinary upkeep. |
 | `App.Agent` refuses `Run` (`cli`) | A prompt requested at runtime from outside a step dispatch, in a binary built from a tree that never passed the gate. The field answers `Name()` and `Efforts()` — declarations, which spend nothing — and nothing else; the real agent is reached only by the dispatch that builds the metered chokepoint. |
-| The reference agent refuses to spawn from a test process (`claude`) | A test that reaches the real binary — which spends on every run, on every machine and in CI, and makes the gate's runtime a function of account state rather than of the tree. |
+| Every substrate implementation refuses to spawn from a test process | A test that reaches a real harness — which spends on every run, on every machine and in CI, and makes the gate's runtime a function of account state rather than of the tree. |
 
 None of the three is a proof. A request assembled through a helper slips past the scan, and an `Agent` implementation the SDK did not write can do what it likes. They catch the honest case, which is the one that keeps happening.
 
@@ -61,13 +113,13 @@ type AgentDoctor interface {
 }
 ```
 
-It is what `doctor`'s agent check calls. The reference implementation spawns the binary and asks its version, which establishes that this SDK can start it — absent, unexecutable, wrong-architecture and too-old installs all fail here — and which costs nothing, because no model is called.
+It is what `doctor`'s agent check calls. An implementation spawns the harness and asks its version, which establishes that this SDK can start it — absent, unexecutable, wrong-architecture and too-old installs all fail here — and which costs nothing, because no model is called.
 
 **It also establishes that the machine can contain a prompt** (§ Containment), by establishing the unit around a process that is not the agent, which spends nothing. A platform on which containment cannot be guaranteed is one on which the agent cannot be invoked, and like every such condition it is found before work is given ([environment.md](environment.md) § The set is closed, and one rule keeps it closed), not by the first prompt's `start-error`.
 
 What it does **not** establish is that a prompt would succeed: credentials, quota and model availability are answered only by spending, and nothing mechanical may spend. An implementation must not close that gap by sending a prompt, and a report must not imply more than it checked.
 
-The reference implementation also enforces a **minimum version**: `--max-budget-usd` only stops a run at the cap from claude CLI v2.1.217. On anything older `AgentRequest.MaxCostUSD` is accepted and ignored, so a step's cost grant stops bounding the prompt — a failure that is invisible until an overrun, which is precisely the kind a preflight exists to catch.
+**Each implementation enforces a minimum version: the oldest release on which every obligation it claims actually holds.** A harness that accepts a flag and ignores it is the case this exists for — a spend limit accepted by a release that does not stop at it leaves a step's cost grant bounding nothing, invisibly until an overrun, which is precisely the kind of failure a preflight exists to catch. Where the obligation is not met at any version, the implementation does not claim it (§ Cost). Each substrate's specification names its minimum and why.
 
 An agent with no `AgentDoctor` is reported as **skipped**, not failed. The SDK cannot check a black-box `Agent` for free, and that is a fact about the interface rather than about the machine.
 
@@ -78,15 +130,17 @@ An agent with no `AgentDoctor` is reported as **skipped**, not failed. The SDK c
 | Field | Type | Meaning |
 |---|---|---|
 | `Prompt` | `string` | The task prompt. |
-| `PermissionMode` | `string` | One of the closed set below. |
-| `Model` | `string` | Model identifier. |
+| `PermissionMode` | `string` | One of the closed set below. A substrate enforces the mode's restriction or refuses it. |
+| `Model` | `string` | Model identifier, in the substrate's vocabulary. Empty means the substrate's configured default. A non-empty value binds the request to a substrate that knows it (§ A flow does not choose its substrate). |
 | `Effort` | `EffortLevel` | How hard the agent works on this prompt: one of the levels **this agent** declares for the requested `Model`, or empty for the agent's own default (§ Effort levels). |
 | `MaxCostUSD` | `float64` | Ceiling on what this prompt may spend, in USD. Zero means unbounded. |
 | `Worktree` | `string` | Working directory for the agent process. **Set by the SDK at the chokepoint, never by the step**: the arena's checkout (`Orchestrator.ArenaRoot()`), the same tree the commit is taken in and the gates measure. In the remote form the prompt host runs the agent in its own arena's checkout, whatever this names (§ Where a prompt runs). |
-| `ResumeSessionID` | `string` | Non-empty resumes that exact session. Empty means "don't actively resume a specific session." **Set by the SDK at the chokepoint, never by the step**: the handle the resolution is holding ([resolution.md](resolution.md) § The agent session). Offered and never depended on — a substrate may decline it, and a step whose result depends on its being honoured has made an optimisation load-bearing. |
-| `FreshSession` | `bool` | Discard any inherited session state — spawn from a clean slate. **Set by the SDK at the chokepoint, never by the step**: true exactly when the resolution holds no handle, so a prompt with nothing to resume cannot attach to whatever the substrate cached. |
+| `ResumeSessionID` | `string` | Non-empty resumes that exact session. Empty means "don't actively resume a specific session." **Set by the SDK at the chokepoint, never by the step**: the handle the resolution is holding, and only when that handle was issued by the substrate this request goes to ([resolution.md](resolution.md) § The agent session; § A handle belongs to the substrate that issued it). Offered and never depended on — a substrate may decline it, and a step whose result depends on its being honoured has made an optimisation load-bearing. |
+| `FreshSession` | `bool` | Discard any inherited session state — spawn from a clean slate. **Set by the SDK at the chokepoint, never by the step**: true exactly when the resolution holds no handle this substrate can use, so a prompt with nothing to resume cannot attach to whatever the substrate cached. |
 | `Item` | `ItemRef` | The item the prompt serves. **Set by the SDK at the chokepoint, never by the step**, so a live prompt, a refusal naming it, and its ending all say what it served (§ Observing a prompt). |
 | `Step` | `StepId` | The step the prompt serves. **Set by the SDK at the chokepoint, never by the step**, for the same reason. |
+
+## Cost
 
 ### MaxCostUSD contract
 
@@ -95,6 +149,25 @@ An agent with no `AgentDoctor` is reported as **skipped**, not failed. The SDK c
 **The bound is the prompt's, across every resumption** (§ Long-running work). Each resumption is given only what the prompt has left, and a prompt with nothing left is not resumed: it ends `cost-cap`.
 
 An implementation that cannot enforce it may ignore the field; the treasurer's chokepoint consultations still apply. A caller setting this field is asking for a tighter ceiling; a metered wrapper must narrow it, never widen it.
+
+**An implementation that cannot enforce it says so**, through the optional capability below, and a run that grants a cost allowance through such an agent announces that the allowance does not bound a prompt. Ignoring the field is permitted; ignoring it where an operator believes it holds is the invisible overrun the minimum version exists to prevent.
+
+```go
+type AgentLimits interface {
+    // EnforcesCostCap reports whether MaxCostUSD stops a prompt at the cap.
+    EnforcesCostCap() bool
+}
+```
+
+An agent that does not implement `AgentLimits` is taken **not** to enforce the cap. Claiming a bound is what needs saying; the absence of a claim is not one.
+
+### A cost that was not measured is not zero
+
+> **A prompt whose cost the substrate did not measure reports its cost as unmeasured. It never reports zero.**
+
+Some substrates price a prompt in currency; others report tokens against a subscription allowance and have no price to give. Zero is a measurement — [cli.md](cli.md) reads `cost_usd: 0` as *the step ran and spent nothing* — so an unmeasured prompt reported as zero is a false statement about money, and it falsifies everything downstream: the ledger totals nothing, the treasurer's cost axis can never trip, and the operator reads a resolution that drained an allowance as one that was free.
+
+So `AgentResponse` distinguishes the two (`CostMeasured`, below). What follows from an unmeasured cost is the treasurer's to decide ([resolution.md](resolution.md) § The treasurer) under one constraint: **it is never read as zero**, and a resolution whose cost axis cannot be measured is reported as unmeasured on that axis, not as within it. What bounds such a resolution is what can be measured — active time, dispatch counts, and the account's published usage (§ The agent account).
 
 ## Permission modes
 
@@ -105,8 +178,16 @@ The `PermissionMode` field is a closed set:
 | `default` | Standard permissions — the agent asks before acting. |
 | `acceptEdits` | The agent may edit files without confirmation. |
 | `bypassPermissions` | All permission prompts are bypassed. |
-| `plan` | The agent produces a plan through the harness's plan-submission tool, ending at that tool call rather than in assistant text. |
+| `plan` | The agent reads and does not modify. Its deliverable is its answer. |
 | `auto` | Fully autonomous operation. |
+
+**A mode is defined by what it restricts, and a substrate enforces the restriction or refuses the mode** (§ Refuse, never substitute). The spellings are this SDK's, not any harness's; a substrate whose own vocabulary differs maps each mode onto an execution mode that restricts at least as much, and states the mapping in its package.
+
+**`plan` restricts the agent to reading.** A substrate with a dedicated plan mode uses it; one without satisfies `plan` with an execution mode that cannot modify the worktree, and in no other way.
+
+**A mode says what the agent may do, never how its answer arrives.** Some harnesses end a plan-mode prompt at a plan-submission tool rather than in assistant text, and `PlanText` exists to catch that; a harness with no such tool delivers the plan as its answer. A step is correct under both — it reads `PlanText` where one was submitted and `LastText` otherwise — and a prompt that depends on a submission tool existing has put a substrate's feature where the step's contract belonged.
+
+**No mode lifts the action guard.** `bypassPermissions` and `auto` concern the harness's own confirmation prompts. The guard's refusals are a separate chokepoint, and layers only narrow ([resolution.md](resolution.md) § Guards).
 
 ### Per-step permission requirement (#19)
 
@@ -137,6 +218,54 @@ type EffortDef struct {
 
 **Every level is a prompt like any other.** Whatever a level makes the agent do — reason longer, delegate, orchestrate further agents — happens inside the prompt: contained, metered into its cost, bounded by `MaxCostUSD` and the deadline, and ended by the ending sequence (§ The lifecycle of a prompt). A level whose work the seam cannot hold the prompt open for is not declared (§ Long-running work).
 
+## The action guard holds on every substrate
+
+The guard over what an agent proposes to do is a property of the environment, not of the flow ([gates-and-commands.md](gates-and-commands.md) § Gates on what an agent does), and one of its two callers is the pre-tool hook every agent passes on its way to publishing ([disclosure.md](disclosure.md)). A substrate that the environment cannot install that hook on is one whose agent edits and publishes past every guard, while the run looks exactly like one in which the guard had nothing to refuse.
+
+> **A conformant substrate offers a pre-tool interception point that receives every tool call the agent can make, before it runs, and honours a refusal.**
+
+- **Every tool, under whatever name.** A shell tool is a `run tool` subject whatever the harness calls it, and a file change is an `edit file` subject whatever shape it arrives in: an edit delivered as a patch names its paths inside the patch, and a guard that reads only an edit tool's path argument is one patch away from irrelevant. The guard reads what the call would do, as it reads what a command would publish ([disclosure.md](disclosure.md)).
+- **A refusal reaches the agent.** It is returned while the agent works, so the agent adapts rather than losing the prompt.
+- **One guard, whichever substrate proposed the call.** The guard decides over what a call does — runs a command, edits these paths, hands work on, reaches outside — and a substrate's payload is translated into that once, at the edge; no rule the guard applies is written against one harness's tool names. The wiring **states** which substrate is calling, and the guard reads the payload in that substrate's vocabulary because it was told to, never because the payload looked like it: two harnesses whose payloads look alike are one release from a guard that reads one as the other.
+- **Absent is refused.** Wiring that finds no guard to run — a checkout nothing has built the guard into yet — blocks every call rather than letting it through, on every substrate. A guard that exists only once someone builds it is absent on every arena nobody has.
+- **A hook the harness skips is not installed.** A harness that runs project hooks only once a person has approved them, and otherwise warns and proceeds, has no guard on an unattended run — and the warning is written where no unattended reader looks.
+
+**A sandbox does not substitute for the guard.** A sandbox bounds what the process can reach; the guard decides what the agent may do. A network-less sandbox keeps a prompt from publishing and does nothing to stop it editing a vendored corpus inside the worktree it was given.
+
+Where the wiring comes from is not this document's subject, and neither is what the guard permits: installation belongs to the environment ([gates-and-commands.md](gates-and-commands.md) § They are not the flow's, and they do not switch off), and the rules to [resolution.md](resolution.md) § Guards. What is required here is that no substrate be one the guard cannot stand in front of.
+
+## The prompt carries everything the result depends on
+
+> **Nothing a step's result depends on reaches the agent through a channel only one substrate has.**
+
+Harnesses read project instructions from different files by convention, offer different tools, and expose different commands. A protocol a step relies on — how to ask a question, how to name a blocker, where the deliverable goes — taught in one harness's instructions file is never seen under another: the question is written as narration, nothing detects it, and the step proceeds on a guess. So a step's prompt states its own protocol, and a step reads only what the interface returns.
+
+**Project conventions are not step protocol.** A project may keep its own guidance wherever its harnesses read it; what this rule forbids is a step whose correctness depends on that guidance having been read.
+
+## The agent account
+
+**The account is a condition scope, not a machine**, and what follows from its exhaustion — the park, the recorded instant, the kept lease — is [environment.md](environment.md) § The agent account. This section is the interface half: what an `Agent` hands the SDK so that it can.
+
+**Account identity and published usage are read through the agent, never by the SDK.** Where the credential lives, which field names the account, and which endpoint publishes the allowance are each one substrate's facts (§ Substrates), so a reader of them outside that substrate's package reads the wrong account as soon as a second one is configured.
+
+```go
+type AgentAccount interface {
+    // Account names the account this agent spends as: the stable identifier
+    // the substrate issues, and separately a readable name for a person. It is
+    // read from a stated field in a stated place, never discovered and never
+    // synthesized; an account it cannot identify is an error, not a guess.
+    Account(ctx context.Context) (AccountRef, error)
+
+    // Usage reports the account's published allowance, one entry per window,
+    // each with the fraction used and the instant it resets.
+    Usage(ctx context.Context) ([]UsageWindow, error)
+}
+```
+
+Both **spend nothing and send no prompt** (§ Nothing mechanical may spend). An agent without `AgentAccount` has an unidentified account and no published usage: its runs are unpaced, and the report says so rather than printing another substrate's figures.
+
+**A refusal for an exhausted allowance is reported on the failure, and the account on the reader.** How a refusal is classified and what the failure carries is § Reporting an exhausted account; the account the resulting park names is the one `Account` reads, not a field of the failure. A substrate whose statement names no reset leaves `ClearsAt` nil, and the SDK consults `Usage` for the instant.
+
 ## AgentResponse
 
 `AgentResponse` is the aggregated result of one `Agent.Run` call — the whole prompt, however many times the seam held it open for its agent's work (§ Long-running work):
@@ -144,12 +273,13 @@ type EffortDef struct {
 | Field | Type | Meaning |
 |---|---|---|
 | `LastText` | `string` | The **last** assistant text block the agent produced — not every text block joined. An agent that ends on a tool call emits preamble before each one, and concatenating those produces an artifact made entirely of narration. |
-| `PlanText` | `string` | What the agent submitted through the plan-submission tool. Empty when the agent did not end that way. |
+| `PlanText` | `string` | What the agent submitted through a plan-submission tool. Empty when the agent did not end that way, and always empty on a substrate that has none. |
 | `PlanSubmitted` | `bool` | Whether the agent called the plan-submission tool. The pair `(PlanSubmitted=true, PlanText="")` is the case worth failing on: the agent produced a plan and the transport lost it. |
-| `ToolsUsed` | `[]string` | Tools the agent invoked. |
-| `CostUSD` | `float64` | Cost of this prompt, all of it — on an ending without a result, what the substrate had reported by then. |
+| `ToolsUsed` | `[]string` | Tools the agent invoked, in the substrate's names. |
+| `CostUSD` | `float64` | Cost of this prompt, all of it — on an ending without a result, what the substrate had reported by then. Meaningful only when `CostMeasured`. |
+| `CostMeasured` | `bool` | Whether the substrate measured `CostUSD`. False means unknown, never zero (§ A cost that was not measured is not zero). |
 | `DurationSeconds` | `float64` | Wall-clock time. |
-| `SessionID` | `string` | The conversation this prompt ran in. **Reported whether the prompt finished or died mid-way**: a substrate that named its session opened one, and that conversation holds everything the dead prompt paid for — a prompt killed by a deadline or a broken stream that reported no handle is bought again on the resume ([resolution.md](resolution.md) § Nothing is bought twice). The SDK records it as the resolution's and offers it back as `Request.ResumeSessionID` at the chokepoint; no step chains it itself. Empty where the substrate has no such notion. A call that never returned is no exception: its ending is collected by the next dispatch in the arena, session included (§ The requester disappearing). |
+| `SessionID` | `string` | The conversation this prompt ran in. **Reported whether the prompt finished or died mid-way**: a substrate that named its session opened one, and that conversation holds everything the dead prompt paid for — a prompt killed by a deadline or a broken stream that reported no handle is bought again on the resume ([resolution.md](resolution.md) § Nothing is bought twice). The SDK records it as the resolution's, together with the substrate that issued it, and offers it back as `Request.ResumeSessionID` at the chokepoint — to that substrate alone (§ A handle belongs to the substrate that issued it); no step chains it itself. Empty where the substrate has no such notion. A call that never returned is no exception: its ending is collected by the next dispatch in the arena, session included (§ The requester disappearing). |
 | `Prompt` | `PromptRecord` | The prompt as it ended: where it ran, the process that ran it, what it had started, and which ending it was (§ Observing a prompt). Present on every ending in which a prompt started. |
 | `Failure` | `*AgentFailure` | Nil on success; non-nil carries structured failure info. |
 
@@ -186,11 +316,12 @@ The `Kind` field is drawn from a closed set. Each kind is one way a prompt ended
 | `left-running` | Finished — its agent answered with nothing outstanding — while processes of the prompt that nothing awaited were still alive. The seam ended them with the prompt, and the failure names each (§ Descendants and sub-agents). | no | An ordinary failure of the step: the dispatch is counted. |
 | `unmetered-agent` | An agent process the substrate did not run within this prompt was found among its processes, and the seam ended the prompt (§ Descendants and sub-agents). | no | An ordinary failure of the step: the dispatch is counted. |
 | `prompt-live` | Refused: the arena already has a live prompt, which the failure names (§ One prompt per arena). Nothing ran. | no | **Not a park, and nothing is charged.** The step stops naming the live prompt, reported `blocked`. |
+| `unsupported` | Refused: the request asked for something this substrate cannot honour — a permission mode, a model, an effort level — and nothing was sent (§ Refuse, never substitute). | no | `refused`, and nothing is charged. The same request is refused identically every time, so no re-dispatch clears it ([orchestrator.md](orchestrator.md) § Vocabularies). |
 | `account-exhausted` | The substrate **refused** the prompt because the agent account's allowance is spent ([environment.md](environment.md) § The agent account). | yes | `account-exhausted` |
 
 ### Transient failures
 
-When `Transient` is true, the attempt is not charged: the treasurer does not count the dispatch, and the metered chokepoint bills none of the prompt's reported cost. One flag, because it is one treatment — a flapping runner must not spend the resolution's budget ([environment.md](environment.md)), and neither may an allowance that refused to spend, which has not bought an attempt. **Two kinds charge nothing without being transient**, `start-error` and `prompt-live`: nothing ran, so there is no attempt to charge, and neither is a park, so there is nothing a re-dispatch is waiting to clear.
+When `Transient` is true, the attempt is not charged: the treasurer does not count the dispatch, and the metered chokepoint bills none of the prompt's reported cost. One flag, because it is one treatment — a flapping runner must not spend the resolution's budget ([environment.md](environment.md)), and neither may an allowance that refused to spend, which has not bought an attempt. **Three kinds charge nothing without being transient**, `start-error`, `prompt-live` and `unsupported`: nothing ran, so there is no attempt to charge. Neither of the first two is a park either, so there is nothing a re-dispatch is waiting to clear; `unsupported` parks `refused`, which is deterministic — the same request is refused identically every time — and so is a park no re-dispatch clears ([orchestrator.md](orchestrator.md) § Vocabularies).
 
 **`account-exhausted` parks `account-exhausted`, not `infra-transient`** — nothing about the infrastructure failed, and an operator told to re-run *once the infrastructure is back* would be looking at healthy infrastructure for as long as the window lasts. The park carries `ClearsAt` and the account it belongs to.
 
@@ -200,7 +331,13 @@ When `Transient` is true, the attempt is not charged: the treasurer does not cou
 
 An implementation whose substrate rations its allowance **must establish the condition from the substrate's own statement that it refused, and never from how the prompt died.** A refused prompt also ends badly — without a result, or with an error whose classification may contradict itself — and that ending carries neither which window refused nor when it returns. An implementation that reads only the prompt's outcome will report an ordinary agent failure, bill the refusal, and count the dispatch, which is what every clause above forbids. Error taxonomies must not be the discriminator: they vary between versions, and a classification keyed to them is wrong the first time one changes, silently, and in the direction that bills for it.
 
-The reference implementation reads the substrate's dedicated rate-limit event, which carries all three facts — that the refusal happened, which window, and the reset instant — and sets `Kind`, `Transient`, `Window` and `ClearsAt` from it.
+Which statement a substrate makes, and how it is read, is that substrate's specification ([claude-agent.md](claude-agent.md) § The agent account, [codex-agent.md](codex-agent.md) § The agent account): a substrate whose statement carries all three facts — that the refusal happened, which window, and the reset instant — sets `Kind`, `Transient`, `Window` and `ClearsAt` from it.
+
+## Open questions
+
+- **Where the substrate is chosen.** § A flow does not choose its substrate settles that it is not a step's; it does not settle whether a binary built with more than one selects per invocation — and so whether that is a [cli.md](cli.md) surface — or whether the choice is made when the binary is built.
+- **Whether `doctor` reports the guard.** § The action guard holds on every substrate requires an interception point on every substrate, and [gates-and-commands.md](gates-and-commands.md) says the flow must not assume the guard is installed. Whether establishing that it is — for free, before an unattended run — is a `doctor` row or stays the environment's alone changes what `doctor` promises.
+- **What an unmeasured cost is reported as.** § A cost that was not measured is not zero forbids zero. Whether the substrate's own units — tokens, allowance fraction consumed — travel with the response so an operator sees *something* per prompt, or the per-prompt figure is simply absent and the account's published usage is the only measure, changes `AgentResponse` and [cli.md](cli.md)'s `cost_usd`.
 
 ## The lifecycle of a prompt
 
@@ -374,8 +511,8 @@ A prompt's **prompt record** can be read without acquiring anything, in both for
 ## Cross-references
 
 - [step-handler.md](step-handler.md) — `ctx.Agent()` is how handlers reach the agent.
-- [resolution.md](resolution.md) — the treasurer and park semantics.
+- [resolution.md](resolution.md) — the treasurer, the agent session, guards, and park semantics.
 - [flow-registration.md](flow-registration.md) — step declaration.
 - [orchestrator.md](orchestrator.md) — the orchestrator supplies a remote prompt's connection and nothing else.
-- [environment.md](environment.md) — what a start that cannot happen says about the machine.
-- [gates-and-commands.md](gates-and-commands.md) — the gate runner, whose account of a vanished process this section's endings parallel.
+- [environment.md](environment.md) — the agent account as a condition scope, and what a start that cannot happen says about the machine.
+- [gates-and-commands.md](gates-and-commands.md) and [disclosure.md](disclosure.md) — the guards every substrate must carry, and the gate runner, whose account of a vanished process this section's endings parallel.
