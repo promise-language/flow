@@ -58,12 +58,15 @@ func (app *App) cmdQuota(ctx context.Context, args []string) int {
 	}
 
 	if mode == OutputHuman {
-		reportQuota(app.Out)
-		// reportQuota reports its own failure in prose and returns, which is
-		// right for narration beside a run that is continuing anyway. Here the
-		// reading IS the command, so a reading that could not be taken is a
-		// command that could not complete, and the exit code has to say so.
-		if _, err := quotaNow(); err != nil {
+		// ONE READING, RENDERED AND JUDGED. reportQuota reports its own failure
+		// in prose and carries on, which is right for narration beside a run
+		// that is continuing anyway; here the reading IS the command, so a
+		// reading that could not be taken is a command that could not complete
+		// and the exit code has to say so. It returns the reason for exactly
+		// that, rather than being asked a second time — on a machine with no
+		// usable cache location every ask is a fetch, and a command that spends
+		// nothing may not take two readings of one figure.
+		if err := reportQuota(app.Out); err != nil {
 			return 1
 		}
 		return 0

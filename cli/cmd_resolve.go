@@ -264,7 +264,18 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 
 	targets := paceTargets{FiveHour: *paceFiveHour / 100, SevenDay: *paceSevenDay / 100}
 
-	app.reportSpend()
+	// THE QUOTA BLOCK PRINTS ONCE, HERE, where it answers whether the run has
+	// headroom. Reprinted after the outcome it buried the park or finalized
+	// line — the one line an operator must act on — under pacing detail they
+	// had already read (docs/cli.md § Resolving). `quota` is how the question
+	// is asked deliberately the rest of the time.
+	reportQuota(app.Err)
+
+	// What the run cost at the orchestrator's own seam is a fact about the
+	// WHOLE run, so it is reported when the run ends — and through one defer
+	// rather than at each of the dozen returns below, which is how one of them
+	// comes to be the path that misses it.
+	defer app.reportServiceSpend()
 
 	enc := json.NewEncoder(app.Out)
 	quotaWarned := false

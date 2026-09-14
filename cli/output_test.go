@@ -338,13 +338,16 @@ func TestListItemPayload_EmbeddedBlockKeysStayFlat(t *testing.T) {
 	}
 	// filed_at joins the always-present keys: it is the actual timestamp
 	// `--sort newest` orders by, and a listing that dropped it for the items
-	// with no explicit one would make the two renderings two reports.
-	// arena / in_progress / park_kind are omitempty — they say something only
-	// about an item that is held, running or parked, and this fixture is none
-	// of the three, so their absence here is itself the assertion.
+	// with no explicit one would make the two renderings two reports. So does
+	// in_progress, which is a fact about every item — `false` is the answer
+	// "no run was observed", and omitted it would be indistinguishable from a
+	// report that does not carry the fact at all.
+	// arena / park_kind are omitempty — each names something an item either has
+	// or has not got, and this fixture is neither held nor parked, so their
+	// absence here is itself the assertion.
 	want := []string{
 		"availability", "block_kind", "block_reason", "blocked", "blocked_by",
-		"display", "filed_at", "orchestrator", "owner", "priority", "tags", "title", "urgency",
+		"display", "filed_at", "in_progress", "orchestrator", "owner", "priority", "tags", "title", "urgency",
 	}
 	got := slices.Sorted(maps.Keys(m))
 	if !slices.Equal(got, want) {

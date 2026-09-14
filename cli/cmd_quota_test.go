@@ -157,9 +157,36 @@ func TestCmdQuota_RejectsAnArgument(t *testing.T) {
 	}
 }
 
-// It spends nothing and changes nothing: one read, through the same
-// machine-wide cache every other display site goes through.
-func TestCmdQuota_ReadsThroughTheCacheOnce(t *testing.T) {
+// It spends nothing and changes nothing: ONE read, in either mode.
+//
+// The cache is deliberately taken away here. With one in place a second ask is
+// served from disk and a command that reads twice looks identical to one that
+// reads once — which is the whole shape of the defect this pins, because the
+// machine with no usable cache location is exactly the one where the second ask
+// is a second request.
+func TestCmdQuota_ReadsOnceInEitherMode(t *testing.T) {
+	for _, mode := range []string{"--human", "--json"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+			s := installFetch(t, func() ([]windowUsage, error) { return usageAt(0.42), nil })
+			prev := quotaCacheDir
+			quotaCacheDir = func() (string, bool) { return "", false }
+			t.Cleanup(func() { quotaCacheDir = prev })
+			app, _, errBuf := newArgparseApp(t)
+
+			if code := app.cmdQuota(context.Background(), []string{mode}); code != 0 {
+				t.Fatalf("cmdQuota = %d; err=%q", code, errBuf.String())
+			}
+			if s.count() != 1 {
+				t.Errorf("fetches = %d, want 1 — the reading is rendered and judged from one ask", s.count())
+			}
+		})
+	}
+}
+
+// …and through the machine-wide cache every other display site goes through,
+// so a reading already taken costs no request at all.
+func TestCmdQuota_ReadsThroughTheCache(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	s := installFetch(t, func() ([]windowUsage, error) { return usageAt(0.42), nil })
 	app, _, _ := quotaApp(t)

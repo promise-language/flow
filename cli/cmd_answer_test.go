@@ -483,6 +483,34 @@ func TestCmdAnswer_AnsweredPrintsTheWholeHistoryInOrder(t *testing.T) {
 	}
 }
 
+// A JSON RENDERING IS NON-INTERACTIVE WHATEVER STDIN IS, so stdout carries the
+// payload and nothing else.
+//
+// The two ordinary ways to ask for the machine form from a terminal — `answer
+// --json`, and `answer` with stdout piped — both leave stdin a terminal, so an
+// interactivity test that consults only stdin prompts anyway. The question and
+// the "your answer:" prompt are prose written to stdout, which is where the
+// payload goes: what comes out is text with an object after it, and no decoder
+// can read it.
+func TestCmdAnswer_JSONModeNeverPromptsOnStdout(t *testing.T) {
+	app, out, errBuf, be, itemID := answerTestSetup(t)
+	asTerminal(t, app, "yes, re-plan\n")
+
+	if code := app.cmdAnswer(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdAnswer = %d; stderr=%q", code, errBuf.String())
+	}
+	var payload answerPayload
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not the payload in JSON mode: %v\n%s", err, out.String())
+	}
+	if len(payload.Questions) != 1 || payload.Questions[0].Text != "should we re-plan?" {
+		t.Errorf("the reading form's payload is missing the question: %+v", payload.Questions)
+	}
+	// It READ; it did not answer. A mode that cannot prompt cannot have been
+	// given a reply, so nothing may be recorded from one.
+	assertStillPending(t, be, itemID, 1)
+}
+
 // The read forms reach --json too, so a tool can read what the flow is waiting
 // on without parsing prose.
 func TestCmdAnswer_JSONCarriesTheQuestions(t *testing.T) {

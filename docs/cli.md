@@ -162,7 +162,7 @@ A step that needs a human decision asks a question and parks. `answer` is how th
 
 **`--answered` prints the whole history**: every question and its answer, in order, not only the outstanding one. A question already answered once, in different words, is otherwise invisible to the operator and to the asking step alike.
 
-**Non-interactive, the bare form never blocks.** With stdin not a terminal it prints every question and its answer — the unanswered one with an empty answer — and returns. A prompt on a piped stdin waits for input that is not coming, which is a hang rather than a report.
+**Non-interactive, the bare form never blocks.** With stdin not a terminal it prints every question and its answer — the unanswered one with an empty answer — and returns. A prompt on a piped stdin waits for input that is not coming, which is a hang rather than a report. **A JSON rendering is non-interactive whatever stdin is**: the payload is the whole of stdout in that mode (§ Output), so a question and a prompt written there would be prepended to it, and the reading form is what the mode has to offer instead.
 
 **An operator who is asked and says nothing has answered nothing.** The question stays pending: recording an empty answer would clear the park on a question nobody settled.
 

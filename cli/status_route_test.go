@@ -76,6 +76,94 @@ func TestStatusHuman_RendersTheJournalInOrder(t *testing.T) {
 	}
 }
 
+// THE PENDING STEP NAMES ITS DECLARED WAYS FORWARD — the other half of a route.
+// docs/cli.md § Status asks for "the pending step and its declared ways
+// forward", and the journal alone says only where the work has BEEN.
+//
+// Under the pending step and under no other: printed under a resolved step they
+// would name choices already made, and under every step they would be the wall
+// of text a route replaces.
+func TestStatusHuman_ThePendingStepNamesItsWaysForward(t *testing.T) {
+	env := newParkGrantEnv(t)
+	recordRoute(t, env, flow.JournalEntry{
+		Step: "plan", Execution: 1,
+		Route: flow.Route{Next: "commit"},
+		By:    "djabi", Role: "contributor",
+		At: time.Date(2025, 5, 1, 9, 0, 0, 0, time.UTC),
+	})
+
+	if code := env.app.cmdStatus(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	out := env.out.String()
+	// `plan` is resolved, so `commit` is the pending step and its declared
+	// successor is `pr-open`.
+	if !strings.Contains(out, "ways forward: pr-open") {
+		t.Errorf("the pending step does not name where it can go:\n%s", out)
+	}
+	if strings.Count(out, "ways forward:") != 1 {
+		t.Errorf("the ways forward are printed for more than the pending step:\n%s", out)
+	}
+}
+
+// A step that may END the flow names the dispositions it may end it with, which
+// is a way forward like any other and the one an operator most needs to see
+// coming.
+func TestStatusHuman_AFinalizingStepNamesItsDispositions(t *testing.T) {
+	env := newParkGrantEnv(t)
+	recordRoute(t, env,
+		flow.JournalEntry{Step: "plan", Execution: 1, Route: flow.Route{Next: "commit"}, By: "djabi", Role: "contributor"},
+		flow.JournalEntry{Step: "commit", Execution: 1, Route: flow.Route{Next: "pr-open"}, By: "djabi", Role: "contributor"},
+	)
+
+	if code := env.app.cmdStatus(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	if out := env.out.String(); !strings.Contains(out, "ways forward: finalize: resolved") {
+		t.Errorf("the pending step does not name the disposition it may end on:\n%s", out)
+	}
+}
+
+// --json carries the ACTUAL declarations, on every step, never the words the
+// human line renders them into: the two modes are one report, and a consumer
+// reading "ways forward: pr-open" would be reading a rendering.
+func TestStatusJSON_StepsCarryTheirDeclaredWaysForward(t *testing.T) {
+	env := newParkGrantEnv(t)
+
+	if code := env.app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	var payload statusPayload
+	if err := json.Unmarshal(env.out.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal %s: %v", env.out.String(), err)
+	}
+	want := map[string]struct {
+		next     []string
+		finalize []string
+	}{
+		"plan":    {next: []string{"commit"}},
+		"commit":  {next: []string{"pr-open"}},
+		"pr-open": {finalize: []string{"resolved"}},
+	}
+	for _, s := range payload.Steps {
+		w, ok := want[s.ID]
+		if !ok {
+			t.Fatalf("unexpected step %q", s.ID)
+		}
+		if strings.Join(s.Next, ",") != strings.Join(w.next, ",") {
+			t.Errorf("step %q next = %v, want %v", s.ID, s.Next, w.next)
+		}
+		if strings.Join(s.MayFinalize, ",") != strings.Join(w.finalize, ",") {
+			t.Errorf("step %q may_finalize = %v, want %v", s.ID, s.MayFinalize, w.finalize)
+		}
+		// Non-null on a step declaring none, so the key set does not depend on
+		// what a flow happens to declare.
+		if s.Next == nil || s.MayFinalize == nil {
+			t.Errorf("step %q carries a null declaration list: next=%v may_finalize=%v", s.ID, s.Next, s.MayFinalize)
+		}
+	}
+}
+
 // A finalizing election names the disposition it ended on, rather than a
 // successor there is none of.
 func TestStatusHuman_AFinalizingElectionNamesItsDisposition(t *testing.T) {

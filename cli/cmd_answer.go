@@ -83,10 +83,18 @@ func (app *App) cmdAnswer(ctx context.Context, args []string) int {
 	// then asked for the reply, which is what makes this one command instead of
 	// a read followed by a second invocation carrying an id copied by hand.
 	if text == "" {
-		if !app.interactive() {
+		if mode != OutputHuman || !app.interactive() {
 			// NON-INTERACTIVE BARE ANSWER NEVER BLOCKS. A prompt on a piped
 			// stdin waits for input that is not coming, which is a hang rather
 			// than a report.
+			//
+			// A JSON RENDERING IS NON-INTERACTIVE WHATEVER STDIN IS. The
+			// payload is the whole of stdout in that mode, and the question and
+			// the prompt are prose: written there they would be prepended to
+			// the JSON, so `answer --json` and `answer | tee` — the ordinary
+			// ways to ask for the machine form from a terminal — would emit
+			// something no decoder can read. The reading form is what the mode
+			// has to offer, and it carries the same questions.
 			return app.emitQuestions(mode, ref, item.Questions)
 		}
 		// The question first: an operator cannot answer what they have not been
@@ -172,12 +180,12 @@ func (app *App) answerTarget(ctx context.Context, args []string) (flow.ItemRef, 
 		// item that EXISTS, which is how `answer <other-item>` still reaches
 		// one.
 		//
-		// EXISTENCE, not resolvability. A backend's resolver is not a syntax
-		// check: the fake mints a ref for any non-empty string, and the GitHub
-		// one falls back to substring matching, so "does this resolve" answers
-		// yes for prose and the answer text would be read as an item id. A load
-		// is the question actually being asked — is there an item here — and it
-		// costs one read on this branch alone.
+		// EXISTENCE, not resolvability. A backend's resolver is not required to
+		// be a syntax check — the fake mints a ref for any non-empty string —
+		// so "does this resolve" can answer yes for prose, and the answer text
+		// would be read as an item id. A load is the question actually being
+		// asked — is there an item here — and it costs one read on this branch
+		// alone.
 		if ref, rerr := app.resolveClaimRef(ctx, args[0]); rerr == nil {
 			if _, lerr := app.Orchestrator.Load(ctx, ref); lerr == nil {
 				return ref, "", true

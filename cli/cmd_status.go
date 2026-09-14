@@ -106,6 +106,10 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		owner = "(unclaimed)"
 	}
 
+	// The checklist, and the step the route is at — derived together, so the
+	// rendering and the payload cannot disagree about which step is pending.
+	steps, pendingStep := app.stepPayloads(typeFlow, state, elsewhere)
+
 	payload := statusPayload{
 		Item:      display,
 		Title:     state.Title,
@@ -127,7 +131,7 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		Journal:   journalPayloads(state.Journal),
 		Awaits:    awaitsPayloadOf(state.Awaits),
 		Spend:     spendPayloadOf(state.Ledger),
-		Steps:     app.stepPayloads(typeFlow, state, elsewhere),
+		Steps:     steps,
 		Questions: questionPayloads(state),
 		Waiting:   waitingPayloadOf(display),
 	}
@@ -160,7 +164,7 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		// Only the type-matching flow's checklist. The "flow:" line names it, so
 		// no redundant header. If no flow handles this item's type, there's
 		// nothing.
-		printChecklist(app, payload.Steps)
+		printChecklist(app, payload.Steps, pendingStep)
 
 		// Whose move it is, and what the run has cost — the two facts the
 		// checklist cannot carry because neither belongs to a step.
@@ -325,12 +329,13 @@ func blockLine(b blockPayload) string {
 	return sb.String()
 }
 
-// stepPayloads projects a flow's lifecycle items onto the state. Returns an
-// empty (non-nil) slice when no flow handles the item's type, so the JSON
-// carries [] rather than null.
-func (app *App) stepPayloads(f *flow.Flow, state *flow.Item, elsewhere bool) []stepPayload {
+// stepPayloads projects a flow's lifecycle items onto the state, and names THE
+// PENDING STEP beside them. Returns an empty (non-nil) slice when no flow
+// handles the item's type, so the JSON carries [] rather than null, and an
+// empty id when nothing is pending.
+func (app *App) stepPayloads(f *flow.Flow, state *flow.Item, elsewhere bool) ([]stepPayload, string) {
 	if f == nil {
-		return []stepPayload{}
+		return []stepPayload{}, ""
 	}
 
 	// Load the running-step record and verify liveness before entering the
@@ -347,9 +352,21 @@ func (app *App) stepPayloads(f *flow.Flow, state *flow.Item, elsewhere bool) []s
 		}
 	}
 
-	// The pending step is the first one still outstanding, and only it can be
-	// executing elsewhere.
-	markedElsewhere := false
+	// THE PENDING STEP, BY IDENTITY: the step the route is at, which is the one
+	// an advance would dispatch next and the one docs/cli.md § Status reports
+	// "and its declared ways forward" of. It is the flow's OWN answer — the
+	// same Position SelectFlow asks — rather than "the first step with nothing
+	// recorded", which is a guess that a step whose artifact happens to exist
+	// puts behind the route.
+	//
+	// Empty when the route has finalized, or names no registered step: both are
+	// "nothing is pending", which is what a finalized item reports everywhere
+	// else. Position is pure — the last journal entry and a map lookup — so
+	// asking it costs nothing.
+	var pendingStep string
+	if pos, perr := f.Position(state); perr == nil && !pos.Finalized {
+		pendingStep = string(pos.Step.Result())
+	}
 
 	items := f.Items()
 	out := make([]stepPayload, 0, len(items))
@@ -358,6 +375,12 @@ func (app *App) stepPayloads(f *flow.Flow, state *flow.Item, elsewhere bool) []s
 			ID:       string(li.Result()),
 			Label:    li.Description,
 			Required: li.Required,
+			// The step's declared ways forward, off the registration the flow
+			// already holds. docs/cli.md § Status asks for the pending step
+			// "and its declared ways forward", and they cost no read: a step
+			// names its successors and its dispositions when it is registered.
+			Next:        stepIdStrings(li.Next),
+			MayFinalize: dispositionStrings(li.MayFinalize),
 		}
 		switch li.Kind {
 		case flow.LifecycleArtifact:
@@ -396,10 +419,10 @@ func (app *App) stepPayloads(f *flow.Flow, state *flow.Item, elsewhere bool) []s
 			sp.State = stateRunning
 			sp.RunningPID = runningPID
 			sp.RunningExe = runningExe
-		} else if sp.State == statePending && elsewhere && !markedElsewhere {
+		} else if sp.State == statePending && elsewhere && sp.ID == pendingStep {
 			// Executing under another party's claim. It displaces PENDING on
-			// the PENDING STEP ONLY — the first one still outstanding, which is
-			// the one a holder would be working — so the steps behind it stay
+			// THE PENDING STEP ONLY — the step the route is at, which is the
+			// one a holder would be working — so the steps behind it stay
 			// pending rather than all claiming to be running somewhere.
 			//
 			// It carries no process: what is known here is the lease, and a
@@ -408,11 +431,10 @@ func (app *App) stepPayloads(f *flow.Flow, state *flow.Item, elsewhere bool) []s
 			// looking for a stalled process — which is what `pending` on an
 			// item leased elsewhere invites.
 			sp.State = stateElsewhere
-			markedElsewhere = true
 		}
 		out = append(out, sp)
 	}
-	return out
+	return out, pendingStep
 }
 
 // artifactState mirrors Flow.stepPending's view of one artifact record.
@@ -447,6 +469,25 @@ func journalPayloads(entries []flow.JournalEntry) []journalEntryPayload {
 			CostUSD:         e.Spend.CostUSD,
 			DurationSeconds: e.Spend.Duration.Seconds(),
 		})
+	}
+	return out
+}
+
+// stepIdStrings and dispositionStrings render a step's declarations as the
+// actual values, never as prose. Non-nil for an empty declaration, so the
+// payload's key set does not depend on what a flow happens to declare.
+func stepIdStrings(ids []flow.StepId) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, string(id))
+	}
+	return out
+}
+
+func dispositionStrings(ds []flow.Disposition) []string {
+	out := make([]string, 0, len(ds))
+	for _, d := range ds {
+		out = append(out, string(d))
 	}
 	return out
 }
@@ -759,7 +800,11 @@ func titleLine(title string) string {
 // accepts), so it leads the line and the human label trails it. Steps that own
 // no budget say so, which is what makes the listing sufficient on its own to
 // know what can be granted.
-func printChecklist(app *App, steps []stepPayload) {
+// pendingStep is the step the route is at, as stepPayloads derived it. Its
+// declared ways forward are printed, and no other step's: under a resolved step
+// they would name choices already made, and under every step they would be the
+// wall of text a route is meant to replace.
+func printChecklist(app *App, steps []stepPayload, pendingStep string) {
 	width := 0
 	for _, s := range steps {
 		if len(s.ID) > width {
@@ -782,7 +827,33 @@ func printChecklist(app *App, steps []stepPayload) {
 			fmt.Fprintf(app.Out, "  (%s)", stateElsewhere)
 		}
 		fmt.Fprintln(app.Out)
+		if s.ID == pendingStep {
+			if line := waysForwardLine(s); line != "" {
+				fmt.Fprintf(app.Out, "      %s\n", line)
+			}
+		}
 	}
+}
+
+// waysForwardLine renders a step's declared routes for a person: the successors
+// its handler may elect, and the dispositions it may end the flow with.
+//
+// Empty when the step declares neither, so a caller can print unconditionally.
+// That is what an await looks like — it goes where the signal takes it and
+// elects nothing — and a "ways forward:" label over nothing would say the step
+// has choices it does not.
+func waysForwardLine(s stepPayload) string {
+	var parts []string
+	if len(s.Next) > 0 {
+		parts = append(parts, strings.Join(s.Next, ", "))
+	}
+	if len(s.MayFinalize) > 0 {
+		parts = append(parts, "finalize: "+strings.Join(s.MayFinalize, ", "))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "ways forward: " + strings.Join(parts, " · ")
 }
 
 func stepMarker(state string) string {

@@ -146,9 +146,9 @@ to name a different item. An explicit id always wins.
   --question ID   which question to answer (required when several are pending)
   --answered      print the whole history, not only the outstanding question
 
-Piped rather than on a terminal, the bare form prints every question and its
-answer and never waits for input. Answering does not resume the item — that is
-a separate, deliberate act (resolve or run-step).`},
+Piped rather than on a terminal, or rendering JSON, the bare form prints every
+question and its answer and never waits for input. Answering does not resume
+the item — that is a separate, deliberate act (resolve or run-step).`},
 
 	"grant": {name: "grant", syntax: "[<step-id>] [--all] [--invocations N] [--prompts N] [--cost USD] [--timeout SECONDS] [--dry-run]", summary: "top up a step's budget",
 		detail: `With no arguments: reads why the item parked and tops up the axis that

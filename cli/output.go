@@ -286,9 +286,20 @@ type stepPayload struct {
 	Required bool   `json:"required"`
 	// Budget is null on signal and await steps: they own no budget record, so
 	// null is the machine-readable "not a grant target".
-	Budget     *budgetPayload `json:"budget"`
-	RunningPID int            `json:"running_pid,omitempty"`
-	RunningExe string         `json:"running_exe,omitempty"`
+	Budget *budgetPayload `json:"budget"`
+	// Next and MayFinalize are the step's DECLARED WAYS FORWARD — the
+	// successors its handler may elect, and the dispositions it may end the
+	// flow with. docs/cli.md § Status asks for the route, and half a route is
+	// where the work has been: these are where it can go.
+	//
+	// They are the flow's own declaration, not a prediction of what will
+	// happen, and they cost no read at all — the registration is in hand. Empty
+	// slices rather than null on a step declaring neither, which is what a wait
+	// is: it goes where the signal takes it and elects nothing.
+	Next        []string `json:"next"`
+	MayFinalize []string `json:"may_finalize"`
+	RunningPID  int      `json:"running_pid,omitempty"`
+	RunningExe  string   `json:"running_exe,omitempty"`
 }
 
 type budgetPayload struct {
@@ -351,7 +362,12 @@ type listItemPayload struct {
 	Arena string `json:"arena,omitempty"`
 	// InProgress is whether a run was OBSERVED advancing this item — a live
 	// registration naming it — never whether one is presumed to be.
-	InProgress bool `json:"in_progress,omitempty"`
+	//
+	// No omitempty, for the reason Priority and Urgency below carry none: the
+	// value is always known, and `false` is the actual answer rather than an
+	// absent one. Omitted, "no run was observed" and "this report does not
+	// carry the fact" would be the same absent key.
+	InProgress bool `json:"in_progress"`
 	// ParkKind is the kind of the item's current park, empty when it is not
 	// parked. The kind, not the rendering of it: the human row's words come
 	// from this value and nothing parses them back.

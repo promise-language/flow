@@ -548,9 +548,7 @@ Age sorts last, and it is what makes this an order at all rather than a preferen
 
 **`ListAutoSelectable` must return this order.** Ordering belongs here for the reason filtering does: priority, urgency and age live in the orchestrator, and `ItemRef` carries none of them, so a caller has nothing to sort on. An SDK ordering afterwards would need everything the orchestrator already knows, and a rule enforced in two places is a rule with two owners and one of them wrong.
 
-**`List` owes an order only at scope `auto`, and none at all at the wider scopes.** The CLI sorts what it receives, with the SDK's own comparison over the axes and the filing time `ItemInfo` carries ([cli.md](cli.md) § Order and length), so the wider scopes stay unconstrained and the rule keeps its one owner.
-
-**`List` must return this order at scope `auto`, and no order at all at the wider scopes.** At that scope the listing *is* the selectable set, so reporting it in an order nothing will take it in answers *what runs next* with something that looks like an answer and is not. This is still one rule with one owner — derived once by the orchestrator, served through both calls. The wider scopes are read by a person who scopes and sorts them for themselves, and fixing an order there would constrain the report without informing anything.
+**`List` must return this order at scope `auto`, and no order at all at the wider scopes.** At that scope the listing *is* the selectable set, so reporting it in an order nothing will take it in answers *what runs next* with something that looks like an answer and is not. This is still one rule with one owner — derived once by the orchestrator, served through both calls. The wider scopes are read by a person who scopes and sorts them for themselves, and fixing an order there would constrain the report without informing anything — the CLI does that sorting, with **this** comparison over the axes and the filing time `ItemInfo` carries ([cli.md](cli.md) § Order and length), which is what keeps the rule's one owner here while leaving the wider scopes unconstrained.
 
 ### Deferral
 
