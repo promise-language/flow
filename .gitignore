@@ -31,23 +31,15 @@ go.work.sum
 # .idea/
 # .vscode/
 
-# forge dev tooling — bin/ holds locally-built tools, never committed
-bin/
-
-# written by `workspace setup` — per-host/per-clone, never committed
-/CLAUDE.local.md
-
-# flow SDK per-clone claim state (pkg/clistate) — never committed
-.flow/
-
-# optional local post-build hook — per-clone, never committed
-/make.local
-
-# written by `workspace setup` — per-host/per-clone, never committed
+# Every path below must be git ignored: `workspace setup` refuses to provision a
+# checkout whose .gitignore is missing one (docs/tool-contract.md §3). This is
+# where a resolution keeps its per-clone state — written variously by setup, by
+# the flow, by the tests and by local builds — and none of it is ever committed.
 /.claude/settings.local.json
-
-# written by `workspace setup` — per-host/per-clone, never committed
+/.flow/
+/.home/
 /.mcp.json
-
-# written by `workspace setup` — per-host/per-clone, never committed
 /.workspace/
+/CLAUDE.local.md
+/make.local
+bin/
