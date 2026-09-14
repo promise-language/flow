@@ -54,20 +54,19 @@ func TestCmdList_DefaultScope(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("cmdList = %d; stderr=%q", code, errBuf.String())
 	}
-	// The listing line is display, availability, urgency, priority, holder,
-	// tags, title — ref and availability lead so a person scanning for
-	// something to work can address it, and the title trails so they can tell
-	// what it is.
-	if !strings.Contains(out.String(), "1\tauto") {
+	// Ref and availability lead so a person scanning for something to work can
+	// address it, and the title trails so they can tell what it is.
+	if !strings.Contains(out.String(), "1    auto") {
 		t.Errorf("output missing the item's display and availability; got:\n%s", out.String())
 	}
 }
 
 // The human row carries the title and the tags the report already holds, so a
 // reader is not sent to the backend's web UI to learn what an item IS. The
-// whole line is asserted, not just presence: the column order is the contract
-// a `cut -f` reader depends on. Tags print in full, in backend order, joined
-// by a bare comma.
+// whole listing is asserted, header and all, not just presence: the column
+// order and the padding are the contract a person following a column down the
+// page depends on. Tags print in full, in backend order, joined by a bare
+// comma.
 func TestCmdList_HumanRowCarriesTitleAndTags(t *testing.T) {
 	be := fake.New()
 	be.AddItem("1", flow.Item{
@@ -80,7 +79,8 @@ func TestCmdList_HumanRowCarriesTitleAndTags(t *testing.T) {
 	if code := app.cmdList(context.Background(), []string{"--human"}); code != 0 {
 		t.Fatalf("cmdList = %d", code)
 	}
-	want := "1\tauto\tdefault\tmedium\t—\tcli,bug\tStartup validation does not validate the graph\n"
+	want := "REF  AVAILABILITY  WORK  URGENCY  PRIORITY  OWNER  TAGS     BLOCKED BY  TITLE\n" +
+		"1    auto          —     —        medium    —      cli,bug  —           Startup validation does not validate the graph\n"
 	if got := out.String(); got != want {
 		t.Errorf("row = %q, want %q", got, want)
 	}
@@ -100,7 +100,8 @@ func TestCmdList_HumanRowBoundsTheTitle(t *testing.T) {
 		if code := app.cmdList(context.Background(), []string{"--human"}); code != 0 {
 			t.Fatalf("cmdList = %d", code)
 		}
-		want := "1\tauto\tdefault\tmedium\t—\t—\tfirst line second line\n"
+		want := "REF  AVAILABILITY  WORK  URGENCY  PRIORITY  OWNER  TAGS  BLOCKED BY  TITLE\n" +
+			"1    auto          —     —        medium    —      —     —           first line second line\n"
 		if got := out.String(); got != want {
 			t.Errorf("row = %q, want %q", got, want)
 		}
@@ -113,7 +114,8 @@ func TestCmdList_HumanRowBoundsTheTitle(t *testing.T) {
 		if code := app.cmdList(context.Background(), []string{"--human"}); code != 0 {
 			t.Fatalf("cmdList = %d", code)
 		}
-		want := "1\tauto\tdefault\tmedium\t—\t—\t" + strings.Repeat("a", statusTitleMax) + "…\n"
+		want := "REF  AVAILABILITY  WORK  URGENCY  PRIORITY  OWNER  TAGS  BLOCKED BY  TITLE\n" +
+			"1    auto          —     —        medium    —      —     —           " + strings.Repeat("a", statusTitleMax) + "…\n"
 		if got := out.String(); got != want {
 			t.Errorf("row = %q, want %q", got, want)
 		}
@@ -123,8 +125,11 @@ func TestCmdList_HumanRowBoundsTheTitle(t *testing.T) {
 // The tags cell is bounded the same way. The tag floor keeps a tag single-line
 // but not tab-free, and the GitHub backend passes label names through
 // verbatim — so a tag carrying a tab must collapse like a title does, or it
-// shifts every cell after it and a `cut -f` reader gets the wrong column. The
-// tag is NOT clipped, whatever its length: tags are reported in full.
+// shifts every cell after it. The tag is NOT clipped, whatever its length:
+// tags are reported in full. What the over-wide cell does lose is its claim on
+// the COLUMN — the header's four characters still set the width here, and the
+// cell simply runs past it. TestCmdList_OneWideTagsCellDoesNotPushEveryRow is
+// where that matters with more than one row in the listing.
 func TestCmdList_HumanRowBoundsTheTags(t *testing.T) {
 	be := fake.New()
 	long := strings.Repeat("x", statusTitleMax+10)
@@ -138,7 +143,8 @@ func TestCmdList_HumanRowBoundsTheTags(t *testing.T) {
 	if code := app.cmdList(context.Background(), []string{"--human"}); code != 0 {
 		t.Fatalf("cmdList = %d", code)
 	}
-	want := "1\tauto\tdefault\tmedium\t—\tneeds review," + long + "\tt\n"
+	want := "REF  AVAILABILITY  WORK  URGENCY  PRIORITY  OWNER  TAGS  BLOCKED BY  TITLE\n" +
+		"1    auto          —     —        medium    —      needs review," + long + "  —           t\n"
 	if got := out.String(); got != want {
 		t.Errorf("row = %q, want %q", got, want)
 	}
@@ -155,7 +161,8 @@ func TestCmdList_HumanRowMarksAbsentTitleAndTags(t *testing.T) {
 	if code := app.cmdList(context.Background(), []string{"--human"}); code != 0 {
 		t.Fatalf("cmdList = %d", code)
 	}
-	want := "1\tauto\tdefault\tmedium\t—\t—\t—\n"
+	want := "REF  AVAILABILITY  WORK  URGENCY  PRIORITY  OWNER  TAGS  BLOCKED BY  TITLE\n" +
+		"1    auto          —     —        medium    —      —     —           —\n"
 	if got := out.String(); got != want {
 		t.Errorf("row = %q, want %q", got, want)
 	}
@@ -174,7 +181,8 @@ func TestCmdList_HumanRowMarksAWhitespaceOnlyTitleAbsent(t *testing.T) {
 	if code := app.cmdList(context.Background(), []string{"--human"}); code != 0 {
 		t.Fatalf("cmdList = %d", code)
 	}
-	want := "1\tauto\tdefault\tmedium\t—\t—\t—\n"
+	want := "REF  AVAILABILITY  WORK  URGENCY  PRIORITY  OWNER  TAGS  BLOCKED BY  TITLE\n" +
+		"1    auto          —     —        medium    —      —     —           —\n"
 	if got := out.String(); got != want {
 		t.Errorf("row = %q, want %q", got, want)
 	}
@@ -204,7 +212,8 @@ func TestCmdList_HumanRowFillsEveryColumnOfAHeldItem(t *testing.T) {
 	if code := app.cmdList(context.Background(), []string{"--human"}); code != 0 {
 		t.Fatalf("cmdList = %d", code)
 	}
-	want := "o/r#1\theld\tnext\thigh\tdjabi\tcli,bug\tStartup validation does not validate the graph\n"
+	want := "REF    AVAILABILITY  WORK                  URGENCY  PRIORITY  OWNER  TAGS     BLOCKED BY  TITLE\n" +
+		"o/r#1  held          leased another arena  next     high      djabi  cli,bug  —           Startup validation does not validate the graph\n"
 	if got := out.String(); got != want {
 		t.Errorf("row = %q, want %q", got, want)
 	}

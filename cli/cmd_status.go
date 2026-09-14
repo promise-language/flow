@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/promise-language/flow"
 	"github.com/promise-language/flow/pkg/clistate"
@@ -29,7 +30,13 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		display   string
 		owner     string
 		overrides []string
+		// elsewhere is whether the item is held by an arena that is not this
+		// one. It is read from the CLAIM — who holds it, and where — because a
+		// process identity on another machine is not knowable from here in
+		// principle, so the only honest evidence is the lease.
+		elsewhere bool
 	)
+	self := arenaKey(flow.ArenaAt(app.Orchestrator.ArenaRoot()))
 	if fs.NArg() == 1 {
 		// Inspect an arbitrary item READ-ONLY, without claiming it. Reading an
 		// item is not a privileged act, so Load is addressed by ref and needs
@@ -50,6 +57,10 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		// operator who, if anyone, currently owns the item.
 		if info, _ := app.Orchestrator.LookupClaim(ctx, ref); info != nil {
 			owner = string(info.Account)
+			// `status <item-id>` inspects without claiming, so the item may be
+			// leased on another host. The arena the claim names is what says
+			// which, and it is the half that used to be dropped here.
+			elsewhere = arenaKey(info.Arena) != self
 		}
 	} else {
 		claim, err := app.Orchestrator.LookupActiveClaim(ctx)
@@ -95,6 +106,10 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		owner = "(unclaimed)"
 	}
 
+	// The checklist, and the step the route is at — derived together, so the
+	// rendering and the payload cannot disagree about which step is pending.
+	steps, pendingStep := app.stepPayloads(typeFlow, state, elsewhere)
+
 	payload := statusPayload{
 		Item:      display,
 		Title:     state.Title,
@@ -110,8 +125,15 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		blockPayload: blockPayloadOf(state.Blocked, state.BlockKind, state.BlockReason, state.BlockedBy),
 		Finalized:    state.Finalized,
 		Park:         parkPayloadOf(state.Park),
-		Steps:        app.stepPayloads(typeFlow, state),
-		Questions:    questionPayloads(state),
+		// The route, not a checklist (docs/cli.md § Status). Load already
+		// returned the journal, the ledger and the awaited marker, so none of
+		// the three costs a read the command was not already making.
+		Journal:   journalPayloads(state.Journal),
+		Awaits:    awaitsPayloadOf(state.Awaits),
+		Spend:     spendPayloadOf(state.Ledger),
+		Steps:     steps,
+		Questions: questionPayloads(state),
+		Waiting:   waitingPayloadOf(display),
 	}
 
 	return app.emit(mode, payload, func() {
@@ -133,10 +155,32 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		fmt.Fprintf(app.Out, "flow:  %s\n", statusFlowLine(state, f, typeFlow))
 		fmt.Fprintln(app.Out)
 
+		// The route so far, above the steps still to come, so the page reads in
+		// the order the work happened. Dropped entirely for an item with no
+		// entries — an unstarted item has an empty route, and a header over
+		// nothing is a line an operator learns to skip.
+		printRoute(app, payload.Journal)
+
 		// Only the type-matching flow's checklist. The "flow:" line names it, so
 		// no redundant header. If no flow handles this item's type, there's
 		// nothing.
-		printChecklist(app, payload.Steps)
+		printChecklist(app, payload.Steps, pendingStep)
+
+		// Whose move it is, and what the run has cost — the two facts the
+		// checklist cannot carry because neither belongs to a step.
+		if a := payload.Awaits; a != nil {
+			fmt.Fprintf(app.Out, "\nwhose move: %s\n", awaitsLine(a))
+		}
+		if s := payload.Spend; s != nil {
+			fmt.Fprintf(app.Out, "spend: %s\n", spendLine(s))
+		}
+		// A run that is alive and deliberately idle. Reported because the
+		// alternative reading of "claim held, nothing running" is a stalled
+		// run, and an operator who reads it that way goes looking for a process
+		// to kill.
+		if w := payload.Waiting; w != nil {
+			fmt.Fprintf(app.Out, "waiting: %s\n", waitingLine(w))
+		}
 
 		// Above the park, because a park is one of the things a block is
 		// derived FROM: reading "blocked: waits-on-person — budget exhausted"
@@ -147,15 +191,35 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		}
 		if payload.Park != nil {
 			fmt.Fprintf(app.Out, "\nparked: %s\n", parkLine(payload.Park))
+			// What would clear it, from the one table `resolve` narrates a park
+			// with. docs/cli.md § Status asks for "the park, with what would
+			// clear it", and the kind is what knows.
+			if act := resumingAct(flow.ParkKind(payload.Park.Kind), selfPath(app.Name)); act != "" {
+				fmt.Fprintf(app.Out, "  to resume: %s\n", act)
+			}
 		}
 		if len(payload.Questions) > 0 {
 			fmt.Fprintln(app.Out, "\nquestions:")
 			for _, q := range payload.Questions {
-				marker := "[ ]"
+				// AN UNANSWERED QUESTION PRINTS IN FULL — header AND text,
+				// unclipped. The one-line form is right for a listing of many
+				// and wrong for the one the item is parked on, which is what
+				// the operator opened `status` to read: clipped to a header,
+				// the options, the evidence and the recommendation reached
+				// --json only, and reading them meant `gh api` against the raw
+				// comment.
+				//
+				// An ANSWERED one stays on its line. It is history, and the
+				// whole history unrolled would bury the question that is still
+				// waiting.
 				if q.Answered {
-					marker = "[x]"
+					fmt.Fprintf(app.Out, "  [x] %s — %s\n", q.ID, questionLine(q))
+					continue
 				}
-				fmt.Fprintf(app.Out, "  %s %s — %s\n", marker, q.ID, questionLine(q))
+				fmt.Fprintf(app.Out, "  [ ] %s\n", q.ID)
+				for _, line := range questionBlock(q) {
+					fmt.Fprintf(app.Out, "      %s\n", line)
+				}
 			}
 		}
 	})
@@ -265,12 +329,13 @@ func blockLine(b blockPayload) string {
 	return sb.String()
 }
 
-// stepPayloads projects a flow's lifecycle items onto the state. Returns an
-// empty (non-nil) slice when no flow handles the item's type, so the JSON
-// carries [] rather than null.
-func (app *App) stepPayloads(f *flow.Flow, state *flow.Item) []stepPayload {
+// stepPayloads projects a flow's lifecycle items onto the state, and names THE
+// PENDING STEP beside them. Returns an empty (non-nil) slice when no flow
+// handles the item's type, so the JSON carries [] rather than null, and an
+// empty id when nothing is pending.
+func (app *App) stepPayloads(f *flow.Flow, state *flow.Item, elsewhere bool) ([]stepPayload, string) {
 	if f == nil {
-		return []stepPayload{}
+		return []stepPayload{}, ""
 	}
 
 	// Load the running-step record and verify liveness before entering the
@@ -287,6 +352,22 @@ func (app *App) stepPayloads(f *flow.Flow, state *flow.Item) []stepPayload {
 		}
 	}
 
+	// THE PENDING STEP, BY IDENTITY: the step the route is at, which is the one
+	// an advance would dispatch next and the one docs/cli.md § Status reports
+	// "and its declared ways forward" of. It is the flow's OWN answer — the
+	// same Position SelectFlow asks — rather than "the first step with nothing
+	// recorded", which is a guess that a step whose artifact happens to exist
+	// puts behind the route.
+	//
+	// Empty when the route has finalized, or names no registered step: both are
+	// "nothing is pending", which is what a finalized item reports everywhere
+	// else. Position is pure — the last journal entry and a map lookup — so
+	// asking it costs nothing.
+	var pendingStep string
+	if pos, perr := f.Position(state); perr == nil && !pos.Finalized {
+		pendingStep = string(pos.Step.Result())
+	}
+
 	items := f.Items()
 	out := make([]stepPayload, 0, len(items))
 	for _, li := range items {
@@ -294,6 +375,12 @@ func (app *App) stepPayloads(f *flow.Flow, state *flow.Item) []stepPayload {
 			ID:       string(li.Result()),
 			Label:    li.Description,
 			Required: li.Required,
+			// The step's declared ways forward, off the registration the flow
+			// already holds. docs/cli.md § Status asks for the pending step
+			// "and its declared ways forward", and they cost no read: a step
+			// names its successors and its dispositions when it is registered.
+			Next:        stepIdStrings(li.Next),
+			MayFinalize: dispositionStrings(li.MayFinalize),
 		}
 		switch li.Kind {
 		case flow.LifecycleArtifact:
@@ -332,10 +419,22 @@ func (app *App) stepPayloads(f *flow.Flow, state *flow.Item) []stepPayload {
 			sp.State = stateRunning
 			sp.RunningPID = runningPID
 			sp.RunningExe = runningExe
+		} else if sp.State == statePending && elsewhere && sp.ID == pendingStep {
+			// Executing under another party's claim. It displaces PENDING on
+			// THE PENDING STEP ONLY — the step the route is at, which is the
+			// one a holder would be working — so the steps behind it stay
+			// pending rather than all claiming to be running somewhere.
+			//
+			// It carries no process: what is known here is the lease, and a
+			// process identity on another machine is not knowable from this
+			// one. The correct response is to leave the item alone, not to go
+			// looking for a stalled process — which is what `pending` on an
+			// item leased elsewhere invites.
+			sp.State = stateElsewhere
 		}
 		out = append(out, sp)
 	}
-	return out
+	return out, pendingStep
 }
 
 // artifactState mirrors Flow.stepPending's view of one artifact record.
@@ -348,12 +447,240 @@ func artifactState(state *flow.Item, id flow.ArtifactId) string {
 	return statePending
 }
 
+// journalPayloads projects the journal onto the payload. The journal is the
+// route so far, and Load already returned it whole — nothing here reads
+// anything.
+//
+// Returns an empty (non-nil) slice for an item with no entries, so the JSON
+// carries [] rather than null: an unstarted item has an empty route, not an
+// unknown one.
+func journalPayloads(entries []flow.JournalEntry) []journalEntryPayload {
+	out := make([]journalEntryPayload, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, journalEntryPayload{
+			Step:            string(e.Step),
+			Execution:       e.Execution,
+			By:              string(e.By),
+			Role:            string(e.Role),
+			Elected:         electionOf(e.Route),
+			Reason:          e.Message,
+			Note:            e.Note,
+			At:              e.At,
+			CostUSD:         e.Spend.CostUSD,
+			DurationSeconds: e.Spend.Duration.Seconds(),
+		})
+	}
+	return out
+}
+
+// stepIdStrings and dispositionStrings render a step's declarations as the
+// actual values, never as prose. Non-nil for an empty declaration, so the
+// payload's key set does not depend on what a flow happens to declare.
+func stepIdStrings(ids []flow.StepId) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, string(id))
+	}
+	return out
+}
+
+func dispositionStrings(ds []flow.Disposition) []string {
+	out := make([]string, 0, len(ds))
+	for _, d := range ds {
+		out = append(out, string(d))
+	}
+	return out
+}
+
+// electionOf renders what an execution elected: its successor, or the
+// finalization with the disposition it ended on. One renderer, so the human
+// route line and the payload cannot describe one election two ways.
+func electionOf(r flow.Route) string {
+	if r.Finalizes() {
+		return "finalize:" + string(r.Finalize)
+	}
+	return string(r.Next)
+}
+
+// awaitsPayloadOf reports whose move it is. Nil when the item awaits nothing —
+// unstarted, or finalized — because "nobody's move" and "a move nobody
+// recorded" are the same fact here and neither is a role.
+func awaitsPayloadOf(a flow.Awaits) *awaitsPayload {
+	if a.Empty() {
+		return nil
+	}
+	return &awaitsPayload{
+		Role:    string(a.Role),
+		Account: string(a.Account),
+		Signal:  string(a.Signal),
+	}
+}
+
+// spendPayloadOf reports the treasurer's item-level record, with WAITING APART
+// from active time. Nil when nothing has been spent and nothing has run: a
+// zeroed spend block on an unstarted item reads as a measurement.
+func spendPayloadOf(l flow.Ledger) *spendPayload {
+	if l.TotalCostUSD == 0 && l.TotalActive == 0 && l.TotalWaiting == 0 {
+		return nil
+	}
+	return &spendPayload{
+		CostUSD:        l.TotalCostUSD,
+		ActiveSeconds:  l.TotalActive.Seconds(),
+		WaitingSeconds: l.TotalWaiting.Seconds(),
+	}
+}
+
+// waitingPayloadOf reports a run that is alive, holds this arena's claim, and
+// has no step executing — pacing, or between steps.
+//
+// OBSERVED, NEVER ASSUMED, exactly as a running step is: the registration must
+// name this item and its holder must be alive right now. A record left behind
+// by a process that died would otherwise report a run that is waiting for
+// something when in fact it stopped hours ago, which is the failure the
+// liveness rule exists to prevent — and here it would be worse than for a
+// running step, because "waiting" invites the operator to keep waiting too.
+func waitingPayloadOf(display string) *waitingPayload {
+	rec, err := clistate.LoadRunning()
+	if err != nil || rec == nil {
+		return nil
+	}
+	// A record naming a step is a DISPATCH, reported as the running step. Only
+	// a record with no step is a wait, so the two can never both be claimed.
+	if rec.Step != "" || rec.Waiting == "" || rec.Item != display {
+		return nil
+	}
+	if !clistate.ProcessAlive(rec.PID, rec.Exe) {
+		return nil
+	}
+	return &waitingPayload{Reason: rec.Waiting, Until: rec.WaitUntil, PID: rec.PID}
+}
+
 func questionPayloads(state *flow.Item) []questionPayload {
 	out := make([]questionPayload, 0, len(state.Questions))
 	for _, q := range state.Questions {
 		out = append(out, questionPayload{
 			ID: string(q.ID), Header: q.Header, Text: q.Text, Answered: q.Answer != "",
 		})
+	}
+	return out
+}
+
+// printRoute renders the journal: one line per completed execution, in order,
+// with who ran it, in which role, what it elected and why.
+//
+// Nothing at all for an empty journal. An unstarted item has an empty route,
+// and a header over no entries is a line that says something happened.
+func printRoute(app *App, entries []journalEntryPayload) {
+	if len(entries) == 0 {
+		return
+	}
+	fmt.Fprintln(app.Out, "route:")
+	for _, e := range entries {
+		var b strings.Builder
+		fmt.Fprintf(&b, "  %s", e.Step)
+		// Only past the first: a step the route reached once needs no counter,
+		// and printing "#1" on every line buries the one that says "#3".
+		if e.Execution > 1 {
+			fmt.Fprintf(&b, " #%d", e.Execution)
+		}
+		if e.By != "" {
+			fmt.Fprintf(&b, " — %s", e.By)
+			if e.Role != "" {
+				fmt.Fprintf(&b, " as %s", e.Role)
+			}
+		} else if e.Role != "" {
+			fmt.Fprintf(&b, " — as %s", e.Role)
+		}
+		fmt.Fprintf(&b, " → %s", e.Elected)
+		if suffix := entrySpend(e); suffix != "" {
+			fmt.Fprintf(&b, " %s", suffix)
+		}
+		fmt.Fprintln(app.Out, b.String())
+		// The reason and the note go under the line rather than on it: both are
+		// free prose from a step, and spliced inline they push the election —
+		// the fact the line is scanned for — off the screen. Bounded through
+		// titleLine, the one renderer free backend text goes through.
+		if line := titleLine(e.Reason); line != "" {
+			fmt.Fprintf(app.Out, "      %s\n", line)
+		}
+		if line := titleLine(e.Note); line != "" {
+			fmt.Fprintf(app.Out, "      note: %s\n", line)
+		}
+	}
+	fmt.Fprintln(app.Out)
+}
+
+// entrySpend renders one execution's cost, in the shape a step outcome already
+// uses. Empty when the entry records neither, which is what an entry written
+// before the ledger tracked them looks like.
+func entrySpend(e journalEntryPayload) string {
+	if e.DurationSeconds == 0 && e.CostUSD == 0 {
+		return ""
+	}
+	return fmt.Sprintf("(%s, $%.2f)",
+		formatDurationCompact(time.Duration(e.DurationSeconds*float64(time.Second))), e.CostUSD)
+}
+
+// awaitsLine renders whose move it is: the awaited role with its account of
+// record, or the signal a pending wait is held on.
+func awaitsLine(a *awaitsPayload) string {
+	if a.Signal != "" {
+		// Nobody's move. An awaited signal waits on an observation, and there
+		// is no party to name — saying so is the point, because "awaiting
+		// maintainer" and "awaiting an observation" call for different acts.
+		return "nobody — awaiting signal " + a.Signal
+	}
+	if a.Account != "" {
+		return fmt.Sprintf("%s (%s)", a.Role, a.Account)
+	}
+	return string(a.Role)
+}
+
+// spendLine renders the treasurer's item-level record, with WAITING APART from
+// active time: a total that folded the two together would read as a step that
+// took hours to do a minute's work.
+func spendLine(s *spendPayload) string {
+	line := fmt.Sprintf("$%.2f, %s active",
+		s.CostUSD, formatDurationCompact(time.Duration(s.ActiveSeconds*float64(time.Second))))
+	if s.WaitingSeconds > 0 {
+		line += fmt.Sprintf(" (%s waiting)",
+			formatDurationCompact(time.Duration(s.WaitingSeconds*float64(time.Second))))
+	}
+	return line
+}
+
+// waitingLine renders a deliberately idle run: what it waits on, and until when
+// where the run knows. A wait that ends on a re-measurement rather than a clock
+// reports no instant, because inventing one would be a prediction.
+func waitingLine(w *waitingPayload) string {
+	line := w.Reason
+	if !w.Until.IsZero() {
+		line += " until " + w.Until.Local().Format("15:04")
+	}
+	if w.PID != 0 {
+		line += fmt.Sprintf(" (pid %d)", w.PID)
+	}
+	return line
+}
+
+// questionBlock is an unanswered question in FULL: its header, then its text,
+// each unclipped and each kept on the lines the asker wrote them on.
+//
+// No titleLine here, and that is the whole point of the function. Free backend
+// prose is bounded everywhere else because it sits in a header or a cell that a
+// paragraph would swamp; this is the paragraph the operator opened `status` to
+// read, and the ask convention puts the options, the evidence and the
+// recommendation in it.
+func questionBlock(q questionPayload) []string {
+	var out []string
+	if h := strings.TrimSpace(q.Header); h != "" {
+		out = append(out, strings.Split(h, "\n")...)
+	}
+	if t := strings.TrimSpace(q.Text); t != "" {
+		if len(out) > 0 {
+			out = append(out, "")
+		}
+		out = append(out, strings.Split(t, "\n")...)
 	}
 	return out
 }
@@ -473,7 +800,11 @@ func titleLine(title string) string {
 // accepts), so it leads the line and the human label trails it. Steps that own
 // no budget say so, which is what makes the listing sufficient on its own to
 // know what can be granted.
-func printChecklist(app *App, steps []stepPayload) {
+// pendingStep is the step the route is at, as stepPayloads derived it. Its
+// declared ways forward are printed, and no other step's: under a resolved step
+// they would name choices already made, and under every step they would be the
+// wall of text a route is meant to replace.
+func printChecklist(app *App, steps []stepPayload, pendingStep string) {
 	width := 0
 	for _, s := range steps {
 		if len(s.ID) > width {
@@ -488,8 +819,41 @@ func printChecklist(app *App, steps []stepPayload) {
 		if s.State == stateRunning && s.RunningPID != 0 {
 			fmt.Fprintf(app.Out, "  (pid %d)", s.RunningPID)
 		}
+		// The state is NAMED for a step executing elsewhere. A marker alone
+		// would leave an operator to guess, and the guess that matters here is
+		// the wrong one — a step that looks stalled invites them to go take the
+		// item over, when the correct response is to leave it alone.
+		if s.State == stateElsewhere {
+			fmt.Fprintf(app.Out, "  (%s)", stateElsewhere)
+		}
 		fmt.Fprintln(app.Out)
+		if s.ID == pendingStep {
+			if line := waysForwardLine(s); line != "" {
+				fmt.Fprintf(app.Out, "      %s\n", line)
+			}
+		}
 	}
+}
+
+// waysForwardLine renders a step's declared routes for a person: the successors
+// its handler may elect, and the dispositions it may end the flow with.
+//
+// Empty when the step declares neither, so a caller can print unconditionally.
+// That is what an await looks like — it goes where the signal takes it and
+// elects nothing — and a "ways forward:" label over nothing would say the step
+// has choices it does not.
+func waysForwardLine(s stepPayload) string {
+	var parts []string
+	if len(s.Next) > 0 {
+		parts = append(parts, strings.Join(s.Next, ", "))
+	}
+	if len(s.MayFinalize) > 0 {
+		parts = append(parts, "finalize: "+strings.Join(s.MayFinalize, ", "))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "ways forward: " + strings.Join(parts, " · ")
 }
 
 func stepMarker(state string) string {
@@ -498,6 +862,11 @@ func stepMarker(state string) string {
 		return "[x]"
 	case stateRunning:
 		return "[>]"
+	case stateElsewhere:
+		// Its own glyph, because it is its own state: not "[>]", which this
+		// arena says only of a process it has OBSERVED, and not "[ ]", which
+		// says nobody is working it.
+		return "[~]"
 	}
 	return "[ ]"
 }

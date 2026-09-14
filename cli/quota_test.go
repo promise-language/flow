@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1130,21 +1131,14 @@ type meteringBackend struct {
 func (m meteringBackend) ServiceSpend() string { return m.line }
 
 // docs/resolution.md § One seam per outside service requires a seam to meter.
-// reportSpend is where the metering becomes visible, and a cost nobody sees is
-// a cost nobody fixes.
-func TestReportSpend_PrintsTheOrchestratorsSeamBesideTheQuota(t *testing.T) {
-	useTempQuotaCache(t)
-	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	t.Setenv("PATH", t.TempDir())
-
+// reportServiceSpend is where the metering becomes visible, and a cost nobody
+// sees is a cost nobody fixes.
+func TestReportServiceSpend_PrintsTheOrchestratorsSeam(t *testing.T) {
 	var buf bytes.Buffer
 	app := &App{Err: &buf, Orchestrator: meteringBackend{fake.New(), "github: 41 request(s), 12 served from cache"}}
-	app.reportSpend()
+	app.reportServiceSpend()
 	if !strings.Contains(buf.String(), "github: 41 request(s)") {
 		t.Errorf("the seam's own meter was not printed: %q", buf.String())
-	}
-	if !strings.Contains(buf.String(), "quota:") {
-		t.Errorf("the agent's quota stopped being printed: %q", buf.String())
 	}
 
 	// An orchestrator that meters nothing prints no line, and one that does not
@@ -1155,9 +1149,55 @@ func TestReportSpend_PrintsTheOrchestratorsSeamBesideTheQuota(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			var b2 bytes.Buffer
-			(&App{Err: &b2, Orchestrator: o}).reportSpend()
+			(&App{Err: &b2, Orchestrator: o}).reportServiceSpend()
 			if strings.Contains(b2.String(), "github:") {
 				t.Errorf("a line was printed for %s: %q", name, b2.String())
+			}
+		})
+	}
+}
+
+// WHAT THE RUN COST AT THE SEAM IS REPORTED WHEN THE RUN ENDS, on every exit.
+// The quota block moved to the start of the run, where it answers whether there
+// is headroom to begin; the seam's count answers what was actually spent, which
+// is zero before anything has happened and is therefore a fact about the end.
+//
+// Every terminal outcome is exercised, because "on every exit" is a property of
+// the run and not of any one of them — that is what the single deferred call
+// site is for, and a test over one exit would pass on a version that had kept
+// only that one.
+func TestCmdResolve_TheSeamsSpendIsReportedAtEveryOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		step func(flow.StepCtx) (flow.StepResult, error)
+		code int
+	}{
+		{"finalize", nil, 0},
+		{"failed step", func(flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, errors.New("boom")
+		}, 1},
+		{"park", func(flow.StepCtx) (flow.StepResult, error) {
+			return flow.StepResult{}, nil
+		}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+			inner := fake.New()
+			inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+			be := meteringBackend{inner, "github: 41 request(s), 12 served from cache"}
+			var app *App
+			var errBuf *bytes.Buffer
+			if tc.step == nil {
+				app, _, errBuf = resolveTestApp(t, be)
+			} else {
+				app, _, errBuf = resolveTestAppStep(t, be, tc.step)
+			}
+
+			if code := app.cmdResolve(context.Background(), nil); code != tc.code {
+				t.Fatalf("exit code = %d, want %d; err=%q", code, tc.code, errBuf.String())
+			}
+			if !strings.Contains(errBuf.String(), "github: 41 request(s)") {
+				t.Errorf("the run ended without saying what it spent at the seam; got:\n%s", errBuf.String())
 			}
 		})
 	}

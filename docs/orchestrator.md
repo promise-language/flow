@@ -105,6 +105,7 @@ Returned by `List` and `Get`.
 |---|---|
 | `Ref` | The item's `ItemRef`. |
 | `Title` | For display in a listing. |
+| `FiledAt` | When the item was filed — the same instant `SelectionKey.Age` orders by. The listing projection carries it because the CLI sorts what `List` returns and `ItemRef` carries no axis at all: without it neither a filing-time order nor the age tiebreak of the selection order can be computed from a listing ([cli.md](cli.md) § Order and length). |
 | `Status` | `ItemStatus` — `open` or `terminal`, with the orchestrator's own disposition alongside. |
 | `Availability` | Where the item sits on the listing ladder, **for the asking `BinaryName`**. |
 | `Holder` | The `(HostId, ArenaId)` of the arena holding it and the `AccountId` credited, or empty when unclaimed. |
@@ -117,6 +118,7 @@ Returned by `List` and `Get`.
 | `Blocked` | Whether the item is blocked. Item-level and the same whoever asks — unlike `Availability`, which can report `closed` or `outside-remit` instead. |
 | `BlockKind` | Who must act and on what — `waits-on-items`, `waits-on-condition` or `waits-on-person`. |
 | `BlockReason` | One line **for a person**, and nothing else. Nothing parses it, branches on it, or infers a state from it — not from its wording and not from whether it is empty. Every machine-readable fact about a block is a field beside it. |
+| `ParkKind` | The `ParkKind` of the item's **current** park, empty when it is not parked. **The kind alone, never the park record**: the record is `Item`'s and costs a read, while the kind is one value from a closed vocabulary and is what a listing's work mark is derived from ([cli.md](cli.md) § Whether an item is being worked). It is **not** the block — a blocked item waits on other items or on a condition, a parked item waits on what its kind names, and both can be true at once. An orchestrator that advertises parks lossily — several kinds under one marker — must read the kind from wherever it is stored exactly, not from the marker. |
 
 ### `Item` — the item, and what the flow recorded on it
 
@@ -150,7 +152,7 @@ There is no separate metadata struct nested inside this one. An item's own field
 
 **Every field `ItemEditor` can change, `Item` reports.** Editing is a read-then-write: an operator adds a tag to the tags an item already has, retracts one blocker of several, or corrects a title they first had to see. A load that showed less than the editor can change would mean editing blind, and the two lists are checkable against each other — title, body, tags, blockers and the manual flag, all present on both.
 
-**What separates them is cost, not meaning.** `ItemInfo` is the listing projection: cheap enough to return hundreds of, so it omits artifacts, signals, questions and park. Where the two overlap they mean the same thing and **must agree** — a field that read one way through `List` and another through `Load` would make the two calls into two answers about one item.
+**What separates them is cost, not meaning.** `ItemInfo` is the listing projection: cheap enough to return hundreds of, so it omits artifacts, signals, questions and the park **record**. The park's *kind* it does carry — one closed-vocabulary value, not the record, and nothing like the record's cost. Where the two overlap they mean the same thing and **must agree** — a field that read one way through `List` and another through `Load` would make the two calls into two answers about one item.
 
 **It carries no store id.** The orchestrator's own key for the item is a projection of `ItemRef`, and a caller that has the item has the ref it was loaded by.
 
@@ -546,7 +548,7 @@ Age sorts last, and it is what makes this an order at all rather than a preferen
 
 **`ListAutoSelectable` must return this order.** Ordering belongs here for the reason filtering does: priority, urgency and age live in the orchestrator, and `ItemRef` carries none of them, so a caller has nothing to sort on. An SDK ordering afterwards would need everything the orchestrator already knows, and a rule enforced in two places is a rule with two owners and one of them wrong.
 
-**`List` must return this order at scope `auto`, and no order at all at the wider scopes.** At that scope the listing *is* the selectable set, so reporting it in an order nothing will take it in answers *what runs next* with something that looks like an answer and is not. This is still one rule with one owner — derived once by the orchestrator, served through both calls. The wider scopes are read by a person who scopes and sorts them for themselves, and fixing an order there would constrain the report without informing anything.
+**`List` must return this order at scope `auto`, and no order at all at the wider scopes.** At that scope the listing *is* the selectable set, so reporting it in an order nothing will take it in answers *what runs next* with something that looks like an answer and is not. This is still one rule with one owner — derived once by the orchestrator, served through both calls. The wider scopes are read by a person who scopes and sorts them for themselves, and fixing an order there would constrain the report without informing anything — the CLI does that sorting, with **this** comparison over the axes and the filing time `ItemInfo` carries ([cli.md](cli.md) § Order and length), which is what keeps the rule's one owner here while leaving the wider scopes unconstrained.
 
 ### Deferral
 

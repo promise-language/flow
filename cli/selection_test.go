@@ -51,10 +51,18 @@ func TestCmdList_JSONCarriesBothAxesOnEveryItem(t *testing.T) {
 	if len(payload.Items) != 2 {
 		t.Fatalf("items = %d, want 2", len(payload.Items))
 	}
-	if got := payload.Items[0]; got.Priority != "medium" || got.Urgency != "default" {
+	// Found by ref, not by position: the listing comes out in the sort order,
+	// which for the default `resolution` puts the marked item first. What is
+	// being asserted here is the key set, not the order —
+	// TestCmdList_SortResolutionIsTheSDKsComparison owns that.
+	byRef := map[string]listItemPayload{}
+	for _, it := range payload.Items {
+		byRef[it.Display] = it
+	}
+	if got := byRef["1"]; got.Priority != "medium" || got.Urgency != "default" {
 		t.Errorf("unset item = %q/%q, want medium/default", got.Priority, got.Urgency)
 	}
-	if got := payload.Items[1]; got.Priority != "critical" || got.Urgency != "next" {
+	if got := byRef["2"]; got.Priority != "critical" || got.Urgency != "next" {
 		t.Errorf("set item = %q/%q, want critical/next", got.Priority, got.Urgency)
 	}
 	// The keys are present as keys, not merely as zero values a decoder filled
@@ -74,8 +82,7 @@ func TestCmdList_JSONCarriesBothAxesOnEveryItem(t *testing.T) {
 	}
 }
 
-// The human line carries them too: display, availability, urgency, priority,
-// owner, tags, title.
+// The human line carries them too, in the columns the header names.
 func TestCmdList_HumanLineShowsBothAxes(t *testing.T) {
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "both set", Priority: flow.PriorityHigh, Urgency: flow.UrgencyNext})
@@ -84,14 +91,66 @@ func TestCmdList_HumanLineShowsBothAxes(t *testing.T) {
 	if code := app.cmdList(context.Background(), []string{"--human"}); code != 0 {
 		t.Fatalf("cmdList = %d", code)
 	}
-	if !strings.Contains(out.String(), "1\tauto\tnext\thigh\t") {
+	if !strings.Contains(out.String(), "next     high") {
 		t.Errorf("output does not carry the two axes; got:\n%s", out.String())
+	}
+}
+
+// `default` is what an item has when NO OPERATOR HAS SAID ANYTHING, and it is
+// almost every item — so the human column renders it as the absent marker and
+// the wall of one repeated word stops hiding the few rows where somebody did
+// act (docs/cli.md § Priority and urgency: the ordinary case "carries no marker
+// of any kind"). `next` and `deferred` are the only urgencies printed.
+//
+// PRIORITY IS NOT TREATED THIS WAY: `medium` prints like every other value,
+// because on that axis every member ranks the work and blanking the commonest
+// one would read as unranked rather than as mid-ranked. The two halves are
+// asserted together, because doing either to both axes is the mistake.
+func TestCmdList_HumanRowBlanksDefaultUrgencyButNeverMediumPriority(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "nothing set"})
+	be.AddItem("2", flow.Item{Type: "task", Title: "deferred", Urgency: flow.UrgencyDeferred})
+	app, out := selectionApp(t, be)
+
+	if code := app.cmdList(context.Background(), []string{"--human"}); code != 0 {
+		t.Fatalf("cmdList = %d", code)
+	}
+	got := out.String()
+	if strings.Contains(got, "default") {
+		t.Errorf("the human listing prints the `default` urgency; got:\n%s", got)
+	}
+	if !strings.Contains(got, "deferred") {
+		t.Errorf("the human listing drops a `deferred` urgency, which an operator DID set; got:\n%s", got)
+	}
+	if strings.Count(got, "medium") != 2 {
+		t.Errorf("`medium` priority should print on every row; got:\n%s", got)
+	}
+	// --json keeps the ACTUAL value: the two renderings are one report, and
+	// what the human column does with `default` is a rendering decision.
+	out.Reset()
+	if code := app.cmdList(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdList = %d", code)
+	}
+	var payload listPayload
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, it := range payload.Items {
+		if it.Display == "1" && it.Urgency != "default" {
+			t.Errorf("--json urgency = %q, want the actual %q", it.Urgency, "default")
+		}
 	}
 }
 
 // At scope `auto` the listing IS the selectable set, and the CLI prints it in
 // the order the orchestrator returned. The fixture's selection order is the
 // reverse of its display order, so a CLI-side re-sort fails here.
+//
+// The default --sort is `resolution`, which sorts by flow.CompareSelection —
+// the same comparison the orchestrator ordered this set with — and does so
+// STABLY, so over an already-ordered set it is a no-op. That is the whole
+// reason the tiebreak here is the sort's stability rather than a rule of the
+// CLI's own: a tiebreak invented here would reorder exactly this listing.
 func TestCmdList_ScopeAutoPrintsTheOrchestratorsOrder(t *testing.T) {
 	be := fake.New()
 	// Filed oldest first, so age cannot be what produces the expected order —
@@ -106,10 +165,10 @@ func TestCmdList_ScopeAutoPrintsTheOrchestratorsOrder(t *testing.T) {
 		t.Fatalf("cmdList = %d", code)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("lines = %v, want two items", lines)
+	if len(lines) != 3 {
+		t.Fatalf("lines = %v, want a header and two items", lines)
 	}
-	if !strings.HasPrefix(lines[0], "b\t") || !strings.HasPrefix(lines[1], "a\t") {
+	if !strings.HasPrefix(lines[1], "b ") || !strings.HasPrefix(lines[2], "a ") {
 		t.Errorf("output is not in the order the orchestrator returned; got:\n%s", out.String())
 	}
 }

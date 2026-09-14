@@ -53,14 +53,16 @@ type ServiceMeter interface {
 	ServiceSpend() string
 }
 
-// reportSpend prints what the run has cost so far: the agent's subscription
-// windows, and the orchestrator's own seam if it meters one.
+// reportServiceSpend prints what the run cost at the orchestrator's own seam,
+// when the orchestrator meters one.
 //
-// Together, at every terminal outcome, because they are two halves of one
-// question. Splitting the call sites is how one of them would stop being
-// printed on a path somebody added later.
-func (app *App) reportSpend() {
-	reportQuota(app.Err)
+// It is reported at the END of a run and the quota block at the start, because
+// the two answer different questions: the quota block says whether there is
+// headroom to begin, and the seam's count says what the run actually spent —
+// a figure that is zero before anything has happened. docs/resolution.md
+// § One seam per outside service requires a seam to meter, and this is where
+// the metering becomes visible.
+func (app *App) reportServiceSpend() {
 	if m, ok := app.Orchestrator.(ServiceMeter); ok {
 		if line := m.ServiceSpend(); line != "" {
 			fmt.Fprintln(app.Err, line)
@@ -68,23 +70,31 @@ func (app *App) reportSpend() {
 	}
 }
 
-// reportQuota prints Claude subscription window utilisation to w.
-// Failure never blocks the run — prints the reason and returns.
+// reportQuota prints Claude subscription window utilisation to w, and returns
+// why it could not when it could not.
 //
-// It reads through the machine-wide cache, which is what makes the seven
-// display call sites free: `resolve` prints the block at startup and again on
-// every terminal outcome, and none of those prints costs a request now.
+// The error is RETURNED as well as printed because its two callers owe
+// different things to it. Beside a run, failure never blocks: the reason is
+// printed and the run carries on unpaced, which is what the returned error
+// being ignored there means. For `quota` the reading IS the command, so a
+// reading that could not be taken is a command that could not complete and the
+// exit code has to say so — and asking twice, once to render and once to judge,
+// would take two readings of one figure.
+//
+// It reads through the machine-wide cache, which is what makes the display call
+// sites free: `resolve` prints the block at startup, and it costs no request
+// now.
 //
 // A reading served past its refresh interval because the endpoint is refusing
 // gets one extra line. Without it the change would newly print stale figures as
 // if they were current and swallow the "rejected — HTTP 429" diagnostic
 // operators read today; the numbers are still the best estimate available,
 // which is why they are printed at all.
-func reportQuota(w io.Writer) {
+func reportQuota(w io.Writer) error {
 	r, err := quotaNow()
 	if err != nil {
 		fmt.Fprintf(w, "quota: %s\n", err)
-		return
+		return err
 	}
 
 	// Whose allowance is being spent, above the figures spending it. A machine
@@ -114,6 +124,10 @@ func reportQuota(w io.Writer) {
 		fmt.Fprintf(w, "quota: figures are %s old — refresh failing: %s\n",
 			formatDurationCompact(now.Sub(r.ReadAt)), r.Failure)
 	}
+	// A stale reading is still a reading. The refusal above is reported, but it
+	// is not the cold case — there were figures to print, so the caller that
+	// judges an exit code on this has its answer.
+	return nil
 }
 
 // windowUsage is the parsed response for one subscription window. It is also

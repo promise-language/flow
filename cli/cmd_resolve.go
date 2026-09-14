@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/promise-language/flow"
+	"github.com/promise-language/flow/pkg/clistate"
 )
 
 // maxResolveSteps backstops cmdResolve's loop. A healthy flow advances through
@@ -252,8 +255,6 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 	// silence reads as a hang and invites the operator to kill a healthy run.
 	// We announce each step BEFORE running it (so the long pause is attributed
 	// to a named step) and report the outcome after.
-	fmt.Fprintf(app.Err, "resolve: driving %s to completion (until finalized or parked)…\n", claim.ItemRef.Display)
-
 	// Before the first dispatch AND before the first pacing wait, so an
 	// operator learns how far this run can take the item rather than inferring
 	// it from where it stops (docs/cli.md § The announcement names the run's
@@ -263,7 +264,18 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 
 	targets := paceTargets{FiveHour: *paceFiveHour / 100, SevenDay: *paceSevenDay / 100}
 
-	app.reportSpend()
+	// THE QUOTA BLOCK PRINTS ONCE, HERE, where it answers whether the run has
+	// headroom. Reprinted after the outcome it buried the park or finalized
+	// line — the one line an operator must act on — under pacing detail they
+	// had already read (docs/cli.md § Resolving). `quota` is how the question
+	// is asked deliberately the rest of the time.
+	reportQuota(app.Err)
+
+	// What the run cost at the orchestrator's own seam is a fact about the
+	// WHOLE run, so it is reported when the run ends — and through one defer
+	// rather than at each of the dozen returns below, which is how one of them
+	// comes to be the path that misses it.
+	defer app.reportServiceSpend()
 
 	enc := json.NewEncoder(app.Out)
 	quotaWarned := false
@@ -343,7 +355,6 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 				// naming why. A person fixes the flow or the record.
 				fmt.Fprintf(app.Err, "resolve: %s is blocked — %s\n", claim.ItemRef.Display,
 					flow.ErrUnknownRole{Role: st.Awaits.Role, Declared: app.Flow.RoleNames()})
-				app.reportSpend()
 				return 1
 			case moveTheirs:
 				return app.handOff(ctx, *claim, st.Awaits, stand)
@@ -380,12 +391,19 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 				if d := paceDelay(usage, targets, now); d > 0 &&
 					bindingExhaustedWindow(usage, now) == nil {
 					fmt.Fprintf(app.Err, "resolve: pacing — waiting %s for quota headroom\n", formatDurationCompact(d))
+					// The narration above is visible only in the terminal that
+					// launched this run. The registration is what a `status` in
+					// any other terminal can read, and without it a deliberate
+					// hold is indistinguishable from a stalled run.
+					app.registerWait(claim.ItemRef, "quota headroom", now.Add(d))
 					select {
 					case <-time.After(d):
 					case <-ctx.Done():
 						fmt.Fprintln(app.Err, "resolve: interrupted while pacing")
+						clistate.ClearRunning()
 						return 1
 					}
+					clistate.ClearRunning()
 				}
 			} else if !quotaWarned {
 				fmt.Fprintf(app.Err, "resolve: ⚠ quota unreadable — %s — pacing disabled\n", qerr)
@@ -397,6 +415,21 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		// pacing and the step's own run is announced when it actually begins.
 		if st != nil {
 			switch {
+			case blockedFromAdvancing(st):
+				// NOTHING IS ABOUT TO RUN, so nothing is announced as running.
+				// The advance stops before dispatch on an item waiting for
+				// unfinished dependencies, and `running "plan"…` above the stop
+				// is a line that says the step ran when it never started.
+				//
+				// The peek already holds the loaded item, and this is RunOne's
+				// own predicate rather than a restatement of it — the same
+				// reuse statusFlowState makes, so the narration and the advance
+				// cannot disagree about whether a dispatch is coming.
+				fmt.Fprintf(app.Err, "resolve: %s waits on unfinished dependencies — not dispatching\n",
+					claim.ItemRef.Display)
+				if line := blockedByLine(openBlockers(st.BlockKind, st.BlockedBy)); line != "" {
+					fmt.Fprintf(app.Err, "  %s\n", line)
+				}
 			case next != "":
 				fmt.Fprintf(app.Err, "resolve: running %q…\n", next)
 			case !acts && !st.Finalized:
@@ -443,6 +476,11 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		if suffix := formatResultSuffix(res); suffix != "" {
 			outcome += " " + suffix
 		}
+		// SET OFF BY AN EMPTY LINE EITHER SIDE. This is the one line an
+		// operator must act on, and flush between progress lines it reads as
+		// one more of them. Written here, at the single site every outcome
+		// passes through, so no outcome can be the one that misses it.
+		fmt.Fprintln(app.Err)
 		fmt.Fprintln(app.Err, outcome)
 		if res.Park != nil && len(res.Park.Axes) > 0 {
 			fmt.Fprintf(app.Err, "  axes: %s\n", flow.FormatAxes(res.Park.Axes))
@@ -453,11 +491,23 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		if line := blockedByLine(openBlockers(res.BlockKind, res.BlockedBy)); line != "" {
 			fmt.Fprintf(app.Err, "  %s\n", line)
 		}
+		// THE PARK NAMES THE ACT THAT RESUMES IT. docs/cli.md already requires
+		// a refusal to carry the failing check's output and the overriding flag
+		// where one exists, and a park is held to the same standard: an
+		// operator who answered a parked question, re-ran, and hit the same
+		// budget park made a round trip this one line prevents. The act comes
+		// from the park KIND, through the one table the listing's work mark
+		// also reads.
+		if res.Park != nil {
+			if act := resumingAct(res.Park.Kind, selfPath(app.Name)); act != "" {
+				fmt.Fprintf(app.Err, "  to resume: %s\n", act)
+			}
+		}
+		fmt.Fprintln(app.Err)
 
 		switch flow.InvocationStatus(res.Status) {
 		case flow.StatusFailed:
 			fmt.Fprintf(app.Err, "resolve: %s stopped on a failed step\n", claim.ItemRef.Display)
-			app.reportSpend()
 			return 1
 		case flow.StatusBlocked:
 			// An environment condition is re-measured, never assumed to persist
@@ -483,14 +533,12 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			}
 			// A gate only a human can clear, or the fitness wait exhausted.
 			fmt.Fprintf(app.Err, "resolve: %s is blocked — %s\n", claim.ItemRef.Display, res.Reason)
-			app.reportSpend()
 			return 1
 		case flow.StatusSkipped:
 			// A preflight refusal — an already-finalized item, an item outside
 			// this binary's coverage. Nothing to re-dispatch: the next cycle
 			// answers identically until somebody acts.
 			fmt.Fprintf(app.Err, "resolve: %s %s — run `status %s` to inspect\n", claim.ItemRef.Display, res.Status, claim.ItemRef.Display)
-			app.reportSpend()
 			return 0
 		case flow.StatusParked:
 			// Whether this park is worth another dispatch is the PARK KIND's own
@@ -523,7 +571,6 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 				fmt.Fprintf(app.Err, "resolve: %s parked — %s — nothing clears before %s, so the run ends here; "+
 					"the claim and this arena are kept, so a run started then resumes from this state\n",
 					claim.ItemRef.Display, res.Reason, res.ClearsAt.UTC().Format(time.RFC3339))
-				app.reportSpend()
 				return 0
 			case mayClear && redispatches < maxRedispatches:
 				// The shape the fitness wait one arm above already has: hold,
@@ -554,7 +601,6 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 				}
 				fmt.Fprintf(app.Err, "resolve: %s parked%s — run `status %s` to inspect\n",
 					claim.ItemRef.Display, bound, claim.ItemRef.Display)
-				app.reportSpend()
 				return 0
 			}
 		case flow.StatusDone:
@@ -572,21 +618,18 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 				if !res.Finalized {
 					fmt.Fprintf(app.Err, "resolve: %s not finalized — no eligible step remains, and the orchestrator does not yet consider the item finished; nothing finalized, claim kept — run `status %s` to inspect\n",
 						claim.ItemRef.Display, claim.ItemRef.Display)
-					app.reportSpend()
 					// ErrUnavailable means ask again later, not that anything
 					// went wrong here: the flow did everything it can.
 					return 0
 				}
 				suffix := finalTotalSuffix(ctx, app, *claim)
 				fmt.Fprintf(app.Err, "resolve: %s finalized ✓%s\n", claim.ItemRef.Display, suffix)
-				app.reportSpend()
 				return 0
 			}
 			// Otherwise a step advanced; loop to run the next one.
 		}
 	}
 	fmt.Fprintf(app.Err, "resolve: stopped after %d step attempts without finalizing (runaway guard); run `status` to inspect\n", maxResolveSteps)
-	app.reportSpend()
 	return 1
 }
 
@@ -609,6 +652,11 @@ type standing struct {
 	rolesKnown bool
 	// creator is the filing account, empty when it could not be read.
 	creator flow.AccountId
+	// title is the item's title, empty when it could not be read or when the
+	// backend has none. It rides here because it comes out of the SAME load the
+	// creator does — the announcement's one read — and a second load to print a
+	// title the first one already fetched would be a request for nothing.
+	title string
 }
 
 // announceStanding derives the run's standing and prints it, before anything is
@@ -628,9 +676,47 @@ func (app *App) announceStanding(ctx context.Context, claim flow.Claim) standing
 	s.roles, s.rolesKnown = app.assumableRoles(ctx)
 	if item, err := app.Orchestrator.Load(ctx, claim.ItemRef); err == nil {
 		s.creator = item.Creator
+		s.title = item.Title
 	}
+	// What is running this and what it is working on lead, because they are
+	// what identifies the transcript; the standing follows, because it is what
+	// says how far the run can get.
+	app.announceRun(claim.ItemRef, s)
+	fmt.Fprintf(app.Err, "resolve: driving %s to completion (until finalized or parked)…\n", claim.ItemRef.Display)
 	app.reportStanding(s)
 	return s
+}
+
+// announceRun prints what an operator reading this scrollback an hour later
+// needs before anything is spent: which binary drove the run, and what the item
+// was about.
+//
+// WHICH BINARY. A binary that cannot say what it is cannot be the subject of a
+// bug report (docs/org/cli-guide.md §7), and `-version` only answers somebody
+// who thinks to ask — the narration is what gets pasted into the report. A
+// modified local build and a release are different facts about a transcript.
+//
+// IT IS A PRINT, NOT A CHECK. The value is one the host already holds: no
+// marker read, no network, nothing that can fail, delay or refuse before the
+// run starts. An empty App.Version prints nothing at all rather than a gap, the
+// way the standing leaves out the filer line rather than printing an empty one.
+//
+// WHICH ITEM. The announcement is the one line before a run that spends real
+// money and time, and a bare `owner/repo#N` is not something an operator can
+// check: one who typed 275 meaning 276 learns it from the first prompt or from
+// the pull request. `list` and `status` both render the title and only
+// `resolve` dropped it. It goes through titleLine like every other free
+// backend prose, and a title that is empty or all whitespace drops the segment.
+//
+// It PRINTS; it does not ask. An interactive acknowledgement here would break
+// every unattended `resolve`.
+func (app *App) announceRun(ref flow.ItemRef, s standing) {
+	if app.Version != "" {
+		fmt.Fprintf(app.Err, "%s version: %s\n", app.Name, app.Version)
+	}
+	if line := titleLine(s.title); line != "" {
+		fmt.Fprintf(app.Err, "%s: %s\n", ref.Display, line)
+	}
 }
 
 // reportStanding prints the standing. One writer for the announcement and for
@@ -725,7 +811,6 @@ func (app *App) handOff(ctx context.Context, claim flow.Claim, awaits flow.Await
 			fmt.Fprintf(app.Err, "resolve: %s awaits %s, but the claim could not be released: %s\n",
 				claim.ItemRef.Display, awaits.Role, err)
 		}
-		app.reportSpend()
 		return 1
 	}
 	// The SAME suffix the finalization prints, so the two totals cannot
@@ -733,7 +818,6 @@ func (app *App) handOff(ctx context.Context, claim flow.Claim, awaits flow.Await
 	fmt.Fprintf(app.Err, "resolve: %s handed off — awaits %s%s\n",
 		claim.ItemRef.Display, awaitedPhrase(awaits), finalTotalSuffix(ctx, app, claim))
 	app.reportStanding(s)
-	app.reportSpend()
 	return 0
 }
 
@@ -839,11 +923,39 @@ func (app *App) awaitFit(ctx context.Context, ref flow.ItemRef, waits *int) (int
 		*waits++
 		fmt.Fprintf(app.Err, "resolve: machine unfit (%d/%d) — %s — waiting…\n",
 			*waits, maxFitnessWaits, fitErr)
+		// Registered for the reason the pacing hold is: this run is alive and
+		// deliberately idle, and `status` in another terminal must be able to
+		// tell that from a run that died. No until-instant — this wait ends on
+		// a re-measurement, not on a clock, and inventing one would be a
+		// prediction rather than a fact.
+		app.registerWait(ref, "the machine to become fit", time.Time{})
 		select {
 		case <-time.After(fitnessWaitInterval):
 		case <-ctx.Done():
 			fmt.Fprintln(app.Err, "resolve: interrupted while waiting for fitness")
+			clistate.ClearRunning()
 			return 1, false
 		}
+		clistate.ClearRunning()
 	}
+}
+
+// registerWait records that this run is holding before a dispatch: alive,
+// holding the claim, with no step executing.
+//
+// It writes the SAME registration RunOne writes for an executing step, with
+// Step empty and the wait filled in — one record, so `status` reads one place
+// and the two states cannot both be claimed at once. Advisory, like that write:
+// a failure means `status` will not show the wait, which is a degradation and
+// not a breakage, so the run is never stopped for it.
+func (app *App) registerWait(ref flow.ItemRef, reason string, until time.Time) {
+	exe, _ := os.Executable()
+	absExe, _ := filepath.Abs(exe)
+	_ = clistate.SaveRunning(clistate.RunningRecord{
+		Item:      ref.Display,
+		PID:       os.Getpid(),
+		Exe:       absExe,
+		Waiting:   reason,
+		WaitUntil: until,
+	})
 }

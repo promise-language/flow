@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 // OutputMode selects how a command renders its result.
@@ -120,11 +121,22 @@ const (
 	kindAwait    = "await"
 )
 
-// Step states, as reported in JSON.
+// Step states, as reported in JSON. The set is CLOSED: a step is in exactly
+// one of these, and a new situation needs a member rather than different prose
+// (docs/cli.md § Status).
 const (
 	stateResolved = "resolved"
 	statePending  = "pending"
 	stateRunning  = "running"
+	// stateElsewhere: the step is executing under ANOTHER PARTY'S CLAIM. It is
+	// its own state and not a wording of `running`, because the two call for
+	// opposite responses — a running step here can be watched or ended, while
+	// an item leased on another host is one to leave alone.
+	//
+	// The evidence is the CLAIM, never a process: a process identity on another
+	// machine is not knowable from here in principle, so `running` — which is
+	// reported only on an observed process — could never be honestly said of it.
+	stateElsewhere = "executing-elsewhere"
 )
 
 // Flow states, as reported in the status payload's flow_state.
@@ -164,10 +176,88 @@ type statusPayload struct {
 	// `status` are required to answer identically for the same item at the same
 	// moment (docs/orchestrator.md § Dependencies).
 	blockPayload
-	Finalized bool              `json:"finalized"`
-	Park      *parkPayload      `json:"park"`
+	Finalized bool         `json:"finalized"`
+	Park      *parkPayload `json:"park"`
+	// Journal is the route so far: every completed execution, in order, with
+	// who ran it, in which role, electing what and why. docs/cli.md § Status
+	// asks for a ROUTE, not a checklist, and this is the half that was missing.
+	Journal []journalEntryPayload `json:"journal"`
+	// Awaits is whose move it is — the awaited role with its account of record,
+	// or the signal a pending wait is held on. Null when the item awaits
+	// nothing: unstarted, or finalized.
+	Awaits *awaitsPayload `json:"awaits"`
+	// Spend is the treasurer's record for the item as a whole. Null when
+	// nothing has been spent on it yet.
+	Spend     *spendPayload     `json:"spend"`
 	Steps     []stepPayload     `json:"steps"`
 	Questions []questionPayload `json:"questions"`
+	// Waiting is a run that holds this arena's claim, is alive, and has no step
+	// executing — pacing, or between steps. Null when nothing is waiting.
+	Waiting *waitingPayload `json:"waiting"`
+}
+
+// journalEntryPayload is one completed step execution, as `status` reports it.
+//
+// flow.JournalEntry carries no JSON tags of its own — its wire form is the
+// orchestrator's, and docs/github-schema.md owns that one — so these names are
+// the CLI's and are pinned by TestStatusPayload_JournalKeySet.
+type journalEntryPayload struct {
+	Step string `json:"step"`
+	// Execution is which completed execution of this step this is, 1-based. A
+	// step the route reaches again appends again.
+	Execution int `json:"execution"`
+	// By and Role are who ran it and the declared role they acted in. Empty
+	// when the orchestrator records no account.
+	By   string `json:"by,omitempty"`
+	Role string `json:"role,omitempty"`
+	// Elected is the route the execution chose: the successor's step id, or
+	// "finalize:<disposition>" on the entry that ended the flow.
+	Elected string `json:"elected"`
+	// Reason is why the successor is being run, from the step that decided —
+	// or, on a finalizing entry, the closing reasons.
+	Reason string `json:"reason,omitempty"`
+	// Note is a standing note addressed to every subsequent step rather than
+	// only the next one. It informs; it never binds.
+	Note string    `json:"note,omitempty"`
+	At   time.Time `json:"at"`
+	// CostUSD and DurationSeconds are what the execution cost. Active time
+	// only — waiting on a declared exclusion is the ledger's, and the item-level
+	// spend below reports it apart.
+	CostUSD         float64 `json:"cost_usd"`
+	DurationSeconds float64 `json:"duration_seconds"`
+}
+
+type awaitsPayload struct {
+	Role string `json:"role,omitempty"`
+	// Account is the awaited role's account of record — the last entry appended
+	// in that role. Empty when the role has not acted yet.
+	Account string `json:"account,omitempty"`
+	// Signal is set instead of Role when the pending step is a signal wait.
+	// An awaited signal is NOBODY's move, which is why it is reported here and
+	// as a block rather than as `awaits`.
+	Signal string `json:"signal,omitempty"`
+}
+
+// spendPayload is the treasurer's item-level record.
+//
+// ACTIVE AND WAITING ARE SEPARATE, and reported separately: time blocked on a
+// declared exclusion is not work, and a total that folded the two together
+// would read as a step that took hours to do a minute's work.
+type spendPayload struct {
+	CostUSD        float64 `json:"cost_usd"`
+	ActiveSeconds  float64 `json:"active_seconds"`
+	WaitingSeconds float64 `json:"waiting_seconds"`
+}
+
+// waitingPayload is a run that is deliberately idle: alive, holding the claim,
+// with no step executing. Without it that state is indistinguishable from a
+// stalled run, which is the signature an operator reads it as.
+type waitingPayload struct {
+	// Reason is what the run is waiting on, in words.
+	Reason string `json:"reason"`
+	// Until is when the hold ends, when the run knows. Zero when it does not.
+	Until time.Time `json:"until,omitempty"`
+	PID   int       `json:"pid,omitempty"`
 }
 
 type parkPayload struct {
@@ -196,9 +286,20 @@ type stepPayload struct {
 	Required bool   `json:"required"`
 	// Budget is null on signal and await steps: they own no budget record, so
 	// null is the machine-readable "not a grant target".
-	Budget     *budgetPayload `json:"budget"`
-	RunningPID int            `json:"running_pid,omitempty"`
-	RunningExe string         `json:"running_exe,omitempty"`
+	Budget *budgetPayload `json:"budget"`
+	// Next and MayFinalize are the step's DECLARED WAYS FORWARD — the
+	// successors its handler may elect, and the dispositions it may end the
+	// flow with. docs/cli.md § Status asks for the route, and half a route is
+	// where the work has been: these are where it can go.
+	//
+	// They are the flow's own declaration, not a prediction of what will
+	// happen, and they cost no read at all — the registration is in hand. Empty
+	// slices rather than null on a step declaring neither, which is what a wait
+	// is: it goes where the signal takes it and elects nothing.
+	Next        []string `json:"next"`
+	MayFinalize []string `json:"may_finalize"`
+	RunningPID  int      `json:"running_pid,omitempty"`
+	RunningExe  string   `json:"running_exe,omitempty"`
 }
 
 type budgetPayload struct {
@@ -236,21 +337,49 @@ type questionPayload struct {
 }
 
 type listPayload struct {
-	Scope string            `json:"scope"`
-	Items []listItemPayload `json:"items"`
+	Scope string `json:"scope"`
+	// Sort is the order the items are in, so a reader of the payload alone
+	// knows what it is looking at. Both renderings come out in this order.
+	Sort string `json:"sort"`
+	// Matched is how many items the scope and tag filters selected, BEFORE
+	// --limit cut. Always present: a consumer comparing it against len(items)
+	// is how a cut listing is told from a complete one, which is the same fact
+	// the human rendering's closing line carries.
+	Matched int               `json:"matched"`
+	Items   []listItemPayload `json:"items"`
 }
 
 type listItemPayload struct {
-	Display      string   `json:"display"`
-	Title        string   `json:"title,omitempty"`
-	Owner        string   `json:"owner"`
+	Display string `json:"display"`
+	Title   string `json:"title,omitempty"`
+	// FiledAt is when the item was filed, as the ACTUAL timestamp — what
+	// `--sort newest` orders by and what the resolution order breaks ties on.
+	FiledAt time.Time `json:"filed_at"`
+	Owner   string    `json:"owner"`
+	// Arena is the holding arena as the orchestrator reports it, empty when the
+	// orchestrator cannot name it (an item held by another arena on a backend
+	// that publishes only a fingerprint) or when nothing holds the item.
+	Arena string `json:"arena,omitempty"`
+	// InProgress is whether a run was OBSERVED advancing this item — a live
+	// registration naming it — never whether one is presumed to be.
+	//
+	// No omitempty, for the reason Priority and Urgency below carry none: the
+	// value is always known, and `false` is the actual answer rather than an
+	// absent one. Omitted, "no run was observed" and "this report does not
+	// carry the fact" would be the same absent key.
+	InProgress bool `json:"in_progress"`
+	// ParkKind is the kind of the item's current park, empty when it is not
+	// parked. The kind, not the rendering of it: the human row's words come
+	// from this value and nothing parses them back.
+	ParkKind     string   `json:"park_kind,omitempty"`
 	Backend      string   `json:"orchestrator"`
 	Availability string   `json:"availability,omitempty"`
 	Tags         []string `json:"tags,omitempty"`
 	// Priority and Urgency are the two selection axes — what decides which of
 	// these items an unattended `resolve` takes, and in what order. No
 	// omitempty: both are always populated, and a stable key set is the machine
-	// contract.
+	// contract. Urgency carries the ACTUAL value, "default" included, whatever
+	// the human rendering does with it.
 	Priority string `json:"priority"`
 	Urgency  string `json:"urgency"`
 	blockPayload

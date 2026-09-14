@@ -896,3 +896,85 @@ func TestCmdDoctor_ReportsAnAppMissingItsParts(t *testing.T) {
 		t.Errorf("docs line should skip when there is no orchestrator to name the checkout; got %q", line)
 	}
 }
+
+// `doctor --help` lists the SAME CLOSED SET the command performs, derived from
+// what the command already holds rather than kept by hand.
+//
+// The hand-kept list is what went stale: it named `orchestrator` and `agent`
+// while the command reported four more, so an operator reading the help to
+// decide whether doctor covers what they are debugging was told it does not
+// check the project's tools or its normative documentation, when it does.
+//
+// Both directions are asserted. A row in the help that the command never emits
+// is the same defect inverted — a promise the report does not keep.
+func TestDoctorHelp_ListsExactlyTheChecksTheCommandPerforms(t *testing.T) {
+	help := commandUsage("bin/issue", "doctor")
+	for _, d := range doctorChecks {
+		if !strings.Contains(help, d.name) {
+			t.Errorf("doctor --help does not name the %q check:\n%s", d.name, help)
+		}
+		if !strings.Contains(help, d.summary) {
+			t.Errorf("doctor --help does not describe the %q check:\n%s", d.name, help)
+		}
+	}
+	if len(doctorChecks) < 6 {
+		t.Errorf("doctorChecks has %d rows; docs/cli.md § Doctor closes the set above that", len(doctorChecks))
+	}
+}
+
+// Every row the command emits is a row the table names. Run against a
+// configuration where each conditional check appears — a startup refusal, so
+// the `startup` row is reported, and a live orchestrator, so `commands` and
+// `gates` are asked — the emitted names are exactly the table's, in the table's
+// order.
+//
+// This is the half a help-side assertion cannot make: the table could name six
+// checks the command does not perform, and the help would still read correctly
+// while promising more than the report delivers.
+func TestCmdDoctor_EmitsExactlyTheTablesChecksInOrder(t *testing.T) {
+	orch := fake.New()
+	arena(t, orch)
+	withDocs(t, orch.ArenaRoot())
+	app := &App{
+		Orchestrator: orch,
+		Agent:        &doctoringAgent{},
+		Artifacts:    []flow.ArtifactDef{flow.Artifact("plan", flow.ArtifactMarkdown)},
+		Flow:         newDummyFlow("x"),
+		Coverage:     []flow.RoleName{"contributor"},
+	}
+	if err := app.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	out := &bytes.Buffer{}
+	app.Out, app.Err = out, &bytes.Buffer{}
+
+	// A startup refusal, so the one conditional row that needs one appears.
+	app.cmdDoctor(context.Background(), nil, errors.New("injected startup refusal"))
+
+	var emitted []string
+	for _, line := range strings.Split(strings.TrimRight(out.String(), "\n"), "\n") {
+		_, rest, found := strings.Cut(line, " ")
+		if !found {
+			continue
+		}
+		name, _, found := strings.Cut(rest, ": ")
+		if !found {
+			continue
+		}
+		// The role standing is reported below the checks and is not one — it is
+		// a report, and it never moves the exit code.
+		if strings.HasPrefix(line, "  role ") {
+			continue
+		}
+		emitted = append(emitted, name)
+	}
+
+	var want []string
+	for _, d := range doctorChecks {
+		want = append(want, d.name)
+	}
+	if strings.Join(emitted, ",") != strings.Join(want, ",") {
+		t.Errorf("doctor emitted %v, but the table names %v — the help is derived from the table, so the two must be one set",
+			emitted, want)
+	}
+}

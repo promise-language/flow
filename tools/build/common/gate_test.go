@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -859,4 +860,110 @@ func captureStream(t *testing.T, stream **os.File) func() string {
 		}
 		return string(b)
 	}
+}
+
+// The coverage profile's temp path is ELIDED on the progress line. It is
+// deliberately outside the worktree — a gate that wrote it into the tree would
+// modify the subject it measures — so it cannot be made relative, and printed
+// whole it is per-run noise that makes two transcripts of one command
+// un-diffable, and on the platforms where TMPDIR sits under the user's home a
+// path the commit guard refuses outright.
+//
+// Both children are checked: the second `-func=` print is the same path a
+// second time, and eliding only the first would leave the transcript refused
+// for the same reason.
+func TestCoverageAnnouncementElidesTheProfilePath(t *testing.T) {
+	repoRoot := t.TempDir()
+	// A module with one trivial package, so `go test ./...` produces a profile.
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repoRoot, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	write("go.mod", "module example.test\n\ngo 1.24\n")
+	write("x.go", "package x\n\nfunc Add(a, b int) int { return a + b }\n")
+	write("x_test.go", "package x\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(1, 2) != 3 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n")
+
+	stderr := captureStderr(t, func() {
+		if _, _, err := measureCovered(repoRoot); err != nil {
+			t.Fatalf("measureCovered: %v", err)
+		}
+	})
+
+	if !strings.Contains(stderr, "-coverprofile="+profilePlaceholder) {
+		t.Errorf("the test child's profile argument was not elided; got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "-func="+profilePlaceholder) {
+		t.Errorf("the cover child's profile argument was not elided; got:\n%s", stderr)
+	}
+	// No temp path of any shape reaches the line.
+	for _, leak := range []string{os.TempDir(), "flow-gate-cover-", "coverage.out"} {
+		if leak == "" {
+			continue
+		}
+		if strings.Contains(stderr, leak) {
+			t.Errorf("the progress line leaks %q:\n%s", leak, stderr)
+		}
+	}
+	// …and the rest of the command is still there, whole: the elision replaces
+	// one argument's VALUE and abbreviates nothing else.
+	if !strings.Contains(stderr, "go test -coverprofile=<profile> ./...") {
+		t.Errorf("the command was cut rather than elided; got:\n%s", stderr)
+	}
+}
+
+// The child is still run against the REAL path — the elision is a display rule
+// and nothing more. A measurement is the proof: no profile, no coverage.
+func TestCoverageStillMeasuresThroughTheRealPath(t *testing.T) {
+	repoRoot := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repoRoot, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	write("go.mod", "module example.test\n\ngo 1.24\n")
+	write("x.go", "package x\n\nfunc Add(a, b int) int { return a + b }\n")
+	write("x_test.go", "package x\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {\n\tif Add(1, 2) != 3 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n")
+
+	var metrics []Metric
+	captureStderr(t, func() {
+		var err error
+		metrics, _, err = measureCovered(repoRoot)
+		if err != nil {
+			t.Fatalf("measureCovered: %v", err)
+		}
+	})
+	if len(metrics) != 1 || metrics[0].Name != "statement_coverage" {
+		t.Fatalf("metrics = %v, want one statement_coverage", metrics)
+	}
+	if metrics[0].Float <= 0 {
+		t.Errorf("coverage = %v, want a real measurement — the child must still get the real path", metrics[0].Float)
+	}
+}
+
+// captureStderr runs fn with os.Stderr redirected to a pipe and returns what
+// was written. announce writes there directly — one printer, one stream — so
+// this is how a test reads a progress line.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		var b strings.Builder
+		_, _ = io.Copy(&b, r)
+		done <- b.String()
+	}()
+	fn()
+	os.Stderr = saved
+	_ = w.Close()
+	out := <-done
+	_ = r.Close()
+	return out
 }

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	gh "github.com/google/go-github/v68/github"
 	"github.com/promise-language/flow"
@@ -737,5 +738,255 @@ func TestBackend_BlockednessDerivesWaitsOnConditionFromEachClearingLabel(t *test
 		if got != tt.want {
 			t.Errorf("blockedness(%v) reason = %q, want %q", tt.labels, got, tt.want)
 		}
+	}
+}
+
+// The listing reports the park's KIND EXACTLY, and it comes out of the state
+// comment rather than the label.
+//
+// It has to come from there: parkLabel maps nine kinds onto five labels, and
+// four of them — refused, write-contract, step-did-not-complete and
+// remote-unreachable — all arrive as `flow:blocked`. The state comment's `park`
+// field is the machine-readable copy (the label and the timeline comment are
+// for humans and for history), so that is what is read, through the same
+// parkRequestFromDoc that Load uses.
+//
+// All four of the colliding kinds are exercised, because a reading taken off
+// the label would pass for any one of them alone.
+func TestBackend_Discover_ParkKindIsExactNotTheLabel(t *testing.T) {
+	for _, kind := range []flow.ParkKind{
+		flow.ParkRefused, flow.ParkWriteContract,
+		flow.ParkStepDidNotComplete, flow.ParkRemoteUnreachable,
+	} {
+		t.Run(string(kind), func(t *testing.T) {
+			mock := newGHMock(t)
+			mux := http.NewServeMux()
+			prefix := "/repos/" + mock.owner + "/" + mock.repo
+
+			body, err := renderStateComment("", stateDoc{
+				Flow:   "implement",
+				Schema: 2,
+				Park:   parkDocFromRequest(flow.ParkRequest{Kind: kind, Step: "plan", Reason: "why"}, time.Now().UTC()),
+			})
+			if err != nil {
+				t.Fatalf("renderStateComment: %v", err)
+			}
+
+			mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
+				writeJSON(w, map[string]any{"name": mock.repo, "full_name": mock.owner + "/" + mock.repo, "permissions": mock.perms})
+			})
+			mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
+				writeJSON(w, map[string]any{"login": "alice"})
+			})
+			// The label every one of these kinds is advertised under: the one
+			// that cannot say which kind it was.
+			mux.HandleFunc(prefix+"/issues", func(w http.ResponseWriter, r *http.Request) {
+				writeJSON(w, []map[string]any{{
+					"number": 42, "title": "Parked issue", "state": "open",
+					"labels":     toLabelObjs([]string{"flow:implement", "flow:blocked"}),
+					"assignees":  toLoginObjs([]string{}),
+					"html_url":   "https://github.com/o/r/issues/42",
+					"updated_at": "2025-01-01T00:00:00Z",
+				}})
+			})
+			mux.HandleFunc(prefix+"/issues/42/comments", func(w http.ResponseWriter, r *http.Request) {
+				writeJSON(w, []map[string]any{{"id": int64(7), "body": body}})
+			})
+
+			srv := startMockServer(t, mock, mux)
+			defer srv.Close()
+			b := newMockedOrchestrator(t, mock, srv)
+
+			items, err := b.List(t.Context(), flow.ScopeProcessable, "implement", func(flow.ItemType) bool { return true }, nil)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if len(items) != 1 {
+				t.Fatalf("got %d items, want 1", len(items))
+			}
+			if items[0].ParkKind != kind {
+				t.Errorf("ParkKind = %q, want %q — the label says only `blocked`, so this must come from the state comment",
+					items[0].ParkKind, kind)
+			}
+		})
+	}
+}
+
+// An item that is NOT parked reports no kind, and — because it carries neither
+// index label — is not read for one at all. The fixture serves no comments
+// endpoint, so a listing that fetched the state comment for every item would
+// fail here rather than merely costing a request per item.
+func TestBackend_Discover_UnparkedItemIsNotReadForAParkKind(t *testing.T) {
+	mock := newGHMock(t)
+	mux := http.NewServeMux()
+	prefix := "/repos/" + mock.owner + "/" + mock.repo
+
+	mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"name": mock.repo, "full_name": mock.owner + "/" + mock.repo, "permissions": mock.perms})
+	})
+	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"login": "alice"})
+	})
+	mux.HandleFunc(prefix+"/issues", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, []map[string]any{{
+			"number": 42, "title": "Ordinary issue", "state": "open",
+			"labels":     toLabelObjs([]string{"flow:implement"}),
+			"assignees":  toLoginObjs([]string{}),
+			"html_url":   "https://github.com/o/r/issues/42",
+			"updated_at": "2025-01-01T00:00:00Z",
+		}})
+	})
+
+	srv := startMockServer(t, mock, mux)
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+
+	items, err := b.List(t.Context(), flow.ScopeProcessable, "implement", func(flow.ItemType) bool { return true }, nil)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if items[0].ParkKind != "" {
+		t.Errorf("ParkKind = %q, want empty on an unparked item", items[0].ParkKind)
+	}
+}
+
+// A state comment that cannot be read NEVER STOPS THE LISTING when it is a read
+// the listing was not already making. This item carries a park label and no
+// awaits label, so the fetch exists only for the park kind — and when it fails
+// the row falls back to what it carried before the column existed: no kind, and
+// every other field intact.
+//
+// An item carrying an AWAITS label is the other case and keeps failing loudly:
+// Awaits is what the `awaits` rung of availability is computed from, so a
+// listing that quietly dropped it would report the wrong rung rather than an
+// error. TestBackend_Discover_BlockReason covers the fallback's happy side.
+func TestBackend_Discover_AnUnreadableStateCommentDoesNotStopTheListing(t *testing.T) {
+	mock := newGHMock(t)
+	mux := http.NewServeMux()
+	prefix := "/repos/" + mock.owner + "/" + mock.repo
+
+	mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"name": mock.repo, "full_name": mock.owner + "/" + mock.repo, "permissions": mock.perms})
+	})
+	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"login": "alice"})
+	})
+	mux.HandleFunc(prefix+"/issues", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, []map[string]any{{
+			"number": 42, "title": "Parked issue", "state": "open",
+			"labels":     toLabelObjs([]string{"flow:implement", "flow:blocked"}),
+			"assignees":  toLoginObjs([]string{}),
+			"html_url":   "https://github.com/o/r/issues/42",
+			"updated_at": "2025-01-01T00:00:00Z",
+		}})
+	})
+	mux.HandleFunc(prefix+"/issues/42/comments", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	srv := startMockServer(t, mock, mux)
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+
+	items, err := b.List(t.Context(), flow.ScopeProcessable, "implement", func(flow.ItemType) bool { return true }, nil)
+	if err != nil {
+		t.Fatalf("List: %v — a read added for a display fact must not stop the command", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if items[0].ParkKind != "" {
+		t.Errorf("ParkKind = %q, want empty when the read failed", items[0].ParkKind)
+	}
+	if items[0].Title != "Parked issue" {
+		t.Errorf("Title = %q — the rest of the row must be unaffected", items[0].Title)
+	}
+}
+
+// …and an item carrying an AWAITS label keeps failing LOUDLY when the same read
+// fails. This is the other half of the asymmetry, and the half a fallback
+// applied to both would silently destroy.
+//
+// For an awaits-labelled item the state comment is the fetch the listing has
+// ALWAYS made: Awaits is what the `awaits` rung of availability is computed
+// from, so a listing that quietly dropped it would report the wrong rung —
+// items would read workable that nobody may take, and the error the operator
+// needed would be gone. Only the fetch added for the park kind is best-effort
+// (TestBackend_Discover_AnUnreadableStateCommentDoesNotStopTheListing).
+func TestBackend_Discover_AnUnreadableStateCommentStillStopsAnAwaitingItem(t *testing.T) {
+	mock := newGHMock(t)
+	mux := http.NewServeMux()
+	prefix := "/repos/" + mock.owner + "/" + mock.repo
+
+	mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"name": mock.repo, "full_name": mock.owner + "/" + mock.repo, "permissions": mock.perms})
+	})
+	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"login": "alice"})
+	})
+	mux.HandleFunc(prefix+"/issues", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, []map[string]any{{
+			"number": 42, "title": "Awaiting issue", "state": "open",
+			"labels":     toLabelObjs([]string{"flow:implement", "flow:awaits:contributor"}),
+			"assignees":  toLoginObjs([]string{}),
+			"html_url":   "https://github.com/o/r/issues/42",
+			"updated_at": "2025-01-01T00:00:00Z",
+		}})
+	})
+	mux.HandleFunc(prefix+"/issues/42/comments", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	srv := startMockServer(t, mock, mux)
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+
+	if _, err := b.List(t.Context(), flow.ScopeProcessable, "implement", func(flow.ItemType) bool { return true }, nil); err == nil {
+		t.Fatal("List succeeded though the awaited marker could not be read — the rung it decides would be reported wrong rather than refused")
+	}
+}
+
+// The filing time reaches ItemInfo, as the actual instant, so the CLI can order
+// a listing by it. It costs nothing: the issue object the listing already
+// fetched carries it, which is where SelectionKey.Age has always come from.
+func TestBackend_Discover_ItemInfoCarriesTheFilingTime(t *testing.T) {
+	mock := newGHMock(t)
+	mux := http.NewServeMux()
+	prefix := "/repos/" + mock.owner + "/" + mock.repo
+	filed := time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)
+
+	mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"name": mock.repo, "full_name": mock.owner + "/" + mock.repo, "permissions": mock.perms})
+	})
+	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"login": "alice"})
+	})
+	mux.HandleFunc(prefix+"/issues", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, []map[string]any{{
+			"number": 42, "title": "Ordinary issue", "state": "open",
+			"labels":     toLabelObjs([]string{"flow:implement"}),
+			"assignees":  toLoginObjs([]string{}),
+			"html_url":   "https://github.com/o/r/issues/42",
+			"created_at": filed.Format(time.RFC3339),
+			"updated_at": "2025-04-01T00:00:00Z",
+		}})
+	})
+
+	srv := startMockServer(t, mock, mux)
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+
+	items, err := b.List(t.Context(), flow.ScopeProcessable, "implement", func(flow.ItemType) bool { return true }, nil)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if !items[0].FiledAt.Equal(filed) {
+		t.Errorf("FiledAt = %v, want %v", items[0].FiledAt, filed)
 	}
 }

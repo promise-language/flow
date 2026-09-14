@@ -240,7 +240,7 @@ func (b *Orchestrator) itemInfoFor(ctx context.Context, iss *github.Issue, binar
 	blocked, kind, reason := b.blockedness(blockers, lblNames)
 	holder, _ := b.holderFromLabels(lblNames)
 
-	awaits, err := b.awaitsOfIssue(ctx, iss.GetNumber(), lblNames)
+	awaits, parkKind, err := b.stateFactsOfIssue(ctx, iss.GetNumber(), lblNames)
 	if err != nil {
 		return flow.ItemInfo{}, err
 	}
@@ -250,6 +250,7 @@ func (b *Orchestrator) itemInfoFor(ctx context.Context, iss *github.Issue, binar
 		Ref:         b.refFromIssue(iss.GetNumber()),
 		Type:        itemType,
 		Title:       iss.GetTitle(),
+		FiledAt:     iss.GetCreatedAt().Time,
 		Creator:     flow.AccountId(iss.GetUser().GetLogin()),
 		Body:        iss.GetBody(),
 		URL:         iss.GetHTMLURL(),
@@ -263,6 +264,7 @@ func (b *Orchestrator) itemInfoFor(ctx context.Context, iss *github.Issue, binar
 		Blocked:     blocked,
 		BlockKind:   kind,
 		BlockReason: reason,
+		ParkKind:    parkKind,
 		Manual:      hasLabel(lblNames, b.labels.Manual()),
 	}
 	info.Availability, err = b.availabilityOf(ctx, iss, lblNames, itemType, blocked, awaits, binary, acceptsType, assumesRole)
@@ -272,39 +274,75 @@ func (b *Orchestrator) itemInfoFor(ctx context.Context, iss *github.Issue, binar
 	return info, nil
 }
 
-// awaitsOfIssue reads the item's awaited marker: the last journal entry's, with
-// the account of record beside it.
+// stateFactsOfIssue reads the two listing facts that live in the state comment:
+// the item's awaited marker, and the KIND of its current park.
 //
-// It reads the STATE COMMENT, which costs a fetch per item — and it skips the
-// fetch for an item carrying no `flow:awaits:<…>` label, which awaits nobody:
-// the label is maintained at every append, so its absence is the cheap answer
-// and no item needs reading to produce it.
+// ONE FETCH FOR BOTH. The state comment costs a request per item, so the two
+// are derived from one read rather than one each — and the read is skipped
+// entirely for an item carrying neither index label, which awaits nobody and is
+// parked on nothing: both labels are maintained at every write, so their absence
+// is the cheap answer and no item needs reading to produce it.
 //
-// The label is an INDEX, not the answer. Only the journal carries
-// Awaits.Account — the account of record for the awaited role — and the label
-// has no room for it, so replacing the fetch outright would drop Account from
-// every listing. The derivation stays awaitsFromDoc, shared with Load, so the
-// two cannot disagree about whose move it is.
-func (b *Orchestrator) awaitsOfIssue(ctx context.Context, issueNum int, lblNames []string) (flow.Awaits, error) {
-	if !hasLabelPrefix(lblNames, b.labels.AwaitsPrefix()) {
-		return flow.Awaits{}, nil
+// The labels are an INDEX, not the answer, and for each the reason differs.
+// Only the journal carries Awaits.Account — the account of record for the
+// awaited role — and the `flow:awaits:<…>` label has no room for it. And the
+// park labels cannot say WHICH KIND it was: parkLabel maps nine kinds onto five
+// labels, so `refused`, `write-contract`, `step-did-not-complete` and
+// `remote-unreachable` all arrive as `flow:blocked`. The state comment's `park:`
+// field is the machine-readable copy (state_comment.go on stateDoc.Park: the
+// label and the timeline comment "are for humans and for history"), so that is
+// what the kind comes out of, exact.
+//
+// Both derivations stay the ones Load uses — awaitsFromDoc and
+// parkRequestFromDoc — so a listing and a load cannot disagree about whose move
+// it is or why the item stopped.
+func (b *Orchestrator) stateFactsOfIssue(ctx context.Context, issueNum int, lblNames []string) (flow.Awaits, flow.ParkKind, error) {
+	awaited := hasLabelPrefix(lblNames, b.labels.AwaitsPrefix())
+	if !awaited && !hasParkLabel(b.labels, lblNames) {
+		return flow.Awaits{}, "", nil
 	}
 	body, stateID, _, err := b.fetchStateComment(ctx, issueNum, b.cachedStateCommentID(issueNum))
 	if err != nil {
-		return flow.Awaits{}, err
+		// A READ THIS LISTING WAS NOT ALREADY MAKING NEVER STOPS IT. For an
+		// item carrying an awaits label the fetch is the one the listing has
+		// always made, and its failure stays fatal — Awaits is what the
+		// `awaits` rung of availability is computed from, so a listing that
+		// quietly dropped it would report the wrong rung rather than an error.
+		//
+		// For an item carrying only a PARK label the fetch is new, added for
+		// the park kind alone, so its failure falls back to what the row
+		// carried before the column existed: no kind, and the rest of the
+		// listing unaffected (docs/cli.md § Listing, the display rule that a
+		// best-effort read never stops a command).
+		if awaited {
+			return flow.Awaits{}, "", err
+		}
+		return flow.Awaits{}, "", nil
 	}
 	if body == "" {
-		return flow.Awaits{}, nil
+		return flow.Awaits{}, "", nil
 	}
 	b.rememberStateCommentID(issueNum, stateID)
 	doc, _, found, perr := extractStateDoc(body)
 	if perr != nil {
-		return flow.Awaits{}, fmt.Errorf("parse state comment on #%d: %w", issueNum, perr)
+		return flow.Awaits{}, "", fmt.Errorf("parse state comment on #%d: %w", issueNum, perr)
 	}
 	if !found {
-		return flow.Awaits{}, nil
+		return flow.Awaits{}, "", nil
 	}
-	return awaitsFromDoc(doc), nil
+	var parkKind flow.ParkKind
+	if req := parkRequestFromDoc(doc.Park); req != nil {
+		parkKind = req.Kind
+	}
+	return awaitsFromDoc(doc), parkKind, nil
+}
+
+// awaitsOfIssue is stateFactsOfIssue asked for the awaited marker alone, for
+// the callers that need no park kind. It is the same read and the same
+// derivation, never a second one.
+func (b *Orchestrator) awaitsOfIssue(ctx context.Context, issueNum int, lblNames []string) (flow.Awaits, error) {
+	awaits, _, err := b.stateFactsOfIssue(ctx, issueNum, lblNames)
+	return awaits, err
 }
 
 // roleAssumable reports whether this account may take the item's next move.

@@ -53,17 +53,31 @@ func commandRunsGates(cmd string) bool { return perCommandUsage[cmd].runsGates }
 // usage(); this adds focused detail for a single command.
 var perCommandUsage = map[string]cmdHelp{
 	"doctor": {name: "doctor", summary: "report whether this environment is fit to be given an item",
+		// The check list is DERIVED from the set the command performs
+		// (doctorChecks), never restated here. A hand-kept second list is what
+		// went stale: it named two of the six for as long as nobody compared
+		// them, and told an operator that doctor does not check the project's
+		// tools or its normative documentation when it does.
 		detail: `Checks, and reports every one of them rather than stopping at the first
 failure:
 
-  orchestrator   reachable and usable
-  agent          can be invoked — established WITHOUT spending a turn
+` + doctorCheckList() + `
 
 A check the SDK cannot make is reported as skipped and does not affect the
 exit code.
 
 doctor spends nothing and mutates nothing: it runs before every item, in CI,
 and on machines that are mid-item. It exits 1 if any check failed.
+Takes no arguments.`},
+	"quota": {name: "quota", summary: "report the agent account's quota state",
+		detail: `Prints the current state of the agent account's subscription windows —
+the same figures resolve shows before it starts.
+
+resolve prints that block once, at the start, where it says whether the run
+has headroom. This is how the question is asked deliberately the rest of the
+time, instead of by starting a run.
+
+It reads and reports; it spends nothing and changes nothing.
 Takes no arguments.`},
 	"list": {name: "list", syntax: "[--scope SCOPE] [--tag TAG]…", summary: "list processable items",
 		detail: `Lists items this flow can see. Default scope is "processable" (open items
@@ -114,20 +128,28 @@ Without --force, prints what would be discarded and refuses.
 			"(--json, FLOW_OUTPUT=json, or a piped/redirected stdout) each step's\n" +
 			"InvocationResult is also streamed to stdout, one compact object per\n" +
 			"line; in human mode stdout stays empty."},
-	"answer": {name: "answer", syntax: "<item-id> <text> [--question ID]",
-		summary: "answer a question a step is parked on",
-		detail: `Posts a human answer on the item and clears the outstanding-question
-marker. Requires no claim — addresses the item by id, like status.
+	"answer": {name: "answer", syntax: "[<item-id>] [<text>] [--question ID] [--answered]",
+		summary: "read and answer a question a step is parked on",
+		detail: `With NO arguments, prints the question the item is parked on, in full —
+and on a terminal then reads your answer and posts it. That is the form to
+reach for: no item id, no question id to copy from anywhere.
 
-  <item-id>       the item carrying the question
-  <text>          the answer text
+  answer                    the active claim's pending question
+  answer "<text>"           answer it
+  answer <item-id>          another item's pending question
+  answer <item-id> "<text>" answer that one
+  answer --answered         every question and its answer, in order
 
-When the item has more than one outstanding question, --question names the
-one being answered. When there is exactly one, it is inferred.
+The item id is optional: it is needed only when this arena holds no claim, or
+to name a different item. An explicit id always wins.
 
-  --question ID   which question to answer (required when multiple are pending)
+  --question ID   which question to answer (required when several are pending)
+  --answered      print the whole history, not only the outstanding question
 
-Answering does not resume the item. Use resolve or run-step to continue.`},
+Piped rather than on a terminal, or rendering JSON, the bare form prints every
+question and its answer and never waits for input. Answering does not resume
+the item — that is a separate, deliberate act (resolve or run-step).`},
+
 	"grant": {name: "grant", syntax: "[<step-id>] [--all] [--invocations N] [--prompts N] [--cost USD] [--timeout SECONDS] [--dry-run]", summary: "top up a step's budget",
 		detail: `With no arguments: reads why the item parked and tops up the axis that
 parked it, plus any other axis already at its cap — a step out of both time
