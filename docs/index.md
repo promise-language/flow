@@ -33,7 +33,7 @@ under-report and read as nearly done.
 - [disclosure.md](disclosure.md) — What the flow sends outward and the guard every outward byte
   passes.
 - [agent.md](agent.md) — The `Agent` interface: the metered chokepoint, permission modes,
-  failure kinds.
+  effort levels, failure kinds, and the lifecycle of a prompt.
 - [orchestrator.md](orchestrator.md) — The SDK–orchestrator boundary: required methods, what
   may be refused.
 - [step-handler.md](step-handler.md) — What a handler receives, must do, may do, and may

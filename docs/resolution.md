@@ -59,6 +59,14 @@ Convention is worth nothing here for the reason it is worth nothing at the agent
 
 Obtaining a credential is the example this SDK has: reading a store the operator already populated is not a request against the service's interface, it happens once, and the mechanism that does it may differ from the seam it serves. That is an argument for putting it *on the list*, not for exempting it by calling it a credential. A category that exempts itself is a bypass with a justification attached, and whatever claims the category next will not be a credential.
 
+> **A seam is one implementation, and everything that reaches its service consumes that implementation as code.**
+
+The single route does not end at this repository's edge. Every flow, every orchestrator and runner, and every other project that reaches the service links that one implementation — this library's, for every seam this library provides. None of them re-implements it, wraps a copy of it, or launches the service's work by a path of its own. **A project that needs something the seam lacks files it against the seam's owner and waits for it** ([org/engineering-guide.md](org/engineering-guide.md) § Do not work around the platform) rather than growing its own version beside it.
+
+The reason is how fixes travel. A defect fixed in the one implementation reaches every consumer the next time it takes the library. A second implementation receives the same fix only as prose — an issue, a document, a description of what went wrong — which it must read, interpret and re-code, late and a little differently each time, and meanwhile it carries the defect unannounced. **The specification describes what the seam must be; it is not a recipe for building another one.** A second implementation written from it is [org/engineering-guide.md](org/engineering-guide.md) § One obvious way failing between projects, where nothing reports the divergence at all.
+
+A consuming project enforces this within its own tree the way this one does: its route check names the seam's one implementation as the only thing permitted to reach the service.
+
 **This is a property, not a machinery.** How a seam meters, where it keeps a cache, what it does about a limit, and whether it is one type or several are its own business; what is stated here is what any of them must be. The seams this SDK has are the agent ([agent.md](agent.md) § The chokepoint) and the orchestrator ([orchestrator.md](orchestrator.md)), and each document defines its own surface.
 
 ## The item and its lifecycle
