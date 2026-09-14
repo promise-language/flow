@@ -122,6 +122,31 @@ func TestCmdQuota_AnUnpublishedWindowIsNullNotZero(t *testing.T) {
 	}
 }
 
+// WHOSE ALLOWANCE the figures belong to reaches --json, as the identifier the
+// human rendering names above the same figures.
+//
+// A machine may drive more than one agent account, so figures reported without
+// one say what is being spent without saying whose it is — and a park written
+// against an account is scoped to it. The two renderings are one report, so the
+// field carries the account rather than the line the human form prints it on.
+func TestCmdQuota_JSONNamesTheAccountTheFiguresBelongTo(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	installFetch(t, func() ([]windowUsage, error) { return usageAt(0.42), nil })
+	useStubAgentAccount(t, agentAccountRecord{Id: "uuid-1", Email: "pat@example.com"}, nil)
+	app, out, _ := quotaApp(t)
+
+	if code := app.cmdQuota(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdQuota = %d", code)
+	}
+	var payload quotaPayload
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal %s: %v", out.String(), err)
+	}
+	if payload.Account != "pat@example.com (uuid-1)" {
+		t.Errorf("account = %q, want the account the figures belong to", payload.Account)
+	}
+}
+
 // A reading that could not be taken is a command that could not complete. The
 // report IS the command here, unlike the narration beside a run that carries on
 // regardless, so the exit code has to say so (docs/cli.md § Exit codes: 1 is

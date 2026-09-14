@@ -1907,3 +1907,98 @@ func TestBackend_WorktreeCutPointStaysPutWhileHeadAdvances(t *testing.T) {
 		t.Errorf("CutPoint moved to %q with the commit; the work would be its own baseline", after)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The two listing facts ItemInfo gained: the filing time, and the park's kind.
+//
+// The fake is the orchestrator every CLI test runs against, so a projection it
+// leaves empty is one the whole suite above stops exercising — and `list --sort
+// newest` and the listing's work mark are both derived from nothing else.
+// ---------------------------------------------------------------------------
+
+// ItemInfo carries the FILING TIME, as the actual instant, through both calls
+// that return one. `list` orders by it, and ItemRef carries no axis at all, so
+// without it neither a filing-time order nor the age tiebreak of the selection
+// order can be computed from a listing.
+func TestItemInfo_CarriesTheFilingTime(t *testing.T) {
+	filed := time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)
+	b := fake.New()
+	b.SetClock(func() time.Time { return filed })
+	ref := addItem(b, "1")
+	acceptsAll := func(flow.ItemType) bool { return true }
+
+	items, err := b.List(t.Context(), flow.ScopeProcessable, "test", acceptsAll, nil)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if !items[0].FiledAt.Equal(filed) {
+		t.Errorf("List FiledAt = %v, want %v", items[0].FiledAt, filed)
+	}
+
+	// Get is the same projection asked about one item, so it must answer the
+	// same — a listing and a lookup that disagreed about when an item was filed
+	// would order one set two ways.
+	info, err := b.Get(t.Context(), ref, "test", acceptsAll, nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !info.FiledAt.Equal(filed) {
+		t.Errorf("Get FiledAt = %v, want %v", info.FiledAt, filed)
+	}
+}
+
+// ItemInfo carries the PARK'S KIND — the kind alone, never the record — and it
+// is the same kind Load projects onto Item.Park. A listing and a load that
+// disagreed about why an item stopped would be two answers about one item
+// (docs/orchestrator.md § `ItemInfo`).
+//
+// Every member of the vocabulary is walked, because a projection that read the
+// kind off something lossier than the record — a marker, a label — would pass
+// for whichever member happened to be tried.
+func TestItemInfo_CarriesTheParkKindAndAgreesWithLoad(t *testing.T) {
+	acceptsAll := func(flow.ItemType) bool { return true }
+	for _, kind := range flow.AllParkKinds() {
+		t.Run(string(kind), func(t *testing.T) {
+			b := fake.New()
+			ref := addItem(b, "1")
+			if err := b.Park(t.Context(), ref, flow.ParkRequest{Kind: kind, Step: "plan", Reason: "why"}); err != nil {
+				t.Fatalf("Park: %v", err)
+			}
+
+			info, err := b.Get(t.Context(), ref, "test", acceptsAll, nil)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if info.ParkKind != kind {
+				t.Errorf("ParkKind = %q, want %q", info.ParkKind, kind)
+			}
+
+			item, err := b.Load(t.Context(), ref)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if item.Park == nil || item.Park.Kind != info.ParkKind {
+				t.Errorf("Load reports park %+v, but the listing projection says %q", item.Park, info.ParkKind)
+			}
+		})
+	}
+}
+
+// An item that is NOT parked reports no kind. Empty is the machine-readable
+// "not parked", and a kind on an item nothing stopped would put a work mark on
+// every row.
+func TestItemInfo_AnUnparkedItemReportsNoParkKind(t *testing.T) {
+	b := fake.New()
+	ref := addItem(b, "1")
+
+	info, err := b.Get(t.Context(), ref, "test", func(flow.ItemType) bool { return true }, nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if info.ParkKind != "" {
+		t.Errorf("ParkKind = %q, want empty on an item that is not parked", info.ParkKind)
+	}
+}

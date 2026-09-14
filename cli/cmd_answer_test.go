@@ -418,6 +418,50 @@ func TestCmdAnswer_AnEmptyReplyRecordsNothing(t *testing.T) {
 	assertStillPending(t, be, itemID, 1)
 }
 
+// A STDIN THAT CANNOT BE READ IS REPORTED, and nothing is recorded. The
+// operator was shown the question and asked for a reply; a read that failed is
+// not a reply, and inventing one from the error would clear the park on a
+// question nobody settled.
+func TestCmdAnswer_AnUnreadableStdinIsReported(t *testing.T) {
+	app, _, errBuf, be, itemID := answerTestSetup(t)
+	asTerminal(t, app, "")
+	app.In = failingReader{}
+	prev := isTerminal
+	isTerminal = func(r io.Reader) bool { return r == app.In }
+	t.Cleanup(func() { isTerminal = prev })
+
+	if code := app.cmdAnswer(context.Background(), nil); code != 1 {
+		t.Fatalf("cmdAnswer = %d, want 1", code)
+	}
+	if !strings.Contains(errBuf.String(), "stdin is gone") {
+		t.Errorf("stderr = %q, want the read failure named", errBuf.String())
+	}
+	assertStillPending(t, be, itemID, 1)
+}
+
+// AN ANSWER WITH NO TRAILING NEWLINE IS STILL THE ANSWER. The read ends in EOF
+// with the line already in hand, and a reader that returned the error instead
+// of the bytes would drop what the operator typed and report that they said
+// nothing.
+func TestCmdAnswer_AReplyWithoutATrailingNewlineIsKept(t *testing.T) {
+	app, _, errBuf, be, itemID := answerTestSetup(t)
+	asTerminal(t, app, "yes, re-plan") // no "\n"
+
+	if code := app.cmdAnswer(context.Background(), nil); code != 0 {
+		t.Fatalf("cmdAnswer = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	assertStillPending(t, be, itemID, 0)
+	if got := answerOn(t, be, itemID); got != "yes, re-plan" {
+		t.Errorf("recorded answer = %q, want the operator's reply", got)
+	}
+}
+
+// failingReader is a stdin that has gone away mid-prompt — a closed pipe, a
+// terminal that vanished — which is neither an answer nor an empty one.
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("stdin is gone (injected)") }
+
 // ONE POSITIONAL WITH A CLAIM IS THE ANSWER TEXT. The arena holds the item, so
 // there is nothing for an id to disambiguate — and requiring one is exactly the
 // friction the bare form removes.

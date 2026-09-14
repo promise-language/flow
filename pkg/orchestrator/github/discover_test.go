@@ -906,6 +906,49 @@ func TestBackend_Discover_AnUnreadableStateCommentDoesNotStopTheListing(t *testi
 	}
 }
 
+// …and an item carrying an AWAITS label keeps failing LOUDLY when the same read
+// fails. This is the other half of the asymmetry, and the half a fallback
+// applied to both would silently destroy.
+//
+// For an awaits-labelled item the state comment is the fetch the listing has
+// ALWAYS made: Awaits is what the `awaits` rung of availability is computed
+// from, so a listing that quietly dropped it would report the wrong rung —
+// items would read workable that nobody may take, and the error the operator
+// needed would be gone. Only the fetch added for the park kind is best-effort
+// (TestBackend_Discover_AnUnreadableStateCommentDoesNotStopTheListing).
+func TestBackend_Discover_AnUnreadableStateCommentStillStopsAnAwaitingItem(t *testing.T) {
+	mock := newGHMock(t)
+	mux := http.NewServeMux()
+	prefix := "/repos/" + mock.owner + "/" + mock.repo
+
+	mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"name": mock.repo, "full_name": mock.owner + "/" + mock.repo, "permissions": mock.perms})
+	})
+	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"login": "alice"})
+	})
+	mux.HandleFunc(prefix+"/issues", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, []map[string]any{{
+			"number": 42, "title": "Awaiting issue", "state": "open",
+			"labels":     toLabelObjs([]string{"flow:implement", "flow:awaits:contributor"}),
+			"assignees":  toLoginObjs([]string{}),
+			"html_url":   "https://github.com/o/r/issues/42",
+			"updated_at": "2025-01-01T00:00:00Z",
+		}})
+	})
+	mux.HandleFunc(prefix+"/issues/42/comments", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	srv := startMockServer(t, mock, mux)
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+
+	if _, err := b.List(t.Context(), flow.ScopeProcessable, "implement", func(flow.ItemType) bool { return true }, nil); err == nil {
+		t.Fatal("List succeeded though the awaited marker could not be read — the rung it decides would be reported wrong rather than refused")
+	}
+}
+
 // The filing time reaches ItemInfo, as the actual instant, so the CLI can order
 // a listing by it. It costs nothing: the issue object the listing already
 // fetched carries it, which is where SelectionKey.Age has always come from.

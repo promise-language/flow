@@ -719,6 +719,57 @@ func TestBackend_AnArenaLabelWithoutAnOwnerLabelIsNotAHolder(t *testing.T) {
 	})
 }
 
+// THE ARENA THE ORCHESTRATOR STAMPS IS THE ONE ITS PUBLIC SURFACE NAMES.
+//
+// This is a cross-package invariant with no other guard. `list` and `status`
+// hold no orchestrator internals: they derive "which arena am I?" from
+// flow.ArenaAt(Orchestrator.ArenaRoot()) and compare it against the arena the
+// orchestrator reports on a Holder or a ClaimInfo. Everything the display says
+// about WHERE an item is being worked rests on the two agreeing — an item this
+// arena holds reads `here` in the listing and stays out of the
+// executing-elsewhere state in `status` for no other reason.
+//
+// Let them drift and nothing fails loudly: the listing simply stops ever saying
+// `here`, and `status <item-id>` calls every locally-held item one being worked
+// on another machine, which is the exact reading that tells an operator to
+// leave their own item alone.
+func TestBackend_TheStampedArenaIsTheOneArenaRootNames(t *testing.T) {
+	_, one, _ := twoArenas(t)
+	one.claimed(t)
+
+	one.run(func() {
+		// What a caller outside this package can compute.
+		self := flow.ArenaAt(one.b.ArenaRoot())
+		if self.Empty() {
+			t.Fatalf("ArenaAt(ArenaRoot()) named no arena: %+v", self)
+		}
+
+		info, err := one.b.LookupClaim(t.Context(), one.b.refFromIssue(42))
+		if err != nil || info == nil {
+			t.Fatalf("LookupClaim = (%+v, %v), want the standing claim", info, err)
+		}
+		if info.Arena != self {
+			t.Errorf("LookupClaim reports arena %+v, but ArenaAt(ArenaRoot()) names %+v — "+
+				"`status` compares exactly these two and would call this arena's own item one held elsewhere",
+				info.Arena, self)
+		}
+
+		// The listing's half of the same comparison: Holder.Arena is what the
+		// work mark's `here` is decided by.
+		items, err := one.b.List(t.Context(), flow.ScopeAll, "implement", func(flow.ItemType) bool { return true }, nil)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(items) != 1 {
+			t.Fatalf("got %d items, want 1", len(items))
+		}
+		if items[0].Holder.Arena != self {
+			t.Errorf("the listing reports holder arena %+v, but ArenaAt(ArenaRoot()) names %+v — "+
+				"the work mark would never read `here`", items[0].Holder.Arena, self)
+		}
+	})
+}
+
 // LookupClaim answers off the ITEM, never off this arena's lease file. A file
 // saying "I hold #42" is what an arena displaced by a take-over goes on saying,
 // and reporting ITSELF as the holder of an item another arena is running is the

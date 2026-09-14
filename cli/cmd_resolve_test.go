@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/promise-language/flow"
+	"github.com/promise-language/flow/pkg/clistate"
 	"github.com/promise-language/flow/pkg/orchestrator/fake"
 )
 
@@ -2825,4 +2828,163 @@ type loadAlwaysFailsBackend struct{ *fake.Orchestrator }
 
 func (b *loadAlwaysFailsBackend) Load(ctx context.Context, ref flow.ItemRef) (*flow.Item, error) {
 	return nil, errors.New("backend unavailable (injected)")
+}
+
+// ---------------------------------------------------------------------------
+// The wait registration: what a deliberately idle run leaves for `status`.
+//
+// docs/cli.md § Status reports a run that is alive and holding — pacing against
+// quota, or re-measuring an unfit machine — from its registration. The reading
+// half of that lives in status_route_test.go and is driven by a record written
+// by hand; these are the WRITING half, and without them the whole feature could
+// be deleted from cmd_resolve.go with every test still passing.
+// ---------------------------------------------------------------------------
+
+// observeWaitRegistration runs a resolve that is about to hold, and hands back
+// the registration it wrote WHILE it was holding.
+//
+// The record exists only between registerWait and the ClearRunning that ends
+// the hold, so there is nothing left to read afterwards — which is itself the
+// contract: a run that forgot to clear would leave `status` reporting a wait
+// nobody is in. The hold is therefore scripted to be far longer than the test,
+// watched for until it appears, and then cut short by cancelling the run.
+//
+// Nothing here races on a duration. The hold outlasts any scheduling delay by
+// orders of magnitude, so the watcher cannot miss it; a wait that never appears
+// ends on the deadline, which is the regression this exists to catch.
+func observeWaitRegistration(t *testing.T, run func(context.Context) int) (clistate.RunningRecord, int) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan int, 1)
+	go func() { done <- run(ctx) }()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		select {
+		case code := <-done:
+			t.Fatalf("the run finished (exit %d) without ever registering a wait", code)
+		default:
+		}
+		if rec, err := clistate.LoadRunning(); err == nil && rec != nil && rec.Waiting != "" {
+			cancel()
+			return *rec, <-done
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatal("no wait was registered: a run holding before a dispatch is indistinguishable from a stalled one")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// assertWaitCleared checks that the hold left nothing behind. A record that
+// outlives its wait reports a run waiting for something when in fact it
+// stopped, which is worse than reporting nothing: "waiting" invites the
+// operator to keep waiting too.
+func assertWaitCleared(t *testing.T) {
+	t.Helper()
+	rec, err := clistate.LoadRunning()
+	if err != nil {
+		t.Fatalf("LoadRunning: %v", err)
+	}
+	if rec != nil {
+		t.Errorf("the registration outlived the wait: %+v", rec)
+	}
+}
+
+// A PACING HOLD REGISTERS ITS WAIT, with the reason and the instant it ends.
+//
+// The narration ("resolve: pacing — waiting 1h 35m for quota headroom") is
+// visible only in the terminal that launched the run. The registration is what
+// a `status` in any other terminal reads, and it is the only thing that tells a
+// deliberate hold from a run that died mid-step.
+func TestCmdResolve_APacingHoldRegistersItsWaitAndClearsIt(t *testing.T) {
+	t.Setenv("FLOW_DIR", t.TempDir())
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	app, _, errBuf := resolveTestApp(t, be)
+	// Over target and far from resetting, so the hold is minutes rather than
+	// milliseconds. Just under 1.0: an EXHAUSTED window parks instead of
+	// pacing, and this is about pacing.
+	app.Quota = func() ([]windowUsage, error) {
+		return []windowUsage{{
+			Label: "5h", Length: time.Hour, Used: 0.99, ResetsAt: time.Now().Add(time.Hour),
+		}}, nil
+	}
+
+	rec, code := observeWaitRegistration(t, func(ctx context.Context) int {
+		return app.cmdResolve(ctx, []string{"1"})
+	})
+
+	if rec.Item != "1" {
+		t.Errorf("the registration names %q, want the item being held", rec.Item)
+	}
+	if rec.Waiting != "quota headroom" {
+		t.Errorf("waiting = %q, want what the run is actually holding for", rec.Waiting)
+	}
+	// A hold that ends on a CLOCK says when. Without it `status` can report
+	// that the run is waiting but not whether it is worth waiting with it.
+	if rec.WaitUntil.IsZero() {
+		t.Error("wait_until is unset on a hold that knows its own end")
+	}
+	// A record naming a step is a DISPATCH, which `status` reports as a running
+	// step. Only a record with no step is a wait, so the two can never both be
+	// claimed of one run.
+	if rec.Step != "" {
+		t.Errorf("step = %q, want empty — a wait is not a dispatch", rec.Step)
+	}
+	// Liveness is what makes the record evidence rather than a leftover, and
+	// ProcessAlive checks it against exactly these two fields. Both must name
+	// THIS process: a record carrying neither is one `status` will never
+	// report, whatever else it says.
+	if rec.PID != os.Getpid() {
+		t.Errorf("pid = %d, want this process's %d", rec.PID, os.Getpid())
+	}
+	if exe, err := os.Executable(); err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	} else if abs, _ := filepath.Abs(exe); rec.Exe != abs {
+		t.Errorf("exe = %q, want this executable's absolute path %q", rec.Exe, abs)
+	}
+
+	if code != 1 || !strings.Contains(errBuf.String(), "interrupted while pacing") {
+		t.Fatalf("exit %d, narration %q — want the interrupted-while-pacing path", code, errBuf.String())
+	}
+	assertWaitCleared(t)
+}
+
+// A FITNESS WAIT REGISTERS ONE TOO, AND NAMES NO INSTANT. This hold ends on a
+// re-measurement rather than on a clock, and an invented instant would be a
+// prediction — `status` reports the reason alone for it.
+func TestCmdResolve_AFitnessWaitRegistersAWaitWithNoInstant(t *testing.T) {
+	t.Setenv("FLOW_DIR", t.TempDir())
+	old := fitnessWaitInterval
+	fitnessWaitInterval = time.Hour
+	defer func() { fitnessWaitInterval = old }()
+
+	inner := fake.New()
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	be := &fitGateBackend{Orchestrator: inner, rounds: []fitRound{{unfit: "12 MB free, floor 2 GB"}}}
+	app, _, errBuf := resolveTestApp(t, be)
+
+	rec, code := observeWaitRegistration(t, func(ctx context.Context) int {
+		return app.cmdResolve(ctx, []string{"1"})
+	})
+
+	if rec.Waiting != "the machine to become fit" {
+		t.Errorf("waiting = %q, want the re-measurement the run is holding for", rec.Waiting)
+	}
+	if !rec.WaitUntil.IsZero() {
+		t.Errorf("wait_until = %v, want none — this wait ends on a measurement, and an instant here would be invented", rec.WaitUntil)
+	}
+	if rec.Step != "" {
+		t.Errorf("step = %q, want empty — a wait is not a dispatch", rec.Step)
+	}
+
+	if code != 1 || !strings.Contains(errBuf.String(), "interrupted while waiting for fitness") {
+		t.Fatalf("exit %d, narration %q — want the interrupted-while-waiting path", code, errBuf.String())
+	}
+	assertWaitCleared(t)
 }
