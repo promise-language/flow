@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
+
+	"github.com/promise-language/forge/primitives"
 )
 
 // HookInput is the subset of the Claude Code Pre/PostToolUse payload the guard
@@ -53,7 +55,7 @@ func Guard(repoRoot, compiledHash string, in HookInput) GuardDecision {
 			return GuardDecision{Reason: reason}
 		}
 	}
-	stale := StaleReason(repoRoot, compiledHash)
+	stale := primitives.StaleReason(repoRoot, compiledHash)
 	if stale == "" {
 		return GuardDecision{Allowed: true} // tools current — nothing more to enforce
 	}
@@ -63,7 +65,7 @@ func Guard(repoRoot, compiledHash string, in HookInput) GuardDecision {
 		if isRecoveryCommand(cmd) || isToolCommand(repoRoot, cmd) {
 			return GuardDecision{Allowed: true}
 		}
-		return GuardDecision{Reason: lockMsg(stale, "only "+MakeCmd()+" and the existing bin/ tools may run")}
+		return GuardDecision{Reason: lockMsg(stale, "only "+primitives.MakeCmd()+" and the existing bin/ tools may run")}
 	case "Edit", "Write", "NotebookEdit":
 		if isRecoveryPath(repoRoot, editPath(in.ToolInput)) {
 			return GuardDecision{Allowed: true}
@@ -79,7 +81,7 @@ func Guard(repoRoot, compiledHash string, in HookInput) GuardDecision {
 }
 
 func lockMsg(reason, detail string) string {
-	return "tools are out of sync (" + reason + ") — " + detail + ". Run " + MakeCmd() + " to recover."
+	return "tools are out of sync (" + reason + ") — " + detail + ". Run " + primitives.MakeCmd() + " to recover."
 }
 
 func bashCommand(raw json.RawMessage) string {

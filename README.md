@@ -714,9 +714,19 @@ The pattern, and why it fits flow:
 2. **Hash-based staleness = "updatable" binaries.** `./make` hashes each
    tool's source (FNV-128a) and recompiles **only** when it changed, so the
    binary in `bin/` is always the latest build of the source with near-zero
-   overhead on repeat runs. After scaffolding, the project owns every line —
-   forge is not a runtime dependency unless you import its `primitives/`
-   helper lib.
+   overhead on repeat runs. The helpers every project's tooling needs — that
+   hash, the staleness check, the platform and exec helpers, flag
+   normalisation, the git-hook wiring — belong once in
+   `github.com/promise-language/forge/primitives`, required at an exact
+   version in your own `tools/build/go.mod` and verified by `go.sum`, so an
+   upstream change reaches you when you raise that line and never before
+   ([primitives.md][forge-primitives] §1, §3). `cmd/init` still writes a copy
+   of each into `tools/build/common`, so adopting the library is a deletion
+   and an import: the copies go, the `require` arrives, and the package
+   qualifier changes — no call site is rewritten (§5). What is specific to
+   your project — your verify pipeline, your gates, your thresholds — stays
+   yours, in your `tools/build/common`. flow's own `tools/build` is built this
+   way.
 3. **`bin/verify` is the gate your flow already calls.** Point the orchestrator's
    `VerifyCmd` at it (`[]string{"bin/verify"}`) so the flow's `Validate` step
    and your pre-commit hook run the *same* check. forge's verify ratchets
@@ -731,6 +741,7 @@ See the forge [blueprint][forge-blueprint] for the full file layout
 `.githooks/pre-commit`), the staleness check, and the ratchet system.
 
 [forge-blueprint]: https://github.com/promise-language/forge/blob/main/docs/blueprint.md
+[forge-primitives]: https://github.com/promise-language/forge/blob/main/docs/primitives.md
 
 ---
 

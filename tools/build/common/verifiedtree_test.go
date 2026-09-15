@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/forge/primitives"
 )
 
 // The contract, tested from the recording end: the id verify records must
@@ -206,7 +208,7 @@ func TestClearVerifiedTree(t *testing.T) {
 	if err := clearVerifiedTree(dir); err != nil {
 		t.Fatalf("clearing an existing record: %v", err)
 	}
-	if Exists(record) {
+	if primitives.Exists(record) {
 		t.Error("record should be gone after clear")
 	}
 	if err := clearVerifiedTree(dir); err != nil {
@@ -219,7 +221,7 @@ func TestRecordOutsideGitCheckout(t *testing.T) {
 	if err := recordVerifiedTree(dir); err != nil {
 		t.Fatalf("outside a checkout recording should be a no-op, not an error: %v", err)
 	}
-	if Exists(filepath.Join(dir, ".workspace", "verified-tree")) {
+	if primitives.Exists(filepath.Join(dir, ".workspace", "verified-tree")) {
 		t.Error("no record should be written outside a git checkout")
 	}
 }
@@ -286,7 +288,7 @@ func TestRunVerifyRedRunLeavesNothingBlessed(t *testing.T) {
 	if err := RunVerify(dir, nil); err == nil {
 		t.Fatal("verify over an unparseable Go file should fail")
 	}
-	if Exists(filepath.Join(dir, ".workspace", "verified-tree")) {
+	if primitives.Exists(filepath.Join(dir, ".workspace", "verified-tree")) {
 		t.Error("a red run must leave nothing blessed — the stale record survived")
 	}
 }
@@ -312,7 +314,7 @@ func TestRunVerifyFailsWhenTheStaleRecordCannotBeCleared(t *testing.T) {
 		t.Errorf("err = %v, want it to name %s", err, verifiedTreeRecord)
 	}
 	// And it stopped there rather than running the pipeline over it.
-	if !Exists(filepath.Join(dir, filepath.FromSlash(verifiedTreeRecord), "occupied")) {
+	if !primitives.Exists(filepath.Join(dir, filepath.FromSlash(verifiedTreeRecord), "occupied")) {
 		t.Error("the run went on and disturbed what it could not clear")
 	}
 }

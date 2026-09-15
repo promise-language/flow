@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/promise-language/flow/tools/build/common"
+	"github.com/promise-language/forge/primitives"
 )
 
 // Injected by the meta-builder via -ldflags at build time; empty otherwise.
@@ -48,12 +49,12 @@ func usage() string {
 }
 
 func main() {
-	args := common.NormalizeArgs(os.Args[1:])
-	if common.HasHelpFlag(args) {
+	args := primitives.NormalizeArgs(os.Args[1:])
+	if primitives.HasHelpFlag(args) {
 		fmt.Print(usage())
 		os.Exit(0)
 	}
-	common.CheckStale(repoRoot, sourceHash)
+	primitives.CheckStale(repoRoot, sourceHash)
 
 	name, verdict, err := common.ParseRunArgs(args)
 	if err != nil {
