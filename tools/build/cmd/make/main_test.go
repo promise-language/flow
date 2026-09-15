@@ -236,44 +236,74 @@ func TestUpToDate_BinaryReplacedAfterBuild(t *testing.T) {
 
 // Raising the pinned forge version, and nothing else, must make every tool
 // report itself stale until the next ./make (#401, forge docs/primitives.md
-// §4). This is what buys the project out of adding anything for staleness when
-// the shared helpers stop being local files: the pin lives in
-// tools/build/go.mod and its digest in tools/build/go.sum, and both are inside
-// the tree this hash covers — so a version bump IS a source change, even
-// though no .go file moved.
+// §4). That is what buys this project out of adding any mechanism for
+// staleness when the shared helpers stop being local files.
 //
-// It is the composition that is flow's to check, not the hash itself. forge
-// unit-tests which filenames SourceHash reads; what this repository is
-// asserting is that its own pin sits inside the hashed directory, that it
-// names no extra directories to hash, and that it carries no `replace` putting
-// the helpers somewhere the walk never reaches. Get any of those wrong and a
-// raised version is invisible to every binary already in bin/, which then
-// measures this tree with the previous forge's logic and says nothing.
-func TestRaisingThePinnedVersionMakesToolsStale(t *testing.T) {
-	const (
-		oldVersion = "v0.0.0-20260908224624-eb8c6520e193"
-		newVersion = "v0.0.0-20260910142522-d5f6db37e698"
-	)
-	goMod := func(version string) string {
-		return "module example/tools/build\n\ngo 1.26\n\nrequire github.com/promise-language/forge " + version + "\n"
+// The half that is forge's is already tested there: SourceHash reads go.mod
+// and go.sum (primitives/hash_test.go, TestSourceHashReadsOnlySourceAndManifests,
+// which fails with "raising a pinned version would not report a binary stale").
+// Restating it here would be a second copy of an upstream test, which is the
+// shape this item exists to remove.
+//
+// What is this repository's to check is the composition — that the pin it
+// actually ships lands inside the tree the hash walks.
+//
+// THE `replace` CHECK IS THE ONE NOTHING ELSE MAKES. ./make stamps
+// primitives.ToolsSourceHash(repoRoot), which names no directory and therefore
+// covers tools/build and nothing else. A `replace` pointing at a forge working
+// tree puts every helper outside that walk, and an edit there leaves every
+// binary in bin/ claiming to be current — the one failure the hash exists to
+// prevent. §4 says a project in that case names the replaced directories; this
+// one is not in that case, and the no-directory call is correct only while that
+// holds. The toolchain has no opinion here: a resolving `replace` builds, vets
+// and tests clean, and staleness goes quietly wrong underneath.
+//
+// The require and the go.sum digest are named rather than relied on: `go test`
+// already refuses a tools module that requires no forge or carries no digest for
+// it, so those two lines cannot be the first to fail. They state the invariant,
+// and they are what makes the last leg's failure legible — it rewrites the pin
+// inside the real go.mod and go.sum bytes, and a pin that appeared in neither
+// would fail there with nothing pointing at why.
+func TestThePinnedForgeVersionIsInsideTheHashedTree(t *testing.T) {
+	toolsDir := filepath.Join(repoRoot(t), "tools", "build")
+	goMod, err := os.ReadFile(filepath.Join(toolsDir, "go.mod"))
+	if err != nil {
+		t.Fatalf("reading this repository's tools/build/go.mod: %v", err)
+	}
+	goSum, err := os.ReadFile(filepath.Join(toolsDir, "go.sum"))
+	if err != nil {
+		t.Fatalf("reading this repository's tools/build/go.sum: %v — an unverified pin is not a pin", err)
 	}
 
+	pin := pinnedForgeVersion(t, string(goMod))
+	if want := forgeModule + " " + pin + " h1:"; !strings.Contains(string(goSum), want) {
+		t.Errorf("go.sum carries no %q line — go.mod's pin is not verified by anything", want)
+	}
+	for _, line := range strings.Split(string(goMod), "\n") {
+		if fields := strings.Fields(line); len(fields) > 0 && fields[0] == "replace" {
+			t.Fatalf("tools/build/go.mod replaces a module (%q), but ./make hashes tools/build and nothing else — "+
+				"an edit inside the replaced tree would leave every binary claiming to be current "+
+				"(forge docs/primitives.md §4)", strings.TrimSpace(line))
+		}
+	}
+
+	// The consequence, over the bytes this repository ships: raising the pin is
+	// a source change even though no .go file moved.
 	repo := t.TempDir()
-	toolsDir := filepath.Join(repo, "tools", "build")
-	if err := os.MkdirAll(toolsDir, 0o755); err != nil {
+	dir := filepath.Join(repo, "tools", "build")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	write := func(name, body string) {
+	write := func(name string, body []byte) {
 		t.Helper()
-		if err := os.WriteFile(filepath.Join(toolsDir, name), []byte(body), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	write("main.go", "package main\n")
-	write("go.mod", goMod(oldVersion))
-	write("go.sum", "github.com/promise-language/forge "+oldVersion+" h1:YDA/ddr1E4g+WEEcuDyYpfcOV2QR43UPxdWpeLLLWwg=\n")
+	write("go.mod", goMod)
+	write("go.sum", goSum)
 
-	// The hash ./make would stamp into every binary it builds from this tree.
+	// The hash ./make bakes into every binary it builds from this tree.
 	stamped, err := primitives.ToolsSourceHash(repo)
 	if err != nil {
 		t.Fatalf("hashing the tools source: %v", err)
@@ -282,20 +312,46 @@ func TestRaisingThePinnedVersionMakesToolsStale(t *testing.T) {
 		t.Fatalf("a tree nobody touched reported stale: %q", reason)
 	}
 
-	// Raising the version in go.mod. No .go file changed.
-	write("go.mod", goMod(newVersion))
+	const raised = "v0.0.0-29990101000000-ffffffffffff"
+	write("go.mod", []byte(strings.Replace(string(goMod), pin, raised, 1)))
 	if reason := primitives.StaleReason(repo, stamped); !strings.Contains(reason, "tools source has changed") {
-		t.Errorf("raising the pin in go.mod reported %q — every binary would keep running the old forge's logic", reason)
+		t.Errorf("raising the pin in go.mod reported %q — every tool in bin/ would go on running the forge it was built against", reason)
 	}
 
-	// And go.sum alone, which is where a version's digest lives: a go.mod
+	// And go.sum alone, which is where the version's digest lives: go.mod
 	// restored to its old text over a go.sum that moved is a tree whose
 	// dependency cannot be what the binaries were built against.
-	write("go.mod", goMod(oldVersion))
-	write("go.sum", "github.com/promise-language/forge "+newVersion+" h1:a9ljkM3VgzdrDrc33xLtCoj0cYtGvr1uqyBF8OQ34Xg=\n")
+	write("go.mod", goMod)
+	write("go.sum", []byte(strings.ReplaceAll(string(goSum), pin, raised)))
 	if reason := primitives.StaleReason(repo, stamped); !strings.Contains(reason, "tools source has changed") {
 		t.Errorf("rewriting go.sum reported %q — a changed dependency digest left every binary claiming to be current", reason)
 	}
+}
+
+const forgeModule = "github.com/promise-language/forge"
+
+// pinnedForgeVersion is the version tools/build/go.mod requires forge at, in
+// either spelling — a bare `require` line or a line inside a `require (` block.
+// It fails the test when there is none: a tools module that requires nothing is
+// the state this item replaced, and a version that is not exact is a build
+// whose helpers can change without anyone raising a line.
+func pinnedForgeVersion(t *testing.T, goMod string) string {
+	t.Helper()
+	for _, line := range strings.Split(goMod, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "//") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 3 && fields[0] == "require" && fields[1] == forgeModule && strings.HasPrefix(fields[2], "v") {
+			return fields[2]
+		}
+		if len(fields) == 2 && fields[0] == forgeModule && strings.HasPrefix(fields[1], "v") {
+			return fields[1]
+		}
+	}
+	t.Fatalf("tools/build/go.mod requires no exact version of %s — the helpers it is built from are unpinned:\n%s", forgeModule, goMod)
+	return ""
 }
 
 // Retiring a tool must not leave the binary ./make built for it in bin/: #199
