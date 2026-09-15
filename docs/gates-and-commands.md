@@ -141,7 +141,9 @@ Two consequences worth stating before anyone hits them:
 
 ### The runner bounds what it reads
 
-**The bound is on stdout**, which is the stream the runner holds in order to parse it. Stderr is passed through and never accumulated, so it needs no bound — it is already going somewhere with a person on the end of it.
+**The bound is on stdout**, which is the stream the runner holds in order to parse it. Stderr is passed through and never accumulated, so there is nothing held to put a bound on.
+
+**That is a rule about what is held in memory, and it settles nothing about evidence.** Passthrough is not preservation: it buys a reader who is watching the liveness described above, and only that. On an unattended run nobody is watching and nothing keeps the stream, so a gate's diagnostics written to stderr are gone with the process that wrote them. What a later reader has is what the envelope carried — which is why [a refusal states its evidence](#how-the-judge-is-asked) rather than pointing at a stream that no longer exists.
 
 A gate that gets stdout wrong is the ordinary case, not an exotic one — a test runner left to print its log there emits as much as the suite feels like. So the runner reads **up to a bound**, and what it does at the bound is part of the contract rather than an implementation detail:
 
@@ -238,10 +240,31 @@ So the project supplies a **judging entry point** beside its gates, and the SDK 
 | **Judge** | **`bin/run <name> --verdict`** | **the envelope on stdin** | **one verdict object** | **not consulted** |
 
 ```json
-{"acceptable": false, "thresholds": {"unformatted_files": 0}, "detail": "unformatted_files is 3, cap 0"}
+{"acceptable": false, "thresholds": {"unformatted_files": 0},
+ "detail": "unformatted_files is 3, cap 0: cli/format.go, cli/output.go, gate.go. Run bin/verify, which formats them."}
 ```
 
-**`acceptable` and `thresholds` are both required.** A missing `acceptable` decoding to `false` is the SDK inventing a refusal out of a judge that gave none, and a verdict whose thresholds were discarded is exactly as unfalsifiable as a lying runner — it is the recomputability of a verdict that lets a judge live in the tree at all. `detail` is prose for a person: which metric, its value, the term it was judged against. What is inside `thresholds` is between a project and its judge, and the SDK carries it without reading it.
+**`acceptable` and `thresholds` are both required, and `detail` is required whenever `acceptable` is false.** A missing `acceptable` decoding to `false` is the SDK inventing a refusal out of a judge that gave none, and a verdict whose thresholds were discarded is exactly as unfalsifiable as a lying runner — it is the recomputability of a verdict that lets a judge live in the tree at all. What is inside `thresholds` is between a project and its judge, and the SDK carries it without reading it.
+
+**A refusal carries what a reader needs in order to act on it.** `detail` is prose for a person, and on a refusal it states three things:
+
+| | Says | Held by |
+|---|---|---|
+| The judgement | Which metric, its value, the term it was judged against | The judge — the only party holding the thresholds |
+| The evidence | Which tests, which findings, which files, and what they said | The gate, and it reaches the judge only through the envelope |
+| The remediation | What to do about it | The project |
+
+A verdict that says a measurement is unacceptable and stops there has told a reader that something is wrong and given them no way to begin. **That reader is usually not a person at a terminal** watching the gate's stderr scroll past: it is an agent holding the verdict, or a person reading the record of a run that ended hours ago. Neither has anything but this.
+
+**Remediation is the project's to state, not the judge's to guess.** It is required for the same reason the rest is — a reader who cannot act has not been told enough — and a project that cannot say what to do about its own refused metric has a threshold nobody knows how to satisfy, which is a defect in the threshold and not a reason to leave the field out.
+
+**A passing verdict carries none of this burden.** There is nothing to act on, and `detail` on a pass is a courtesy.
+
+`detail` is prose and nothing keys on it, which is what keeps this a floor rather than a schema: what is required is that a reader can act, not that a parser can.
+
+**The judge relays evidence; it does not author it.** The judge did not run the gate and cannot have seen what the gate saw, so a judge supplying a plausible-looking cause would be inventing a fact about a measurement it did not take. That is the same defect as reading an unanswerable judge as a refusal — a statement about the subject, manufactured by a layer that has none, and worse here because it is convincing.
+
+**So a judge handed no evidence says it was handed none.** It names the gap rather than filling it, and the refusal stays honest: the reader learns that the metric failed, on what term, and that the gate reported nothing about why — which is actionable, because it says whose defect it is. Whether an envelope may carry a failing measurement with no evidence at all is not this document's question: the envelope is [base's](https://github.com/promise-language/base/blob/main/docs/gate-contract.md), and so is every outcome a runner may report about one.
 
 **One object on stdout and nothing else**, for the same reason a gate prints one envelope and nothing else.
 
@@ -285,9 +308,11 @@ The split is not a preference. An integration baseline has to be a function of t
 
 **The exec line and the outcome vocabulary are universal.** Every project's gates are exec'd the same way and every run reports one of the same five outcomes, because the SDK reads them in every project and cannot hold one dialect per repository.
 
-**The envelope's shape is between a project and whoever judges it.** Two projects may carry different detail without either being wrong, so long as each is consistent with the thing reading it. The SDK does not read a project's measurements; it runs the gate and reports what became of the run.
+**Which measurements an envelope carries is between a project and whoever judges it.** Two projects measure different things and name them differently without either being wrong, so long as each is consistent with the thing reading it. The SDK does not read a project's measurements; it runs the gate and reports what became of the run.
 
-**The judge's exec line and the verdict's two required fields are universal**, for the same reason the gate's are: the SDK asks every project the same way and reads the same answer. **What is inside `thresholds` is not** — it is between a project and its judge, exactly as the envelope's shape is, and the SDK carries it so the verdict can be re-checked without ever reading it.
+**That latitude is over the contents, never the structure.** What fields an envelope has, what a measurement declares about itself, and which vocabularies are closed are fixed for everyone in [base's gate contract](https://github.com/promise-language/base/blob/main/docs/gate-contract.md); what a project chooses is what goes in them. Read the wider way, this section would say an envelope has no shape that anything may require of it — which leaves every property that must hold across projects with nowhere to be stated, and makes each project's gate a contract with nobody but its own judge.
+
+**The judge's exec line and the verdict's required fields are universal**, for the same reason the gate's are: the SDK asks every project the same way and reads the same answer. **What is inside `thresholds` is not** — it is between a project and its judge, exactly as a project's measurements are, and the SDK carries it so the verdict can be re-checked without ever reading it.
 
 ## Where these live
 
