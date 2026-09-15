@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/promise-language/forge/primitives"
 )
 
 func bashInput(cmd string) HookInput {
@@ -147,7 +149,7 @@ func TestGuardLockdownReasonSourceChanged(t *testing.T) {
 // allowed and only dangerous commands are blocked.
 func TestGuardCurrentAllows(t *testing.T) {
 	root := testRepoRoot(t)
-	hash, err := ToolsSourceHash(root)
+	hash, err := primitives.ToolsSourceHash(root)
 	if err != nil {
 		t.Skipf("cannot hash tools source from %s: %v", root, err)
 	}

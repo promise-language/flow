@@ -9,13 +9,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/promise-language/flow/tools/build/common"
+	"github.com/promise-language/forge/primitives"
 )
 
 // writeBin creates a binary file with the given content and returns its SHA-256.
 func writeBin(t *testing.T, dir, name, content string) string {
 	t.Helper()
-	path := filepath.Join(dir, common.BinaryName(name))
+	path := filepath.Join(dir, primitives.BinaryName(name))
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -234,6 +234,70 @@ func TestUpToDate_BinaryReplacedAfterBuild(t *testing.T) {
 	}
 }
 
+// Raising the pinned forge version, and nothing else, must make every tool
+// report itself stale until the next ./make (#401, forge docs/primitives.md
+// §4). This is what buys the project out of adding anything for staleness when
+// the shared helpers stop being local files: the pin lives in
+// tools/build/go.mod and its digest in tools/build/go.sum, and both are inside
+// the tree this hash covers — so a version bump IS a source change, even
+// though no .go file moved.
+//
+// It is the composition that is flow's to check, not the hash itself. forge
+// unit-tests which filenames SourceHash reads; what this repository is
+// asserting is that its own pin sits inside the hashed directory, that it
+// names no extra directories to hash, and that it carries no `replace` putting
+// the helpers somewhere the walk never reaches. Get any of those wrong and a
+// raised version is invisible to every binary already in bin/, which then
+// measures this tree with the previous forge's logic and says nothing.
+func TestRaisingThePinnedVersionMakesToolsStale(t *testing.T) {
+	const (
+		oldVersion = "v0.0.0-20260908224624-eb8c6520e193"
+		newVersion = "v0.0.0-20260910142522-d5f6db37e698"
+	)
+	goMod := func(version string) string {
+		return "module example/tools/build\n\ngo 1.26\n\nrequire github.com/promise-language/forge " + version + "\n"
+	}
+
+	repo := t.TempDir()
+	toolsDir := filepath.Join(repo, "tools", "build")
+	if err := os.MkdirAll(toolsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(toolsDir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("main.go", "package main\n")
+	write("go.mod", goMod(oldVersion))
+	write("go.sum", "github.com/promise-language/forge "+oldVersion+" h1:YDA/ddr1E4g+WEEcuDyYpfcOV2QR43UPxdWpeLLLWwg=\n")
+
+	// The hash ./make would stamp into every binary it builds from this tree.
+	stamped, err := primitives.ToolsSourceHash(repo)
+	if err != nil {
+		t.Fatalf("hashing the tools source: %v", err)
+	}
+	if reason := primitives.StaleReason(repo, stamped); reason != "" {
+		t.Fatalf("a tree nobody touched reported stale: %q", reason)
+	}
+
+	// Raising the version in go.mod. No .go file changed.
+	write("go.mod", goMod(newVersion))
+	if reason := primitives.StaleReason(repo, stamped); !strings.Contains(reason, "tools source has changed") {
+		t.Errorf("raising the pin in go.mod reported %q — every binary would keep running the old forge's logic", reason)
+	}
+
+	// And go.sum alone, which is where a version's digest lives: a go.mod
+	// restored to its old text over a go.sum that moved is a tree whose
+	// dependency cannot be what the binaries were built against.
+	write("go.mod", goMod(oldVersion))
+	write("go.sum", "github.com/promise-language/forge "+newVersion+" h1:a9ljkM3VgzdrDrc33xLtCoj0cYtGvr1uqyBF8OQ34Xg=\n")
+	if reason := primitives.StaleReason(repo, stamped); !strings.Contains(reason, "tools source has changed") {
+		t.Errorf("rewriting go.sum reported %q — a changed dependency digest left every binary claiming to be current", reason)
+	}
+}
+
 // Retiring a tool must not leave the binary ./make built for it in bin/: #199
 // deleted cmd/guard, and every clone that had built it kept a bin/guard — the
 // very "binary under a guard name" guardNames defends against. The sidecar the
@@ -256,10 +320,10 @@ func TestPruneRetired_RemovesWhatMakeBuiltAndNoLongerBuilds(t *testing.T) {
 	if err := pruneRetired(hashFile, binDir, []string{"verify"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(binDir, common.BinaryName("precommit"))); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(binDir, primitives.BinaryName("precommit"))); !os.IsNotExist(err) {
 		t.Errorf("bin/precommit is still there after its tool was retired (stat: %v)", err)
 	}
-	if _, err := os.Stat(filepath.Join(binDir, common.BinaryName("verify"))); err != nil {
+	if _, err := os.Stat(filepath.Join(binDir, primitives.BinaryName("verify"))); err != nil {
 		t.Errorf("bin/verify, still a tool, was removed: %v", err)
 	}
 }
@@ -285,7 +349,7 @@ func TestPruneRetired_LeavesABinaryItNeverRecorded(t *testing.T) {
 	if err := pruneRetired(hashFile, binDir, []string{"verify"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(binDir, common.BinaryName("tool-guard"))); err != nil {
+	if _, err := os.Stat(filepath.Join(binDir, primitives.BinaryName("tool-guard"))); err != nil {
 		t.Errorf("bin/tool-guard, which make never recorded, was removed: %v", err)
 	}
 }
@@ -315,7 +379,7 @@ func TestPruneRetired_LeavesAReplacedBinary(t *testing.T) {
 	if err := pruneRetired(hashFile, binDir, []string{"verify"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(binDir, common.BinaryName("precommit"))); err != nil {
+	if _, err := os.Stat(filepath.Join(binDir, primitives.BinaryName("precommit"))); err != nil {
 		t.Errorf("bin/precommit, replaced since make built it, was removed: %v", err)
 	}
 	if got := stderr(); !strings.Contains(got, "precommit") || !strings.Contains(got, "not the file ./make built") {
@@ -338,7 +402,7 @@ func TestPruneRetired_MissingSidecarOrMissingBinaryIsNotAnError(t *testing.T) {
 		if err := pruneRetired(filepath.Join(binDir, ".tools.hash"), binDir, []string{"verify"}); err != nil {
 			t.Fatalf("pruneRetired with no sidecar: %v", err)
 		}
-		if _, err := os.Stat(filepath.Join(binDir, common.BinaryName("precommit"))); err != nil {
+		if _, err := os.Stat(filepath.Join(binDir, primitives.BinaryName("precommit"))); err != nil {
 			t.Errorf("with no sidecar nothing is recorded, yet bin/precommit was removed: %v", err)
 		}
 	})
@@ -353,7 +417,7 @@ func TestPruneRetired_MissingSidecarOrMissingBinaryIsNotAnError(t *testing.T) {
 		if err := pruneRetired(hashFile, binDir, []string{"verify"}); err != nil {
 			t.Fatalf("pruneRetired with a malformed sidecar: %v", err)
 		}
-		if _, err := os.Stat(filepath.Join(binDir, common.BinaryName("precommit"))); err != nil {
+		if _, err := os.Stat(filepath.Join(binDir, primitives.BinaryName("precommit"))); err != nil {
 			t.Errorf("a sidecar that does not parse records nothing, yet bin/precommit was removed: %v", err)
 		}
 	})
@@ -390,7 +454,7 @@ func TestPruneRetired_LeavesABinaryItCannotRead(t *testing.T) {
 	writeSidecar(t, hashFile, "abc123", map[string]string{
 		"precommit": retiredHash,
 	})
-	path := filepath.Join(binDir, common.BinaryName("precommit"))
+	path := filepath.Join(binDir, primitives.BinaryName("precommit"))
 	if err := os.Chmod(path, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -440,7 +504,7 @@ func TestPruneRetired_CannotRemoveIsAnError(t *testing.T) {
 	if !strings.Contains(err.Error(), "precommit") {
 		t.Errorf("err = %v, want it to name the binary it could not remove", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(binDir, common.BinaryName("precommit"))); statErr != nil {
+	if _, statErr := os.Stat(filepath.Join(binDir, primitives.BinaryName("precommit"))); statErr != nil {
 		t.Errorf("bin/precommit should still be there after a failed remove: %v", statErr)
 	}
 }

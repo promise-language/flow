@@ -35,6 +35,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/promise-language/forge/primitives"
 )
 
 // Direction is the sense in which a measurement is compared to its threshold.
@@ -249,7 +251,7 @@ type verdictWire struct {
 // A caller that meant --verdict and mistyped it must not silently get the
 // measuring mode, which spawns a gate.
 func ParseRunArgs(args []string) (name string, verdict bool, err error) {
-	for _, a := range NormalizeArgs(args) {
+	for _, a := range primitives.NormalizeArgs(args) {
 		switch {
 		case a == "-verdict":
 			verdict = true

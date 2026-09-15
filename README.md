@@ -714,9 +714,15 @@ The pattern, and why it fits flow:
 2. **Hash-based staleness = "updatable" binaries.** `./make` hashes each
    tool's source (FNV-128a) and recompiles **only** when it changed, so the
    binary in `bin/` is always the latest build of the source with near-zero
-   overhead on repeat runs. After scaffolding, the project owns every line —
-   forge is not a runtime dependency unless you import its `primitives/`
-   helper lib.
+   overhead on repeat runs. The helpers every project's tooling needs — that
+   hash, the staleness check, the platform and exec helpers, flag
+   normalisation, the git-hook wiring — are not scaffolded as copies: they
+   live once in `github.com/promise-language/forge/primitives`, required at an
+   exact version in your own `tools/build/go.mod` and verified by `go.sum`. An
+   upstream change reaches you when you raise that line and never before. What
+   is specific to your project — your verify pipeline, your gates, your
+   thresholds — stays yours, in your `tools/build/common`. flow's own
+   `tools/build` is built this way.
 3. **`bin/verify` is the gate your flow already calls.** Point the orchestrator's
    `VerifyCmd` at it (`[]string{"bin/verify"}`) so the flow's `Validate` step
    and your pre-commit hook run the *same* check. forge's verify ratchets
