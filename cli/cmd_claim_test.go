@@ -556,11 +556,14 @@ func TestCmdClaim_JSONReportsTheRoleRefusalTheSDKRaises(t *testing.T) {
 }
 
 // An awaited role the flow does not declare is a stop with no typed refusal
-// behind it, so the report carries the reason and CLASSIFIES NOTHING: absent
-// item_scoped is the documented unclassified value, which a caller reads as
-// false. Guessing at a scope here would be a second answer beside the one
-// cmdResolve reads from the error itself.
-func TestCmdClaim_JSONReportsAnUndeclaredRoleWithoutClassifyingIt(t *testing.T) {
+// behind it — so no `code` — but it is NOT unclassified: the item's own record
+// is what is wrong, another item may be sound, and cmdResolve's auto-selection
+// already moves on to the next ref for it
+// (TestCmdResolve_AutoSelectSkipsAnItemWhoseAwaitedRoleIsUndeclared). Reported
+// absent, a fleet driver obeying the documented "absent is false" would take
+// the arena out of rotation over one corrupt marker — the same failure, moved
+// outside the process.
+func TestCmdClaim_JSONReportsAnUndeclaredRoleAsItemScoped(t *testing.T) {
 	be := fake.New()
 	be.AddItem("1", flow.Item{Type: "task", Title: "1", Awaits: flow.Awaits{Role: "reviewer"}})
 	be.SetCapabilities("", flow.CapPush)
@@ -581,8 +584,16 @@ func TestCmdClaim_JSONReportsAnUndeclaredRoleWithoutClassifyingIt(t *testing.T) 
 	if _, present := got["code"]; present {
 		t.Errorf("code is present on a stop that carries no typed refusal: %v", got)
 	}
-	if _, present := got["item_scoped"]; present {
-		t.Errorf("item_scoped is present on a stop nothing classified: %v", got)
+	if got["item_scoped"] != true {
+		t.Errorf("item_scoped = %v, want true — a corrupt marker on one item is not a broken arena", got["item_scoped"])
+	}
+	// The command's name belongs to the human line, not to the report: a
+	// consumer reads the reason, never the rendering of it.
+	if strings.HasPrefix(got["reason"].(string), "claim:") {
+		t.Errorf("reason = %q, carries the stderr prefix", got["reason"])
+	}
+	if !strings.HasPrefix(errBuf.String(), "claim: ") {
+		t.Errorf("stderr = %q, want the command's name on the human line", errBuf.String())
 	}
 }
 
@@ -602,8 +613,14 @@ func TestCmdClaim_JSONReportsAnUnresolvableId(t *testing.T) {
 	if got["claimed"] != false {
 		t.Errorf("claimed = %v, want false", got["claimed"])
 	}
-	if !strings.Contains(got["reason"].(string), "T9999") {
-		t.Errorf("reason = %v, want the input that could not be resolved", got["reason"])
+	// The reason VERBATIM — the backend's own account, with no "claim: " in
+	// front of it. The command's name is the human line's rendering, and a
+	// consumer that had to strip it would be parsing prose again.
+	if got["reason"] != `no item named "T9999"` {
+		t.Errorf("reason = %q, want the backend's account with no stderr prefix", got["reason"])
+	}
+	if !strings.HasPrefix(errBuf.String(), "claim: ") {
+		t.Errorf("stderr = %q, want the command's name on the human line", errBuf.String())
 	}
 	if _, present := got["item_scoped"]; present {
 		t.Errorf("item_scoped is present on a stop nothing classified: %v", got)

@@ -37,8 +37,9 @@ func (app *App) cmdClaim(ctx context.Context, args []string) int {
 	if err != nil {
 		// No ref yet, so the report names no item: the string that could not be
 		// resolved is not an identity and reporting it as one would put a value
-		// in `item` that addresses nothing.
-		return app.claimFailed(mode, "", fmt.Sprintf("claim: %v", err))
+		// in `item` that addresses nothing. Unclassified: a string that addresses
+		// nothing here says nothing about whether another one would.
+		return app.claimFailed(mode, "", err.Error(), nil)
 	}
 
 	var overrides []flow.ClaimOverride
@@ -67,11 +68,22 @@ func (app *App) cmdClaim(ctx context.Context, args []string) int {
 		// one more unmet precondition: no other account and no other arena would
 		// fare better, and what clears it is a person fixing the flow or the
 		// record (docs/resolution.md § Whose move it is).
+		//
+		// ITEM-SCOPED, and said so on the wire. The stop is THIS ITEM's record
+		// being wrong — the doc reports it as the item blocked — so a different
+		// item may well be sound, which is exactly what `item_scoped: true`
+		// means (docs/cli.md § Output). It is also the answer cmdResolve's
+		// auto-selection already gives it in-process, where an undeclared role
+		// moves on to the next ref rather than ending the run; omitted here, the
+		// fleet driver outside the process would read the documented "absent is
+		// false" and take the whole arena out of rotation over one corrupt
+		// marker — the failure that loop's comment exists to name.
 		var unknown flow.ErrUnknownRole
 		if errors.As(err, &unknown) {
-			return app.claimFailed(mode, ref.Display, fmt.Sprintf("claim: %v", unknown))
+			itemScoped := true
+			return app.claimFailed(mode, ref.Display, unknown.Error(), &itemScoped)
 		}
-		return app.claimFailed(mode, ref.Display, fmt.Sprintf("claim: %v", err))
+		return app.claimFailed(mode, ref.Display, err.Error(), nil)
 	}
 	// The account is AMBIENT — the orchestrator read it rather than being told —
 	// so it is reported from the claim it minted, which is the one the work is
@@ -92,13 +104,17 @@ func (app *App) cmdClaim(ctx context.Context, args []string) int {
 // § One-shot reports), so a driver never has to tell "refused" from "stdout was
 // empty".
 //
-// IT CLASSIFIES NOTHING. `item_scoped` is absent, which docs/cli.md § Output
-// says a caller reads as false — the fail-closed direction. None of these
-// errors carries a scope, and inventing one here would be a second answer beside
-// the one cmdResolve's auto-selection already reads from the error itself.
-func (app *App) claimFailed(mode OutputMode, item, reason string) int {
-	fmt.Fprintln(app.Err, reason)
-	app.emit(mode, claimPayload{Item: item, Claimed: false, Reason: reason}, func() {})
+// `scoped` is the classification when the stop has one and nil when it has
+// not; nil omits `item_scoped`, which docs/cli.md § Output says a caller reads
+// as false — the fail-closed direction, and the right one for a stop nothing
+// classified.
+//
+// The command's name is the HUMAN LINE's, not the report's: `reason` goes on
+// the wire bare, the way run-step's refuseArena puts it there, so a consumer
+// reads the reason rather than the rendering of it.
+func (app *App) claimFailed(mode OutputMode, item, reason string, scoped *bool) int {
+	fmt.Fprintln(app.Err, "claim: "+reason)
+	app.emit(mode, claimPayload{Item: item, Claimed: false, Reason: reason, ItemScoped: scoped}, func() {})
 	return 1
 }
 
