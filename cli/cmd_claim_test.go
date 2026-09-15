@@ -436,6 +436,28 @@ func TestCmdClaim_JSONReportsATakenClaim(t *testing.T) {
 	}
 }
 
+// A claim that WARNS still puts one object on stdout and nothing else. Open
+// blockers are narration (docs/cli.md § Claiming) and narration on the machine
+// channel is a stream no caller can parse — so the warning has to stay on
+// stderr in JSON mode too, where the human-mode tests above cannot see it.
+func TestCmdClaim_JSONStdoutCarriesOnlyTheReportWhenBlockersWarn(t *testing.T) {
+	env := newJSONClaimEnv(t)
+	env.be.AddItem("3", flow.Item{Type: "task", Title: "still open"})
+	blockOn(t, env.be, env.be.Ref("1"), env.be.Ref("3"))
+
+	if code := env.app.cmdClaim(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("cmdClaim = %d, want 0 — open blockers do not refuse a claim; stderr=%q", code, env.err.String())
+	}
+	// decodeClaimReport is the assertion: it fails if anything but the one
+	// object reached stdout.
+	if got := decodeClaimReport(t, env.out); got["claimed"] != true {
+		t.Errorf("claimed = %v, want true", got["claimed"])
+	}
+	if !strings.Contains(env.err.String(), "blocked by: 3") {
+		t.Errorf("stderr = %q, want the open blocker named in JSON mode too", env.err.String())
+	}
+}
+
 // An ARENA-scoped refusal: every item would meet the same answer, and the
 // caller must stop. The false has to be ON THE WIRE — omitted, it is
 // indistinguishable from a refusal nobody classified, which is the same
@@ -627,6 +649,49 @@ func TestCmdClaim_JSONReportsAnUnresolvableId(t *testing.T) {
 	}
 }
 
+// erroringClaimBackend cannot answer the lease at all — a plain error, not a
+// refusal it can name and type.
+type erroringClaimBackend struct{ *fake.Orchestrator }
+
+func (erroringClaimBackend) Claim(context.Context, flow.ItemRef, []flow.ClaimOverride) (flow.Claim, error) {
+	return flow.Claim{}, errors.New("the forge will not say")
+}
+
+// The third stop, and the one a fleet meets most: no typed refusal and no role
+// — the backend simply failed. Unlike an id nothing resolved, the ref DID
+// resolve, so the report addresses the item; and it classifies nothing, because
+// a backend that would not answer said nothing about whether another item would
+// fare better. Absent is the fail-closed reading, which is the right one here.
+func TestCmdClaim_JSONReportsABackendFailureAgainstTheItem(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+	app := &App{Orchestrator: erroringClaimBackend{be}, Out: out, Err: errBuf, Output: OutputJSON}
+
+	if code := app.cmdClaim(context.Background(), []string{"1"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	got := decodeClaimReport(t, out)
+	if got["item"] != "1" {
+		t.Errorf("item = %v, want 1 — the ref resolved, so the report addresses it", got["item"])
+	}
+	if got["claimed"] != false {
+		t.Errorf("claimed = %v, want false", got["claimed"])
+	}
+	if got["reason"] != "the forge will not say" {
+		t.Errorf("reason = %q, want the backend's account with no stderr prefix", got["reason"])
+	}
+	if _, present := got["code"]; present {
+		t.Errorf("code is present on a stop that carries no typed refusal: %v", got)
+	}
+	if _, present := got["item_scoped"]; present {
+		t.Errorf("item_scoped is present on a stop nothing classified: %v", got)
+	}
+	if !strings.Contains(errBuf.String(), "claim: the forge will not say") {
+		t.Errorf("stderr = %q, want the reason under the command's name", errBuf.String())
+	}
+}
+
 // Human mode is unchanged on a refusal: prose on stderr, exit code as the
 // signal, and STDOUT CARRIES NOTHING (docs/cli.md § Output). A failure payload
 // on human stdout would put a refusal where a reader looks for a result.
@@ -708,6 +773,34 @@ func TestCmdClaim_ContradictoryModesAreDecidedBeforeArity(t *testing.T) {
 	}
 	if strings.Contains(errBuf.String(), "missing item id") {
 		t.Errorf("stderr = %q, reports the wrong mistake", errBuf.String())
+	}
+}
+
+// The FLAG is what an external driver types, and it is the highest-precedence
+// selector (docs/cli.md § Output). Every other test here injects App.Output,
+// which reaches the mode by the DETECTION path — so nothing until now would
+// notice `claim` deciding the mode off stdout alone and ignoring what the
+// command line told it. Asserted as a difference between the two invocations,
+// because "--json produced JSON" proves nothing if the mode was JSON anyway.
+func TestCmdClaim_TheJSONFlagSelectsTheReport(t *testing.T) {
+	plain := newClaimEnv(t)
+	if code := plain.app.cmdClaim(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("cmdClaim = %d, want 0; stderr=%q", code, plain.err.String())
+	}
+	if got := plain.out.String(); got != "claimed 1 as fake-account\n" {
+		t.Fatalf("stdout = %q, want the human line — the premise of the comparison", got)
+	}
+
+	flagged := newClaimEnv(t)
+	if code := flagged.app.cmdClaim(context.Background(), []string{"1", "--json"}); code != 0 {
+		t.Fatalf("cmdClaim --json = %d, want 0; stderr=%q", code, flagged.err.String())
+	}
+	if strings.Contains(flagged.out.String(), "claimed 1 as ") {
+		t.Fatalf("stdout = %q, want the report — the flag was ignored and the human line printed", flagged.out.String())
+	}
+	got := decodeClaimReport(t, flagged.out)
+	if got["claimed"] != true || got["item"] != "1" {
+		t.Errorf("report = %v, want the taken claim", got)
 	}
 }
 
