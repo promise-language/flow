@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -379,5 +380,478 @@ func TestCmdClaim_RefusalRendering(t *testing.T) {
 	}
 	if !strings.Contains(got, "--force-unadmitted") {
 		t.Errorf("expected override hint in output; got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The report. `claim` is a one-shot report (docs/cli.md § Output): its result
+// goes to stdout in the selected mode for EVERY outcome, and a refusal carries
+// the code and the scope that were, until now, dropped at the boundary — so a
+// driver running one claim per arena tells a lost race from a broken arena
+// without parsing the rendered line (docs/cli.md § Claiming).
+// ---------------------------------------------------------------------------
+
+// jsonClaimEnv is newClaimEnv with the machine mode forced, so the report is
+// the one a piped caller reads rather than the one a terminal does.
+func newJSONClaimEnv(t *testing.T) *claimEnv {
+	t.Helper()
+	env := newClaimEnv(t)
+	env.app.Output = OutputJSON
+	return env
+}
+
+// decodeClaimReport reads the one object on stdout as a bare map, which is what
+// pins the KEY SET: a decode into claimPayload would silently accept a renamed
+// or missing key.
+func decodeClaimReport(t *testing.T, out *bytes.Buffer) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal(out.Bytes(), &m); err != nil {
+		t.Fatalf("stdout is not one JSON object: %v\ngot: %q", err, out.String())
+	}
+	return m
+}
+
+// A claim that was taken reports itself, and classifies NOTHING: item_scoped is
+// the scope of a stop, and a present false on a success would read as "this
+// arena is the problem".
+func TestCmdClaim_JSONReportsATakenClaim(t *testing.T) {
+	env := newJSONClaimEnv(t)
+
+	if code := env.app.cmdClaim(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("cmdClaim = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	got := decodeClaimReport(t, env.out)
+	if got["item"] != "1" {
+		t.Errorf("item = %v, want 1", got["item"])
+	}
+	if got["claimed"] != true {
+		t.Errorf("claimed = %v, want true", got["claimed"])
+	}
+	if got["account"] != "fake-account" {
+		t.Errorf("account = %v, want fake-account", got["account"])
+	}
+	if _, present := got["item_scoped"]; present {
+		t.Errorf("item_scoped is present on a claim that was taken: %v", got)
+	}
+}
+
+// A claim that WARNS still puts one object on stdout and nothing else. Open
+// blockers are narration (docs/cli.md § Claiming) and narration on the machine
+// channel is a stream no caller can parse — so the warning has to stay on
+// stderr in JSON mode too, where the human-mode tests above cannot see it.
+func TestCmdClaim_JSONStdoutCarriesOnlyTheReportWhenBlockersWarn(t *testing.T) {
+	env := newJSONClaimEnv(t)
+	env.be.AddItem("3", flow.Item{Type: "task", Title: "still open"})
+	blockOn(t, env.be, env.be.Ref("1"), env.be.Ref("3"))
+
+	if code := env.app.cmdClaim(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("cmdClaim = %d, want 0 — open blockers do not refuse a claim; stderr=%q", code, env.err.String())
+	}
+	// decodeClaimReport is the assertion: it fails if anything but the one
+	// object reached stdout.
+	if got := decodeClaimReport(t, env.out); got["claimed"] != true {
+		t.Errorf("claimed = %v, want true", got["claimed"])
+	}
+	if !strings.Contains(env.err.String(), "blocked by: 3") {
+		t.Errorf("stderr = %q, want the open blocker named in JSON mode too", env.err.String())
+	}
+}
+
+// An ARENA-scoped refusal: every item would meet the same answer, and the
+// caller must stop. The false has to be ON THE WIRE — omitted, it is
+// indistinguishable from a refusal nobody classified, which is the same
+// direction but not the same fact.
+func TestCmdClaim_JSONReportsAnArenaScopedRefusal(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+	app := &App{
+		Orchestrator: &refusingClaimBackend{
+			Orchestrator: be,
+			refusal: flow.ErrClaimRefused{
+				Code:     "dirty-tree",
+				Reason:   "worktree has uncommitted or untracked changes",
+				Detail:   " M cli/cmd_claim.go\n?? scratch.txt",
+				Check:    "clean-tree",
+				Override: "force",
+			},
+		},
+		Out: out, Err: errBuf, Output: OutputJSON,
+	}
+
+	if code := app.cmdClaim(context.Background(), []string{"1"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(out.String(), `"item_scoped": false`) {
+		t.Errorf("a present false must serialise; got %s", out.String())
+	}
+	got := decodeClaimReport(t, out)
+	if got["claimed"] != false {
+		t.Errorf("claimed = %v, want false", got["claimed"])
+	}
+	if got["code"] != "dirty-tree" {
+		t.Errorf("code = %v, want dirty-tree", got["code"])
+	}
+	if got["check"] != "clean-tree" {
+		t.Errorf("check = %v, want clean-tree", got["check"])
+	}
+	if got["reason"] != "worktree has uncommitted or untracked changes" {
+		t.Errorf("reason = %v", got["reason"])
+	}
+	// The failing check's own output, verbatim and unmodified — not the
+	// two-space-indented rendering the human line wraps it in.
+	if got["detail"] != " M cli/cmd_claim.go\n?? scratch.txt" {
+		t.Errorf("detail = %q, want the porcelain verbatim", got["detail"])
+	}
+	// The flag's NAME, not the rendering of it. `--force` would make a consumer
+	// strip dashes to get back to the value.
+	if got["override"] != "force" {
+		t.Errorf("override = %v, want force (no dashes)", got["override"])
+	}
+	// And the prose is still where an operator reads it.
+	if !strings.Contains(errBuf.String(), `claim: refused — worktree has uncommitted`) {
+		t.Errorf("stderr = %q, want the rendered refusal", errBuf.String())
+	}
+}
+
+// An ITEM-scoped refusal: a different item might succeed. The codes that carry
+// this are exactly the ones with no check name, which is why the check token in
+// the rendered line could never have stood in for the classification.
+func TestCmdClaim_JSONReportsAnItemScopedRefusal(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	out := &bytes.Buffer{}
+	app := &App{
+		Orchestrator: &refusingClaimBackend{
+			Orchestrator: be,
+			refusal: flow.ErrClaimRefused{
+				Code:       "claim-race",
+				ItemScoped: true,
+				Reason:     "another arena took this item first",
+			},
+		},
+		Out: out, Err: newDiscardWriter(), Output: OutputJSON,
+	}
+
+	if code := app.cmdClaim(context.Background(), []string{"1"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	got := decodeClaimReport(t, out)
+	if got["item_scoped"] != true {
+		t.Errorf("item_scoped = %v, want true — a lost race is not a broken arena", got["item_scoped"])
+	}
+	if got["code"] != "claim-race" {
+		t.Errorf("code = %v, want claim-race", got["code"])
+	}
+	for _, absent := range []string{"check", "override", "detail", "account"} {
+		if _, present := got[absent]; present {
+			t.Errorf("%s is present on a refusal that carries none: %v", absent, got)
+		}
+	}
+}
+
+// The refusal the SDK itself raises reaches the wire too, not only the
+// backend's: `awaits-other-role` is item-scoped, so a fleet driver takes the
+// next item rather than concluding the arena is broken.
+func TestCmdClaim_JSONReportsTheRoleRefusalTheSDKRaises(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", awaitingMaintainer())
+	be.SetCapabilities("", flow.CapPush)
+	app, _ := handoffTestApp(t, be)
+	out := &bytes.Buffer{}
+	app.Out, app.Output = out, OutputJSON
+
+	if code := app.cmdClaim(context.Background(), []string{"1"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	got := decodeClaimReport(t, out)
+	if got["code"] != "awaits-other-role" {
+		t.Errorf("code = %v, want awaits-other-role", got["code"])
+	}
+	if got["item_scoped"] != true {
+		t.Errorf("item_scoped = %v, want true — another item may await a role this run can take", got["item_scoped"])
+	}
+	if _, present := got["override"]; present {
+		t.Errorf("override is present; no flag makes a role assumable: %v", got)
+	}
+}
+
+// An awaited role the flow does not declare is a stop with no typed refusal
+// behind it — so no `code` — but it is NOT unclassified: the item's own record
+// is what is wrong, another item may be sound, and cmdResolve's auto-selection
+// already moves on to the next ref for it
+// (TestCmdResolve_AutoSelectSkipsAnItemWhoseAwaitedRoleIsUndeclared). Reported
+// absent, a fleet driver obeying the documented "absent is false" would take
+// the arena out of rotation over one corrupt marker — the same failure, moved
+// outside the process.
+func TestCmdClaim_JSONReportsAnUndeclaredRoleAsItemScoped(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1", Awaits: flow.Awaits{Role: "reviewer"}})
+	be.SetCapabilities("", flow.CapPush)
+	app, errBuf := handoffTestApp(t, be)
+	out := &bytes.Buffer{}
+	app.Out, app.Output = out, OutputJSON
+
+	if code := app.cmdClaim(context.Background(), []string{"1"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1; stderr=%q", code, errBuf.String())
+	}
+	got := decodeClaimReport(t, out)
+	if got["claimed"] != false {
+		t.Errorf("claimed = %v, want false", got["claimed"])
+	}
+	if !strings.Contains(got["reason"].(string), `role "reviewer" is not declared by this flow`) {
+		t.Errorf("reason = %v, want the undeclared role named", got["reason"])
+	}
+	if _, present := got["code"]; present {
+		t.Errorf("code is present on a stop that carries no typed refusal: %v", got)
+	}
+	if got["item_scoped"] != true {
+		t.Errorf("item_scoped = %v, want true — a corrupt marker on one item is not a broken arena", got["item_scoped"])
+	}
+	// The command's name belongs to the human line, not to the report: a
+	// consumer reads the reason, never the rendering of it.
+	if strings.HasPrefix(got["reason"].(string), "claim:") {
+		t.Errorf("reason = %q, carries the stderr prefix", got["reason"])
+	}
+	if !strings.HasPrefix(errBuf.String(), "claim: ") {
+		t.Errorf("stderr = %q, want the command's name on the human line", errBuf.String())
+	}
+}
+
+// An id nothing resolves stops before there is an item to name, so the report
+// carries an empty `item` rather than the string that failed to address one.
+func TestCmdClaim_JSONReportsAnUnresolvableId(t *testing.T) {
+	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+	app := &App{Orchestrator: refusingRefBackend{fake.New()}, Out: out, Err: errBuf, Output: OutputJSON}
+
+	if code := app.cmdClaim(context.Background(), []string{"T9999"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	got := decodeClaimReport(t, out)
+	if got["item"] != "" {
+		t.Errorf("item = %v, want empty — nothing was resolved to name", got["item"])
+	}
+	if got["claimed"] != false {
+		t.Errorf("claimed = %v, want false", got["claimed"])
+	}
+	// The reason VERBATIM — the backend's own account, with no "claim: " in
+	// front of it. The command's name is the human line's rendering, and a
+	// consumer that had to strip it would be parsing prose again.
+	if got["reason"] != `no item named "T9999"` {
+		t.Errorf("reason = %q, want the backend's account with no stderr prefix", got["reason"])
+	}
+	if !strings.HasPrefix(errBuf.String(), "claim: ") {
+		t.Errorf("stderr = %q, want the command's name on the human line", errBuf.String())
+	}
+	if _, present := got["item_scoped"]; present {
+		t.Errorf("item_scoped is present on a stop nothing classified: %v", got)
+	}
+}
+
+// erroringClaimBackend cannot answer the lease at all — a plain error, not a
+// refusal it can name and type.
+type erroringClaimBackend struct{ *fake.Orchestrator }
+
+func (erroringClaimBackend) Claim(context.Context, flow.ItemRef, []flow.ClaimOverride) (flow.Claim, error) {
+	return flow.Claim{}, errors.New("the forge will not say")
+}
+
+// The third stop, and the one a fleet meets most: no typed refusal and no role
+// — the backend simply failed. Unlike an id nothing resolved, the ref DID
+// resolve, so the report addresses the item; and it classifies nothing, because
+// a backend that would not answer said nothing about whether another item would
+// fare better. Absent is the fail-closed reading, which is the right one here.
+func TestCmdClaim_JSONReportsABackendFailureAgainstTheItem(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+	app := &App{Orchestrator: erroringClaimBackend{be}, Out: out, Err: errBuf, Output: OutputJSON}
+
+	if code := app.cmdClaim(context.Background(), []string{"1"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	got := decodeClaimReport(t, out)
+	if got["item"] != "1" {
+		t.Errorf("item = %v, want 1 — the ref resolved, so the report addresses it", got["item"])
+	}
+	if got["claimed"] != false {
+		t.Errorf("claimed = %v, want false", got["claimed"])
+	}
+	if got["reason"] != "the forge will not say" {
+		t.Errorf("reason = %q, want the backend's account with no stderr prefix", got["reason"])
+	}
+	if _, present := got["code"]; present {
+		t.Errorf("code is present on a stop that carries no typed refusal: %v", got)
+	}
+	if _, present := got["item_scoped"]; present {
+		t.Errorf("item_scoped is present on a stop nothing classified: %v", got)
+	}
+	if !strings.Contains(errBuf.String(), "claim: the forge will not say") {
+		t.Errorf("stderr = %q, want the reason under the command's name", errBuf.String())
+	}
+}
+
+// Human mode is unchanged on a refusal: prose on stderr, exit code as the
+// signal, and STDOUT CARRIES NOTHING (docs/cli.md § Output). A failure payload
+// on human stdout would put a refusal where a reader looks for a result.
+func TestCmdClaim_HumanRefusalWritesNothingToStdout(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+	app := &App{
+		Orchestrator: &refusingClaimBackend{
+			Orchestrator: be,
+			refusal:      flow.ErrClaimRefused{Code: "dirty-tree", Reason: "worktree is dirty", Check: "clean-tree"},
+		},
+		Out: out, Err: errBuf, Output: OutputHuman,
+	}
+
+	if code := app.cmdClaim(context.Background(), []string{"1"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing in human mode", out.String())
+	}
+	if !strings.Contains(errBuf.String(), `claim: refused — worktree is dirty (check "clean-tree")`) {
+		t.Errorf("stderr = %q, want the rendered refusal", errBuf.String())
+	}
+}
+
+// And human mode is unchanged on a success: the one line it always printed,
+// byte for byte. The report is an addition to the machine channel, not a
+// rewording of the operator's.
+func TestCmdClaim_HumanSuccessLineIsUnchanged(t *testing.T) {
+	env := newClaimEnv(t)
+	env.app.Output = OutputHuman
+
+	if code := env.app.cmdClaim(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("cmdClaim = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	if got := env.out.String(); got != "claimed 1 as fake-account\n" {
+		t.Errorf("stdout = %q, want the unchanged claim line", got)
+	}
+}
+
+// Contradictory modes are a property of the INVOCATION, settled before the
+// command acts: exit 2, nothing on stdout, and no lease asked for.
+func TestCmdClaim_ContradictoryModesClaimNothing(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	wrapped := &recordingClaimBackend{Orchestrator: be}
+	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+	app := &App{Orchestrator: wrapped, Out: out, Err: errBuf}
+
+	if code := app.cmdClaim(context.Background(), []string{"1", "--json", "--human"}); code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "mutually exclusive") {
+		t.Errorf("stderr = %q, want the mutual-exclusion refusal", errBuf.String())
+	}
+	if wrapped.claims != 0 {
+		t.Errorf("Claim was called %d times; a malformed invocation takes no lease", wrapped.claims)
+	}
+}
+
+// The mode is decided BEFORE the arity check. Answered the other way round,
+// somebody who asked for both modes would be told they forgot the item id —
+// and `claim --json --human` would report the flags as unrecognised, which is
+// what TestUsage_NamesExactlyTheCommandsTakingOutputFlags reads as "this
+// command has no output modes".
+func TestCmdClaim_ContradictoryModesAreDecidedBeforeArity(t *testing.T) {
+	errBuf := &bytes.Buffer{}
+	app := &App{Orchestrator: fake.New(), Out: newDiscardWriter(), Err: errBuf}
+
+	if code := app.cmdClaim(context.Background(), []string{"--json", "--human"}); code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
+	if !strings.Contains(errBuf.String(), "mutually exclusive") {
+		t.Errorf("stderr = %q, want the mutual-exclusion refusal", errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "missing item id") {
+		t.Errorf("stderr = %q, reports the wrong mistake", errBuf.String())
+	}
+}
+
+// The FLAG is what an external driver types, and it is the highest-precedence
+// selector (docs/cli.md § Output). Every other test here injects App.Output,
+// which reaches the mode by the DETECTION path — so nothing until now would
+// notice `claim` deciding the mode off stdout alone and ignoring what the
+// command line told it. Asserted as a difference between the two invocations,
+// because "--json produced JSON" proves nothing if the mode was JSON anyway.
+func TestCmdClaim_TheJSONFlagSelectsTheReport(t *testing.T) {
+	plain := newClaimEnv(t)
+	if code := plain.app.cmdClaim(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("cmdClaim = %d, want 0; stderr=%q", code, plain.err.String())
+	}
+	if got := plain.out.String(); got != "claimed 1 as fake-account\n" {
+		t.Fatalf("stdout = %q, want the human line — the premise of the comparison", got)
+	}
+
+	flagged := newClaimEnv(t)
+	if code := flagged.app.cmdClaim(context.Background(), []string{"1", "--json"}); code != 0 {
+		t.Fatalf("cmdClaim --json = %d, want 0; stderr=%q", code, flagged.err.String())
+	}
+	if strings.Contains(flagged.out.String(), "claimed 1 as ") {
+		t.Fatalf("stdout = %q, want the report — the flag was ignored and the human line printed", flagged.out.String())
+	}
+	got := decodeClaimReport(t, flagged.out)
+	if got["claimed"] != true || got["item"] != "1" {
+		t.Errorf("report = %v, want the taken claim", got)
+	}
+}
+
+// The key set is the machine contract. Both outcomes are pinned: what a taken
+// claim carries, and what a refusal adds — the four things docs/cli.md
+// § Claiming says a refusal carries, plus the scope.
+func TestClaimPayload_KeySets(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		payload claimPayload
+		want    []string
+	}{
+		{
+			"taken",
+			claimPayload{Item: "1", Claimed: true, Account: "fake-account"},
+			[]string{"account", "claimed", "item"},
+		},
+		{
+			"refused",
+			refusedClaimPayload("1", flow.ErrClaimRefused{
+				Code: "dirty-tree", Reason: "dirty", Detail: " M x", Check: "clean-tree", Override: "force",
+			}),
+			[]string{"check", "claimed", "code", "detail", "item", "item_scoped", "override", "reason"},
+		},
+		{
+			// A refusal with nothing but a code and a reason drops the optional
+			// keys and KEEPS item_scoped: the classification is never optional
+			// on a refusal, only on a stop that carries no typed one.
+			"refused, nothing optional",
+			refusedClaimPayload("1", flow.ErrClaimRefused{Code: "claim-race", ItemScoped: true, Reason: "lost"}),
+			[]string{"claimed", "code", "item", "item_scoped", "reason"},
+		},
+		{
+			// A stop with no typed refusal behind it classifies nothing.
+			"stopped, unclassified",
+			claimPayload{Item: "1", Reason: "load item: the forge will not say"},
+			[]string{"claimed", "item", "reason"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b, err := json.Marshal(c.payload)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(b, &m); err != nil {
+				t.Fatalf("unmarshal %s: %v", b, err)
+			}
+			if got := slices.Sorted(maps.Keys(m)); !slices.Equal(got, c.want) {
+				t.Errorf("keys = %v, want %v", got, c.want)
+			}
+		})
 	}
 }

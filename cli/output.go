@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/promise-language/flow"
 )
 
 // OutputMode selects how a command renders its result.
@@ -92,9 +94,15 @@ func (of outputFlags) mode(app *App, cmd string) (OutputMode, bool) {
 }
 
 // emit renders one command result: the payload as indented JSON, or whatever
-// human writes. Errors never travel through here — they stay plain text on
-// stderr with the exit code as the signal, so a caller never has to tell a
-// success payload from a failure payload on the same stream.
+// human writes.
+//
+// A STOP IS STILL A RESULT, and in JSON mode it is reported here like any
+// other — the shape `run-step` already takes (refuseArena) and `claim` takes
+// now, because docs/cli.md § One-shot reports asks for a report on EVERY
+// outcome, including the ones that did no work. What never changes is the
+// human rendering: a refusal's PROSE is on stderr with the exit code as the
+// signal, and human-mode stdout carries nothing at all for it — so a reader of
+// human output still never has to tell a success from a failure on one stream.
 func (app *App) emit(mode OutputMode, payload any, human func()) int {
 	if mode == OutputJSON {
 		enc := json.NewEncoder(app.Out)
@@ -434,4 +442,73 @@ type intDelta struct {
 type costDelta struct {
 	From float64 `json:"from"`
 	To   float64 `json:"to"`
+}
+
+// claimPayload is `claim`'s report, and it is ONE object for every outcome: a
+// claim taken, a typed refusal, and a stop that never reached the backend at
+// all. A caller driving arenas reads one shape rather than switching on
+// whether stdout carried anything (docs/cli.md § One-shot reports).
+//
+// The refusal's fields are FLAT rather than nested under a `refusal` object.
+// docs/cli.md § Output defines `item_scoped` as a field of a result and says a
+// refused claim carries "the same distinction, and the same name" — nested, the
+// one consumer that reads both this and an InvocationResult would have two
+// spellings of one fact.
+type claimPayload struct {
+	Item string `json:"item"`
+	// Claimed carries no omitempty for the reason listItemPayload.InProgress
+	// carries none: the value is always known, and `false` is the actual answer
+	// rather than an absent one.
+	Claimed bool `json:"claimed"`
+	// Account is the account the lease was minted as — ambient, read by the
+	// orchestrator rather than given to it. Empty on every outcome but a claim.
+	Account string `json:"account,omitempty"`
+
+	// Code is the refusal's own code, VERBATIM. flow defines no constants for
+	// the vocabulary (flow.ClaimRefusalCode) because it belongs to the refusing
+	// backend, and this passes it through without interpreting it. Empty on a
+	// stop that carries no typed refusal.
+	Code string `json:"code,omitempty"`
+	// ItemScoped is the scope a caller branches on: true → this ITEM is the
+	// problem and a different one might succeed; false → this ARENA is, and
+	// every item would meet the same answer. nil means the stop classified
+	// nothing, and a caller reads nil as false — the fail-closed direction
+	// docs/cli.md § Output fixes.
+	//
+	// A pointer for the reason flow.InvocationResult.ItemScoped is one: a
+	// present false is the classification that matters most, and a plain bool
+	// with omitempty would put it on the wire identically to absent — while a
+	// plain bool WITHOUT omitempty would report a successful claim as
+	// `item_scoped: false`, which reads as an arena-scoped stop.
+	ItemScoped *bool `json:"item_scoped,omitempty"`
+	// Reason is the one-line human reason. Nothing parses it: every
+	// machine-readable fact about the stop is a field beside it.
+	Reason string `json:"reason,omitempty"`
+	// Detail is the failing check's own output, reproduced verbatim and
+	// unmodified, and Check names the check that produced it.
+	Detail string `json:"detail,omitempty"`
+	Check  string `json:"check,omitempty"`
+	// Override is the flag that would bypass this refusal, as its NAME —
+	// `force-unadmitted`, not `--force-unadmitted`. The value, never the
+	// rendering: the human line adds the dashes and nothing parses them back.
+	// Empty when nothing overrides it.
+	Override string `json:"override,omitempty"`
+}
+
+// refusedClaimPayload projects a typed refusal onto the wire. THE ONE
+// projection of flow.ErrClaimRefused: a second copy of this mapping is how the
+// four things docs/cli.md § Claiming says a refusal carries come to be three at
+// one command and four at another.
+func refusedClaimPayload(item string, e flow.ErrClaimRefused) claimPayload {
+	scoped := e.ItemScoped
+	return claimPayload{
+		Item:       item,
+		Claimed:    false,
+		Code:       string(e.Code),
+		ItemScoped: &scoped,
+		Reason:     e.Reason,
+		Detail:     e.Detail,
+		Check:      e.Check,
+		Override:   e.Override,
+	}
 }
