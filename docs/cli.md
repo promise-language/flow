@@ -52,7 +52,7 @@ Passing both `--json` and `--human` is a usage error, detected before the comman
 
 Commands fall into two shapes, and the shape determines the streams.
 
-### One-shot reports — `list`, `status`, `quota`, `grant`, `doctor`, `run-step`
+### One-shot reports — `list`, `status`, `quota`, `grant`, `doctor`, `claim`, `run-step`
 
 The report *is* the output. It goes to **stdout**, rendered in the selected mode.
 
@@ -187,6 +187,8 @@ A claim is refused when the item is already held, **when this worktree already h
 - the flag that would override it, when one exists.
 
 A refusal that another item might survive is distinguished from one that no item would survive, so `resolve`'s auto-selection knows whether trying the next item is meaningful.
+
+**The distinction reaches a caller outside the process.** `claim` is a one-shot report (§ Output): its result goes to stdout in the selected mode, for **every** outcome — a claim taken, a typed refusal, and a stop that never reached the backend — and a refused claim carries the **code**, the item-scope classification under the same name `item_scoped` a result reporting a stop uses, the reason, the failing check and its output, and the override where one exists. A driver running one `claim` per arena across a fleet reads the same distinction `resolve`'s auto-selection reads in-process; nothing recovers it by parsing the rendered prose, and a stop that classifies nothing omits `item_scoped` rather than guessing at it.
 
 **An occupied worktree is its own refusal, and it is not overridable.** A claim binds `item ↔ arena` until the item is resolved, and that binding survives a park, a stopped run and a restart — so a worktree holding one item is not free for a second, and the refusal names the item it holds and says to finish or release that one first. It reads as a distinct code from *already held*, because the two ask for opposite actions: an item another person holds can be taken over deliberately, where an item **this** worktree holds has nobody to take it from. That is also why `--force` does not reach it. Overriding here would not settle a dispute; it would overwrite this worktree's own claim record while the first item's uncommitted work, branch and build outputs stay in this tree — state that exists nowhere else and that nothing can recover by re-reading, so the first item is simply orphaned. An operator who wanted the ordinary path and got that would not be told.
 
