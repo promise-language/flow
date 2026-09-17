@@ -104,9 +104,29 @@ The exec line is `bin/gate <name>`, and the question is asked one way only — t
 
 **The runner appends `--envelope`.** The flag is protocol rather than project configuration, so it has one spelling everywhere and a runner adds it without being told to. It is appended last, after whatever the project declared, because that is the only rule that works without parsing the line.
 
-**A gate prints an envelope only when it was given the flag.** Any other invocation is a person or an agent at a terminal, and must print nothing on stdout and exit non-zero. Silence and failure are what stop the human path from becoming a second channel: a bare invocation that printed measurements and exited `0` would be read as a pass by the first script that wrapped it, which is the ambiguity the three parties exist to remove.
+**A gate prints an envelope only when it was given the flag.** An invocation that names a gate without it is a person or an agent at a terminal, and must print nothing on stdout and exit non-zero. Silence and failure are what stop the human path from becoming a second channel: a bare invocation that printed measurements and exited `0` would be read as a pass by the first script that wrapped it, which is the ambiguity the three parties exist to remove.
 
 `bin/gate tested --envelope` is the program `bin/gate` with the argument `tested`. No shell, so no quoting rules, no word splitting, no `.rc` file, no dialect. This is portability, not preference: a line that is interpreted gives different answers on different hosts for reasons that have nothing to do with the subject, which is the measurement half of reproducibility failing at the point of invocation.
+
+### Which gates a project has is asked for, and answered as JSON
+
+> **A listing a program depends on is asked for in the machine-readable form.** The flag is passed; which mode a caller receives is never left to the entry point's own detection.
+
+The exec line is `bin/gate --list --json`, and the answer is one object on stdout, exit `0`:
+
+```json
+{"gates": [{"name": "integration", "summary": "…"}, {"name": "tested", "summary": "…"}]}
+```
+
+A project tool renders its result for whoever is reading it — human at a terminal, JSON otherwise ([org/cli-guide.md](org/cli-guide.md) § 6) — and this query's stdout is a pipe, so a conforming entry point would send the object anyway. Asking for it is what makes that a contract rather than a coincidence, and it is the difference between a reader that works and one that works until someone attaches a terminal. The human rendering is a rendering: its labels and the very choice of one name per line are free to improve whenever they read better. **The object is the interface**, and it grows by adding fields.
+
+**Besides a measurement, the listing is the only mode that puts gate data on stdout**, and it does not reopen the second channel the section above closes. A caller that asked which gates exist did not ask for a measurement, and a listing cannot be mistaken for an envelope by anything that parses one — in either rendering, because what closes that channel is the absence of a verdict, not the absence of a second wire.
+
+**Only the name is addressed.** The summary is for a person reading the listing; a gate is asked for by name. A field the listing grows later is ignored rather than refused, which is what reading an additive interface means.
+
+**A name outside the flow's vocabulary is skipped, not refused.** A project has gates the flow knows nothing about ([below](#a-project-has-gates-the-flow-knows-nothing-about)), and this listing is the part the flow can address.
+
+**An entry point that is absent, cannot be executed, exits non-zero, or does not answer within the short bound on a startup query has not said what it supports, and is read as a machine with no gates.** That is the same reading a checkout whose tools were never built gets, and every caller acts on it: the commands that would run a gate refuse, `doctor` reports it, and nothing dispatches a step that would have failed at its first measurement.
 
 ### What the runner reports
 
@@ -405,7 +425,7 @@ Some serve purposes a resolution has no part in: a size measurement watched for 
 Two consequences worth stating:
 
 - The gate entry point carries whatever the project gates. Asking it for a name it does not have is an error; **having names the flow never asks for is not.**
-- Nothing enumerates a project's gates on the flow's behalf. The flow asks for what it needs by name, and learns nothing about the rest.
+- Nothing holds a list of a project's gates on the flow's behalf. The flow asks the entry point itself ([above](#which-gates-a-project-has-is-asked-for-and-answered-as-json)) and addresses the names it knows; a name outside its vocabulary is passed over, neither recorded nor acted on.
 
 **A project decides what `integration` is made of, and that is where the two sets meet.** A check that should stop a change from landing belongs inside `integration`; one that watches the project over time does not. A size measurement is the clear case: as a trend it is periodic and none of the flow's business, and as a limit a change must not cross it is part of what the project means by integrable — the same underlying check, placed by what the project wants it to decide.
 

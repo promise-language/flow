@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/promise-language/flow"
 )
@@ -110,6 +111,202 @@ func TestDeclarations_AreReadOncePerOrchestrator(t *testing.T) {
 	}
 	if lines := strings.Count(string(asked), "\n"); lines != 1 {
 		t.Errorf("the entry point was asked %d times, want 1", lines)
+	}
+}
+
+// The listing a program reads is asked for. A project tool decides how to
+// render a result from whether its stdout is a terminal, and this query's
+// never is — so an entry point asked the bare question hands back the JSON it
+// writes for programs, and a reader expecting lines finds no gate in it. That
+// empty list is indistinguishable from an unbuilt checkout, and what the
+// operator is told is to build tools that are already there.
+func TestSupportedGates_AsksForTheMachineReadableListing(t *testing.T) {
+	requireRealProcesses(t)
+	dir := t.TempDir()
+	writeGateEntryPoint(t, dir, `case "$*" in
+"--list --json") printf '{"gates":[{"name":"fit","summary":"a"},{"name":"integration","summary":"b"},{"name":"tested","summary":"c"},{"name":"not-a-gate","summary":"d"}]}\n' ;;
+*) echo "gate: unknown flag" >&2; exit 2 ;;
+esac`)
+
+	got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates()
+	if strings.Join(names2(got), ",") != "fit,integration,tested" {
+		t.Errorf("SupportedGates() = %v, want the three the listing named (and not the unknown one)", names2(got))
+	}
+	// The contract's two are marked required; the project's own are not — the
+	// same property the bare-name path has always had, over the other wire.
+	for _, g := range got {
+		wantRequired := g.Name == flow.GateFit || g.Name == flow.GateIntegration
+		if g.Required != wantRequired {
+			t.Errorf("gate %q required = %v, want %v", g.Name, g.Required, wantRequired)
+		}
+	}
+}
+
+// An entry point that predates the flag refuses it, and refusing it is not
+// saying there are no gates. The question is asked again without it, which is
+// what keeps every project that has not upgraded yet runnable — this one
+// included, until #415 lands.
+func TestSupportedGates_FallsBackWhenTheFlagIsRefused(t *testing.T) {
+	requireRealProcesses(t)
+	dir := t.TempDir()
+	writeGateEntryPoint(t, dir, `case "$*" in
+"--list") printf 'fit\nintegration\ntested\n' ;;
+*) echo "gate: unknown flag -json" >&2; exit 2 ;;
+esac`)
+
+	got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates()
+	if strings.Join(names2(got), ",") != "fit,integration,tested" {
+		t.Errorf("SupportedGates() = %v, want the three the entry point named", names2(got))
+	}
+}
+
+// The fallback reads the JSON too, and that is the half of this that cannot
+// retire with the second spawn: an entry point old enough to refuse --json
+// still renders for a pipe, so the bare query answers in JSON on exactly the
+// machines the fallback exists for.
+func TestSupportedGates_FallbackReadsEitherForm(t *testing.T) {
+	requireRealProcesses(t)
+	dir := t.TempDir()
+	writeGateEntryPoint(t, dir, `case "$*" in
+"--list") printf '{"gates":[{"name":"fit"},{"name":"integration"}]}\n' ;;
+*) exit 2 ;;
+esac`)
+
+	got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates()
+	if strings.Join(names2(got), ",") != "fit,integration" {
+		t.Errorf("SupportedGates() = %v, want the two the listing named", names2(got))
+	}
+}
+
+// The second spawn is a fallback, not a second question. An entry point that
+// answers the flagged query is asked once: asking both every time would make
+// every conformant project pay a process spawn at startup for a refusal path
+// it never takes, and would hide an ordering mistake — asking the legacy form
+// first works just as well until the day the fallback is removed (#414).
+func TestSupportedGates_TheFlagIsNotAskedTwice(t *testing.T) {
+	requireRealProcesses(t)
+	dir := t.TempDir()
+	writeGateEntryPoint(t, dir, `printf 'asked\n' >> `+filepath.Join(dir, "asked")+`
+case "$*" in
+"--list --json") printf '{"gates":[{"name":"fit"},{"name":"integration"}]}\n' ;;
+*) exit 2 ;;
+esac`)
+
+	got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates()
+	if strings.Join(names2(got), ",") != "fit,integration" {
+		t.Fatalf("SupportedGates() = %v, want the two the listing named", names2(got))
+	}
+	asked, err := os.ReadFile(filepath.Join(dir, "asked"))
+	if err != nil {
+		t.Fatalf("the entry point was never asked: %v", err)
+	}
+	if spawns := strings.Count(string(asked), "\n"); spawns != 1 {
+		t.Errorf("the entry point was spawned %d times, want 1 — the legacy query is a fallback", spawns)
+	}
+}
+
+// The deadline bounds the question, not each way of asking it. An entry point
+// that never answers is killed at declarationTimeout and declares nothing —
+// and the fallback does not get a window of its own, because a bound that
+// renewed itself per attempt would let a startup query against a wedged entry
+// point cost twice what the bound says it can, before any work begins.
+func TestSupportedGates_OneDeadlineCoversBothAttempts(t *testing.T) {
+	requireRealProcesses(t)
+	dir := t.TempDir()
+	// `exec` so the shell is replaced rather than left with a child holding
+	// stdout: an orphan on that pipe outlives the kill, and the read waits for
+	// it rather than for the deadline this test is about.
+	writeGateEntryPoint(t, dir, `printf 'asked\n' >> `+filepath.Join(dir, "asked")+`
+exec sleep 30`)
+
+	start := time.Now()
+	got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates()
+	elapsed := time.Since(start)
+
+	if len(got) != 0 {
+		t.Errorf("SupportedGates() = %v, want none — the entry point never said what it supports", names2(got))
+	}
+	asked, err := os.ReadFile(filepath.Join(dir, "asked"))
+	if err != nil {
+		t.Fatalf("the entry point was never asked: %v", err)
+	}
+	if spawns := strings.Count(string(asked), "\n"); spawns != 1 {
+		t.Errorf("the entry point ran %d times, want 1 — the deadline was spent on the first attempt, so the fallback must not start a second process", spawns)
+	}
+	// Halfway between the two answers: one deadline is what a correct run
+	// costs, two is what the regression costs, and neither is near the bound.
+	if bound := declarationTimeout + declarationTimeout/2; elapsed >= bound {
+		t.Errorf("SupportedGates() took %v, want under %v — one deadline covers the query however many ways it is asked", elapsed, bound)
+	}
+}
+
+// An answer this SDK cannot read declares NO gates, never the names that
+// happen to survive in it. A partial set is worse than an empty one: it says
+// `integration` is on a machine whose listing was cut off before the rest of
+// it arrived, and the caller that acts on it discovers the truth at the first
+// measurement.
+//
+// Exit 0 is the entry point saying it answered, so there is no second question
+// to ask — the fallback is for a refused flag, not for a reply that did not
+// parse.
+func TestSupportedGates_AnAnswerItCannotReadDeclaresNothing(t *testing.T) {
+	requireRealProcesses(t)
+	for _, c := range []struct{ what, stdout string }{
+		{"a listing truncated mid-write", `{"gates":[{"name":"fit"},{"name":"integrat`},
+		{"an array where the listing object belongs", `[{"name":"fit"},{"name":"integration"}]`},
+		{"an object carrying the names under other keys", `{"gate_names":["fit","integration"]}`},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			dir := t.TempDir()
+			writeGateEntryPoint(t, dir, `printf '%s' '`+c.stdout+`'`)
+
+			if got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates(); len(got) != 0 {
+				t.Errorf("SupportedGates() = %v, want none — %s is not a listing", names2(got), c.what)
+			}
+		})
+	}
+}
+
+// Exit 0 is the entry point saying it answered, and an answer is not asked
+// again — not when the listing declares no gates, and not when it is one this
+// SDK cannot read.
+//
+// The fallback exists for a REFUSED FLAG. Widening it to "the reply was not
+// what I hoped for" restores this defect from the other side: an entry point
+// that answered the flagged query with an object the SDK failed to decode
+// would be asked the bare question and have its HUMAN RENDERING read instead
+// — the exact inversion the flagged query exists to delete, and silent,
+// because the gate list that came back would look right.
+//
+// The bare query here answers with names, so a second ask shows up in the
+// result and not only in the spawn count.
+func TestSupportedGates_AnAnsweredQueryIsNotAskedAgain(t *testing.T) {
+	requireRealProcesses(t)
+	for _, c := range []struct{ what, stdout string }{
+		{"a listing that declares no gates", `{"gates":[]}`},
+		{"an answer this SDK cannot read", `not a listing`},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			dir := t.TempDir()
+			writeGateEntryPoint(t, dir, `printf 'asked\n' >> `+filepath.Join(dir, "asked")+`
+case "$*" in
+"--list --json") printf '%s' '`+c.stdout+`' ;;
+*) printf 'fit\nintegration\n' ;;
+esac`)
+
+			got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates()
+			if len(got) != 0 {
+				t.Errorf("SupportedGates() = %v, want none — the entry point answered, and %s is what it said",
+					names2(got), c.what)
+			}
+			asked, err := os.ReadFile(filepath.Join(dir, "asked"))
+			if err != nil {
+				t.Fatalf("the entry point was never asked: %v", err)
+			}
+			if spawns := strings.Count(string(asked), "\n"); spawns != 1 {
+				t.Errorf("the entry point was spawned %d times, want 1 — the fallback is for a refused flag, not for an answer the SDK did not like", spawns)
+			}
+		})
 	}
 }
 
