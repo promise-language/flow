@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/promise-language/flow"
 )
@@ -201,6 +202,68 @@ esac`)
 	}
 	if spawns := strings.Count(string(asked), "\n"); spawns != 1 {
 		t.Errorf("the entry point was spawned %d times, want 1 — the legacy query is a fallback", spawns)
+	}
+}
+
+// The deadline bounds the question, not each way of asking it. An entry point
+// that never answers is killed at declarationTimeout and declares nothing —
+// and the fallback does not get a window of its own, because a bound that
+// renewed itself per attempt would let a startup query against a wedged entry
+// point cost twice what the bound says it can, before any work begins.
+func TestSupportedGates_OneDeadlineCoversBothAttempts(t *testing.T) {
+	requireRealProcesses(t)
+	dir := t.TempDir()
+	// `exec` so the shell is replaced rather than left with a child holding
+	// stdout: an orphan on that pipe outlives the kill, and the read waits for
+	// it rather than for the deadline this test is about.
+	writeGateEntryPoint(t, dir, `printf 'asked\n' >> `+filepath.Join(dir, "asked")+`
+exec sleep 30`)
+
+	start := time.Now()
+	got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates()
+	elapsed := time.Since(start)
+
+	if len(got) != 0 {
+		t.Errorf("SupportedGates() = %v, want none — the entry point never said what it supports", names2(got))
+	}
+	asked, err := os.ReadFile(filepath.Join(dir, "asked"))
+	if err != nil {
+		t.Fatalf("the entry point was never asked: %v", err)
+	}
+	if spawns := strings.Count(string(asked), "\n"); spawns != 1 {
+		t.Errorf("the entry point ran %d times, want 1 — the deadline was spent on the first attempt, so the fallback must not start a second process", spawns)
+	}
+	// Halfway between the two answers: one deadline is what a correct run
+	// costs, two is what the regression costs, and neither is near the bound.
+	if bound := declarationTimeout + declarationTimeout/2; elapsed >= bound {
+		t.Errorf("SupportedGates() took %v, want under %v — one deadline covers the query however many ways it is asked", elapsed, bound)
+	}
+}
+
+// An answer this SDK cannot read declares NO gates, never the names that
+// happen to survive in it. A partial set is worse than an empty one: it says
+// `integration` is on a machine whose listing was cut off before the rest of
+// it arrived, and the caller that acts on it discovers the truth at the first
+// measurement.
+//
+// Exit 0 is the entry point saying it answered, so there is no second question
+// to ask — the fallback is for a refused flag, not for a reply that did not
+// parse.
+func TestSupportedGates_AnAnswerItCannotReadDeclaresNothing(t *testing.T) {
+	requireRealProcesses(t)
+	for _, c := range []struct{ what, stdout string }{
+		{"a listing truncated mid-write", `{"gates":[{"name":"fit"},{"name":"integrat`},
+		{"an array where the listing object belongs", `[{"name":"fit"},{"name":"integration"}]`},
+		{"an object carrying the names under other keys", `{"gate_names":["fit","integration"]}`},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			dir := t.TempDir()
+			writeGateEntryPoint(t, dir, `printf '%s' '`+c.stdout+`'`)
+
+			if got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates(); len(got) != 0 {
+				t.Errorf("SupportedGates() = %v, want none — %s is not a listing", names2(got), c.what)
+			}
+		})
 	}
 }
 
