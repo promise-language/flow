@@ -128,9 +128,13 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		// The route, not a checklist (docs/cli.md § Status). Load already
 		// returned the journal, the ledger and the awaited marker, so none of
 		// the three costs a read the command was not already making.
-		Journal:   journalPayloads(state.Journal),
-		Awaits:    awaitsPayloadOf(state.Awaits),
-		Spend:     spendPayloadOf(state.Ledger),
+		Journal: journalPayloads(state.Journal),
+		Awaits:  awaitsPayloadOf(state.Awaits),
+		// typeFlow, not f: what a route asks for is read off the journal, which
+		// a FINALIZED item still has and which SelectFlow answers nil for. A
+		// finished resolution is exactly when an operator wants to know whether
+		// it bought its conversation twice.
+		Spend:     spendPayloadOf(typeFlow, state),
 		Steps:     steps,
 		Questions: questionPayloads(state),
 		Waiting:   waitingPayloadOf(display),
@@ -173,6 +177,12 @@ func (app *App) cmdStatus(ctx context.Context, args []string) int {
 		}
 		if s := payload.Spend; s != nil {
 			fmt.Fprintf(app.Out, "spend: %s\n", spendLine(s))
+			// On its own line, because it answers a different question from
+			// cost and time: not what the work took, but how many times the
+			// resolution bought its conversation back.
+			if line := sessionsLine(s.Sessions); line != "" {
+				fmt.Fprintf(app.Out, "sessions: %s\n", line)
+			}
 		}
 		// A run that is alive and deliberately idle. Reported because the
 		// alternative reading of "claim held, nothing running" is a stalled
@@ -517,17 +527,47 @@ func awaitsPayloadOf(a flow.Awaits) *awaitsPayload {
 }
 
 // spendPayloadOf reports the treasurer's item-level record, with WAITING APART
-// from active time. Nil when nothing has been spent and nothing has run: a
-// zeroed spend block on an unstarted item reads as a measurement.
-func spendPayloadOf(l flow.Ledger) *spendPayload {
-	if l.TotalCostUSD == 0 && l.TotalActive == 0 && l.TotalWaiting == 0 {
+// from active time and the session count beside them. Nil when nothing has been
+// spent, nothing has run and no session was asked for: a zeroed spend block on
+// an unstarted item reads as a measurement.
+//
+// The flow is taken so the count can be judged against the route this item
+// actually travelled (flow.Flow.SessionsAccountedFor) — the same arithmetic the
+// chokepoint classifies with. It may be nil: no flow handles this item's type,
+// and then the counts are reported without one.
+func spendPayloadOf(f *flow.Flow, state *flow.Item) *spendPayload {
+	l := state.Ledger
+	sessions := sessionsPayloadOf(f, state)
+	if l.TotalCostUSD == 0 && l.TotalActive == 0 && l.TotalWaiting == 0 && sessions == nil {
 		return nil
 	}
 	return &spendPayload{
 		CostUSD:        l.TotalCostUSD,
 		ActiveSeconds:  l.TotalActive.Seconds(),
 		WaitingSeconds: l.TotalWaiting.Seconds(),
+		Sessions:       sessions,
 	}
+}
+
+// sessionsPayloadOf reports how many conversations the resolution bought and how
+// many its route asks for. Nil when it has opened none and refused none, which
+// is what an unstarted item looks like.
+func sessionsPayloadOf(f *flow.Flow, state *flow.Item) *sessionsPayload {
+	s := state.Ledger.Sessions
+	if s == (flow.SessionCounts{}) {
+		return nil
+	}
+	out := &sessionsPayload{
+		Opened:     s.Opened(),
+		Declared:   s.Declared,
+		HandleGone: s.HandleGone,
+		Refused:    s.Refused,
+	}
+	if f != nil {
+		expected := f.SessionsAccountedFor(state)
+		out.Expected = &expected
+	}
+	return out
 }
 
 // waitingPayloadOf reports a run that is alive, holds this arena's claim, and
@@ -645,6 +685,30 @@ func spendLine(s *spendPayload) string {
 	if s.WaitingSeconds > 0 {
 		line += fmt.Sprintf(" (%s waiting)",
 			formatDurationCompact(time.Duration(s.WaitingSeconds*float64(time.Second))))
+	}
+	return line
+}
+
+// sessionsLine renders the treasurer's session count: how many conversations the
+// resolution opened, why, and whether that is more than its route accounts for.
+//
+// THE EXCESS IS THE SIGNAL, and very nearly the only one — nothing else about a
+// resolution that bought its context twice looks wrong afterwards. What the
+// excess does not say is which cause it was, so the breakdown says that instead:
+// a handle that was gone is a limit of the substrate or the backend, and a
+// refusal is a defect in the flow (docs/resolution.md § The treasurer).
+func sessionsLine(s *sessionsPayload) string {
+	if s == nil {
+		return ""
+	}
+	line := fmt.Sprintf("%d opened (%d declared, %d handle-gone)", s.Opened, s.Declared, s.HandleGone)
+	if s.Refused > 0 {
+		line += fmt.Sprintf(", %d refused", s.Refused)
+	}
+	// Only against a route this binary can read. Without a flow there is no
+	// number to compare with, and silence is the honest report.
+	if s.Expected != nil && s.Opened > *s.Expected {
+		line += fmt.Sprintf(" — %d more than the route accounts for", s.Opened-*s.Expected)
 	}
 	return line
 }

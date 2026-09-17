@@ -597,6 +597,7 @@ func TestBackend_Reset_ClearsTheFlowsWholeRecord(t *testing.T) {
 	_ = b.RecordDispatch(ctx, ref, "plan")
 	_ = b.AddCost(ctx, ref, "plan", 4.25)
 	_ = b.AddDuration(ctx, ref, "plan", time.Minute)
+	_ = b.RecordSession(ctx, ref, flow.SessionDeclared)
 	_ = b.SaveWorkInProgress(ctx, ref, "impl", "half a diff")
 	_ = b.SaveAgentSession(ctx, ref, flow.AgentSession{SessionID: "sess-1", Boundary: "impl"})
 	if err := b.Park(ctx, ref, flow.ParkRequest{Kind: flow.ParkRefused, Step: "impl", Reason: "no"}); err != nil {
@@ -613,6 +614,12 @@ func TestBackend_Reset_ClearsTheFlowsWholeRecord(t *testing.T) {
 	}
 	if len(state.Ledger.Steps) != 0 || state.Ledger.TotalCostUSD != 0 || state.Ledger.TotalActive != 0 {
 		t.Errorf("Ledger = %+v after Reset, want empty", state.Ledger)
+	}
+	// The session count goes with the journal it was compared against: a count
+	// kept past the route it accounted for would read as an excess on the next
+	// resolution's first dispatch.
+	if state.Ledger.Sessions != (flow.SessionCounts{}) {
+		t.Errorf("Ledger.Sessions = %+v after Reset, want the zero value", state.Ledger.Sessions)
 	}
 	if state.Park != nil {
 		t.Errorf("Park = %+v after Reset, want nil", state.Park)
@@ -2000,5 +2007,45 @@ func TestItemInfo_AnUnparkedItemReportsNoParkKind(t *testing.T) {
 	}
 	if info.ParkKind != "" {
 		t.Errorf("ParkKind = %q, want empty on an item that is not parked", info.ParkKind)
+	}
+}
+
+// The session count is item-level and filed under the reason. It takes no step,
+// which is the difference from every other ledger write: the session belongs to
+// the resolution and outlives every step on the route.
+func TestBackend_RecordSession_CountsByReason(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := claimed(t, b, "1")
+
+	for _, r := range []flow.SessionReason{
+		flow.SessionDeclared, flow.SessionHandleGone, flow.SessionHandleGone, flow.SessionRefused,
+	} {
+		if err := b.RecordSession(ctx, ref, r); err != nil {
+			t.Fatalf("RecordSession(%q): %v", r, err)
+		}
+	}
+	state, _ := b.Load(ctx, ref)
+	want := flow.SessionCounts{Declared: 1, HandleGone: 2, Refused: 1}
+	if state.Ledger.Sessions != want {
+		t.Errorf("sessions = %+v, want %+v", state.Ledger.Sessions, want)
+	}
+	if got := state.Ledger.Sessions.Opened(); got != 3 {
+		t.Errorf("Opened() = %d, want 3 — a refused request opened no session", got)
+	}
+	// And the count does not leak between items: it is the resolution's.
+	otherState, _ := b.Load(ctx, addItem(b, "2"))
+	if otherState.Ledger.Sessions != (flow.SessionCounts{}) {
+		t.Errorf("another item's sessions = %+v, want the zero value", otherState.Ledger.Sessions)
+	}
+}
+
+// An item nothing registered is a write with nowhere to land, and it says so
+// rather than counting into nothing.
+func TestBackend_RecordSession_RefusesAnUnknownItem(t *testing.T) {
+	b := fake.New()
+	err := b.RecordSession(context.Background(), b.Ref("nope"), flow.SessionDeclared)
+	if err == nil {
+		t.Error("RecordSession on an unregistered item = nil, want an error naming the item")
 	}
 }

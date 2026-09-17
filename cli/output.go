@@ -255,6 +255,30 @@ type spendPayload struct {
 	CostUSD        float64 `json:"cost_usd"`
 	ActiveSeconds  float64 `json:"active_seconds"`
 	WaitingSeconds float64 `json:"waiting_seconds"`
+	// Sessions is the treasurer's count of the agent sessions this resolution
+	// opened, with what the route it travelled accounts for. Null when it has
+	// opened none and refused none.
+	Sessions *sessionsPayload `json:"sessions"`
+}
+
+// sessionsPayload is how many conversations a resolution bought, and how many
+// the route asked for.
+//
+// NO `excess` FIELD. An excess is `opened > expected`, and a stored answer to a
+// question these two numbers already answer is a second copy that can disagree
+// with them.
+type sessionsPayload struct {
+	// Opened is Declared + HandleGone. Refused opened nothing, so it is not in
+	// it.
+	Opened     int `json:"opened"`
+	Declared   int `json:"declared"`
+	HandleGone int `json:"handle_gone"`
+	Refused    int `json:"refused"`
+	// Expected is what the journal accounts for. Omitted when no flow handles
+	// this item, because the count the route asks for is read off a graph this
+	// binary would then not have — and a zero there would read as "the route
+	// asked for none", which is an accusation rather than an absence.
+	Expected *int `json:"expected,omitempty"`
 }
 
 // waitingPayload is a run that is deliberately idle: alive, holding the claim,

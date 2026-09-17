@@ -165,6 +165,20 @@ type stateLedgerDoc struct {
 	TotalCostUSD         float64 `yaml:"total_cost_usd,omitempty"`
 	TotalDurationSeconds float64 `yaml:"total_duration_seconds,omitempty"`
 	TotalWaitingSeconds  float64 `yaml:"total_waiting_seconds,omitempty"`
+	// Sessions is the treasurer's count of the agent sessions this resolution
+	// opened, item-level because the session is the resolution's. The HANDLE
+	// never comes near this comment (docs/github-schema.md § The agent session);
+	// a count is a ledger figure and travels with the rest of the ledger.
+	Sessions stateLedgerSessionsDoc `yaml:"sessions,omitempty"`
+}
+
+// stateLedgerSessionsDoc is the session count on the wire. A doc written before
+// the treasurer counted them has no `sessions` key and reads as zeroes, which is
+// the honest reading: nothing was counted.
+type stateLedgerSessionsDoc struct {
+	Declared   int `yaml:"declared,omitempty"`
+	HandleGone int `yaml:"handle_gone,omitempty"`
+	Refused    int `yaml:"refused,omitempty"`
 }
 
 type stateLedgerRowDoc struct {
@@ -194,6 +208,11 @@ func ledgerFromDoc(d stateLedgerDoc) flow.Ledger {
 		TotalCostUSD: d.TotalCostUSD,
 		TotalActive:  secondsToDuration(d.TotalDurationSeconds),
 		TotalWaiting: secondsToDuration(d.TotalWaitingSeconds),
+		Sessions: flow.SessionCounts{
+			Declared:   d.Sessions.Declared,
+			HandleGone: d.Sessions.HandleGone,
+			Refused:    d.Sessions.Refused,
+		},
 	}
 	if len(d.Steps) == 0 {
 		return l

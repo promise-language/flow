@@ -4472,3 +4472,48 @@ func TestBackend_Login_ReportsAFailedResolutionRatherThanAnEmptySelf(t *testing.
 		t.Errorf("Login = %q after the refusal cleared, want alice — the failure was memoised as the answer", login)
 	}
 }
+
+// The treasurer's session count is durable with the rest of the ledger. Filed
+// under the reason, and rowless: the session belongs to the resolution, so there
+// is no step to hang it off.
+func TestBackend_RecordSession_PersistsViaStateComment(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+
+	ctx := t.Context()
+	ref := b.refFromIssue(42)
+	claim, err := b.Claim(ctx, ref, nil)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	for _, r := range []flow.SessionReason{
+		flow.SessionDeclared, flow.SessionDeclared, flow.SessionHandleGone, flow.SessionRefused,
+	} {
+		if err := b.RecordSession(ctx, claim.ItemRef, r); err != nil {
+			t.Fatalf("RecordSession(%q): %v", r, err)
+		}
+	}
+	state, err := b.Load(ctx, claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := flow.SessionCounts{Declared: 2, HandleGone: 1, Refused: 1}
+	if state.Ledger.Sessions != want {
+		t.Errorf("sessions = %+v, want %+v", state.Ledger.Sessions, want)
+	}
+	if got := state.Ledger.Sessions.Opened(); got != 3 {
+		t.Errorf("Opened() = %d, want 3 — the refused request opened nothing", got)
+	}
+	// A reason this version does not know moves nothing rather than inventing a
+	// figure nothing can account for, and it is not an error either: the write
+	// happened, and there was no bucket for it.
+	if err := b.RecordSession(ctx, claim.ItemRef, "machinery-chose"); err != nil {
+		t.Fatalf("RecordSession(unknown): %v", err)
+	}
+	state, _ = b.Load(ctx, claim.ItemRef)
+	if state.Ledger.Sessions != want {
+		t.Errorf("sessions = %+v after an unknown reason, want %+v unchanged", state.Ledger.Sessions, want)
+	}
+}

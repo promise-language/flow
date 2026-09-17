@@ -872,6 +872,20 @@ type Orchestrator interface {
 	// never here.
 	AddDuration(ctx context.Context, ref ItemRef, step StepId, d time.Duration) error
 
+	// RecordSession files one request at the treasurer's third chokepoint under
+	// its reason: a session opened because the route declared one, a session
+	// opened because the handle was gone, or a refused request that opened none
+	// (docs/resolution.md § The treasurer).
+	//
+	// NO StepId, and that is the difference from every other ledger write. The
+	// session belongs to the RESOLUTION and outlives every step on the route, so
+	// the count is the item's and there is no row to hang it off.
+	//
+	// The reason-to-count mapping is SessionCounts.Record and nothing else: an
+	// orchestrator that switched on the reason itself would be a second answer to
+	// which figure a reason moves.
+	RecordSession(ctx context.Context, ref ItemRef, reason SessionReason) error
+
 	// AddWaiting adds time spent blocked on a declared exclusion, recorded apart
 	// from active time as evidence about contention rather than about the work
 	// (docs/resolution.md § The treasurer).

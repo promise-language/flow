@@ -1887,7 +1887,41 @@ func (s *stepCtx) resolutionSession() flow.AgentSession {
 // and never the step, because the prompt is what makes a dispatch right and the
 // handle decides only what it costs. The memo is updated whatever the store did,
 // so the rest of THIS dispatch behaves consistently with what was just decided.
+//
+// IT IS ALSO THE TREASURER'S THIRD CHOKEPOINT, on the one side of it that can
+// refuse: a write dropping a live handle discards a conversation the resolution
+// has already paid for, and every such write goes through here. Routing them all
+// through one function is what makes the guard structural — a future site that
+// decides a moment is special is refused by construction rather than reported
+// after the context is gone.
 func (s *stepCtx) setResolutionSession(sess flow.AgentSession) {
+	// A DISCARD the route does not account for. The session about to be thrown
+	// away is kept, the dispatch proceeds on it, and the attempt is recorded —
+	// no park, because the fix is in the graph or in the machinery rather than on
+	// the item, and parking would stop work over something no operator can clear
+	// (docs/resolution.md § The treasurer). Continuing silently would leave it
+	// invisible, which is what the record is for.
+	//
+	// Only a live handle can be refused: dropping an empty one discards nothing,
+	// and the opening that follows is classified at the prompt instead.
+	if held := s.resolutionSession(); held.SessionID != "" && sess.SessionID == "" &&
+		!s.sessionDiscardAccountedFor(held) {
+		s.recordSessionRequest(flow.SessionRefused)
+		// WHICH OF THE TWO TERMS FAILED, because the fixes are different ones: a
+		// step that should have declared `fresh` and did not, against machinery
+		// taking a second conversation on a step whose one declared discard is
+		// already spent.
+		declares := fmt.Sprintf("step %q declares Session %q", s.li.Result(), s.li.Session)
+		if s.li.Session == flow.SessionFresh {
+			declares += ", and the one conversation that declaration bought is already open"
+		}
+		s.Notify("", fmt.Sprintf(
+			"refused to discard the resolution's agent session: %s, and %s asked for another one "+
+				"the route does not account for. The session is kept and the dispatch continues on it. "+
+				"See docs/resolution.md § The treasurer",
+			declares, callSite(0)))
+		return
+	}
 	err := s.app.Orchestrator.SaveAgentSession(s.ctx, s.claim.ItemRef, sess)
 	if err != nil && !errors.Is(err, flow.ErrUnsupported) {
 		s.Notify("", "could not record the agent session: "+err.Error())
@@ -2048,6 +2082,23 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 	sess := m.stepCtx.resolutionSession()
 	req.ResumeSessionID = sess.SessionID
 	req.FreshSession = sess.SessionID == ""
+	// THE TREASURER'S THIRD CHOKEPOINT, on the side that opens rather than the
+	// side that refuses. A prompt going out with no handle held opens a session,
+	// so it is asked for and recorded here — before the request leaves, which is
+	// the only point at which asking is worth anything.
+	//
+	// Nothing is refusable at this moment: the handle is already empty, so no
+	// conversation is being discarded and a refusal would have nothing to save.
+	// What the classification decides is WHY — the route's, or a handle that was
+	// gone — and those have different fixes.
+	//
+	// Above the artifact/non-artifact split so a signal step's unmetered
+	// pass-through counts too, and below the mechanical refusal so a step
+	// declaring Prompts: none reaches nothing and leaves no record of having
+	// asked.
+	if req.FreshSession {
+		m.stepCtx.recordSessionRequest(m.stepCtx.sessionOpeningReason())
+	}
 	// Signal/await steps carry no cap policy worth metering. Allow the call to
 	// pass through unmetered — those steps shouldn't normally call the agent,
 	// but if they do the spend is not gated here.
@@ -2165,6 +2216,17 @@ func (m *meteredAgent) Run(ctx context.Context, req flow.AgentRequest) (*flow.Ag
 func (m *meteredAgent) recordSession(prev flow.AgentSession, resp *flow.AgentResponse) {
 	if resp == nil || resp.SessionID == "" || resp.SessionID == prev.SessionID {
 		return
+	}
+	// A handle was OFFERED and a different conversation came back: the substrate
+	// declined to resume, and a session was opened. The treasurer's third
+	// chokepoint counts it and cannot refuse it — this is a circumstance rather
+	// than a decision, and by the time it is visible the context is already gone
+	// (docs/resolution.md § The agent session).
+	//
+	// Where no handle was offered the opening was already counted before the
+	// request went out, so counting again here would bill one conversation twice.
+	if prev.SessionID != "" {
+		m.stepCtx.recordSessionRequest(flow.SessionHandleGone)
 	}
 	m.stepCtx.setResolutionSession(flow.AgentSession{
 		SessionID: resp.SessionID,

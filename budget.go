@@ -83,3 +83,53 @@ func EffectiveBudget(base StepBudget, row LedgerRow) StepBudget {
 	out.Timeout += time.Duration(row.GrantedOn(AxisTimeout) * float64(time.Second))
 	return out
 }
+
+// SessionsAccountedFor is how many agent sessions the route this item has
+// actually travelled asks for: one at the entry, and one more for each execution
+// of a step declaring SessionFresh (docs/resolution.md § The treasurer).
+//
+// READ OFF THE JOURNAL, NEVER THE GRAPH. A route may cross the same declaring
+// step more than once — nothing forbids a cycle and the disclosure repair uses a
+// back edge — so the graph offers no static total, while the journal records
+// exactly one entry per execution.
+//
+// THE ONE ARITHMETIC. The chokepoint classifies an opening by comparing the
+// ledger's count against this, and `status` flags an excess by comparing the
+// same two numbers. A second sum would let the party that approved a session and
+// the report that judged it disagree about what the route asked for.
+//
+// Three terms:
+//   - The entry's one. The first journal entry IS the entry step's first
+//     execution, and the resolution's first session is opened for it whether the
+//     entry declares `fresh` or inherits `continued` — so index 0 is never
+//     counted again below (docs/flow-registration.md § Session continuity).
+//   - One per later journal entry whose step declares `fresh`.
+//   - One for the pending step when it declares `fresh`, because the execution
+//     in flight has opened its session and has no journal entry yet. The pending
+//     step is inside the treasurer's vantage by the same section.
+//
+// It is deliberately an UPPER BOUND — an unregistered step id and a route
+// Position refuses contribute nothing rather than failing — because a false
+// excess flag accuses a resolution of waste it did not commit, which is worse
+// than missing an excess of one.
+func (f *Flow) SessionsAccountedFor(it *Item) int {
+	if f == nil || it == nil {
+		return 0
+	}
+	n := 1
+	// From 1: index 0 is the entry's execution, and its session is the one
+	// above.
+	for i := 1; i < len(it.Journal); i++ {
+		if li, ok := f.ItemByResult(it.Journal[i].Step); ok && li.Session == SessionFresh {
+			n++
+		}
+	}
+	// Only on a started resolution: with an empty journal the pending step IS the
+	// entry, whose session is the one above.
+	if len(it.Journal) > 0 {
+		if pos, err := f.Position(it); err == nil && !pos.Finalized && pos.Step.Session == SessionFresh {
+			n++
+		}
+	}
+	return n
+}

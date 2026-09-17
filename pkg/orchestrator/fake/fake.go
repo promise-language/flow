@@ -319,6 +319,7 @@ func cloneLedger(l flow.Ledger) flow.Ledger {
 		TotalCostUSD: l.TotalCostUSD,
 		TotalActive:  l.TotalActive,
 		TotalWaiting: l.TotalWaiting,
+		Sessions:     l.Sessions,
 	}
 	if l.Steps == nil {
 		return out
@@ -1326,6 +1327,27 @@ func (b *Orchestrator) AddWaiting(ctx context.Context, ref flow.ItemRef, step fl
 		row.Waiting += d
 		l.TotalWaiting += d
 	})
+}
+
+// RecordSession files one request at the treasurer's third chokepoint under its
+// reason. Item-level and rowless: the session belongs to the resolution, not to
+// the step that happened to be running when it was opened.
+//
+// The mapping is flow.SessionCounts.Record, shared with the github store, so one
+// rule decides which figure a reason moves.
+func (b *Orchestrator) RecordSession(ctx context.Context, ref flow.ItemRef, reason flow.SessionReason) error {
+	itemID, err := refID(ref)
+	if err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	rec.ledger.Sessions.Record(reason)
+	return nil
 }
 
 // Grant records the extension against the step's row and clears a
