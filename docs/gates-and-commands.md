@@ -120,7 +120,7 @@ The exec line is `bin/gate --list --json`, and the answer is one object on stdou
 
 A project tool renders its result for whoever is reading it — human at a terminal, JSON otherwise ([org/cli-guide.md](org/cli-guide.md) § 6) — and this query's stdout is a pipe, so a conforming entry point would send the object anyway. Asking for it is what makes that a contract rather than a coincidence, and it is the difference between a reader that works and one that works until someone attaches a terminal. The human rendering is a rendering: its labels and the very choice of one name per line are free to improve whenever they read better. **The object is the interface**, and it grows by adding fields.
 
-**This is the one invocation besides a measurement that writes to stdout and exits `0`**, and it does not reopen the second channel the section above closes. A caller that asked which gates exist did not ask for a measurement, and a listing cannot be mistaken for an envelope by anything that parses one.
+**Besides a measurement, this is the only invocation that puts gate data on stdout**, and it does not reopen the second channel the section above closes. A caller that asked which gates exist did not ask for a measurement, and a listing cannot be mistaken for an envelope by anything that parses one.
 
 **Only the name is addressed.** The summary is for a person reading the listing; a gate is asked for by name. A field the listing grows later is ignored rather than refused, which is what reading an additive interface means.
 
