@@ -444,6 +444,8 @@ func TestRenderStateComment_LedgerRoundTrip(t *testing.T) {
 				"pr-open": {Dispatches: 1},
 			},
 			TotalCostUSD: 4.25, TotalDurationSeconds: 90, TotalWaitingSeconds: 600,
+			// Item-level, with no row: the session belongs to the resolution.
+			Sessions: stateLedgerSessionsDoc{Declared: 2, HandleGone: 1, Refused: 1},
 		},
 	}
 
@@ -478,6 +480,13 @@ func TestRenderStateComment_LedgerRoundTrip(t *testing.T) {
 	if l.TotalCostUSD != 4.25 || l.TotalActive != 90*time.Second || l.TotalWaiting != 10*time.Minute {
 		t.Errorf("totals = %v/%v/%v, want 4.25/1m30s/10m", l.TotalCostUSD, l.TotalActive, l.TotalWaiting)
 	}
+	want := flow.SessionCounts{Declared: 2, HandleGone: 1, Refused: 1}
+	if l.Sessions != want {
+		t.Errorf("sessions = %+v, want %+v", l.Sessions, want)
+	}
+	if l.Sessions.Opened() != 3 {
+		t.Errorf("Opened() = %d, want 3 — the refused request opened nothing", l.Sessions.Opened())
+	}
 }
 
 // An untouched ledger writes no key and reads back as the zero value — not as a
@@ -495,6 +504,12 @@ func TestRenderStateComment_EmptyLedgerRoundTrip(t *testing.T) {
 	l := ledgerFromDoc(got.Ledger)
 	if len(l.Steps) != 0 || l.TotalCostUSD != 0 || l.TotalActive != 0 || l.TotalWaiting != 0 {
 		t.Errorf("ledger = %+v after the round trip, want the zero value", l)
+	}
+	// A state comment written before the treasurer counted sessions carries no
+	// `sessions` key, and reads back as zeroes rather than as an absence
+	// anything has to special-case.
+	if l.Sessions != (flow.SessionCounts{}) {
+		t.Errorf("sessions = %+v after the round trip, want the zero value", l.Sessions)
 	}
 }
 

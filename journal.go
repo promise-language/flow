@@ -2,6 +2,7 @@ package flow
 
 import (
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -236,6 +237,75 @@ func (r LedgerRow) GrantedOn(axis BudgetAxis) float64 {
 	return total
 }
 
+// SessionReason is why a new agent session was asked for at the treasurer's
+// third chokepoint (docs/resolution.md § The treasurer). Closed at three, and
+// the set is what tells the two causes apart: machinery starting over is a
+// defect in the flow, a backend that keeps no handle is a limit of what it runs
+// on, and they have different fixes.
+type SessionReason string
+
+const (
+	// SessionDeclared — the route asked for it: the resolution's first session,
+	// or a step declaring SessionFresh. Approved and counted; a declared new
+	// session is not the treasurer's to refuse, because independence is a
+	// property of the graph rather than a spending decision.
+	SessionDeclared SessionReason = "declared"
+	// SessionHandleGone — nobody's decision: the substrate declined the handle,
+	// or the backend keeps none. The conversation ended somewhere the system did
+	// not choose, so there was nothing to refuse. Approved and counted.
+	SessionHandleGone SessionReason = "handle-gone"
+	// SessionRefused — machinery asked to discard a live conversation the route
+	// does not account for. NOTHING WAS OPENED: the session is kept, the dispatch
+	// proceeds on it, and this records that the attempt happened, because
+	// continuing silently would leave it invisible.
+	SessionRefused SessionReason = "refused"
+)
+
+// AllSessionReasons returns every reason, in declaration order.
+func AllSessionReasons() []SessionReason {
+	return []SessionReason{SessionDeclared, SessionHandleGone, SessionRefused}
+}
+
+// Valid reports whether the reason is one of the three.
+func (r SessionReason) Valid() bool { return slices.Contains(AllSessionReasons(), r) }
+
+// SessionCounts is the treasurer's count of the agent sessions a resolution has
+// opened, kept by WHY each was opened.
+//
+// TALLIES, NOT A LOG. A backend with nowhere to keep a handle opens a session
+// per prompt, so a record of every request would grow the durable state without
+// bound. Three buckets answer both questions the count exists for: how many
+// (Opened), and which of the two causes it was — the one fixed in the flow, and
+// the one that is a limit of the substrate or the backend.
+type SessionCounts struct {
+	Declared   int
+	HandleGone int
+	// Refused counts attempts that opened NOTHING, so it is not in Opened.
+	Refused int
+}
+
+// Opened is how many sessions the resolution actually opened. A refusal opened
+// none, which is why it is not summed here.
+func (s SessionCounts) Opened() int { return s.Declared + s.HandleGone }
+
+// Record files one request under its reason. THE ONE REASON-TO-BUCKET MAPPING:
+// every orchestrator's store and the in-dispatch mirror go through it, so three
+// writers cannot disagree about which count a reason moves.
+//
+// An unrecognised reason moves nothing. A count is a claim about what was spent,
+// and inventing a bucket for a reason this version does not know would report a
+// figure nothing can account for.
+func (s *SessionCounts) Record(r SessionReason) {
+	switch r {
+	case SessionDeclared:
+		s.Declared++
+	case SessionHandleGone:
+		s.HandleGone++
+	case SessionRefused:
+		s.Refused++
+	}
+}
+
 // Ledger is the treasurer's record whole: a row per step, and the item-level
 // totals. Load returns it; nothing in the SDK writes it except through the
 // ledger methods on Orchestrator.
@@ -244,6 +314,11 @@ type Ledger struct {
 	TotalCostUSD float64
 	TotalActive  time.Duration
 	TotalWaiting time.Duration
+	// Sessions counts the agent sessions this resolution has opened, and the
+	// requests it refused. ITEM-LEVEL, not a row: the session belongs to the
+	// resolution and outlives every step on the route (docs/resolution.md § The
+	// agent session), so there is no step to hang it off.
+	Sessions SessionCounts
 }
 
 // Row returns the ledger row for a step, or the zero row when the step has none

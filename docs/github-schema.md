@@ -81,7 +81,17 @@ Each entry in `steps`:
 | `granted` | array | Operator extensions recorded against this step: each with `axis`, `amount`, `at`. |
 | `last_run_at` | timestamp | When the last dispatch started. |
 
-Item-level: `total_cost_usd`, `total_duration_seconds`, `total_waiting_seconds`.
+Item-level: `total_cost_usd`, `total_duration_seconds`, `total_waiting_seconds`, and `sessions`.
+
+The `sessions` object is the treasurer's count of the agent sessions this resolution opened, kept by **why** each was opened. Item-level and not a row: the session belongs to the resolution, not to whichever step was running when it was opened.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `declared` | int | Sessions the route asked for: the resolution's first, and one per execution of a step declaring `fresh`. |
+| `handle_gone` | int | Sessions opened because the handle was gone — the substrate declined it, or the backend keeps none. Nobody's decision. |
+| `refused` | int | Requests to discard a live conversation the route does not account for. **Nothing was opened**; the attempt is recorded so it is not invisible. |
+
+A state comment written before the treasurer counted sessions carries no `sessions` key, and reads back as zeroes.
 
 ### Signal entries
 
@@ -264,7 +274,9 @@ The GitHub backend's draft store is the worktree-local `.flow/draft/` directory.
 
 The backend's session store is the worktree-local `.flow/session/` directory, beside the draft tree and never published for the same structural reason: nothing in it touches the GitHub API. One file per issue — the session belongs to the resolution ([resolution.md](resolution.md) § The agent session), so it is **keyed by the issue number alone**, and keying it like a draft would end the conversation at the first step boundary. The record holds the substrate's handle and the step whose `fresh` declaration it already honoured; the issue number is stored in the file as well as in its path, so two ids that sanitise onto one name lose a record rather than hand one resolution another's conversation. It is cleared when the claim is released (via `clistate.Clear`) and when the item's record is reset.
 
-**Nothing about the session reaches the issue.** It is not in the state comment, not in the journal, and not in any published body: the handle names a conversation holding the resolution's whole reasoning.
+**Nothing of the session record reaches the issue.** The handle and the boundary it was stored with are not in the state comment, not in the journal, and not in any published body: the handle names a conversation holding the resolution's whole reasoning, and the boundary says which step's reasoning it is.
+
+**The treasurer's session count is not the session record**, and it does travel in the state comment, with the rest of the ledger (§ Ledger). A count of how many conversations a resolution bought, and why, names none of them and carries none of their reasoning — it is a spending figure of the same kind as cost and active time, and it is published for the same reason those are: an operator cannot see waste that is recorded nowhere they can read ([resolution.md](resolution.md) § The treasurer).
 
 ## Cross-references
 

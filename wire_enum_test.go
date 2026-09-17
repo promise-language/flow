@@ -281,6 +281,13 @@ func TestStepModelEnums_ExhaustiveAgainstAST(t *testing.T) {
 		// refused at every registration naming it, as with Capability.
 		{"step.go", "PromptPolicy", stringsOf(flow.AllPromptPolicies())},
 		{"step.go", "SessionPolicy", stringsOf(flow.AllSessionPolicies())},
+		// SessionReason is the treasurer's, not a declaration's, and the hole a
+		// missing member leaves is quieter still: SessionCounts.Record moves
+		// nothing for a reason it does not know, so a session opened under a
+		// member left out of the enumerator would be approved, spent, and
+		// counted nowhere — the one figure that exists to make that spend
+		// visible.
+		{"journal.go", "SessionReason", stringsOf(flow.AllSessionReasons())},
 		// Capability has no defined zero, but the enumerator is still the only
 		// thing standing between a declared member and a role that can never be
 		// assumed: Flow.Role validates a declaration against AllCapabilities,

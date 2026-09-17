@@ -436,6 +436,34 @@ func (b *Orchestrator) AddDuration(ctx context.Context, ref flow.ItemRef, step f
 	})
 }
 
+// RecordSession files one request at the treasurer's third chokepoint under its
+// reason. Item-level, with no row: the session is the resolution's.
+//
+// The reason-to-count mapping is flow.SessionCounts.Record, so this store and
+// the fake's cannot disagree about which figure a reason moves. The counts round
+// trip through the flow type rather than being incremented on the doc directly,
+// which is what keeps that mapping in one place.
+// mutateOrCreateStateDoc for the reason a row write takes it: the first session
+// a resolution opens may be the first thing anything records about the item, and
+// a ledger write that refused for want of a comment to write into would lose the
+// count of exactly the resolutions worth counting.
+func (b *Orchestrator) RecordSession(ctx context.Context, ref flow.ItemRef, reason flow.SessionReason) error {
+	return b.mutateOrCreateStateDoc(ctx, ref, "RecordSession", func(doc *stateDoc) error {
+		counts := flow.SessionCounts{
+			Declared:   doc.Ledger.Sessions.Declared,
+			HandleGone: doc.Ledger.Sessions.HandleGone,
+			Refused:    doc.Ledger.Sessions.Refused,
+		}
+		counts.Record(reason)
+		doc.Ledger.Sessions = stateLedgerSessionsDoc{
+			Declared:   counts.Declared,
+			HandleGone: counts.HandleGone,
+			Refused:    counts.Refused,
+		}
+		return nil
+	})
+}
+
 // AddWaiting adds time spent blocked on a declared exclusion, reported by the
 // party that held the wait.
 func (b *Orchestrator) AddWaiting(ctx context.Context, ref flow.ItemRef, step flow.StepId, d time.Duration) error {
@@ -740,8 +768,8 @@ const stateWriteAttempts = 3
 //
 //  3. On a foreign write, the mutation is REPLAYED against the document that is
 //     actually there. Every mutator is an in-place delta — AppendEntry, Grant,
-//     RecordDispatch, AddCost, AddDuration, PostAnswer, Park — so replay is
-//     exactly what they mean, and both changes survive.
+//     RecordDispatch, AddCost, AddDuration, RecordSession, PostAnswer, Park — so
+//     replay is exactly what they mean, and both changes survive.
 //
 // The comparison is the comment's ETag, so docs/github-schema.md's wire format
 // is untouched: no version field, no new marker, nothing on the surface.
