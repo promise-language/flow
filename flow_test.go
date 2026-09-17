@@ -1,6 +1,12 @@
 package flow
 
 import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -744,4 +750,152 @@ func TestAddStep_PanicsOnEmptyDescription(t *testing.T) {
 		}
 	}()
 	NewFlow("x", nil).AddStep("", "plan", noopHandler, StepConfig{Prompts: PromptsAgent})
+}
+
+// ---------------------------------------------------------------------------
+// The SDK declares no graph of its own.
+//
+// This repository ships what a flow binary composes its own graph FROM, and no
+// graph. That is the line #403 drew when it deleted `issue/` — the step set,
+// the two roles, and the ten prompt bodies that drove them — while keeping
+// StepConfig, ValidateGraph, budgets, the journal, claims and roles.
+//
+// It is checked rather than remembered because of how it breaks: a recipe added
+// back here compiles and passes every other test, and it brings prompt bodies
+// with it — a graph is what prompt bodies are FOR, so a graph is how they
+// return. Nothing else in this repository would say so. The agent-turn ratchet
+// (tools/build/common/agentturns.go) refuses the dispatch rather than the
+// recipe, and a library rendering text for someone ELSE's binary to send asks
+// for no turn at all.
+//
+// Two places legitimately compose a graph: `examples/`, which exists to show
+// one being composed, and tests, which build one to exercise the machinery.
+// ---------------------------------------------------------------------------
+
+// flowBuilders are the entry points that declare a graph: the constructor and
+// the four methods that add to it. Matched by name — the scan does not
+// type-check, and a package composing a flow through names of its own is not
+// the quiet case this catches.
+var flowBuilders = map[string]bool{
+	"NewFlow":       true,
+	"AddStep":       true,
+	"AddSignalStep": true,
+	"AwaitSignal":   true,
+	"RequireSignal": true,
+}
+
+// sdkGraphExempt reports the files allowed to compose a graph.
+func sdkGraphExempt(rel string) bool {
+	return strings.HasPrefix(rel, "examples/") || strings.HasSuffix(rel, "_test.go")
+}
+
+// graphBuilderCalls returns every call to a flow builder under root, as
+// "<path>:<line> <name>", skipping what exempt reports. The exemption is a
+// parameter so the same scan can be run over the same tree with nothing exempt,
+// which is what shows it capable of finding anything at all.
+func graphBuilderCalls(root string, exempt func(rel string) bool) ([]string, error) {
+	var found []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" || d.Name() == "bin" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		rel = filepath.ToSlash(rel)
+		if exempt(rel) {
+			return nil
+		}
+
+		fset := token.NewFileSet()
+		file, parseErr := parser.ParseFile(fset, path, nil, 0)
+		if parseErr != nil {
+			// A file that does not parse is the build gate's business, and it
+			// reports one far better than a scanner can.
+			return nil
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if name := calleeName(call); flowBuilders[name] {
+				found = append(found, fmt.Sprintf("%s:%d %s", rel, fset.Position(call.Pos()).Line, name))
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walking %s: %w", root, err)
+	}
+	return found, nil
+}
+
+// calleeName is the identifier a call names: "NewFlow" for NewFlow(…), and
+// "AddStep" for f.AddStep(…) and for the qualified flow.AddStep(…) alike.
+func calleeName(call *ast.CallExpr) string {
+	switch fn := call.Fun.(type) {
+	case *ast.Ident:
+		return fn.Name
+	case *ast.SelectorExpr:
+		return fn.Sel.Name
+	}
+	return ""
+}
+
+// The invariant: nothing in this module declares a step graph.
+func TestSDKDeclaresNoStepGraph(t *testing.T) {
+	found, err := graphBuilderCalls(".", sdkGraphExempt)
+	if err != nil {
+		t.Fatalf("scanning the module: %v", err)
+	}
+	if len(found) > 0 {
+		t.Errorf("a step graph is composed inside the SDK:\n  %s\n\n"+
+			"This repository ships what a binary composes a graph FROM and no graph of its "+
+			"own (#403): a recipe here brings the prompt bodies that drive it back with it. "+
+			"Compose the graph in the binary that runs it — examples/ is where one is shown.",
+			strings.Join(found, "\n  "))
+	}
+}
+
+// A scan that finds nothing because it is broken passes exactly as one that
+// finds nothing because the invariant holds. So the same scan runs over the
+// same tree with nothing exempt, and must find the two places this repository
+// DOES compose a graph: a walk that stopped reaching real files, a matcher that
+// stopped recognising a builder, or an exemption that swallowed everything
+// fails here instead of passing above forever.
+func TestGraphBuilderScan_FindsTheGraphsThisRepositoryComposes(t *testing.T) {
+	found, err := graphBuilderCalls(".", func(string) bool { return false })
+	if err != nil {
+		t.Fatalf("scanning the module: %v", err)
+	}
+
+	var example, test bool
+	for _, site := range found {
+		if strings.HasPrefix(site, "examples/") {
+			example = true
+		}
+		if strings.Contains(site, "_test.go:") {
+			test = true
+		}
+	}
+	if !example {
+		t.Errorf("the scan found no graph under examples/, which composes one:\n  %s",
+			strings.Join(found, "\n  "))
+	}
+	if !test {
+		t.Errorf("the scan found no graph in a test, and this package's tests compose several:\n  %s",
+			strings.Join(found, "\n  "))
+	}
 }
