@@ -10,7 +10,7 @@
 
 Not politeness, and not quality. **Every mechanism this project uses to make a change cheap to accept is item-scoped**, and a request with no item has none of them:
 
-- **No plan.** The intent exists only in the code, and the plan step exists precisely because intent written after the code is a description of work done ([issue-flow.md](../issue-flow.md) § Plan).
+- **No plan.** The intent exists only in the code, and the plan step exists precisely because intent written after the code is a description of work done ([archive/issue-flow.md](../archive/issue-flow.md) § Plan).
 - **No producing phases.** Implement, review and coverage are three passes and three commits, so what was built, what was corrected, and what was tested are separable. One commit is one undifferentiated act.
 - **No gate result.** Nothing was measured by this project's gate before the request was opened, so the request is a guess about whether it can land.
 - **No journal.** There is no item to attach one to, so nothing the review measures has anywhere to be recorded, and a second reviewer starts from zero.
@@ -63,6 +63,6 @@ That keeps one path rather than two. The item is what a change answers to, what 
 ## Relationship to other documents
 
 - [proposals/outside-contribution.md](outside-contribution.md) — the path a change actually takes, and the measurements a maintainer makes on it.
-- [issue-flow.md](../issue-flow.md) — the producing phases and the filing shape an item's resolution uses.
+- [archive/issue-flow.md](../archive/issue-flow.md) — the producing phases and the filing shape an item's resolution uses.
 - [proposals/untrusted-sources.md](untrusted-sources.md) — the acceptance question an item filed from a request inherits.
 - [org/normative.md](../org/normative.md) — the reconciliation invariant a change with no item cannot satisfy.

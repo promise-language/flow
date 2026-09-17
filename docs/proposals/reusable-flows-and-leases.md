@@ -206,8 +206,8 @@ identical.
 
 ### 3.5 Prompt composition + project-configurable guardrails
 
-Keep the existing two layers: a domain-agnostic skeleton in
-[prompt](../../prompt/prompt.go) (partials, `{{.VerifyCmd}}`, item header, …) and
+Keep the existing two layers: a domain-agnostic skeleton in the `prompt` package
+(partials, `{{.VerifyCmd}}`, item header, …) and
 per-project prompt builders supplied via `Config.Prompts`. Add a
 backward-compatible **guardrails** seam so a project can inject prompt
 prefix/suffix prose and resource-limit guidance without editing the SDK:

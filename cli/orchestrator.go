@@ -969,11 +969,11 @@ func completeStep(
 //
 // A violation is ParkBlocked, deliberately NOT ParkWriteContract. The
 // write-contract kind says the AGENT moved something it was not permitted to
-// move (docs/issue-flow.md § A step's write contract is checked), and a step
-// that ended on the wrong branch or over a dirty tree may have violated nothing
-// of the sort — it may simply have finished somewhere its declaration does not
-// allow it to finish. Mis-attributing that to the agent sends the operator to
-// inspect evidence of something that never happened.
+// move (docs/archive/issue-flow.md § A step's write contract is checked), and a
+// step that ended on the wrong branch or over a dirty tree may have violated
+// nothing of the sort — it may simply have finished somewhere its declaration
+// does not allow it to finish. Mis-attributing that to the agent sends the
+// operator to inspect evidence of something that never happened.
 //
 // Failing to MEASURE is not the step's violation: a branch that could not be
 // read, or names that could not be resolved, park infra-transient, which a

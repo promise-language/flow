@@ -124,7 +124,7 @@ Two facts, not one. The account that filed it is already carried and is not enou
 
 **It is not a chain of trust.** That is the tempting name and it is wrong in the direction that matters: in a chain of trust each link vouches for the next, and here nothing vouches for anything. What travels the chain is not trust but **derivation** — and the entire reason to record it is that trust does *not* follow it. The record is the item's **provenance**; the walk from an item back to the text it came from is its **chain of origin**.
 
-**The chain is walked, not copied.** Each item records its immediate parent and nothing further; the chain is derived by following them. A copy would drift from the items it describes, would have to be rewritten on every item whose ancestor was transferred or retyped, and would be a second answer to a question the parents already answer — the same reason a resolution records the commit it produced rather than a patch of it ([issue-flow.md](../issue-flow.md) § The implementation lives in the branch).
+**The chain is walked, not copied.** Each item records its immediate parent and nothing further; the chain is derived by following them. A copy would drift from the items it describes, would have to be rewritten on every item whose ancestor was transferred or retyped, and would be a second answer to a question the parents already answer — the same reason a resolution records the commit it produced rather than a patch of it ([archive/issue-flow.md](../archive/issue-flow.md) § The implementation lives in the branch).
 
 **Depth is bounded by nothing, and that is not a problem.** A reconciliation pass files items whose resolutions file more. A chain ten long is a real history, and reading it is a query rather than a burden. What matters is that the walk terminates, and it does: every item was filed while resolving an item that already existed.
 
@@ -171,4 +171,4 @@ What the chain of origin buys under every one of the three readings is the same,
 - [orchestrator.md](../orchestrator.md) — where the `BlockKind` member and the acceptance-record contract would land.
 - [cli.md](../cli.md) — where the permit, the refusals, and the listing behaviour would land.
 - [github-schema.md](../github-schema.md) — where the GitHub orchestrator's own acceptance record would be described.
-- [issue-flow.md](../issue-flow.md) — the filing route whose outputs the chain of origin describes, and the filing shape a plan elects.
+- [archive/issue-flow.md](../archive/issue-flow.md) — the filing route whose outputs the chain of origin describes, and the filing shape a plan elects.

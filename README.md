@@ -823,7 +823,6 @@ usage and exits 0 without running it.
 ├── pkg/orchestrator/fake/       in-memory orchestrator for SDK tests (read this first when writing your own)
 ├── pkg/orchestrator/github/ GitHub-Issues orchestrator: state-comment index, claim race-lock, worktree, signal polling, orphan-branch artifact spillover
 ├── examples/verify/        minimal one-step "run go test" flow
-├── examples/issue/         contributor (fix) + maintainer (merge) flows on one issue
 └── docs/                   architecture docs
 ```
 

@@ -47,8 +47,6 @@ under-report and read as nearly done.
   routes, item types, signal preconditions.
 - [artifacts-and-signals.md](artifacts-and-signals.md) — The two result kinds and the
   vocabulary depending on them.
-- [issue-flow.md](issue-flow.md) — The concrete step graph this repository ships for resolving
-  issues.
 - [github-schema.md](github-schema.md) — The on-issue wire format: state comment, artifact
   comments, orphan branch.
 - [tags.md](tags.md) — The label vocabulary for this repository's issues: document tags, the
@@ -98,3 +96,6 @@ their tags is its own compliance gaps.
 
 - [archive/design.md](archive/design.md) — The original storage-schema design; archived, and
   the gap of a normative successor is carried as an issue.
+- [archive/issue-flow.md](archive/issue-flow.md) — The concrete step graph this repository
+  once shipped for resolving issues; archived when the library implementing it moved in-tree
+  to its only consumer. The `issue-flow` label outlives it.

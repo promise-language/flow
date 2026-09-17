@@ -29,7 +29,7 @@ import (
 // a binary reading its cwd resolves decoy/decoy there and gets further,
 // producing different output from the second run. A binary anchored to itself
 // answers identically from both, about its own checkout.
-func TestIssueBinaryAnswersTheSameFromAnyWorkingDirectory(t *testing.T) {
+func TestReferenceBinaryAnswersTheSameFromAnyWorkingDirectory(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX layout")
 	}
@@ -42,21 +42,21 @@ func TestIssueBinaryAnswersTheSameFromAnyWorkingDirectory(t *testing.T) {
 	tmp := t.TempDir()
 	root := filepath.Join(tmp, "root")
 	decoy := filepath.Join(tmp, "decoy")
-	exe := filepath.Join(root, "bin", "issue")
+	exe := filepath.Join(root, "bin", "verify")
 	if err := os.MkdirAll(filepath.Dir(exe), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	// Build the reference binary INTO the checkout it is meant to belong to:
-	// <root>/bin/issue, which is where every flow binary is built.
+	// <root>/bin/verify, which is where every flow binary is built.
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("cannot locate this test's own source, so cannot find the module to build")
 	}
-	build := exec.Command("go", "build", "-o", exe, "github.com/promise-language/flow/examples/issue")
+	build := exec.Command("go", "build", "-o", exe, "github.com/promise-language/flow/examples/verify")
 	build.Dir = filepath.Dir(thisFile)
 	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build ./examples/issue: %v\n%s", err, out)
+		t.Fatalf("go build ./examples/verify: %v\n%s", err, out)
 	}
 
 	// The binary's own checkout has NO origin — so resolving the repository
@@ -89,7 +89,7 @@ func TestIssueBinaryAnswersTheSameFromAnyWorkingDirectory(t *testing.T) {
 		)
 		out, err := cmd.CombinedOutput()
 		if err == nil {
-			t.Fatalf("issue status run from %s succeeded; its own checkout has no origin, "+
+			t.Fatalf("verify status run from %s succeeded; its own checkout has no origin, "+
 				"so it must fail:\n%s", cwd, out)
 		}
 		return string(out)
