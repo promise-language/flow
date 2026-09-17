@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,7 +41,32 @@ var commandDir = filepath.Join("tools", "build", "cmd")
 // gateListArgs asks the gate entry point which gates this project has. The
 // entry point is the only party that knows, and asking it is the only way to
 // learn that cannot drift from what a run would actually find.
-var gateListArgs = []string{"--list"}
+//
+// THE MACHINE-READABLE FORM IS ASKED FOR RATHER THAN ASSUMED. A project tool
+// renders its result for whoever is reading it — one bare name per line at a
+// terminal, JSON when stdout is not one (docs/org/cli-guide.md § 6) — and a
+// listing a program depends on must not rest on that detection going its way.
+// The human form is a rendering: its labels, its columns, and the very choice
+// of one name per line are free to improve whenever they read better. The JSON
+// is the interface, and it is the one that promises to evolve additively.
+//
+// Leaning on the detection is how this broke. The query's stdout is a pipe, so
+// an entry point obliging a program it could not see handed back a JSON object
+// — and every line of it failed to parse as a gate name, leaving an empty list
+// no caller could tell from an entry point that was never built.
+var gateListArgs = []string{"--list", "--json"}
+
+// gateListLegacyArgs is the same question without the flag, asked only when
+// asking with it failed.
+//
+// An entry point predating --json refuses the flag and exits non-zero, and
+// that refusal must not read as "this machine has no gates": the cost of
+// getting this wrong is paid silently, by an operator told to build tools that
+// are already built and answering.
+//
+// Transitional, and its removal is #414: it goes when every project's entry
+// point takes --json.
+var gateListLegacyArgs = []string{"--list"}
 
 // declarationTimeout bounds the list query. It is short on purpose: this runs
 // at startup, before any work, and a gate entry point that cannot say what it
@@ -79,7 +105,8 @@ func discoverCommands(root string) []flow.CommandDef {
 	return out
 }
 
-// SupportedGates asks the gate entry point what it supports, one name per line.
+// SupportedGates asks the gate entry point what it supports, and reads the
+// listing it writes back.
 //
 // `integration` and `fit` are marked required when they come back — the
 // contract requires an orchestrator to have them, and this one reports what it
@@ -92,14 +119,16 @@ func (b *Orchestrator) SupportedGates() []flow.GateDef {
 }
 
 func discoverGates(root string) []flow.GateDef {
+	// One deadline covers both attempts. What is bounded is how long this SDK
+	// waits to learn what a machine can run, not how many ways it asks.
 	ctx, cancel := context.WithTimeout(context.Background(), declarationTimeout)
 	defer cancel()
 
-	argv := append(append([]string{}, gateEntryPoint...), gateListArgs...)
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.Dir = root
-	out, err := cmd.Output()
-	if err != nil {
+	out, answered := askGateList(ctx, root, gateListArgs)
+	if !answered {
+		out, answered = askGateList(ctx, root, gateListLegacyArgs)
+	}
+	if !answered {
 		// An absent, unexecutable or silent entry point is a machine with no
 		// gates — which is what a checkout whose tools are not yet built looks
 		// like. Every caller reads that correctly: the commands that would run
@@ -110,9 +139,8 @@ func discoverGates(root string) []flow.GateDef {
 	}
 
 	var gates []flow.GateDef
-	for _, line := range strings.Split(string(out), "\n") {
-		name := flow.GateName(strings.TrimSpace(line))
-		if name == "" || !name.Valid() {
+	for _, name := range listedGateNames(out) {
+		if !name.Valid() {
 			// A name this SDK does not know is not a gate it can ask for. It
 			// is skipped rather than refused: the entry point is free to have
 			// gates of its own, and this list is what the SDK can address.
@@ -122,4 +150,57 @@ func discoverGates(root string) []flow.GateDef {
 	}
 	slices.SortFunc(gates, func(a, c flow.GateDef) int { return strings.Compare(string(a.Name), string(c.Name)) })
 	return gates
+}
+
+// askGateList runs the entry point with one set of arguments and returns what
+// it wrote.
+//
+// An error means it was absent, could not run, refused the arguments, or was
+// killed at the deadline. In every one of those it has not said what it
+// supports, and reading a list out of a diagnostic would declare gates on the
+// strength of an error message.
+func askGateList(ctx context.Context, root string, args []string) ([]byte, bool) {
+	argv := append(append([]string{}, gateEntryPoint...), args...)
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+// gateListing is the machine-readable form of the listing. Only the name is
+// read: the listing carries a summary per gate as well, and this SDK addresses
+// a gate by name. Anything it grows later is ignored here rather than refused,
+// which is what reading an additive interface means.
+type gateListing struct {
+	Gates []struct {
+		Name flow.GateName `json:"name"`
+	} `json:"gates"`
+}
+
+// listedGateNames reads the names out of whichever form came back.
+//
+// Both are accepted for as long as both are in circulation, and the parser is
+// the half that cannot be dropped on a flag day: an entry point that refuses
+// --json may still answer the bare query in JSON, because its own stdout is a
+// pipe either way. What retires with gateListLegacyArgs is the second spawn
+// (#414), not the ability to read a line.
+func listedGateNames(out []byte) []flow.GateName {
+	var listing gateListing
+	if err := json.Unmarshal(out, &listing); err == nil {
+		names := make([]flow.GateName, 0, len(listing.Gates))
+		for _, g := range listing.Gates {
+			names = append(names, g.Name)
+		}
+		return names
+	}
+	var names []flow.GateName
+	for _, line := range strings.Split(string(out), "\n") {
+		if name := flow.GateName(strings.TrimSpace(line)); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }

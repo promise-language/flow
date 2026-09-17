@@ -113,6 +113,97 @@ func TestDeclarations_AreReadOncePerOrchestrator(t *testing.T) {
 	}
 }
 
+// The listing a program reads is asked for. A project tool decides how to
+// render a result from whether its stdout is a terminal, and this query's
+// never is — so an entry point asked the bare question hands back the JSON it
+// writes for programs, and a reader expecting lines finds no gate in it. That
+// empty list is indistinguishable from an unbuilt checkout, and what the
+// operator is told is to build tools that are already there.
+func TestSupportedGates_AsksForTheMachineReadableListing(t *testing.T) {
+	requireRealProcesses(t)
+	dir := t.TempDir()
+	writeGateEntryPoint(t, dir, `case "$*" in
+"--list --json") printf '{"gates":[{"name":"fit","summary":"a"},{"name":"integration","summary":"b"},{"name":"tested","summary":"c"},{"name":"not-a-gate","summary":"d"}]}\n' ;;
+*) echo "gate: unknown flag" >&2; exit 2 ;;
+esac`)
+
+	got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates()
+	if strings.Join(names2(got), ",") != "fit,integration,tested" {
+		t.Errorf("SupportedGates() = %v, want the three the listing named (and not the unknown one)", names2(got))
+	}
+	// The contract's two are marked required; the project's own are not — the
+	// same property the bare-name path has always had, over the other wire.
+	for _, g := range got {
+		wantRequired := g.Name == flow.GateFit || g.Name == flow.GateIntegration
+		if g.Required != wantRequired {
+			t.Errorf("gate %q required = %v, want %v", g.Name, g.Required, wantRequired)
+		}
+	}
+}
+
+// An entry point that predates the flag refuses it, and refusing it is not
+// saying there are no gates. The question is asked again without it, which is
+// what keeps every project that has not upgraded yet runnable — this one
+// included, until #415 lands.
+func TestSupportedGates_FallsBackWhenTheFlagIsRefused(t *testing.T) {
+	requireRealProcesses(t)
+	dir := t.TempDir()
+	writeGateEntryPoint(t, dir, `case "$*" in
+"--list") printf 'fit\nintegration\ntested\n' ;;
+*) echo "gate: unknown flag -json" >&2; exit 2 ;;
+esac`)
+
+	got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates()
+	if strings.Join(names2(got), ",") != "fit,integration,tested" {
+		t.Errorf("SupportedGates() = %v, want the three the entry point named", names2(got))
+	}
+}
+
+// The fallback reads the JSON too, and that is the half of this that cannot
+// retire with the second spawn: an entry point old enough to refuse --json
+// still renders for a pipe, so the bare query answers in JSON on exactly the
+// machines the fallback exists for.
+func TestSupportedGates_FallbackReadsEitherForm(t *testing.T) {
+	requireRealProcesses(t)
+	dir := t.TempDir()
+	writeGateEntryPoint(t, dir, `case "$*" in
+"--list") printf '{"gates":[{"name":"fit"},{"name":"integration"}]}\n' ;;
+*) exit 2 ;;
+esac`)
+
+	got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates()
+	if strings.Join(names2(got), ",") != "fit,integration" {
+		t.Errorf("SupportedGates() = %v, want the two the listing named", names2(got))
+	}
+}
+
+// The second spawn is a fallback, not a second question. An entry point that
+// answers the flagged query is asked once: asking both every time would make
+// every conformant project pay a process spawn at startup for a refusal path
+// it never takes, and would hide an ordering mistake — asking the legacy form
+// first works just as well until the day the fallback is removed (#414).
+func TestSupportedGates_TheFlagIsNotAskedTwice(t *testing.T) {
+	requireRealProcesses(t)
+	dir := t.TempDir()
+	writeGateEntryPoint(t, dir, `printf 'asked\n' >> `+filepath.Join(dir, "asked")+`
+case "$*" in
+"--list --json") printf '{"gates":[{"name":"fit"},{"name":"integration"}]}\n' ;;
+*) exit 2 ;;
+esac`)
+
+	got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates()
+	if strings.Join(names2(got), ",") != "fit,integration" {
+		t.Fatalf("SupportedGates() = %v, want the two the listing named", names2(got))
+	}
+	asked, err := os.ReadFile(filepath.Join(dir, "asked"))
+	if err != nil {
+		t.Fatalf("the entry point was never asked: %v", err)
+	}
+	if spawns := strings.Count(string(asked), "\n"); spawns != 1 {
+		t.Errorf("the entry point was spawned %d times, want 1 — the legacy query is a fallback", spawns)
+	}
+}
+
 // writeGateEntryPoint installs a bin/gate that answers --list with body.
 func writeGateEntryPoint(t *testing.T, root, body string) {
 	t.Helper()
