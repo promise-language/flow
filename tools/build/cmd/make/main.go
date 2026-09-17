@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/promise-language/flow/tools/build/common"
 	"github.com/promise-language/forge/primitives"
 )
 
@@ -54,7 +55,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "warning: could not configure git hooks: %v\n", err)
 	}
 
-	tools, err := discoverTools(filepath.Join(repoRoot, "tools", "build", "cmd"))
+	tools, err := common.CommandNames(repoRoot)
 	must(err)
 
 	binDir := filepath.Join(repoRoot, "bin")
@@ -106,29 +107,6 @@ func main() {
 	}
 	must(os.WriteFile(hashFile, []byte(sb.String()), 0o644))
 	fmt.Printf("built %d tool(s) into bin/\n", len(tools))
-}
-
-// discoverTools is the tool set: one tool per directory under
-// tools/build/cmd, except make itself, which runs from source and is never
-// compiled into bin/. The listing IS the registry — there is no list anywhere
-// to keep in step with it, so adding a tool is adding a directory and retiring
-// one is deleting it (#199 retired `guard` that way); the next ./make removes
-// the binary it had built for the retired name (see pruneRetired).
-//
-// A file under cmd/ is not a tool: `go build ./cmd/<name>` wants a package.
-func discoverTools(cmdDir string) ([]string, error) {
-	entries, err := os.ReadDir(cmdDir)
-	if err != nil {
-		return nil, err
-	}
-	var tools []string
-	for _, e := range entries {
-		if e.IsDir() && e.Name() != "make" {
-			tools = append(tools, e.Name())
-		}
-	}
-	sort.Strings(tools)
-	return tools, nil
 }
 
 // readSidecar parses the hash sidecar: line 1 is the tools-source hash, lines
@@ -193,7 +171,7 @@ func upToDate(hashFile, hash, binDir string, tools []string) bool {
 
 // pruneRetired removes the binaries an earlier ./make built for tools that no
 // longer exist. Retiring a tool is deleting its directory under cmd/ (see
-// discoverTools); without this, the binary built for it stays in bin/ in every
+// common.CommandNames); without this, the binary built for it stays in bin/ in every
 // clone that ever built it. #199 retired `guard` and left a bin/guard behind —
 // the exact "binary under a guard name" that main_test.go's guardNames
 // defends against.

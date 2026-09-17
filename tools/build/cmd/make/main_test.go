@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/promise-language/flow/tools/build/common"
 	"github.com/promise-language/forge/primitives"
 )
 
@@ -893,37 +894,6 @@ var guardNames = []string{"guard", "tool-guard", "precommit-guard"}
 // directory under cmd/ builds it.
 var provisionedBinaries = []string{"tool-guard", "precommit-guard", "workspace"}
 
-func TestDiscoverTools_ListsDirectoriesExceptMake(t *testing.T) {
-	cmdDir := t.TempDir()
-	for _, name := range []string{"verify", "make", "gate"} {
-		if err := os.Mkdir(filepath.Join(cmdDir, name), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// A file is not a tool: `go build ./cmd/notes.md` is not a build.
-	if err := os.WriteFile(filepath.Join(cmdDir, "notes.md"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := discoverTools(cmdDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(got, ",") != "gate,verify" {
-		t.Errorf("discoverTools() = %v, want [gate verify] — make runs from source and a file is not a package", got)
-	}
-}
-
-// A cmd directory that cannot be read is not an empty tool set. Reporting no
-// tools with no error would take the up-to-date short circuit — nothing to
-// build, every expected binary present, "Tools up to date" — and leave bin/
-// however it was found, which for a fresh clone is empty.
-func TestDiscoverTools_UnreadableDirectoryIsAnError(t *testing.T) {
-	if _, err := discoverTools(filepath.Join(t.TempDir(), "cmd")); err == nil {
-		t.Error("discoverTools() succeeded on a missing cmd directory; make would report every tool up to date having built none")
-	}
-}
-
 // The #199 regression, and the reason the deletion was the whole change: the
 // tool set is the directory listing, so re-creating tools/build/cmd/guard is
 // by itself enough to bring the twin back. On an artifact-provisioned clone
@@ -989,7 +959,7 @@ func TestCommittedHooks_NameOnlySuppliedBinaries(t *testing.T) {
 // repoTools is the tool set of THIS repository, read the way make reads it.
 func repoTools(t *testing.T) []string {
 	t.Helper()
-	tools, err := discoverTools(filepath.Join(repoRoot(t), "tools", "build", "cmd"))
+	tools, err := common.CommandNames(repoRoot(t))
 	if err != nil {
 		t.Fatalf("reading this repository's cmd directory: %v", err)
 	}

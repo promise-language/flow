@@ -25,7 +25,7 @@ var (
 func usage() string {
 	var sb strings.Builder
 	sb.WriteString("run — measure one gate and judge what it measured.\n\n")
-	sb.WriteString("Usage:\n  run <gate> [-h | -help]\n  run <gate> --verdict < envelope\n\n")
+	sb.WriteString("Usage:\n  run <gate> [-h | -help]\n  run <gate> --verdict < envelope\n  run --list [--json | --human]\n\n")
 	sb.WriteString("Runs bin/gate <gate> --envelope, then prints each measurement beside the\n")
 	sb.WriteString("term it was judged on. Exit 0 means every capped measurement is within its\n")
 	sb.WriteString("cap; non-zero means one is not, or that nothing could be measured.\n\n")
@@ -34,6 +34,11 @@ func usage() string {
 	sb.WriteString("mode the SDK asks — the SDK spawns the gate, because a judge that ran its\n")
 	sb.WriteString("own measurement would be the runner, and the runner comes from outside the\n")
 	sb.WriteString("tree.\n\n")
+	sb.WriteString("With --list it answers what this project builds and what it can be asked\n")
+	sb.WriteString("to measure, as two labelled groups for a person and as one object for\n")
+	sb.WriteString("anything reading it. The query takes no argument: it is what the project\n")
+	sb.WriteString("builds, never what is currently built, so it answers in a clone where\n")
+	sb.WriteString("nothing has been built yet.\n\n")
 	sb.WriteString("Gates:\n")
 	for _, n := range common.GateNames() {
 		fmt.Fprintf(&sb, "  %-12s %s\n", n, common.GateSummary(n))
@@ -55,6 +60,35 @@ func main() {
 		os.Exit(0)
 	}
 	primitives.CheckStale(repoRoot, sourceHash)
+
+	// The discovery query, answered before the single-name rule below, because
+	// it names nothing: refusing it for having no gate would read as a project
+	// with nothing to run.
+	//
+	// After CheckStale, and for the reason every other mode is: the entry point
+	// is a built artifact, and a listing printed by a binary built from an
+	// earlier tree describes that tree and reads as an answer about this one.
+	if asked, of, err := common.ParseListArgs(args); asked {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "run: %v; run `%s -h` for usage\n", err, os.Args[0])
+			os.Exit(2)
+		}
+		mode, err := of.Mode()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "run: %v\n", err)
+			os.Exit(2)
+		}
+		list, err := common.CollectBuildList(repoRoot)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "run: %v\n", err)
+			os.Exit(1)
+		}
+		if err := common.WriteBuildList(os.Stdout, mode, list); err != nil {
+			fmt.Fprintf(os.Stderr, "run: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	name, verdict, err := common.ParseRunArgs(args)
 	if err != nil {

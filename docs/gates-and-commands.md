@@ -248,6 +248,24 @@ That is also why a gate keeps exactly one output mode. A gate that pretty-printe
 
 **The SDK never invokes this mode.** The judging entry point below is the same program with a flag: `bin/run <gate>` measures and then judges, while `bin/run <gate> --verdict` judges an envelope it was handed and spawns nothing. Only the second is asked by anything a decision rests on — a judging entry point that ran its own gate would be the runner, and the runner may not come from the tree.
 
+#### What this project builds and answers
+
+**`bin/run --list` answers what this project builds and what it can be asked to measure.** It exits `0` having spawned nothing, read nothing on stdin and judged nothing — it is a declaration, not a run.
+
+**The two kinds stay separable**: the commands are the binaries this project's own builder writes into `bin/`, and the gates are the names [`bin/gate --list`](#which-gates-a-project-has-is-asked-for-and-answered-as-json) declares. A reader of one kind is asking about binaries and a reader of the other is asking about measurements, and a merged list would put a tool name beside a gate name for a reader that has to tell them apart.
+
+They do share one namespace for whoever types a name, because `run <name>` addresses both. So **a name that is a command and a gate is refused rather than resolved by precedence**: precedence would make the shadowed name unreachable while both still appeared in the listing, and nothing in the listing would say which one a caller had reached.
+
+**Neither half is enumerated in the entry point's source.** The gates are the map the measurements themselves come from; the commands are the same directory listing `./make` builds from, read by one function both call. A list written down beside either would be a second copy, and the copy that drifts is the one nothing reads. The acceptance test is that adding a command is adding a directory: it appears here with no other edit, and deleting the directory removes it.
+
+**The listing is what this project BUILDS, not what is currently built.** It answers in a clone where `./make` has never run, which is what makes a missing binary diagnosable rather than a contradiction — and `bin/` is not the answer, because it holds binaries this project did not build.
+
+**Both renderings, selected by [org/cli-guide.md](org/cli-guide.md) § 6**: two labelled groups one name per line for a person at a terminal, one JSON object for anything else, with `--json` and `--human` forcing either and both together a usage error before anything is written. The object is `{"commands": ["verify", …], "gates": ["tested", …]}` — two arrays of plain names, unsuffixed, because the caller applies the host's executable suffix. An empty array is this project stating it builds none, which is an answer; an entry point that could not be asked is the unknown, and that is the asker's to detect.
+
+**The query takes no argument beside `--json` or `--human`.** One that accepted a name would invite being read as a filter, and a caller reading a filtered listing as the build set would see a collision that is not there.
+
+This is the listing [workspace's `doctor`](https://github.com/promise-language/workspace/blob/main/docs/generic-projects.md) asks a managed repository for, and what it reports about a project that cannot answer it.
+
 ### Where the verdict is made
 
 A gate cannot be asked for a verdict, and neither can a runner: `measured` says a measurement exists, not that it is acceptable.
