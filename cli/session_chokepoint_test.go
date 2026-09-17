@@ -447,6 +447,85 @@ func TestSessionChokepoint_ASecondDiscardOnAFreshStepIsRefused(t *testing.T) {
 	wantSessions(t, be, claim, flow.SessionCounts{Declared: 2, Refused: 1})
 }
 
+// A SIGNAL STEP'S PROMPT IS UNMETERED AND STILL COUNTED. Those steps carry no
+// cap policy worth metering, so the turn passes through the chokepoint ungated —
+// but a conversation it opened was still bought, and a spend nothing gates is
+// exactly the one a count has to see. The record sits ABOVE the artifact split
+// for that reason, and below the mechanical refusal for the opposite one.
+func TestSessionChokepoint_ASignalStepsUnmeteredPromptIsCounted(t *testing.T) {
+	agent := &sessionAgent{}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		// Prompts nothing itself: the only conversation on this route is the one
+		// the signal step opens, so the count cannot be the entry's by accident.
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Next("pr-open", "the plan is written").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true,
+			Next: []flow.StepId{"pr-open"}})
+		f.AddSignalStep("create pull request", "pr-open", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"}); err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Finalize(flow.DispositionResolved, "the change is proposed"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor",
+			MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, agent)
+
+	runSteps(t, app, claim, 2)
+	// The turn did go out: a count of zero would otherwise be right for the
+	// wrong reason.
+	if len(agent.reqs) != 1 {
+		t.Fatalf("the agent saw %d requests, want 1 from the signal step", len(agent.reqs))
+	}
+	wantSessions(t, be, claim, flow.SessionCounts{Declared: 1})
+}
+
+// A SUBSTRATE THAT NAMES NO SESSION opens one every prompt: there is no handle
+// to record, so nothing is carried from one prompt to the next inside a single
+// dispatch. The route accounts for the first; each one after it is the handle
+// having been gone, which is the excess the count exists to make visible.
+//
+// This is the one shape where the chokepoint classifies twice in a dispatch, and
+// so the one that holds the in-dispatch mirror honest: a classification reading
+// the count the item was LOADED with would call the second opening the route's
+// too, and report two declared conversations on a route that declared one.
+func TestSessionChokepoint_ASubstrateNamingNoSessionCountsEachPromptAfterTheFirst(t *testing.T) {
+	// stubAgent answers without a SessionID, which is what a substrate with no
+	// such notion does (docs/agent.md § AgentResponse).
+	agent := &stubAgent{name: "nameless"}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			for range 2 {
+				if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"}); err != nil {
+					return flow.StepResult{}, err
+				}
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true,
+			MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, agent)
+
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
+		t.Fatalf("RunOne = (%+v, %v), want done — a substrate with no sessions is expensive, not broken", res, err)
+	}
+	// Both prompts went out with nothing to resume, which is what makes the
+	// second one an opening rather than a continuation.
+	for n, req := range agent.reqs {
+		if req.ResumeSessionID != "" || !req.FreshSession {
+			t.Errorf("request %d = (ResumeSessionID %q, FreshSession %v), want (\"\", true)",
+				n, req.ResumeSessionID, req.FreshSession)
+		}
+	}
+	wantSessions(t, be, claim, flow.SessionCounts{Declared: 1, HandleGone: 1})
+
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, want := state.Ledger.Sessions.Opened(), app.Flow.SessionsAccountedFor(state); got <= want {
+		t.Errorf("opened %d sessions against a route accounting for %d — want an excess to flag", got, want)
+	}
+}
+
 // sessionRecordFailsBackend has a ledger that will not take the session count.
 type sessionRecordFailsBackend struct {
 	*fake.Orchestrator
@@ -643,6 +722,52 @@ func TestStatusHuman_FlagsTheExcessAndTheRefusals(t *testing.T) {
 	want := "sessions: 3 opened (1 declared, 2 handle-gone), 1 refused — 2 more than the route accounts for"
 	if !strings.Contains(out, want) {
 		t.Errorf("status output does not carry %q:\n%s", want, out)
+	}
+}
+
+// A FINISHED ROUTE IS STILL JUDGED AGAINST ITSELF, and a finished resolution is
+// exactly when an operator asks whether the item bought its conversation twice —
+// nothing else about such a resolution looks wrong afterwards, and by then there
+// is nothing left to watch it happen.
+//
+// What a route asks for is read off the JOURNAL, which a route that elected a
+// disposition still has. Reading it off the ELIGIBLE step instead would lose the
+// comparison at the end of every route, because a route that has ended has no
+// eligible step.
+func TestStatusJSON_AnEndedRouteStillReportsWhatItAccountsFor(t *testing.T) {
+	env := newParkGrantEnv(t)
+	// plan → commit → pr-open, which finalizes. Every step continues, so the
+	// whole route accounts for the entry's one conversation.
+	runSteps(t, env.app, env.claim, 3)
+	recordSessions(t, env, flow.SessionDeclared, 1)
+	recordSessions(t, env, flow.SessionHandleGone, 2)
+
+	if code := env.app.cmdStatus(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdStatus = %d; stderr=%q", code, env.err.String())
+	}
+	payload := decode(t, env.out)
+	// The condition the choice of graph turns on: the route elected a
+	// disposition, so there is no eligible step left to read one off.
+	if got := payload["flow_state"]; got != "no-eligible-step" {
+		t.Fatalf("flow_state = %v, want no-eligible-step — this test is about a route that ended", got)
+	}
+	spend, ok := payload["spend"].(map[string]any)
+	if !ok {
+		t.Fatalf("spend = %v, want an object", payload["spend"])
+	}
+	s, ok := spend["sessions"].(map[string]any)
+	if !ok {
+		t.Fatalf("spend.sessions = %v, want an object", spend["sessions"])
+	}
+	if got := s["opened"]; got != float64(3) {
+		t.Errorf("sessions.opened = %v, want 3", got)
+	}
+	expected, present := s["expected"]
+	if !present {
+		t.Fatalf("sessions payload carries no %q on a route that ended: %v — the journal is still there to read it off", "expected", s)
+	}
+	if expected != float64(1) {
+		t.Errorf("sessions.expected = %v, want 1 — the entry's, and every step after it continues", expected)
 	}
 }
 

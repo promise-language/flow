@@ -124,10 +124,18 @@ func journalOf(steps ...StepId) []JournalEntry {
 	return out
 }
 
+// An unstarted route asks for the entry's one WHATEVER THE ENTRY DECLARES. With
+// an empty journal the pending step IS the entry, so the pending term and the
+// leading one are the same session — counting both would have the chokepoint
+// approve a second opening in the entry's own dispatch as the route's, and would
+// have `status` report a route asking for two conversations on a graph that has
+// one step on it so far.
 func TestSessionsAccountedFor_UnstartedRouteAsksForTheEntrysOne(t *testing.T) {
-	f := sessionFlow(t, SessionContinued, SessionContinued, SessionContinued)
-	if got := f.SessionsAccountedFor(&Item{}); got != 1 {
-		t.Errorf("SessionsAccountedFor(empty journal) = %d, want 1 — the entry's", got)
+	for _, entry := range []SessionPolicy{SessionContinued, SessionFresh} {
+		f := sessionFlow(t, entry, SessionContinued, SessionContinued)
+		if got := f.SessionsAccountedFor(&Item{}); got != 1 {
+			t.Errorf("SessionsAccountedFor(empty journal, entry %q) = %d, want 1 — the entry's", entry, got)
+		}
 	}
 }
 
