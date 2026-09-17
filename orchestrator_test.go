@@ -400,6 +400,32 @@ func TestGateRegression_ErrorNamesBothLists(t *testing.T) {
 	}
 }
 
+// The required clause appears only when a required gate went, and its absence
+// is load-bearing. A project gate the change retired is still the finding — but
+// a report that named it required would tell an operator no arena can start,
+// which is the one thing this regression does not mean, and would send them
+// after a cross-repository repair that nothing here needs.
+//
+// The clause's presence is asserted above; nothing asserted it could be absent,
+// so dropping the condition on it would have gone out reading "— required: "
+// with nothing after it.
+func TestGateRegression_ErrorOmitsTheRequiredClauseWhenNoneWent(t *testing.T) {
+	reg := CheckGatesHeld(declares(GateIntegration, GateFit, GateCovered), declares(GateIntegration, GateFit))
+	if reg == nil {
+		t.Fatal("CheckGatesHeld() found no regression")
+	}
+	msg := reg.Error()
+	if strings.Contains(msg, "required") {
+		t.Errorf("Error() = %q, want no required clause — `covered` is the project's own gate", msg)
+	}
+	if !strings.Contains(msg, "declaration(s): covered") {
+		t.Errorf("Error() = %q, want it to name the gate that went", msg)
+	}
+	if !strings.Contains(msg, "covered, fit, integration") {
+		t.Errorf("Error() = %q, want the before-listing whole", msg)
+	}
+}
+
 // A caller that wants an error gets one through Err(), and a change that
 // removed nothing gets a NIL one.
 //

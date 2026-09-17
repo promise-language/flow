@@ -449,6 +449,80 @@ func TestLandingRead_ReportsAChangeThatBrokeTheListing(t *testing.T) {
 	}
 }
 
+// A change that only RE-RENDERS the listing is not a regression, and this is
+// the half that decides whether the check can be left switched on. The test
+// above is the true positive; a check that also parked on an entry point moving
+// onto the object would refuse the very change #416 requires, on every project,
+// at the moment it makes it — and the first operator to meet that would turn
+// the check off.
+//
+// Both directions, because both happen: onto the object now, and back off it in
+// the mirror case the comparison never learns about — a project still printing
+// bare names under a consumer that bumped past #414. Neither is visible here,
+// and that is the point: the names are the same names because the same reader
+// read them.
+func TestLandingRead_AFormChangeIsNotARegression(t *testing.T) {
+	requireRealProcesses(t)
+	const asObject = `printf '{"gates":[{"name":"fit","summary":"a"},{"name":"integration","summary":"b"},{"name":"tested","summary":"c"}]}\n'`
+	const asLines = `printf 'fit\nintegration\ntested\n'`
+
+	for _, tt := range []struct{ name, before, after string }{
+		{"one bare name per line, then the object", asLines, asObject},
+		{"the object, then one bare name per line", asObject, asLines},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeGateEntryPoint(t, dir, tt.before)
+			before := DiscoverGates(context.Background(), dir)
+			if got := strings.Join(names2(before), ","); got != "fit,integration,tested" {
+				t.Fatalf("the before-read = %q, want the three the entry point declared", got)
+			}
+
+			writeGateEntryPoint(t, dir, tt.after)
+			now := DiscoverGates(context.Background(), dir)
+
+			if reg := flow.CheckGatesHeld(before, now); reg != nil {
+				t.Errorf("CheckGatesHeld() reported %q gone, want no regression — the same names in another rendering", gateNameList(reg.Gone))
+			}
+		})
+	}
+}
+
+// The UPDATE direction, which has no resolution to hang a check on: nothing in
+// the project moved, the requirement did. An installer holds a tree and a
+// requirement and asks the same question through the same call — this read, and
+// flow.MissingGates over what it answered — so nothing outside this SDK
+// reimplements discovery to find out whether the checkout it has just written
+// can still be driven.
+//
+// The bare-names row is the one that matters. It is a tree a JSON-only check
+// would report as declaring nothing, which is a release condemning every
+// checkout that has not upgraded its entry point yet.
+func TestInstallerRead_MeasuresATreeAgainstWhatIsRequired(t *testing.T) {
+	requireRealProcesses(t)
+	for _, tt := range []struct {
+		name      string
+		body      string // "" installs no entry point at all
+		wantShort string
+	}{
+		{"a tree answering the object", `printf '{"gates":[{"name":"fit"},{"name":"integration"},{"name":"tested"}]}\n'`, ""},
+		{"a tree still printing bare names", `printf 'fit\nintegration\ntested\n'`, ""},
+		{"a tree that stopped declaring one of them", `printf '{"gates":[{"name":"integration"},{"name":"tested"}]}\n'`, "fit"},
+		{"a tree whose entry point was never built", "", "integration,fit"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tt.body != "" {
+				writeGateEntryPoint(t, dir, tt.body)
+			}
+			got := gateNameList(flow.MissingGates(DiscoverGates(context.Background(), dir)))
+			if got != tt.wantShort {
+				t.Errorf("MissingGates(DiscoverGates()) = %q, want %q", got, tt.wantShort)
+			}
+		})
+	}
+}
+
 // writeGateEntryPoint installs a bin/gate that answers --list with body.
 func writeGateEntryPoint(t *testing.T, root, body string) {
 	t.Helper()
