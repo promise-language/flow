@@ -42,18 +42,16 @@ import (
 //
 // ADDING AN ENTRY IS THE MAINTAINER'S DECISION, NOT THE COMMITTER'S. Removing
 // one when the call goes away is ordinary upkeep and needs nobody's approval.
-var approvedAgentTurns = map[string]int{
-	"issue/steps.go (*builder).stepPlan":              1,
-	"issue/steps.go (*builder).stepImplement":         1,
-	"issue/steps.go (*builder).commitWithRepair":      2,
-	"issue/steps.go (*builder).producingMarkdownStep": 1,
-	"issue/steps.go (*builder).stepRepairDisclosure":  1,
-	"issue/steps.go (*builder).runAgent":              1,
-	"issue/steps.go (*builder).resolveQuestion":       1,
-	"issue/steps.go (*builder).agentMarkdownStep":     1,
-
-	"issue/steps_maintainer.go (*builder).stepReviewProposal": 1,
-}
+//
+// It is EMPTY, and that is the correct state for this repository rather than a
+// list someone forgot to fill. Every entry it held was a step of the issue
+// recipe, which shipped from `issue/` until that package was deleted and the
+// graph moved to the binaries that run it. What remains here is the machinery a
+// binary composes a flow FROM — and the SDK's own plumbing forwards a turn
+// somebody else asked for rather than asking for one, which is not this list's
+// business. A turn added anywhere in this repository is refused against an
+// empty list exactly as it was against a full one.
+var approvedAgentTurns = map[string]int{}
 
 // checkApprovedAgentTurns refuses a commit that asks for an agent turn anywhere
 // but an approved call site, and refuses a stale list.

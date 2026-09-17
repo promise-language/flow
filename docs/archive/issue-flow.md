@@ -1,22 +1,35 @@
+> **Archived, and NOT normative.** This document specified the issue step graph this
+> repository shipped as a library: `issue/` — the graph, the two roles, the coverage gate
+> and the answer protocol — together with `prompt/`'s shared partials and the worked
+> consumer in `examples/issue/`. All three were deleted once the only consumer took the
+> graph and the prompt bodies in-tree ([promise-language/workspace#452](https://github.com/promise-language/workspace/issues/452)).
+> Nothing in this repository implements these steps, and no flow binary built from this
+> SDK is obliged to have them: a flow composes its own graph, and this was one graph.
+>
+> Normative documents live at the top of `docs/`. Where this file and a normative
+> document disagree, the normative document is correct and this one is history.
+>
+> It is kept because the `issue-flow` label outlives it: the items that record this work
+> cite these sections by name.
+
+---
+
 # The issue flow
 
-> **Tag:** `issue-flow` — remaining work to complete this document: the query named in
-> [`docs/index.md`](index.md).
-
-**Normative.** The step graph this repository ships for resolving issues, and what each step must do.
+The step graph this repository shipped for resolving issues, and what each step had to do.
 
 `docs/resolution.md` defines the process, boundaries and responsibilities common to any resolution. `docs/resolution-standalone.md` defines the model this flow runs under. This document defines **these steps and these routes** — a different flow may hold every property in those documents with a different graph.
 
 ## Roles
 
-The graph declares two roles ([resolution.md](resolution.md) § Accounts, capabilities and roles):
+The graph declares two roles ([resolution.md](../resolution.md) § Accounts, capabilities and roles):
 
 | Role | Requires | Performs |
 |---|---|---|
 | **contributor** | push | Producing and proposing a change, or filing the items that resolve the issue |
 | **maintainer** | push, merge | Judging a proposal: integrating it, returning it for rework, or rejecting it |
 
-One principal covering both roles, on an account that backs both, crosses the boundary without a handoff — that is carry-through ([resolution.md](resolution.md) § One principal, several roles). Two principals are the split: the contributor's part ends at the proposal, and the item awaits the maintainer.
+One principal covering both roles, on an account that backs both, crosses the boundary without a handoff — that is carry-through ([resolution.md](../resolution.md) § One principal, several roles). Two principals are the split: the contributor's part ends at the proposal, and the item awaits the maintainer.
 
 ## The graph
 
@@ -50,7 +63,7 @@ The plan step's deliverable is a decision about the work — and part of that de
 
 The shapes differ in what the artifact is and in what the worktree contract means. On the filing route no step touches the tree, and that is by declaration, not by exception: a filing forced through the change route arrives at steps whose contract expects commits, where the actual deliverable — items filed on the backend — reads as a violation and the resolution stops on work done correctly. The route is how the same flow holds both kinds of work to the right contract.
 
-Filing writes are **outward writes**: every item filed passes the disclosure guard ([disclosure.md](disclosure.md)) like anything else that leaves the machine.
+Filing writes are **outward writes**: every item filed passes the disclosure guard ([disclosure.md](../disclosure.md)) like anything else that leaves the machine.
 
 ### Verify is a tool, not a step
 
@@ -96,7 +109,7 @@ A refusal **blocks the resolution on a named reason.** It is not a route and not
 
 The set is closed. A refusal fitting none of these means the vocabulary is wrong, not that a fifth may be invented in prose.
 
-**Waiting on items is not a refusal.** A plan that finds the work pending under other items — behaviour this item needs that is being built elsewhere, or a change that cannot be made until something else has landed — declares those items as blockers and stops as blocked on them ([resolution.md](resolution.md) § Blocked on items). It is not `duplicate`: a duplicate says this item is redundant and a person redirects, where a blocked item is still this item's work, waiting. And it is not a fifth refusal, because nobody decides anything: the blockers land, and the plan runs again from where it stood with nobody having acted. The line is who acts — a refusal means no change will help and a person decides; blocked on items means the work exists elsewhere and will arrive.
+**Waiting on items is not a refusal.** A plan that finds the work pending under other items — behaviour this item needs that is being built elsewhere, or a change that cannot be made until something else has landed — declares those items as blockers and stops as blocked on them ([resolution.md](../resolution.md) § Blocked on items). It is not `duplicate`: a duplicate says this item is redundant and a person redirects, where a blocked item is still this item's work, waiting. And it is not a fifth refusal, because nobody decides anything: the blockers land, and the plan runs again from where it stood with nobody having acted. The line is who acts — a refusal means no change will help and a person decides; blocked on items means the work exists elsewhere and will arrive.
 
 **Not knowing enough to plan is different and is not a refusal.** An item that could be planned given an answer asks the question and parks, which is a resumable state — the plan step will run again with the answer in hand. Refusing means no answer would help.
 
@@ -108,7 +121,7 @@ What it keeps is a draft, not a result: it completes nothing, only the step that
 
 The **Writes** column is a contract, and every step is held to it after it runs.
 
-Prevention comes first — each step's declaration is a layer of the action guard, so a plan dispatch has a file write refused as it is attempted: the union of the general rules, the contributor role's restrictions, and plan's own layer ([resolution.md](resolution.md) § Guards), refusing a forbidden action before it runs and letting the agent adapt while it works rather than losing the whole prompt.
+Prevention comes first — each step's declaration is a layer of the action guard, so a plan dispatch has a file write refused as it is attempted: the union of the general rules, the contributor role's restrictions, and plan's own layer ([resolution.md](../resolution.md) § Guards), refusing a forbidden action before it runs and letting the agent adapt while it works rather than losing the whole prompt.
 
 But prevention is enforced **by the agent**, not by this flow, which passes a configuration and trusts the outcome. A shell, a tool that shells out, or a mode that does not apply cleanly goes straight through it. So prevention is worth having, is the cheapest place to catch a violation, and is not the guarantee.
 
@@ -130,7 +143,7 @@ One check covers all three because they are one question: **did this step do onl
 
 ### The branching sequence is declared
 
-Every step declares the worktree state it needs and the state it leaves ([resolution.md](resolution.md) § Steps and the worktree), so the resolution's whole branching story is written down here, not improvised route by route — committed and clean at every boundary, which is the commit contract's guarantee:
+Every step declares the worktree state it needs and the state it leaves ([resolution.md](../resolution.md) § Steps and the worktree), so the resolution's whole branching story is written down here, not improvised route by route — committed and clean at every boundary, which is the commit contract's guarantee:
 
 | Step | Needs | Leaves |
 |---|---|---|
@@ -160,11 +173,11 @@ The check costs two reads and turns an unenforceable instruction into an invaria
 
 Close branch runs when the contributor's part **completed**. A run that parked, was blocked, or failed leaves the worktree exactly where it stopped, because that state is what someone will resume from or diagnose.
 
-Returning the worktree is not the same act as releasing a claim. An operator releasing mid-work is stepping away and **keeps their branch** — release deletes nothing — but they still commit what is in the tree and return to the base before the claim can be dropped, because a release must leave the arena fit for the next item ([cli.md](cli.md) § Releasing). A contributor role that finished is done with the branch and owes the arena a clean starting point either way; the difference is what happens to the branch, not whether the worktree is returned.
+Returning the worktree is not the same act as releasing a claim. An operator releasing mid-work is stepping away and **keeps their branch** — release deletes nothing — but they still commit what is in the tree and return to the base before the claim can be dropped, because a release must leave the arena fit for the next item ([cli.md](../cli.md) § Releasing). A contributor role that finished is done with the branch and owes the arena a clean starting point either way; the difference is what happens to the branch, not whether the worktree is returned.
 
 ### The implementation lives in the branch, and the record names it
 
-The deliverable of a producing step is the **commit it left on the branch**, and what it records is that commit — a result captured from the tree, in [artifacts-and-signals.md](artifacts-and-signals.md)'s sense.
+The deliverable of a producing step is the **commit it left on the branch**, and what it records is that commit — a result captured from the tree, in [artifacts-and-signals.md](../artifacts-and-signals.md)'s sense.
 
 Recording a diff instead would be recording a copy. The copy can legitimately be empty — a resumed branch whose work an earlier run already committed has a clean tree, so there is nothing left to capture — which means an empty record cannot be read as "the step did nothing" without deadlocking a resumption over work sitting right there in the branch. A copy that may be empty, that nothing reads back, and that can disagree with the thing it copies is not a record worth keeping.
 
@@ -230,9 +243,9 @@ That is the whole boundary, and it is worth stating because the two steps otherw
 
 **The boundary is physical: two commits.** Implement's work and review's work are separate commits on the branch, so what each step did is visible rather than inferred. A reader asking "what did the review change" reads a commit, not a diff between two states nobody recorded.
 
-**The boundary is also conversational: this is the one step in this flow that begins a new agent session.** A resolution is one conversation and its steps continue it, so `review` is the single place an author declared `Session: fresh` ([flow-registration.md](flow-registration.md) § Session continuity) — declared for **independence**, not for hygiene: review answers to the code, and an agent still holding the deliberations that produced what it judges reliably agrees with them. Everything else on the route continues, the mechanical steps included — open branch runs between plan and implement precisely so the implementing conversation picks up where the planning one left off.
+**The boundary is also conversational: this is the one step in this flow that begins a new agent session.** A resolution is one conversation and its steps continue it, so `review` is the single place an author declared `Session: fresh` ([flow-registration.md](../flow-registration.md) § Session continuity) — declared for **independence**, not for hygiene: review answers to the code, and an agent still holding the deliberations that produced what it judges reliably agrees with them. Everything else on the route continues, the mechanical steps included — open branch runs between plan and implement precisely so the implementing conversation picks up where the planning one left off.
 
-So this step arrives at a conversation that has never heard of the item, and its prompt names the item for that reason. That is the handle staying an optimisation: it decides what a dispatch costs and never what it produces ([resolution.md](resolution.md) § The agent session).
+So this step arrives at a conversation that has never heard of the item, and its prompt names the item for that reason. That is the handle staying an optimisation: it decides what a dispatch costs and never what it produces ([resolution.md](../resolution.md) § The agent session).
 
 **It fixes what it finds.** It is reading the change right now; leaving a fault for someone else costs another prompt to rediscover what this step is looking at.
 
@@ -266,16 +279,16 @@ The request body carries the plan, each producing step's briefing, and the gate'
 
 **On a rework round the request already exists.** The push updates it; a second request is never opened for the same branch, and the step completes on the request being current rather than on it being new.
 
-**It is mechanical on every path, and that is a declaration it is held to.** What the branch carries can be refused twice on the way out — by the pre-commit hook at the commit, and by the disclosure guard at the push — and **neither refusal is answered here**. Repairing one in place would make the longest cheap step in the flow one that can spend, which costs it all three guarantees a mechanical step earns ([flow-registration.md](flow-registration.md) § Step configuration): free, deterministic, and cheap to retry.
+**It is mechanical on every path, and that is a declaration it is held to.** What the branch carries can be refused twice on the way out — by the pre-commit hook at the commit, and by the disclosure guard at the push — and **neither refusal is answered here**. Repairing one in place would make the longest cheap step in the flow one that can spend, which costs it all three guarantees a mechanical step earns ([flow-registration.md](../flow-registration.md) § Step configuration): free, deterministic, and cheap to retry.
 
 The two refusals stop differently, and what separates them is the state of the tree:
 
 | Refused | What it does | Why |
 |---|---|---|
 | **the push**, by the disclosure guard | elects **repair disclosure** and completes | the tree is committed and clean, so the step completes into its declared state and the repair takes the branch from there |
-| **the commit**, by the pre-commit hook | **blocks**, keeping the hook's words with the step | the refused work is still in the tree, and a step that ends over a dirty tree has not completed ([resolution.md](resolution.md) § Steps and the worktree) — a flow does not leave one step's changes uncommitted for a later step to sweep up |
+| **the commit**, by the pre-commit hook | **blocks**, keeping the hook's words with the step | the refused work is still in the tree, and a step that ends over a dirty tree has not completed ([resolution.md](../resolution.md) § Steps and the worktree) — a flow does not leave one step's changes uncommitted for a later step to sweep up |
 
-**A commit refused here is an anomaly, not a routine repair.** Every producing step commits its own work through the same repair, in its own dispatch where prompting is what it is for, so uncommittable content reaching this step means a step before it left work behind. The block says so, and the remedy is the one the commit contract names — deletion, not an ignore rule ([resolution.md](resolution.md) § The commit contract).
+**A commit refused here is an anomaly, not a routine repair.** Every producing step commits its own work through the same repair, in its own dispatch where prompting is what it is for, so uncommittable content reaching this step means a step before it left work behind. The block says so, and the remedy is the one the commit contract names — deletion, not an ignore rule ([resolution.md](../resolution.md) § The commit contract).
 
 **A push refusal that survives one repair round blocks.** The repair answers the refusal in one dispatch, so a branch arriving back from it still refused has had its round, and electing the same round again is how a loop is built. What was refused is kept with the step, unpublished, for whoever clears the block. A later rework round arrives from coverage rather than from the repair, so a fresh refusal there earns a fresh repair.
 
@@ -285,7 +298,7 @@ Rewrites the history that names what may not leave the machine, so the branch ca
 
 It exists because the mechanical part is the deliverable: the request's job is to gate, commit, push and propose, and the repair is a rare answer to a refusal on that job's failure path — the one shape `flow-registration.md` recommends splitting. The record it leaves is the more valuable half: **a resolution that rewrote its own history to get a push out used to leave no trace of why**, and the journal entry names it.
 
-**It is not handed the refusal.** Every hand-off is published — an election message, a park record — through the same guard that refused it, and the unpublished draft belongs to the step that wrote it ([resolution.md](resolution.md) § Drafts). So it receives the **act**, and asks the guard itself what a push of this branch would carry, without pushing ([disclosure.md](disclosure.md) § A refusal does not travel). The answer never leaves the dispatch, and it is the current one where a copy could be stale.
+**It is not handed the refusal.** Every hand-off is published — an election message, a park record — through the same guard that refused it, and the unpublished draft belongs to the step that wrote it ([resolution.md](../resolution.md) § Drafts). So it receives the **act**, and asks the guard itself what a push of this branch would carry, without pushing ([disclosure.md](../disclosure.md) § A refusal does not travel). The answer never leaves the dispatch, and it is the current one where a copy could be stale.
 
 **It commits before it asks**, through the same repair every producing step commits through. The tree it is handed is clean, so that is normally nothing at all — it is there because what the guard is asked about must be the branch **as the commit left it**, and a round arriving over a tree that still carries work would otherwise ask about a state nobody proposes.
 
@@ -315,7 +328,7 @@ Its election is the decision, and the three routes are the three honest outcomes
 - **implement** — the proposal needs work the contributor must do. The message carries what must change and why, specifically enough to act on: a handback with a vague message spends a full contributor round to rediscover what this step already knew. The route crosses back to the contributor's account of record.
 - **finalize: rejected** — the item should not be resolved by this proposal or any successor to it, with the reasons in the finalizing message.
 
-The distinction between the last two is the one worth deciding deliberately: rework expects the resolution to continue; rejection ends it ([resolution.md](resolution.md) § Finalizing).
+The distinction between the last two is the one worth deciding deliberately: rework expects the resolution to continue; rejection ends it ([resolution.md](../resolution.md) § Finalizing).
 
 A merged request found already in place — a human integrated by hand — is not an anomaly: the step observes `pr-merged` set and elects the route onward, so the record still completes.
 
@@ -347,8 +360,8 @@ Files what was decided, and records the filed references as its result — the `
 
 Mechanical: what to file was decided at plan, and that the set closes the gap was established at review the filing. Every filed item is an outward write, guarded as every outward write is.
 
-**Filing is resumable, not atomic — completion is the atomic act.** The backend files one item at a time and offers no transaction, so the step never pretends otherwise: each intended item is filed through the orchestrator's idempotent surface ([orchestrator.md](orchestrator.md) § Filing), keyed by this item and the intended item's key, so a dispatch interrupted after filing three of five files the two missing on resume and duplicates nothing. The journal entry appends only when every intended item exists — the step completes whole or not at all, and the `filed-items` artifact lists exactly what exists.
+**Filing is resumable, not atomic — completion is the atomic act.** The backend files one item at a time and offers no transaction, so the step never pretends otherwise: each intended item is filed through the orchestrator's idempotent surface ([orchestrator.md](../orchestrator.md) § Filing), keyed by this item and the intended item's key, so a dispatch interrupted after filing three of five files the two missing on resume and duplicates nothing. The journal entry appends only when every intended item exists — the step completes whole or not at all, and the `filed-items` artifact lists exactly what exists.
 
-**A guard refusal routes back to plan.** The refused text is the plan's — the intended items are its artifact — and this step is mechanical: retrying it cannot change a word, so parking here would buy the loop the treasurer exists to stop. The election back to plan names **the act and the origin** and quotes nothing the guard refused — a refusal does not travel ([disclosure.md](disclosure.md) § A refusal does not travel), so the plan step asks the guard what it would publish rather than reading a copy. Items already filed stay filed and stay recorded, and the corrected set returns through the filing review before anything more goes out.
+**A guard refusal routes back to plan.** The refused text is the plan's — the intended items are its artifact — and this step is mechanical: retrying it cannot change a word, so parking here would buy the loop the treasurer exists to stop. The election back to plan names **the act and the origin** and quotes nothing the guard refused — a refusal does not travel ([disclosure.md](../disclosure.md) § A refusal does not travel), so the plan step asks the guard what it would publish rather than reading a copy. Items already filed stay filed and stay recorded, and the corrected set returns through the filing review before anything more goes out.
 
 It finalizes the item as resolved: the filing **is** the resolution.

@@ -650,9 +650,9 @@ func (b *Orchestrator) DefaultBranch(ctx context.Context) (flow.BranchName, erro
 	return "", fmt.Errorf("repository %s/%s reports no default branch", b.cfg.Owner, b.cfg.Repo)
 }
 
-// Login returns the authenticated principal this orchestrator acts as. The
-// issue package needs it to tell the flow's own comments apart from a human's
-// when scanning an issue thread for answers.
+// Login returns the authenticated principal this orchestrator acts as. A flow
+// scanning an issue thread for answers needs it to tell the flow's own comments
+// apart from a human's.
 //
 // It goes through the same one derivation the claim path and the discovery path
 // use, so nothing in this package can disagree about who it is acting as.

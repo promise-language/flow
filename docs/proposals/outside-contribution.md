@@ -2,7 +2,7 @@
 
 **Proposal. Not normative.** How an item is resolved when the contributor is a principal the project does not trust, and what the maintainer measures before the change lands.
 
-[issue-flow.md](../issue-flow.md) declares two roles and the boundary between them: the contributor's part ends at the proposal, the item awaits the maintainer, and one principal covering both roles crosses without a handoff. What it does not say is what changes when the contributor principal is **outside** — no write access to the repository, working in a fork, appending journal entries with their own account. That is the ordinary case for a public project, and it is the path a change should take to reach the mainline.
+[archive/issue-flow.md](../archive/issue-flow.md) declares two roles and the boundary between them: the contributor's part ends at the proposal, the item awaits the maintainer, and one principal covering both roles crosses without a handoff. What it does not say is what changes when the contributor principal is **outside** — no write access to the repository, working in a fork, appending journal entries with their own account. That is the ordinary case for a public project, and it is the path a change should take to reach the mainline.
 
 > **The item is the project's, the journal is shared, and the trust is not.**
 
@@ -12,7 +12,7 @@ Everything here follows from those three facts holding at once. A request that a
 
 **A change reaches the mainline by resolving an item.** An item exists in this project's tracker; a contributor resolves it through the flow, producing a plan, three producing commits, briefings, and a gate result, all recorded against that item; the maintainer reviews what the journal holds, measures what it cannot vouch for, and lands it.
 
-That path is worth being the well-lit one because of what it makes available at review. The maintainer is not reading a request body: the intent was written down before the code, by a step whose whole contract is that it modifies nothing ([issue-flow.md](../issue-flow.md) § Plan); the producing phase is three commits, so what implement did and what review changed are separable; and the gate ran on the branch before the request was opened, so what is proposed has been measured by the same gate the maintainer will run.
+That path is worth being the well-lit one because of what it makes available at review. The maintainer is not reading a request body: the intent was written down before the code, by a step whose whole contract is that it modifies nothing ([archive/issue-flow.md](../archive/issue-flow.md) § Plan); the producing phase is three commits, so what implement did and what review changed are separable; and the gate ran on the branch before the request was opened, so what is proposed has been measured by the same gate the maintainer will run.
 
 **None of that is available to a review of a naked request, and none of it can be reconstructed.** A plan derived after the fact is not a plan, and a diff cannot say what its author decided not to do.
 
@@ -81,7 +81,7 @@ Steps in **bold** are mechanical — no agent prompt.
 | check the plan of record | maintainer | The change claims no place and no name something else already spoke for | the `plan-conflict` record | state coverage |
 | state coverage | maintainer | What was measured, and what was not | the `coverage-statement` | review the proposal |
 
-It elects into `review the proposal`, which is unchanged: it judges the proposal as what will land, and its three declared routes — verify merge result, implement, finalize: rejected — are [issue-flow.md](../issue-flow.md)'s. The sequence supplies what that step measures with; it does not decide.
+It elects into `review the proposal`, which is unchanged: it judges the proposal as what will land, and its three declared routes — verify merge result, implement, finalize: rejected — are [archive/issue-flow.md](../archive/issue-flow.md)'s. The sequence supplies what that step measures with; it does not decide.
 
 **There is no separate tag-reconciliation step.** What the change closes is the item's own subject, already in the journal, and whether a document's tag query is complete is the project's reconciliation pass rather than this review's ([org/normative.md](../org/normative.md) § 7).
 
@@ -130,13 +130,13 @@ A measuring step's record carries findings, each of one kind. The set is closed;
 
 Situate the branch, establish provenance and verify doc references spend no agent prompt: they are git plumbing, path and section existence, and counts. They run first because they are cheap and because their output is the context every later step reads.
 
-The remaining steps spend a prompt on a decision, and the mechanical checks they rely on are **instruments, not steps**, for the reason [issue-flow.md](../issue-flow.md) gives for the verify command: an instrument used inside a step does not earn a place in the graph. Check conformance runs the formatter and counts annotations before it judges; run the acceptance program builds and executes before it decides whose defect a failure is. Making either half its own step would put a checkpoint where there is no decision.
+The remaining steps spend a prompt on a decision, and the mechanical checks they rely on are **instruments, not steps**, for the reason [archive/issue-flow.md](../archive/issue-flow.md) gives for the verify command: an instrument used inside a step does not earn a place in the graph. Check conformance runs the formatter and counts annotations before it judges; run the acceptance program builds and executes before it decides whose defect a failure is. Making either half its own step would put a checkpoint where there is no decision.
 
 The split is visible in the result types. The mechanical steps produce `ArtifactJSON`, whose shape is declared with the artifact ([artifacts-and-signals.md](../artifacts-and-signals.md) § A JSON artifact's id names one shape) and read by the steps after them. The judging steps produce `ArtifactMarkdown`, because what they produce is prose for a reader.
 
 ### The measuring steps leave the tree as they found it
 
-Every step declares the worktree state it needs and the state it leaves ([resolution.md](../resolution.md) § Steps and the worktree). Every step in the sequence needs the **merge result** and leaves the tree `as-found`. No step branches, commits, or edits, and the write contract's check after each step ([issue-flow.md](../issue-flow.md) § A step's write contract is checked) is what holds it.
+Every step declares the worktree state it needs and the state it leaves ([resolution.md](../resolution.md) § Steps and the worktree). Every step in the sequence needs the **merge result** and leaves the tree `as-found`. No step branches, commits, or edits, and the write contract's check after each step ([archive/issue-flow.md](../archive/issue-flow.md) § A step's write contract is checked) is what holds it.
 
 **The acceptance program is built outside the worktree.** Its whole point is the consumer's position — a separate project that depends on the change, not a test living inside it — so it is compiled and run in a scratch location, and no build output lands in the tree under review. That is not a convenience: a program built inside the module can resolve names the module never exported, which is the exact defect this step exists to find.
 
@@ -202,7 +202,7 @@ Everything the sequence did not measure the review is taking on the journal's wo
 
 ## Rework or reject
 
-[issue-flow.md](../issue-flow.md) names the distinction between its handback and its rejection as "the one worth deciding deliberately" and leaves the test open. The measurements supply it:
+[archive/issue-flow.md](../archive/issue-flow.md) names the distinction between its handback and its rejection as "the one worth deciding deliberately" and leaves the test open. The measurements supply it:
 
 > **A proposal is rejected rather than reworked when bringing it to the bar would cost more than resolving the item from the start.**
 
@@ -235,7 +235,7 @@ The path this document specifies is not runnable today, and the obstacles are on
 
 ## Relationship to other documents
 
-- [issue-flow.md](../issue-flow.md) — the graph this sequence sits inside, the roles, the handoff, and the routes `review the proposal` elects.
+- [archive/issue-flow.md](../archive/issue-flow.md) — the graph this sequence sits inside, the roles, the handoff, and the routes `review the proposal` elects.
 - [proposals/drive-by-requests.md](drive-by-requests.md) — a request that arrives with no item, which is not this path.
 - [proposals/untrusted-sources.md](untrusted-sources.md) — the same premise one boundary earlier, the trust test, and the step declaration every measuring step makes.
 - [flow-registration.md](../flow-registration.md) — where the roles, the graph, and the worktree states are declared.

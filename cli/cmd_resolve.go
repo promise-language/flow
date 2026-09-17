@@ -335,10 +335,10 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		// (cli/app.go roleStandings): a role this binary does not COVER, or one
 		// it covers that the account cannot BACK. Both are handoffs — a binary
 		// declining a role its account could back (a maintainer-capable account
-		// pinned to the contributor's coverage, examples/issue/main.go) ends at
-		// the boundary like one whose account lacks the merge, and the item
-		// records the role it awaits. A run that crosses instead says so before
-		// it does: that is the default branch.
+		// pinned to the contributor's coverage) ends at the boundary like one
+		// whose account lacks the merge, and the item records the role it
+		// awaits. A run that crosses instead says so before it does: that is
+		// the default branch.
 		//
 		// The SAME classification the claim refusal reads (cli/claim.go
 		// whoseMoveIs), over the standing derived once above: the rule that

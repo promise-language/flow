@@ -4393,3 +4393,82 @@ func TestBackend_AccountExhaustedParkLabelIsWrittenAndCleared(t *testing.T) {
 		t.Errorf("labels = %v, want %q removed — a park label that outlives its condition is read as current", mock.labelNames(), want)
 	}
 }
+
+// Login is public surface with no caller left inside this repository: the
+// package that read it — through its own Principal interface, which also
+// asserted at compile time that this orchestrator still satisfied it — was
+// deleted with the issue recipe. What consumes it now is a flow binary in
+// another tree, so a regression here is invisible where it is made and surfaces
+// as a broken build or a wrong answer somewhere else.
+//
+// Two ways to answer wrongly, and the caller can tell neither from the truth:
+// answering as somebody else — the repository's owner is the tempting one, it
+// is right there in the config — and answering as nobody. A thread scan that
+// believes it is "" attributes its own comments to a human, which is the exact
+// confusion the method exists to prevent.
+
+// The account is the AUTHENTICATED one, and it is derived once: the login a
+// thread scan compares against and the owner a claim stamps cannot be two
+// different values, which is what the memo behind both is for.
+func TestBackend_Login_AnswersTheAuthenticatedAccountThroughTheOneDerivation(t *testing.T) {
+	mock := newGHMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+
+	// Three logins are in play and only one is the answer: "alice" holds the
+	// credentials, "o" owns the repository, "carol" filed the issue.
+	login, err := b.Login(t.Context())
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if login != "alice" {
+		t.Errorf("Login = %q, want alice — the account GET /user reports, not the repository's owner (%q) or the filer (%q)",
+			login, mock.owner, mock.issueUser)
+	}
+
+	claim, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if string(claim.Account) != login {
+		t.Errorf("Login says %q and the claim stamped %q; the two surfaces disagree about who this orchestrator is",
+			login, claim.Account)
+	}
+	if n := mock.requestCount("GET /user"); n != 1 {
+		t.Errorf("GET /user asked %d times across Login and Claim, want 1 — Login resolved the account itself instead of coming through the one derivation", n)
+	}
+}
+
+// A resolution that FAILED is reported. Returning the empty login with a nil
+// error would hand the caller a self it has no reason to doubt, and the answer
+// would stay wrong for as long as the process lives — the caller's own remedy
+// (do not cache a failure) is available to it only if it can see one.
+func TestBackend_Login_ReportsAFailedResolutionRatherThanAnEmptySelf(t *testing.T) {
+	mock := newGHMock(t)
+	// 401, not 403: a rate limit binds the machine-wide seam cache and would
+	// refuse the second call below without asking, which is a different story
+	// from the one this test tells.
+	mock.refusals = []ghMockRefusal{{Status: http.StatusUnauthorized}}
+	srv := mock.server()
+	defer srv.Close()
+	b := newMockedOrchestrator(t, mock, srv)
+
+	login, err := b.Login(t.Context())
+	if err == nil {
+		t.Fatalf("Login against a refused GET /user returned %q and no error", login)
+	}
+	if login != "" {
+		t.Errorf("Login = %q on a failed resolution, want the empty login beside the error", login)
+	}
+
+	// The failure is not remembered as an answer. One refused call must not
+	// settle the identity for the rest of the process.
+	login, err = b.Login(t.Context())
+	if err != nil {
+		t.Fatalf("Login after the refusal cleared: %v", err)
+	}
+	if login != "alice" {
+		t.Errorf("Login = %q after the refusal cleared, want alice — the failure was memoised as the answer", login)
+	}
+}

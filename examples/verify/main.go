@@ -30,8 +30,8 @@ func main() {
 		BinaryName: "verify",
 		VerifyCmd:  []string{"go", "test", "./..."},
 		// No guard, so this binary publishes nothing: `doctor` and `list`
-		// work, and `claim` — the first write — refuses. See examples/issue
-		// and docs/disclosure.md.
+		// work, and `claim` — the first write — refuses. See
+		// docs/disclosure.md.
 		Guard: nil,
 	})
 	if err != nil {
