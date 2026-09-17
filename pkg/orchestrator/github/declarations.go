@@ -69,10 +69,14 @@ var gateListArgs = []string{"--list", "--json"}
 var gateListLegacyArgs = []string{"--list"}
 
 // declarationTimeout bounds the list query. It is short on purpose: this runs
-// at startup, before any work, and a gate entry point that cannot say what it
-// supports within a couple of seconds is not one a step should be dispatched
-// against. Timing out reports NO gates, which is the honest reading — nothing
-// was learned — and `doctor` says so on the gates line.
+// before any work, and a gate entry point that cannot say what it supports
+// within a couple of seconds is not one a step should be dispatched against.
+// Timing out reports NO gates, which is the honest reading — nothing was
+// learned — and `doctor` says so on the gates line.
+//
+// It bounds the landing read as well as the startup one, and one constant is
+// the point: a check made against a change asks the same question with the same
+// patience as the check made before it, or the two answers are not comparable.
 const declarationTimeout = 5 * time.Second
 
 // SupportedCommands lists the commands this machine actually has: one
@@ -114,14 +118,39 @@ func discoverCommands(root string) []flow.CommandDef {
 // they are simply absent from the list, which is what `doctor` reports and what
 // `claim`, `run-step` and `resolve` refuse to proceed on.
 func (b *Orchestrator) SupportedGates() []flow.GateDef {
-	b.gatesOnce.Do(func() { b.gatesList = discoverGates(b.cfg.WorktreeDir) })
+	b.gatesOnce.Do(func() { b.gatesList = DiscoverGates(context.Background(), b.cfg.WorktreeDir) })
 	return b.gatesList
 }
 
-func discoverGates(root string) []flow.GateDef {
+// DiscoverGates asks root's gate entry point which gates it has, and reads the
+// listing it writes back. Exported because the read has a SECOND caller and
+// must not be reimplemented for it.
+//
+// SupportedGates answers what this machine could run when the resolution
+// started, and memoises it — a binary's answer to "what can I run" must not
+// change under it mid-run. But the entry point that answers this query is a
+// file in the tree, and a resolution may edit it, so the last state anything
+// verified is the state before the change. A caller holding a tree it is about
+// to land calls THIS: the same entry point, the same query, the same deadline,
+// read again against the tree as it will land, with nothing served from the
+// memo (docs/resolution.md § A change that removes a declaration does not land).
+//
+// It is a plain function over a checkout path because the callers that need it
+// are not all orchestrators: a graph step's landing check, and — outside this
+// SDK — whatever installs a release into a checkout and must report a checkout
+// it has just made undriveable. flow.CheckGatesHeld does the comparison.
+//
+// The entry point is a BUILT ARTIFACT. A listing read from a binary built from
+// the previous tree answers about the previous tree and reads as a pass, so a
+// caller checking a change takes this read after that tree's tools are built.
+//
+// ctx bounds the caller's patience; declarationTimeout bounds this SDK's, and
+// whichever expires first ends the query. A cancelled ctx reports no gates,
+// which is the same honest reading an entry point that said nothing gets.
+func DiscoverGates(ctx context.Context, root string) []flow.GateDef {
 	// One deadline covers both attempts. What is bounded is how long this SDK
 	// waits to learn what a machine can run, not how many ways it asks.
-	ctx, cancel := context.WithTimeout(context.Background(), declarationTimeout)
+	ctx, cancel := context.WithTimeout(ctx, declarationTimeout)
 	defer cancel()
 
 	out, answered := askGateList(ctx, root, gateListArgs)

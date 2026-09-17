@@ -458,6 +458,20 @@ Ignoring is the worst of the three and reads as the most helpful. The gate measu
 
 **A refusal that survives repair parks, and costs nothing.** Once retrying is known to be pointless — the same tree, committed again, refused identically — the step parks carrying the refusal's own message, rather than spending dispatches on a repetition it cannot change.
 
+### A change that removes a declaration does not land
+
+A resolution cannot start in an environment whose declarations are missing — [environment.md](environment.md) closes the set of conditions on the rule that every member is checked before work is given *and* classified during it. The entry point that answers *what can this machine run* is a file in the tree, and a resolution may edit it. So the check made before the work is the only one anything has made, and the last state it verified is the state before the change.
+
+> **Before a step commits, the declarations the resolution depends on are read again** — off the machine, against the tree as it will land, the same way discovery reads them ([gates-and-commands.md](gates-and-commands.md)) — and compared with what was declared when the resolution started. Where a route also lands or measures a merge result, the read is taken there too, after that result's tools are built.
+
+**The comparison is within the resolution, not against a document.** What was declared when the item was claimed, against what is declared now. Names added are fine, and what a project calls its own gates is not this comparison's business — it asserts only that the names the tree declared before the change are declared by the tree after it.
+
+**It is not a second `doctor`.** `doctor` answers whether the machine can be driven *now*, which a machine this change has just broken answers in the negative for a reason it cannot see. This asks whether *this change* removed a declaration, and only the resolution holds both sides of that.
+
+**A name that disappeared parks the step**, carrying both lists and the diff that caused them to differ. It is not a gate failure — the tests are fine, the seam is not — and it is deterministic, so re-dispatching it is a loop rather than a retry.
+
+**Nothing else can catch it, and the cost of missing it is not local.** The arena that lands such a change is the first one that cannot resolve, so the flow in that repository cannot be used to repair it; the repair arrives from whichever repository ships the consumer, and nobody learns that until an operator reads a refusal naming a repair that cannot help. A failure this shape is not one to discover from its symptom.
+
 ### Duplicate-fix conflicts during rebase
 
 When a rebase conflict exists because the mainline already landed the same fix our branch carries — two independent spellings of one repair — integrating both sides produces a file that differs from the mainline's version permanently. The same conflict returns on the very next rebase, and the one after that. No retry clears it.

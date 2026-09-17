@@ -3,6 +3,7 @@ package flow
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -236,5 +237,276 @@ func TestRequiredGatesAndCommands(t *testing.T) {
 	}
 	if got := RequiredCommands(); len(got) != 1 || got[0] != CommandVerify {
 		t.Errorf("RequiredCommands() = %v, want [verify]", got)
+	}
+}
+
+// declares builds a declaration list from names, the way a discovery read
+// returns one.
+func declares(names ...GateName) []GateDef {
+	defs := make([]GateDef, 0, len(names))
+	for _, n := range names {
+		defs = append(defs, Gate(n, false))
+	}
+	return defs
+}
+
+func TestMissingGates(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		declared []GateDef
+		want     string
+	}{
+		{"both required gates declared", declares(GateIntegration, GateFit), ""},
+		{"the project's own gates do not substitute", declares(GateIntegration, GateFit, GateTested, GateCovered), ""},
+		{"fit dropped", declares(GateIntegration, GateTested), "fit"},
+		{"integration dropped", declares(GateFit, GateTested), "integration"},
+		// The order is RequiredGates()'s, which is the order the boundary
+		// refusal and `doctor` already name them in.
+		{"nothing declared at all", nil, "integration, fit"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := joinGateNames(MissingGates(tt.declared)); got != tt.want {
+				t.Errorf("MissingGates(%v) = %q, want %q", tt.declared, got, tt.want)
+			}
+		})
+	}
+}
+
+// Nothing disappeared is not a finding. A change that adds gates, reorders the
+// listing, or repeats a name has removed nothing, and a check that parked on
+// any of those would stop work it has no business stopping.
+func TestCheckGatesHeld_NothingDisappeared(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		before, after []GateDef
+	}{
+		{"identical", declares(GateIntegration, GateFit), declares(GateIntegration, GateFit)},
+		{"same names in another order", declares(GateIntegration, GateFit), declares(GateFit, GateIntegration)},
+		{"names added", declares(GateIntegration, GateFit), declares(GateIntegration, GateFit, GateCovered)},
+		{"a name repeated in the listing", declares(GateFit, GateFit, GateIntegration), declares(GateIntegration, GateFit)},
+		{"nothing before and nothing now", nil, nil},
+		// The before-side is the whole of what this check has over `doctor`.
+		// With none, it has nothing to say: a machine that declared nothing when
+		// the resolution started is the BOUNDARY refusal's condition, already
+		// met before any step ran, and reporting it here would blame this change
+		// for a checkout whose tools were never built.
+		{"nothing before, gates now", nil, declares(GateIntegration, GateFit)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CheckGatesHeld(tt.before, tt.after); got != nil {
+				t.Errorf("CheckGatesHeld() reported %v, want no regression", got.Gone)
+			}
+		})
+	}
+}
+
+func TestCheckGatesHeld_ReportsWhatDisappeared(t *testing.T) {
+	// The observed case: an entry point that answers a form the reader cannot
+	// parse declares nothing, exactly as an unbuilt checkout does.
+	everything := declares(GateBuilds, GateChecked, GateCovered, GateFit, GateFormatted, GateIntegration, GateTested)
+
+	for _, tt := range []struct {
+		name           string
+		before, after  []GateDef
+		gone, required string
+	}{
+		{
+			name:   "a project gate the change retired",
+			before: declares(GateIntegration, GateFit, GateCovered),
+			after:  declares(GateIntegration, GateFit),
+			gone:   "covered",
+			// Not required, so the checkout is still driveable. It is still a
+			// name that disappeared, and still the finding.
+			required: "",
+		},
+		{
+			name:     "a required gate",
+			before:   declares(GateIntegration, GateFit, GateTested),
+			after:    declares(GateIntegration, GateTested),
+			gone:     "fit",
+			required: "fit",
+		},
+		{
+			name:     "the listing stopped being readable",
+			before:   everything,
+			after:    nil,
+			gone:     "builds, checked, covered, fit, formatted, integration, tested",
+			required: "integration, fit",
+		},
+		{
+			// Names are compared whole: the full name is what a caller
+			// addresses a gate by, so an instance that stopped being declared
+			// is a name that disappeared, however alive its concept is.
+			name:     "an instance renamed under a concept that stayed",
+			before:   declares(GateIntegration, GateFit, "tested:wasm"),
+			after:    declares(GateIntegration, GateFit, "tested:wasi"),
+			gone:     "tested:wasm",
+			required: "",
+		},
+		{
+			name:     "a name repeated in the before-listing is reported once",
+			before:   declares(GateIntegration, GateFit, GateCovered, GateCovered),
+			after:    declares(GateIntegration, GateFit),
+			gone:     "covered",
+			required: "",
+		},
+		{
+			name:     "gates added while a required one went",
+			before:   declares(GateIntegration, GateFit),
+			after:    declares(GateIntegration, GateCovered, GateTested),
+			gone:     "fit",
+			required: "fit",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CheckGatesHeld(tt.before, tt.after)
+			if got == nil {
+				t.Fatalf("CheckGatesHeld() found no regression, want gone: %s", tt.gone)
+			}
+			if g := joinGateNames(got.Gone); g != tt.gone {
+				t.Errorf("Gone = %q, want %q", g, tt.gone)
+			}
+			if r := joinGateNames(got.Required); r != tt.required {
+				t.Errorf("Required = %q, want %q", r, tt.required)
+			}
+			if b := joinGateNames(got.Before); b != joinGateNames(gateNames(tt.before)) {
+				t.Errorf("Before = %q, want the before-listing whole", b)
+			}
+			if a := joinGateNames(got.After); a != joinGateNames(gateNames(tt.after)) {
+				t.Errorf("After = %q, want the after-listing whole", a)
+			}
+		})
+	}
+}
+
+// The report carries BOTH lists. One of them empty is the whole finding in the
+// observed case, and an operator who sees only "integration, fit are missing"
+// has been handed the same sentence a never-built checkout produces.
+func TestGateRegression_ErrorNamesBothLists(t *testing.T) {
+	reg := CheckGatesHeld(declares(GateIntegration, GateFit, GateTested), nil)
+	if reg == nil {
+		t.Fatal("CheckGatesHeld() found no regression")
+	}
+	msg := reg.Error()
+	for _, want := range []string{
+		"fit, integration, tested",   // what was declared when the resolution started
+		"required: integration, fit", // which of the losses leave no arena able to start
+		"(none)",                     // what the tree as it will land declares
+		"declared by the tree as it will land",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("Error() = %q, want it to carry %q", msg, want)
+		}
+	}
+}
+
+// The required clause appears only when a required gate went, and its absence
+// is load-bearing. A project gate the change retired is still the finding — but
+// a report that named it required would tell an operator no arena can start,
+// which is the one thing this regression does not mean, and would send them
+// after a cross-repository repair that nothing here needs.
+//
+// The clause's presence is asserted above; nothing asserted it could be absent,
+// so dropping the condition on it would have gone out reading "— required: "
+// with nothing after it.
+func TestGateRegression_ErrorOmitsTheRequiredClauseWhenNoneWent(t *testing.T) {
+	reg := CheckGatesHeld(declares(GateIntegration, GateFit, GateCovered), declares(GateIntegration, GateFit))
+	if reg == nil {
+		t.Fatal("CheckGatesHeld() found no regression")
+	}
+	msg := reg.Error()
+	if strings.Contains(msg, "required") {
+		t.Errorf("Error() = %q, want no required clause — `covered` is the project's own gate", msg)
+	}
+	if !strings.Contains(msg, "declaration(s): covered") {
+		t.Errorf("Error() = %q, want it to name the gate that went", msg)
+	}
+	if !strings.Contains(msg, "covered, fit, integration") {
+		t.Errorf("Error() = %q, want the before-listing whole", msg)
+	}
+}
+
+// A caller that wants an error gets one through Err(), and a change that
+// removed nothing gets a NIL one.
+//
+// This is the case the method exists for: CheckGatesHeld answers with a typed
+// pointer, and a typed nil moved into an error interface is not nil. An
+// installer returning the result directly would report a regression on every
+// checkout it did not break — and panic rendering it — so the conversion has to
+// be somewhere that knows the receiver may be nil.
+func TestGateRegression_ErrIsNilWhenNothingDisappeared(t *testing.T) {
+	held := CheckGatesHeld(declares(GateIntegration, GateFit), declares(GateIntegration, GateFit, GateTested))
+	if err := held.Err(); err != nil {
+		t.Errorf("Err() = %v, want a nil error — the change added a gate and removed none", err)
+	}
+
+	reg := CheckGatesHeld(declares(GateIntegration, GateFit), declares(GateIntegration))
+	err := reg.Err()
+	if err == nil {
+		t.Fatal("Err() = nil, want the regression reported as an error")
+	}
+	if !strings.Contains(err.Error(), "fit") {
+		t.Errorf("Err().Error() = %q, want it to name the gate that went", err.Error())
+	}
+	// And the lists survive the conversion: a caller that wrapped it still
+	// reaches both sides of the comparison.
+	var recovered *GateRegression
+	if !errors.As(err, &recovered) || recovered != reg {
+		t.Errorf("errors.As() did not recover the regression itself, got %v", recovered)
+	}
+}
+
+// The park is deterministic and carries its evidence. Re-dispatching it is a
+// loop, not a retry: the same tree re-read answers the same way.
+func TestGateRegression_ParkRequest(t *testing.T) {
+	reg := CheckGatesHeld(declares(GateIntegration, GateFit), declares(GateIntegration))
+	if reg == nil {
+		t.Fatal("CheckGatesHeld() found no regression")
+	}
+	req := reg.ParkRequest("implementation", "--- a/bin/gate\n+++ b/bin/gate\n")
+
+	if req.Kind != ParkRefused {
+		t.Errorf("Kind = %q, want %q", req.Kind, ParkRefused)
+	}
+	if req.Kind.RedispatchMayClear() {
+		t.Error("a declaration regression must not be re-dispatchable: the same tree answers identically")
+	}
+	if req.Step != "implementation" {
+		t.Errorf("Step = %q, want the step that was about to commit", req.Step)
+	}
+	if !strings.Contains(req.Reason, "no arena can start without") || !strings.Contains(req.Reason, "fit") {
+		t.Errorf("Reason = %q, want it to name the required gate that went and what that costs", req.Reason)
+	}
+	for _, want := range []string{"fit, integration", "--- a/bin/gate"} {
+		if !strings.Contains(req.Details, want) {
+			t.Errorf("Details = %q, want it to carry %q — both lists and the diff that caused them to differ", req.Details, want)
+		}
+	}
+}
+
+// A regression with no required gate in it still parks, and says so without
+// claiming the arena cannot start.
+func TestGateRegression_ParkRequestWithoutARequiredGate(t *testing.T) {
+	reg := CheckGatesHeld(declares(GateIntegration, GateFit, GateCovered), declares(GateIntegration, GateFit))
+	if reg == nil {
+		t.Fatal("CheckGatesHeld() found no regression")
+	}
+	req := reg.ParkRequest("implementation", "")
+
+	if req.Kind != ParkRefused {
+		t.Errorf("Kind = %q, want %q", req.Kind, ParkRefused)
+	}
+	if strings.Contains(req.Reason, "no arena can start without") {
+		t.Errorf("Reason = %q, want no claim that the arena cannot start — `covered` is the project's own", req.Reason)
+	}
+	if !strings.Contains(req.Reason, "covered") {
+		t.Errorf("Reason = %q, want it to name the gate that went", req.Reason)
+	}
+	// No diff offered, so none is fabricated — the lists are still there.
+	if strings.Contains(req.Details, "the diff that caused it") {
+		t.Errorf("Details = %q, want no diff section when the caller had none", req.Details)
+	}
+	if !strings.Contains(req.Details, "covered, fit, integration") {
+		t.Errorf("Details = %q, want the before-listing", req.Details)
 	}
 }

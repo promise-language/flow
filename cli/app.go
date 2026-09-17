@@ -639,7 +639,7 @@ const repairUnbuiltTools = "an orchestrator reads what it can run off the machin
 // check, which asks solely when a flow named a gate of its own.
 func (app *App) requireRunnable(cmd string) error {
 	gates := app.Orchestrator.SupportedGates()
-	if missing := missingGates(gates); len(missing) > 0 {
+	if missing := flow.MissingGates(gates); len(missing) > 0 {
 		return app.refuseRunnable(cmd, "this environment cannot run gates", "gates",
 			fmt.Sprintf("orchestrator %q does not declare the required gate(s): %s",
 				app.Orchestrator.Name(), joinNames(missing)),
@@ -676,22 +676,16 @@ func (app *App) refuseRunnable(cmd, reason, check string, detail ...string) erro
 	return errors.New(formatRefusal(cmd, reason, check, strings.Join(detail, "\n")))
 }
 
-// missingGates and missingCommands report which REQUIRED declarations are
-// absent from what an orchestrator says it can run. One copy, used by the
-// boundary refusal and by `doctor`: the two report to different readers and
-// their messages stay distinct, but which ones are missing is a single
-// question and a second implementation of it is what goes stale when
-// flow.RequiredGates() changes.
-func missingGates(declared []flow.GateDef) []flow.GateName {
-	var missing []flow.GateName
-	for _, want := range flow.RequiredGates() {
-		if !flow.HasGate(declared, want) {
-			missing = append(missing, want)
-		}
-	}
-	return missing
-}
-
+// missingCommands reports which REQUIRED commands are absent from what an
+// orchestrator says it can run. One copy, used by the boundary refusal and by
+// `doctor`: the two report to different readers and their messages stay
+// distinct, but which ones are missing is a single question and a second
+// implementation of it is what goes stale when flow.RequiredCommands() changes.
+//
+// The gate half of this pair is flow.MissingGates, which lives in the flow
+// package because a caller outside this SDK needs it too: what installs a
+// release into a checkout has to be able to report a checkout it has just made
+// undriveable, and it holds a tree and a requirement rather than an App.
 func missingCommands(declared []flow.CommandDef) []flow.CommandName {
 	var missing []flow.CommandName
 	for _, want := range flow.RequiredCommands() {

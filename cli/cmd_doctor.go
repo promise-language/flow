@@ -280,7 +280,7 @@ func (app *App) checkCommands() check {
 func (app *App) checkGates() check {
 	const name = doctorCheckGates
 	declared := app.Orchestrator.SupportedGates()
-	if missing := missingGates(declared); len(missing) > 0 {
+	if missing := flow.MissingGates(declared); len(missing) > 0 {
 		return check{name: name, status: checkFail, detail: fmt.Sprintf(
 			"%s does not declare the required gate(s): %s — %s",
 			app.Orchestrator.Name(), joinNames(missing), repairUnbuiltTools)}
