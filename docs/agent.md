@@ -37,9 +37,9 @@ The request vocabulary, the chokepoint, the treasurer, `doctor`, the pacer, the 
 
 ### A flow does not choose its substrate
 
-**What pays for a resolution is the agent account, and the substrate comes with the account** ([cli.md](cli.md) § The agent account is a separate axis). Neither is a property of the work: a flow is written once and runs on every conformant substrate, and a step declares what it needs from a prompt — a permission mode, an effort — never whose harness provides it.
+**What pays for a resolution is the agent account, and the substrate comes with the account** ([cli.md](cli.md) § The agent account is a separate axis). Neither is a property of the work, and a step declares what it needs from a prompt — a permission mode — never whose harness provides it.
 
-**A `Model` identifier is the one field that binds a substrate**, because model names are the substrate's vocabulary. A step that names a model has chosen its substrate, and is refused on any other (§ Refuse, never substitute). A flow meant to run on more than one substrate names no model, and leaves the choice to the substrate's configuration.
+**A `Model` identifier and an `Effort` level are the fields that bind a substrate**, because both are the substrate's own vocabulary (§ Effort levels). A step that names either has chosen its substrate, and is refused on any other (§ Refuse, never substitute). A flow meant to run on every conformant substrate names neither, and leaves both to the substrate's own defaults.
 
 ### What a substrate must provide
 
@@ -47,7 +47,7 @@ The request vocabulary, the chokepoint, the treasurer, `doctor`, the pacer, the 
 |---|---|---|
 | Run one prompt non-interactively in the stamped `Worktree` and return one aggregated `AgentResponse` | **Yes** | It is not a substrate |
 | Enforce the restriction of every `PermissionMode` it accepts (§ Permission modes) | **Yes**, per mode | The mode is refused before anything is sent |
-| Accept a value for `Effort` and `Model`, or refuse it | **Yes** | Refused before anything is sent |
+| Declare the `Effort` levels it accepts for each model (§ Effort levels); accept a `Model` and one of those levels, or refuse them | **Yes** | Refused before anything is sent |
 | A pre-tool interception point that sees every tool call it can make (§ The action guard) | **Yes** | It is not a conformant substrate |
 | Classify a refusal for an exhausted allowance from its own statement (§ The agent account) | **Yes** | Published usage is consulted instead, where it names a reset |
 | Identify its account from a stated field in a stated place | **Yes** | The account is reported unidentified, and scoped to nothing |
