@@ -1509,7 +1509,8 @@ type GateRegression struct {
 // is asked for).
 //
 // A GateRegression is an error so a caller that is not a step — an installer, a
-// standalone resolution — can return it as one.
+// standalone resolution — can return it as one. It is reached through Err(),
+// which is the only safe way to move a CheckGatesHeld result into an error.
 func (r *GateRegression) Error() string {
 	var b strings.Builder
 	b.WriteString("a change removed gate declaration(s): ")
@@ -1523,6 +1524,30 @@ func (r *GateRegression) Error() string {
 	b.WriteString("\n  declared by the tree as it will land: ")
 	b.WriteString(joinGateNamesOrNone(r.After))
 	return b.String()
+}
+
+// Err returns the regression as an error, and a NIL error when the receiver is
+// nil — which is what CheckGatesHeld returns for a change that removed nothing.
+//
+// The conversion is a method because the obvious spelling is wrong. A
+// *GateRegression assigned into an error is non-nil even when the pointer is
+// nil: the interface header carries the type. So an installer writing
+//
+//	return flow.CheckGatesHeld(before, now) // WRONG
+//
+// from a function returning error reports a regression on every checkout it did
+// not break, and panics across this package's boundary the moment anything
+// renders that error — which docs/org/engineering-guide-go.md § Errors forbids.
+// The failure is silent in the direction that matters: it condemns healthy
+// trees. One place gets it right, and every caller that wants an error goes
+// through it:
+//
+//	if err := flow.CheckGatesHeld(before, now).Err(); err != nil { … }
+func (r *GateRegression) Err() error {
+	if r == nil {
+		return nil
+	}
+	return r
 }
 
 // ParkRequest is the park a regression makes, carried whole so the graphs that
@@ -1553,6 +1578,10 @@ func (r *GateRegression) ParkRequest(step StepId, diff string) ParkRequest {
 // declared now, and reports the names that disappeared. It returns nil when
 // none did — including when nothing was declared before, which is the boundary
 // refusal's condition and not a regression this change caused.
+//
+// The return is the CONCRETE type, so `== nil` is the whole test. A caller that
+// wants an error calls Err() on the result rather than assigning it to one; see
+// Err for why the difference is not cosmetic.
 //
 // Both sides are READ OFF THE MACHINE by the caller, the second one against the
 // tree as it will land. This function does the comparison and nothing else, so

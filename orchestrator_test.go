@@ -400,6 +400,36 @@ func TestGateRegression_ErrorNamesBothLists(t *testing.T) {
 	}
 }
 
+// A caller that wants an error gets one through Err(), and a change that
+// removed nothing gets a NIL one.
+//
+// This is the case the method exists for: CheckGatesHeld answers with a typed
+// pointer, and a typed nil moved into an error interface is not nil. An
+// installer returning the result directly would report a regression on every
+// checkout it did not break — and panic rendering it — so the conversion has to
+// be somewhere that knows the receiver may be nil.
+func TestGateRegression_ErrIsNilWhenNothingDisappeared(t *testing.T) {
+	held := CheckGatesHeld(declares(GateIntegration, GateFit), declares(GateIntegration, GateFit, GateTested))
+	if err := held.Err(); err != nil {
+		t.Errorf("Err() = %v, want a nil error — the change added a gate and removed none", err)
+	}
+
+	reg := CheckGatesHeld(declares(GateIntegration, GateFit), declares(GateIntegration))
+	err := reg.Err()
+	if err == nil {
+		t.Fatal("Err() = nil, want the regression reported as an error")
+	}
+	if !strings.Contains(err.Error(), "fit") {
+		t.Errorf("Err().Error() = %q, want it to name the gate that went", err.Error())
+	}
+	// And the lists survive the conversion: a caller that wrapped it still
+	// reaches both sides of the comparison.
+	var recovered *GateRegression
+	if !errors.As(err, &recovered) || recovered != reg {
+		t.Errorf("errors.As() did not recover the regression itself, got %v", recovered)
+	}
+}
+
 // The park is deterministic and carries its evidence. Re-dispatching it is a
 // loop, not a retry: the same tree re-read answers the same way.
 func TestGateRegression_ParkRequest(t *testing.T) {
