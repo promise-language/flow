@@ -267,6 +267,49 @@ func TestSupportedGates_AnAnswerItCannotReadDeclaresNothing(t *testing.T) {
 	}
 }
 
+// Exit 0 is the entry point saying it answered, and an answer is not asked
+// again — not when the listing declares no gates, and not when it is one this
+// SDK cannot read.
+//
+// The fallback exists for a REFUSED FLAG. Widening it to "the reply was not
+// what I hoped for" restores this defect from the other side: an entry point
+// that answered the flagged query with an object the SDK failed to decode
+// would be asked the bare question and have its HUMAN RENDERING read instead
+// — the exact inversion the flagged query exists to delete, and silent,
+// because the gate list that came back would look right.
+//
+// The bare query here answers with names, so a second ask shows up in the
+// result and not only in the spawn count.
+func TestSupportedGates_AnAnsweredQueryIsNotAskedAgain(t *testing.T) {
+	requireRealProcesses(t)
+	for _, c := range []struct{ what, stdout string }{
+		{"a listing that declares no gates", `{"gates":[]}`},
+		{"an answer this SDK cannot read", `not a listing`},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			dir := t.TempDir()
+			writeGateEntryPoint(t, dir, `printf 'asked\n' >> `+filepath.Join(dir, "asked")+`
+case "$*" in
+"--list --json") printf '%s' '`+c.stdout+`' ;;
+*) printf 'fit\nintegration\n' ;;
+esac`)
+
+			got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates()
+			if len(got) != 0 {
+				t.Errorf("SupportedGates() = %v, want none — the entry point answered, and %s is what it said",
+					names2(got), c.what)
+			}
+			asked, err := os.ReadFile(filepath.Join(dir, "asked"))
+			if err != nil {
+				t.Fatalf("the entry point was never asked: %v", err)
+			}
+			if spawns := strings.Count(string(asked), "\n"); spawns != 1 {
+				t.Errorf("the entry point was spawned %d times, want 1 — the fallback is for a refused flag, not for an answer the SDK did not like", spawns)
+			}
+		})
+	}
+}
+
 // writeGateEntryPoint installs a bin/gate that answers --list with body.
 func writeGateEntryPoint(t *testing.T, root, body string) {
 	t.Helper()
