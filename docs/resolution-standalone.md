@@ -34,7 +34,7 @@ Two requirements follow:
 
 ## The steps of a resolution
 
-A flow defines its own steps and routes; what follows is the shape a standalone resolution takes **when the work is a change to the tree**, and the properties every such route holds to. Not every item is that — the step that plans is where the work's shape is discovered, and its declared routes are where a different shape goes a different way ([archive/issue-flow.md](archive/issue-flow.md) ships an example). What follows binds the change-shaped route.
+A flow defines its own steps and routes; what follows is the shape a standalone resolution takes **when the work is a change to the tree**, and the properties every such route holds to. Not every item is that — the step that plans is where the work's shape is discovered, and its declared routes are where a different shape goes a different way ([archive/issue-flow.md](archive/issue-flow.md) describes one such graph). What follows binds the change-shaped route.
 
 | Phase | |
 |---|---|
