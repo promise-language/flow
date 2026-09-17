@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -1453,6 +1454,181 @@ func HasGate(defs []GateDef, name GateName) bool {
 // HasCommand reports whether defs declares name.
 func HasCommand(defs []CommandDef, name CommandName) bool {
 	return slices.ContainsFunc(defs, func(d CommandDef) bool { return d.Name == name })
+}
+
+// MissingGates reports which of RequiredGates() are absent from what an
+// orchestrator says it can run.
+//
+// ONE COPY, and it is exported because three parties need the same answer and a
+// second implementation is what goes stale when RequiredGates() changes: the
+// boundary refusal and `doctor` inside this SDK, and — outside it — whatever
+// installs a release into a checkout and has to report a checkout it has just
+// made undriveable. That last one is why this is here rather than in cli: an
+// installer holds a tree and a requirement, not an App.
+//
+// Together with RequiredGates() this is the whole of "a driver states its
+// requirements in a form a consumer can check a tree against".
+func MissingGates(declared []GateDef) []GateName {
+	var missing []GateName
+	for _, want := range RequiredGates() {
+		if !HasGate(declared, want) {
+			missing = append(missing, want)
+		}
+	}
+	return missing
+}
+
+// GateRegression is a gate declaration a change removed: what was declared when
+// the resolution started, what the tree as it will land declares, and which
+// names stopped being declared in between.
+//
+// The comparison it records is WITHIN a resolution, never against a document. A
+// project's own vocabulary is not its business — what it asserts is that the
+// names the tree declared before the change are declared by the tree after it.
+type GateRegression struct {
+	// Before is what was declared when the resolution started — the read taken
+	// off the machine before the change existed.
+	Before []GateName
+	// After is what the tree as it will land declares.
+	After []GateName
+	// Gone is in Before and not in After. A name that disappeared is the
+	// failure; names added are fine and are not reported here.
+	Gone []GateName
+	// Required is the subset of Gone that RequiredGates() names — the part that
+	// leaves no arena able to start, as opposed to a project gate the change
+	// deliberately retired. It sharpens the report; it does not change the
+	// verdict, which is that a declared name disappeared.
+	Required []GateName
+}
+
+// Error renders the regression for a reader who has to act on it: what went,
+// which of those were required, and both lists. Both are printed because the
+// whole point of the check is that the two together distinguish a change that
+// broke the listing from a checkout whose tools were never built — an empty
+// answer alone cannot (docs/gates-and-commands.md § Which gates a project has
+// is asked for).
+//
+// A GateRegression is an error so a caller that is not a step — an installer, a
+// standalone resolution — can return it as one.
+func (r *GateRegression) Error() string {
+	var b strings.Builder
+	b.WriteString("a change removed gate declaration(s): ")
+	b.WriteString(joinGateNames(r.Gone))
+	if len(r.Required) > 0 {
+		b.WriteString(" — required: ")
+		b.WriteString(joinGateNames(r.Required))
+	}
+	b.WriteString("\n  declared when the resolution started: ")
+	b.WriteString(joinGateNamesOrNone(r.Before))
+	b.WriteString("\n  declared by the tree as it will land: ")
+	b.WriteString(joinGateNamesOrNone(r.After))
+	return b.String()
+}
+
+// ParkRequest is the park a regression makes, carried whole so the graphs that
+// adopt this check cannot disagree about the kind or about what the park says.
+//
+// The kind is ParkRefused: the same tree re-read answers identically, so
+// re-dispatching is a loop rather than a retry (ParkKind.RedispatchMayClear is
+// already false for it), and a person must clear it. It is deliberately NOT a
+// gate failure — the tests are fine, the seam is not — and deliberately not
+// silent: the arena that lands such a change is the first one that cannot
+// resolve, and the flow in that repository cannot be used to repair it.
+//
+// diff is the change that caused the two lists to differ, and may be empty
+// where the caller has none to show.
+func (r *GateRegression) ParkRequest(step StepId, diff string) ParkRequest {
+	reason := "this change removes gate declaration(s): " + joinGateNames(r.Gone)
+	if len(r.Required) > 0 {
+		reason = "this change removes gate declaration(s) no arena can start without: " + joinGateNames(r.Required)
+	}
+	details := r.Error()
+	if diff != "" {
+		details += "\n\nthe diff that caused it:\n" + diff
+	}
+	return ParkRequest{Kind: ParkRefused, Step: step, Reason: reason, Details: details}
+}
+
+// CheckGatesHeld compares what was declared before a change against what is
+// declared now, and reports the names that disappeared. It returns nil when
+// none did — including when nothing was declared before, which is the boundary
+// refusal's condition and not a regression this change caused.
+//
+// Both sides are READ OFF THE MACHINE by the caller, the second one against the
+// tree as it will land. This function does the comparison and nothing else, so
+// that whatever forms the listing arrives in — and which of them a reader still
+// accepts — is settled in one place, by discovery, for the startup read and the
+// landing read alike.
+//
+// Names are compared WHOLE. `tested:wasm` is not `tested`: the full name is what
+// a caller addresses a gate by, so an instance that stopped being declared is a
+// name that disappeared.
+//
+// GATES ONLY. The commands half of the same startup check has the same hazard —
+// a resolution that removes the verify command locks the arena identically —
+// but a command is discovered from an orchestrator's own layout rather than
+// from the project contract, so it needs a seam of its own: #419.
+func CheckGatesHeld(before, now []GateDef) *GateRegression {
+	declaredNow := make(map[GateName]bool, len(now))
+	for _, d := range now {
+		declaredNow[d.Name] = true
+	}
+	declaredBefore := gateNames(before)
+	var gone []GateName
+	for _, name := range declaredBefore {
+		if !declaredNow[name] {
+			gone = append(gone, name)
+		}
+	}
+	if len(gone) == 0 {
+		return nil
+	}
+	// In RequiredGates() order, which is the order the boundary refusal and
+	// `doctor` already name them in.
+	var required []GateName
+	for _, want := range RequiredGates() {
+		if slices.Contains(gone, want) {
+			required = append(required, want)
+		}
+	}
+	return &GateRegression{
+		Before:   declaredBefore,
+		After:    gateNames(now),
+		Gone:     gone,
+		Required: required,
+	}
+}
+
+// gateNames is the sorted, deduplicated name set of a declaration list. Sorted
+// so a message reads the same twice, deduplicated so a listing that repeated a
+// name does not report it twice as gone.
+func gateNames(defs []GateDef) []GateName {
+	names := make([]GateName, 0, len(defs))
+	for _, d := range defs {
+		if !slices.Contains(names, d.Name) {
+			names = append(names, d.Name)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
+func joinGateNames(names []GateName) string {
+	s := make([]string, 0, len(names))
+	for _, n := range names {
+		s = append(s, string(n))
+	}
+	return strings.Join(s, ", ")
+}
+
+// joinGateNamesOrNone renders an empty list as "(none)". An empty line where a
+// list belongs reads as a formatting slip; the whole finding here is that one
+// of these lists lost names, so an empty one has to be visible as empty.
+func joinGateNamesOrNone(names []GateName) string {
+	if len(names) == 0 {
+		return "(none)"
+	}
+	return joinGateNames(names)
 }
 
 // Answer is one human reply to a question a flow asked.

@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -310,6 +311,144 @@ esac`)
 	}
 }
 
+// The landing read is NOT served from the memo. SupportedGates answers what the
+// machine could run when the resolution started and must not move under the
+// run; DiscoverGates is the second, deliberate read a caller takes against the
+// tree it is about to land — and if it came back memoised it would report the
+// state before the change, which is the whole defect it exists to catch.
+func TestDiscoverGates_IsNotServedFromTheMemo(t *testing.T) {
+	requireRealProcesses(t)
+	dir := t.TempDir()
+	writeGateEntryPoint(t, dir, `printf '{"gates":[{"name":"fit"},{"name":"integration"}]}\n'`)
+
+	b := &Orchestrator{cfg: Config{WorktreeDir: dir}}
+	memo := strings.Join(names2(b.SupportedGates()), ",")
+	if memo != "fit,integration" {
+		t.Fatalf("SupportedGates() = %q, want %q", memo, "fit,integration")
+	}
+	if got := strings.Join(names2(DiscoverGates(context.Background(), dir)), ","); got != "fit,integration" {
+		t.Fatalf("DiscoverGates() = %q, want %q", got, "fit,integration")
+	}
+
+	// The resolution edits the entry point.
+	writeGateEntryPoint(t, dir, `printf '{"gates":[{"name":"fit"}]}\n'`)
+
+	if got := strings.Join(names2(DiscoverGates(context.Background(), dir)), ","); got != "fit" {
+		t.Errorf("DiscoverGates() = %q after the entry point changed, want %q — the landing read asks the machine again", got, "fit")
+	}
+	if got := strings.Join(names2(b.SupportedGates()), ","); got != memo {
+		t.Errorf("SupportedGates() = %q, want %q — the before-state is what the landing read is compared against, and it must not move under the run", got, memo)
+	}
+}
+
+// The caller's deadline is honoured alongside this SDK's. A step that was
+// cancelled does not wait out declarationTimeout to learn nothing, and learning
+// nothing is reported as no gates — the same honest reading an entry point that
+// said nothing gets.
+func TestDiscoverGates_HonoursCallerCancellation(t *testing.T) {
+	requireRealProcesses(t)
+	dir := t.TempDir()
+	writeGateEntryPoint(t, dir, `printf '{"gates":[{"name":"fit"},{"name":"integration"}]}\n'`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	got := DiscoverGates(ctx, dir)
+	elapsed := time.Since(start)
+
+	if len(got) != 0 {
+		t.Errorf("DiscoverGates() = %v, want none — the caller gave up before the entry point answered", names2(got))
+	}
+	if elapsed >= declarationTimeout {
+		t.Errorf("DiscoverGates() took %v, want well under %v — a cancelled caller does not wait out this SDK's bound", elapsed, declarationTimeout)
+	}
+}
+
+// An unbuilt checkout declares nothing through the exported read too. It is the
+// case the before-side exists to distinguish: identical here to an entry point
+// that broke, and told apart only by what the tree declared beforehand.
+func TestDiscoverGates_UnbuiltEntryPointDeclaresNothing(t *testing.T) {
+	requireRealProcesses(t)
+	if got := DiscoverGates(context.Background(), t.TempDir()); len(got) != 0 {
+		t.Errorf("DiscoverGates() = %v, want none — there is no gate entry point", names2(got))
+	}
+}
+
+// Whatever form the listing arrives in, the landing read yields the same names
+// — because it is the same read. That is what makes the check work in both
+// directions: a project that moves onto the object, and (once #414 removes the
+// fallback) one whose entry point still prints bare names under a consumer that
+// bumped. Neither direction is known to the comparison; both are settled here.
+func TestDiscoverGates_BothFormsGiveTheSameNames(t *testing.T) {
+	requireRealProcesses(t)
+	for _, tt := range []struct{ name, body string }{
+		{"the machine-readable listing", `printf '{"gates":[{"name":"fit","summary":"a"},{"name":"integration","summary":"b"}]}\n'`},
+		{"one bare name per line", `printf 'fit\nintegration\n'`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeGateEntryPoint(t, dir, tt.body)
+			if got := strings.Join(names2(DiscoverGates(context.Background(), dir)), ","); got != "fit,integration" {
+				t.Errorf("DiscoverGates() = %q, want %q", got, "fit,integration")
+			}
+		})
+	}
+}
+
+// The defect, end to end. A resolution edits the gate entry point; the tree
+// builds and every test passes, so no gate reports anything wrong; and the
+// listing the next `resolve` reads has nothing in it. The arena that landed the
+// change is the first one that cannot start, and the flow in that repository
+// cannot be used to repair it.
+//
+// Read once before the change and once after, the two lists say which — where
+// the after-list alone is the same empty answer a checkout whose tools were
+// never built produces, and sends the operator to build tools that are already
+// there.
+func TestLandingRead_ReportsAChangeThatBrokeTheListing(t *testing.T) {
+	requireRealProcesses(t)
+	const answering = `printf '{"gates":[{"name":"builds"},{"name":"checked"},{"name":"covered"},{"name":"fit"},{"name":"formatted"},{"name":"integration"},{"name":"tested"}]}\n'`
+
+	for _, tt := range []struct{ name, broken string }{
+		// Loud: the entry point is there and refuses every query.
+		{"an entry point that answers nothing", `exit 2`},
+		// Silent, and the reason the landing read is the only place this can be
+		// caught at all: an answer carrying the names somewhere the reader does
+		// not address parses fine and declares no gates. Nothing fails, nothing
+		// is logged, and the list is empty.
+		{"an answer that no longer carries names where the reader looks", `printf '{"gate_names":["fit","integration"]}\n'`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeGateEntryPoint(t, dir, answering)
+
+			before := DiscoverGates(context.Background(), dir)
+			if got := strings.Join(names2(before), ","); got != "builds,checked,covered,fit,formatted,integration,tested" {
+				t.Fatalf("the before-read = %q, want the seven the entry point declared", got)
+			}
+
+			// The resolution lands its change and the tools are rebuilt from it.
+			writeGateEntryPoint(t, dir, tt.broken)
+			now := DiscoverGates(context.Background(), dir)
+
+			reg := flow.CheckGatesHeld(before, now)
+			if reg == nil {
+				t.Fatal("CheckGatesHeld() found no regression — this change leaves no arena able to start")
+			}
+			if got := gateNameList(reg.Gone); got != "builds,checked,covered,fit,formatted,integration,tested" {
+				t.Errorf("Gone = %q, want every name that was declared before the change", got)
+			}
+			if got := gateNameList(reg.Required); got != "integration,fit" {
+				t.Errorf("Required = %q, want %q — these are what no arena can start without", got, "integration,fit")
+			}
+			if msg := reg.Error(); !strings.Contains(msg, "tested") || !strings.Contains(msg, "(none)") {
+				t.Errorf("Error() = %q, want both lists — the empty one is only readable as a regression beside the full one", msg)
+			}
+		})
+	}
+}
+
 // writeGateEntryPoint installs a bin/gate that answers --list with body.
 func writeGateEntryPoint(t *testing.T, root, body string) {
 	t.Helper()
@@ -339,4 +478,12 @@ func names2(defs []flow.GateDef) []string {
 		out = append(out, string(d.Name))
 	}
 	return out
+}
+
+func gateNameList(names []flow.GateName) string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		out = append(out, string(n))
+	}
+	return strings.Join(out, ",")
 }

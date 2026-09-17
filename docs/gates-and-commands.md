@@ -128,6 +128,14 @@ A project tool renders its result for whoever is reading it — human at a termi
 
 **An entry point that is absent, cannot be executed, exits non-zero, or does not answer within the short bound on a startup query has not said what it supports, and is read as a machine with no gates.** That is the same reading a checkout whose tools were never built gets, and every caller acts on it: the commands that would run a gate refuse, `doctor` reports it, and nothing dispatches a step that would have failed at its first measurement.
 
+**The listing is read at more than one moment, and it is the same read each time** — the same entry point, the same query, the same bound. A caller re-asking does not re-derive how to ask: which forms an answer may arrive in, and which of them this reader still accepts, is settled in one place, so a reader that gains or loses a form gains or loses it everywhere the question is asked.
+
+**An empty answer means different things at the two moments, and only the second can tell them apart.** At a startup read there is nothing to compare against, so an entry point that was never built and an entry point whose answer this reader cannot parse are the same empty list — which is why the refusal names the repair that fits the commoner cause, and why an operator whose tools are built and answering is sent to build them. At a read taken against a change there is a before-list, and an answer that lost names is a regression in the change rather than a machine that was never provisioned.
+
+**The read is taken against the tree as it will land, which means after that tree's tools have been built from it.** The entry point is a built artifact. A listing read from a binary built from the previous tree answers about the previous tree, and reads as a pass.
+
+**A driver states the names it requires in a form a consumer can check a tree against, and offers the check.** The requirement is not prose in a release note and the reading is not each consumer's to reimplement: whatever installs a release into a checkout, and whatever is about to land a change in one, asks the same question through the same call. Either side of this relation can move — a project can stop declaring what a driver requires, and a driver can start requiring what a project does not declare — and a check that knows only one form would miss the second direction entirely.
+
 ### What the runner reports
 
 An outcome the runner determines from what it observed, not a number the gate chose:
