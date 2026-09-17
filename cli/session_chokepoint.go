@@ -35,10 +35,12 @@ func (s *stepCtx) recordSessionRequest(reason flow.SessionReason) {
 	if err := s.app.Orchestrator.RecordSession(s.ctx, s.claim.ItemRef, reason); err != nil {
 		s.Notify("", "could not record the agent session request: "+err.Error())
 	}
-	// The mirror, so sessionOpeningReason's next comparison and `status`'s
-	// excess check read what was just decided rather than what the item held
-	// when it was loaded. flow.SessionCounts.Record is the one mapping, shared
-	// with both orchestrators' stores.
+	// The mirror, so the next classification in THIS dispatch compares against
+	// what was just decided rather than against what the item held when it was
+	// loaded — the same reason mirrorLedger exists for the row writes.
+	// `status` reads the durable count and never this one.
+	// flow.SessionCounts.Record is the one mapping, shared with both
+	// orchestrators' stores.
 	if s.state != nil {
 		s.state.Ledger.Sessions.Record(reason)
 	}
@@ -65,14 +67,26 @@ func (s *stepCtx) sessionOpeningReason() flow.SessionReason {
 	return flow.SessionHandleGone
 }
 
-// sessionDiscardAccountedFor reports whether discarding the handle the
-// resolution is holding is one the route asked for.
+// sessionDiscardAccountedFor reports whether discarding the handle `held` is a
+// discard the route asked for.
 //
-// The pending step's own declaration is the whole test: `fresh` is the only way
-// a new session happens, and the boundary switch in RunOne is the one write that
-// acts on it (docs/flow-registration.md § Session continuity). A discard from
-// anywhere else is machinery deciding this moment is special, which is what the
-// third chokepoint exists to refuse.
-func (s *stepCtx) sessionDiscardAccountedFor() bool {
-	return s.li.Session == flow.SessionFresh
+// TWO TERMS, and the second is what makes a declaration account for ONE discard
+// rather than for a dispatch's worth of them:
+//
+//   - The pending step declares `fresh`. That is the only way a new session
+//     happens (docs/flow-registration.md § Session continuity), so a discard on a
+//     step that declares nothing is machinery deciding this moment is special.
+//   - The declaration has not been acted on yet, which the BOUNDARY says. `fresh`
+//     is a property of one execution, and the boundary switch in RunOne stamps
+//     the step's own id on the session the moment it takes the discard. Anything
+//     asking for a second one inside that execution — or on the step's next
+//     dispatch, where the boundary still stands — is asking past what the
+//     declaration bought, which docs/resolution.md § The agent session names as
+//     machinery starting over rather than as a declared boundary.
+//
+// They are the two terms the boundary switch itself branches on, which is what
+// keeps the guard from refusing the one discard the route declared while still
+// refusing every one it did not.
+func (s *stepCtx) sessionDiscardAccountedFor(held flow.AgentSession) bool {
+	return s.li.Session == flow.SessionFresh && held.Boundary != s.li.Result()
 }

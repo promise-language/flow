@@ -1905,13 +1905,21 @@ func (s *stepCtx) setResolutionSession(sess flow.AgentSession) {
 	// Only a live handle can be refused: dropping an empty one discards nothing,
 	// and the opening that follows is classified at the prompt instead.
 	if held := s.resolutionSession(); held.SessionID != "" && sess.SessionID == "" &&
-		!s.sessionDiscardAccountedFor() {
+		!s.sessionDiscardAccountedFor(held) {
 		s.recordSessionRequest(flow.SessionRefused)
+		// WHICH OF THE TWO TERMS FAILED, because the fixes are different ones: a
+		// step that should have declared `fresh` and did not, against machinery
+		// taking a second conversation on a step whose one declared discard is
+		// already spent.
+		declares := fmt.Sprintf("step %q declares Session %q", s.li.Result(), s.li.Session)
+		if s.li.Session == flow.SessionFresh {
+			declares += ", and the one conversation that declaration bought is already open"
+		}
 		s.Notify("", fmt.Sprintf(
-			"refused to discard the resolution's agent session on step %q, which declares Session %q: "+
-				"%s asked for a new conversation the route does not account for. The session is kept and "+
-				"the dispatch continues on it. See docs/resolution.md § The treasurer",
-			s.li.Result(), s.li.Session, callSite(0)))
+			"refused to discard the resolution's agent session: %s, and %s asked for another one "+
+				"the route does not account for. The session is kept and the dispatch continues on it. "+
+				"See docs/resolution.md § The treasurer",
+			declares, callSite(0)))
 		return
 	}
 	err := s.app.Orchestrator.SaveAgentSession(s.ctx, s.claim.ItemRef, sess)

@@ -273,10 +273,10 @@ func (r SessionReason) Valid() bool { return slices.Contains(AllSessionReasons()
 // opened, kept by WHY each was opened.
 //
 // TALLIES, NOT A LOG. A backend with nowhere to keep a handle opens a session
-// per prompt, so a record of every request would grow the durable state without
-// bound. Three buckets answer both questions the count exists for: how many
-// (Opened), and which of the two causes it was — the one fixed in the flow, and
-// the one that is a limit of the substrate or the backend.
+// every dispatch, so a record of every request would grow the durable state
+// without bound. Three buckets answer both questions the count exists for: how
+// many (Opened), and which of the two causes it was — the one fixed in the flow,
+// and the one that is a limit of the substrate or the backend.
 type SessionCounts struct {
 	Declared   int
 	HandleGone int

@@ -443,10 +443,11 @@ func (b *Orchestrator) AddDuration(ctx context.Context, ref flow.ItemRef, step f
 // the fake's cannot disagree about which figure a reason moves. The counts round
 // trip through the flow type rather than being incremented on the doc directly,
 // which is what keeps that mapping in one place.
-// mutateOrCreateStateDoc for the reason a row write takes it: the first session
-// a resolution opens may be the first thing anything records about the item, and
-// a ledger write that refused for want of a comment to write into would lose the
-// count of exactly the resolutions worth counting.
+//
+// It takes mutateOrCreateStateDoc for the reason a row write does: the first
+// session a resolution opens may be the first thing anything records about the
+// item, and a ledger write that refused for want of a comment to write into
+// would lose the count of exactly the resolutions worth counting.
 func (b *Orchestrator) RecordSession(ctx context.Context, ref flow.ItemRef, reason flow.SessionReason) error {
 	return b.mutateOrCreateStateDoc(ctx, ref, "RecordSession", func(doc *stateDoc) error {
 		counts := flow.SessionCounts{
@@ -709,10 +710,11 @@ func (b *Orchestrator) requireOwnClaim(ctx context.Context, ref flow.ItemRef, op
 //
 // Nothing seeds an item any more, so whichever of these lands first is what
 // brings its state comment into being: the first journal entry, the first
-// ledger row, the first park, the first question, or the first observed signal.
-// The last three are here because work can be attempted and record no entry — a
-// refusal on the very first step counts no dispatch, and a question and a signal
-// are both written mid-handler, before any dispatch is counted.
+// ledger row, the first session count, the first park, the first question, or
+// the first observed signal. The last four are here because work can be
+// attempted and record no entry — a refusal on the very first step counts no
+// dispatch, and a session count, a question and a signal are all written
+// mid-handler, before any dispatch is counted.
 //
 // The writes that can only FOLLOW a record still refuse an absent document
 // (mutateStateDoc): an answer needs the question it answers, a park is cleared

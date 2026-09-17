@@ -403,6 +403,50 @@ func TestSessionChokepoint_ADeclaredDiscardIsNotRefused(t *testing.T) {
 	wantFresh(t, agent, 1) // the declared boundary did discard, as it must
 }
 
+// A SECOND DISCARD INSIDE ONE EXECUTION is refused on a `fresh` step like on any
+// other. The declaration buys ONE conversation per execution and the boundary
+// switch has already taken it; machinery asking for another on the same step is
+// starting over, which is exactly what the chokepoint refuses — and a guard that
+// read only the declaration would wave it through on the one step where the
+// machinery is most likely to decide a moment is special.
+func TestSessionChokepoint_ASecondDiscardOnAFreshStepIsRefused(t *testing.T) {
+	agent := &sessionAgent{}
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", promptingStep("implementation", asPlan),
+			flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true,
+				Next: []flow.StepId{"implementation"}})
+		f.AddStep("review the work", "implementation", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			// The declared boundary is already spent: this prompt opens the one
+			// conversation `fresh` asked for.
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "work"}); err != nil {
+				return flow.StepResult{}, err
+			}
+			discardTheSession(ctx)
+			if _, err := ctx.Agent().Run(ctx.Context(), flow.AgentRequest{Prompt: "more work"}); err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").Patch(flow.PatchBody{
+				Diff: []byte("diff --git a/x b/x\n"), BaseBranch: "main",
+			}), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor",
+			Session: flow.SessionFresh, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, agent)
+
+	runSteps(t, app, claim, 1)
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != "done" {
+		t.Fatalf("RunOne = (%+v, %v), want done — a refusal does not stop the resolution", res, err)
+	}
+	// The step's own conversation survived the attempt: the prompt after the
+	// discard resumed the one the declared boundary opened.
+	wantResume(t, agent, 2, "sess-2")
+	if agent.minted != 2 {
+		t.Errorf("the substrate opened %d sessions, want 2 — the entry's and the declared one", agent.minted)
+	}
+	// The entry's and the declaration's, and the refusal beside them. Nothing in
+	// HandleGone: the second discard opened nothing to file there.
+	wantSessions(t, be, claim, flow.SessionCounts{Declared: 2, Refused: 1})
+}
+
 // sessionRecordFailsBackend has a ledger that will not take the session count.
 type sessionRecordFailsBackend struct {
 	*fake.Orchestrator
