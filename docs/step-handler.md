@@ -75,6 +75,17 @@ A handler reads artifacts and writes none: its own artifact is captured from its
 
 `ctx.ParkedOn() → *ParkRequest` returns the park this dispatch is resuming from, or nil when the step was not parked. It reads the state the orchestrator already loaded — a handler that needs it (to read the answers to a question it asked last time, for example) does not have to re-load the item.
 
+## The base and its health
+
+| Method | Returns |
+|---|---|
+| `ctx.Base() → CommitSha` | The trunk commit this arena was dispatched onto. |
+| `ctx.BaseHealth() → TrunkHealth` | What is known about that commit on this arena's platform — `green`, `red` or `unknown`, as [orchestrator.md](orchestrator.md) § Trunk health defines. |
+
+Both are inputs and a handler derives neither ([trunk-health.md](trunk-health.md) § Health is delivered, never derived). A step meeting a red gate reads them rather than working out for itself whose fault the failure is: the classification is a measurement, and no agent's conclusion is one.
+
+**`BaseHealth` always returns a value.** A base nothing has measured is `unknown` — never a zero value a caller must interpret, and never an absent field, because an absent field is read as `green` by the next reader who forgets.
+
 ## Electing the route
 
 `StepResult` is built by constructors, and the election must be within the step's declaration ([flow-registration.md](flow-registration.md)):
@@ -101,6 +112,12 @@ A handler may return these sentinels (as the `error`, with a nil `StepResult`) i
 `ErrRefused` — returned for deterministic failures that cannot change on re-run (a repository guard refused a staged file, a required tool is out of date). The orchestrator parks with `ParkRefused`; the treasurer does not count the attempt.
 
 **There is no skip sentinel.** A dispatched handler that stopped saying only "no progress right now" would be the inert stop [resolution.md](resolution.md) § Every outcome leads somewhere forbids: a state naming nothing that would clear it, re-dispatched into an identical stop. Every case it seems to cover decomposes into an outcome that names its clearing — nothing left to do **completes**, with the finding in its message; a condition that clears itself **parks**, naming the condition; a decision needed **asks**. The `skipped` invocation status survives without it ([resolution.md](resolution.md) § Reporting): it reports an invocation stopped before any dispatch, and no handler produces it, because a skipped invocation is one in which no handler ran.
+
+### A block on trunk health is parked, never asked
+
+A step that cannot proceed because its base is `red`, or because its base is `unknown` and it is in no position to measure it, parks with `ParkConditionUnmet` naming what would clear it — a kind no re-dispatch cures and no person has to lift ([orchestrator.md](orchestrator.md) § Vocabularies). A step that cannot progress on a base that is `green` parks with **neither**: that is an environment condition, reported as the invocation status `blocked` and written to the item nowhere ([environment.md](environment.md) § The condition is reported, not recorded on the item).
+
+It does **not** ask a question. A block is not a question and no answer unblocks a red trunk; an unanswered question is checked before dispatch, so a question asked here holds up the item's own re-dispatch waiting on a person with nothing to decide; and an answer would clear the question without clearing the condition, resuming the flow into the identical stop. [trunk-health.md](trunk-health.md) § A block is reported, not asked states the rule, and § Three conditions, three clocks states what each block must name.
 
 ## Error semantics
 
@@ -142,4 +159,5 @@ The draft is **scaffolding, not a result**: it completes nothing, decides nothin
 - [artifacts-and-signals.md](artifacts-and-signals.md) — the result kinds and their capture.
 - [flow-registration.md](flow-registration.md) — how steps and their routes are declared.
 - [agent.md](agent.md) — the agent interface and permission modes.
+- [trunk-health.md](trunk-health.md) — what a red gate can mean, and what a step reports rather than concludes.
 - [orchestrator.md](orchestrator.md) — the identities, structures, worktree and orchestrator contract.
