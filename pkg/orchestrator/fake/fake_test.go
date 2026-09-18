@@ -2117,3 +2117,37 @@ func TestBlockedness_AnswersForEveryParkKind(t *testing.T) {
 		})
 	}
 }
+
+// A park kind this binary does not know — one written by a newer binary, which
+// Park stores without inspecting it — reports the item NOT BLOCKED, the same
+// answer the six known kinds above fall out of the switch with.
+//
+// Written down because the other two crosswalks #324 proved each pin their own
+// unknown-kind answer (parkLabel labels it blocked, remedyFor gives it the
+// generic remedy) and this one did not. It is the answer with the most reach:
+// not blocked is what ListAutoSelectable reads, so the item is OFFERED — a
+// runner keeps picking up a park it did not write and cannot read. That
+// consequence, not the switch's shape, is what this holds; whether it is the
+// right answer is #431's question.
+func TestBlockedness_AnUnknownParkKindDoesNotBlock(t *testing.T) {
+	b := fake.New()
+	ref := addItem(b, "1")
+	if err := b.Park(t.Context(), ref, flow.ParkRequest{Kind: "from-the-future", Step: "plan", Reason: "why"}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+	info, err := b.Get(t.Context(), ref, "test", func(flow.ItemType) bool { return true }, nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if info.Blocked || info.BlockKind != "" || info.BlockReason != "" {
+		t.Errorf("an unknown-kind park reports blocked=%v kind=%q reason=%q, want not blocked at all",
+			info.Blocked, info.BlockKind, info.BlockReason)
+	}
+	selectable, err := b.ListAutoSelectable(t.Context(), nil, nil)
+	if err != nil {
+		t.Fatalf("ListAutoSelectable: %v", err)
+	}
+	if len(selectable) != 1 {
+		t.Errorf("ListAutoSelectable = %v, want the parked item offered — that is what reporting it unblocked costs", selectable)
+	}
+}

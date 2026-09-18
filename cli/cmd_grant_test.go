@@ -211,6 +211,11 @@ func TestCmdGrant_TypeOutsideTheRemitStillGrants(t *testing.T) {
 func TestRemedyFor_AnswersForEveryParkKind(t *testing.T) {
 	// want holds the substring a kind's own arm must carry. A kind mapped to ""
 	// takes genericRemedy, deliberately — see below.
+	//
+	// A "" row proves WHICH LINE the kind takes and not what that line says:
+	// the comparison is against the constant, so it holds however the constant
+	// reads. What the generic line must actually tell an operator is pinned
+	// end-to-end by TestGrantPark_BlockedParkRefusalNamesTheNextAction.
 	want := map[flow.ParkKind]string{
 		// The generic line IS the blocked park's remedy: a person clears what
 		// the item waits on, then the step runs again. There is nothing an arm
