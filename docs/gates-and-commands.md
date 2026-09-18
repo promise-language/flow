@@ -74,6 +74,40 @@ It divides into instances like any other concept — `fit:disk`, `fit:toolchain`
 
 **It does not appear in the concern table below**, and that is deliberate rather than an omission. A project reads that table to decide what its `integration` is made of, and a machine that cannot build is not a change that may not land. What `fit` measures, what follows from an unfit answer, and why a `fit` gate may live in the tree despite measuring something that does not persist, is [environment.md](environment.md).
 
+### A green `verify` blesses the tree it verified
+
+A `verify` that passes has established something narrow and worth keeping: a green run completed on exactly this content. Everything downstream wants to ask it — a commit that must not record unverified content, a party deciding whether the gate needs to run at all — and the run is gone by the time they ask. So the fact is recorded, and recording it is part of what `verify` is.
+
+> **A green `verify` blesses the tree it verified, and nothing else may.**
+
+The blessing is about content, never time. A tree blessed last week and untouched since is still blessed; a tree edited five seconds after a green run is not.
+
+> **The blessed content is what `git add -A` would stage, and it is computed without touching the index.**
+
+Tracked changes plus untracked-but-not-ignored files: what *would* be committed rather than what has been. The commit is the wrong identity in both directions — it says nothing about an untracked file that never enters it, and a step that amends as it works produces a new commit per attempt over an identical tree.
+
+The computation runs over a **copy** of the index, seeded from the real one. That seed is not a detail: ignore rules apply only to untracked paths, so the tracked set decides three cases any other seed gets wrong. A tracked-but-ignored file belongs in the tree, one force-added but not yet committed belongs in it, and one just `git rm --cached`ed does not — an empty seed drops the first, and HEAD drops the second and keeps the third. The real index is never written, so the computation is safe beside a live worktree and beside a person at a terminal.
+
+> **The record is cleared before the first step and written only after every one of them has passed.**
+
+Clearing first is what makes an in-flight verify honest; writing last is what keeps a red one from blessing anything. A run that dies part way leaves nothing a later reader could mistake for a pass.
+
+There are two states and they are the whole vocabulary: a record naming a tree means that tree is blessed, and **anything else means nothing has blessed this tree**. Absent, blank, and unreadable as a tree id are different histories — none has ever run here, one is in flight having cleared the record, a write was interrupted — and they are deliberately one answer, because the only safe response to all three is the same. A reader able to tell them apart would have to decide what to do about each, and there is nothing else to do.
+
+> **The project ignores the record's path, and a party that finds it unignored refuses to bless, naming it.**
+
+An unignored record sits inside its own subject: writing it changes the tree it names, so the blessing is for content that stopped existing the moment it was recorded, and every commit is then refused with nothing anyone can do about it. § The non-modification rule draws the same line for gates — paths the project ignores are outside the subject — and this is that line. The refusal belongs at the bless, the last moment the cause is still visible.
+
+> **Every party asks the same implementation.**
+
+The record has one writer and several readers, in different repositories: the project's `verify`, a commit guard refusing a commit whose staged tree differs, a party deciding whether the gate needs to run at all. While each computed its own tree id they could disagree with nothing able to reconcile them, and the disagreement is silent — a runner that had genuinely verified a tree could not record the fact, because nothing guaranteed its tree id was the guard's.
+
+So the tree id, the record and the check are one package in the SDK, `pkg/verifiedtree`, and no project computes a tree id for blessing or for execution identity, nor reads or writes the record, except through it. Where the record lives and what bytes it holds are that package's to state; a document that also spelled them would be the second copy this rule exists to remove.
+
+> **A party holding a green result over a tree may record it, and only for that tree.**
+
+A result belongs to the content it was measured over, and a party may come by one without running anything — by recognising that the same work over the same tree has already been done. Such a result is as good as a run's, and it must leave the checkout in the state a run would have left it in, or the work is bought a second time for nothing. What it may not do is bless whatever the checkout happens to hold now: it names the tree its result is about, and a checkout that has moved on is simply not blessed.
+
 ## Running a gate, and reading what it reported
 
 Three parties, three jobs, and the separation is the whole design:
