@@ -620,6 +620,13 @@ func dispositionFromIssue(iss *github.Issue) string {
 // The reason names the KIND of block and never an item: BlockedBy carries the
 // references, and prose repeating them is a second copy nothing can act on and
 // nothing updates when a blocker lands.
+//
+// TestBlockedness_AnswersForEveryParkKindsLabel walks flow.AllParkKinds()
+// through parkLabel and writes down what every member reads back as here — the
+// composition is where the mapping goes lossy, nine kinds onto five labels, so a
+// kind added to the vocabulary silently inherits whatever its label already
+// means. Six of those answers differ from the fake's for the same park; #431
+// decides which side moves.
 func (b *Orchestrator) blockedness(blockers []flow.Blocker, lblNames []string) (bool, flow.BlockKind, string) {
 	// waits-on-items whenever ANY blocker is still open. It outranks the label
 	// causes because it is the one a caller can go act on elsewhere.

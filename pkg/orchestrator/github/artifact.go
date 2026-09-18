@@ -908,6 +908,11 @@ const (
 // parkLabel returns the label that advertises a park of this kind. Adding and
 // removing go through the same function so a park can never be labelled by one
 // rule and unlabelled by another.
+//
+// TestParkLabel_LabelsEveryKindDeliberately walks flow.AllParkKinds() and writes
+// down the label every member gets, including the three that reach the
+// fall-through, so a kind added to the vocabulary cannot pick up the generic
+// label unnoticed.
 func parkLabel(l labels, req *flow.ParkRequest) string {
 	if req == nil {
 		return ""

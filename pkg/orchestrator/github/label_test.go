@@ -306,24 +306,28 @@ func TestParkLabels_AreAllRecognisedAsParks(t *testing.T) {
 }
 
 // Every member of the park vocabulary has a label written down, including the
-// five that take parkLabel's fall-through. The crosswalk walks
-// flow.AllParkKinds(), so a kind added to the vocabulary lands here rather than
-// in `default: l.Blocked()`, where a kind that belongs under the generic label
-// and one that does not read exactly alike (#324).
+// three that take parkLabel's fall-through — `blocked`, `step-did-not-complete`
+// and `remote-unreachable`. Five kinds carry the generic label in all; the other
+// two reach it through arms of their own, and the entries below say which is
+// which. The crosswalk walks flow.AllParkKinds(), so a kind added to the
+// vocabulary lands here rather than in `default: l.Blocked()`, where a kind that
+// belongs under the generic label and one that does not read exactly alike
+// (#324).
 //
 // TestParkLabels_AreAllRecognisedAsParks above proves every kind's label is
 // recognised as advertising a park; this one proves WHICH label each kind gets.
 func TestParkLabel_LabelsEveryKindDeliberately(t *testing.T) {
 	l := newLabels("flow:")
 	want := map[flow.ParkKind]string{
-		// The kind the generic label is named for.
+		// The fall-through, and the kind the generic label is named for.
 		flow.ParkBlocked: l.Blocked(),
-		// A deterministic refusal and a write-contract violation are both
-		// blocked until a person acts, and no budget grant clears either.
+		// Arms of their own, both returning the generic label: a deterministic
+		// refusal and a write-contract violation are blocked until a person
+		// acts, and no budget grant clears either.
 		flow.ParkRefused:       l.Blocked(),
 		flow.ParkWriteContract: l.Blocked(),
-		// Advertised as blocked since before it left the blocked kind (#325);
-		// docs/github-schema.md § Labels and
+		// The fall-through, and right: advertised as blocked since before it
+		// left the blocked kind (#325); docs/github-schema.md § Labels and
 		// TestParkLabel_StepDidNotCompleteIsAdvertisedAsBlocked hold why.
 		flow.ParkStepDidNotComplete: l.Blocked(),
 		// The fall-through, and #322 holds that it is the WRONG answer for this

@@ -216,10 +216,11 @@ func TestRemedyFor_AnswersForEveryParkKind(t *testing.T) {
 		// the item waits on, then the step runs again. There is nothing an arm
 		// of its own would say differently.
 		flow.ParkBlocked: "",
-		// Never reached: planPark refuses a non-treasurer park before calling
-		// this, so `grant` answers the treasurer-refused kind itself — topping
-		// up the parked axis is the whole command. The generic line stands as
-		// the answer to a question nothing asks.
+		// Never reached: planPark calls remedyFor only on the branch it takes
+		// for a park that is NOT treasurer-refused. A treasurer-refused park is
+		// the one `grant` acts on itself — topping up the parked axis is the
+		// whole command — so the generic line stands as the answer to a
+		// question nothing asks.
 		flow.ParkTreasurerRefused:   "",
 		flow.ParkQuestion:           "Answer the question on the item",
 		flow.ParkStepDidNotComplete: "the step left its job undone",
