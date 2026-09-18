@@ -149,14 +149,14 @@ The exec line is `bin/gate <name>`, and the question is asked one way only — t
 The exec line is `bin/gate --list --json`, and the answer is one object on stdout, exit `0`:
 
 ```json
-{"gates": [{"name": "integration", "summary": "…"}, {"name": "tested", "summary": "…"}]}
+{"gates": [{"name": "integration", "summary": "…"}, {"name": "tested", "summary": "…", "host_scope": true}]}
 ```
 
 A project tool renders its result for whoever is reading it — human at a terminal, JSON otherwise ([org/cli-guide.md](org/cli-guide.md) § 6) — and this query's stdout is a pipe, so a conforming entry point would send the object anyway. Asking for it is what makes that a contract rather than a coincidence, and it is the difference between a reader that works and one that works until someone attaches a terminal. The human rendering is a rendering: its labels and the very choice of one name per line are free to improve whenever they read better. **The object is the interface**, and it grows by adding fields.
 
 **Besides a measurement, the listing is the only mode that puts gate data on stdout**, and it does not reopen the second channel the section above closes. A caller that asked which gates exist did not ask for a measurement, and a listing cannot be mistaken for an envelope by anything that parses one — in either rendering, because what closes that channel is the absence of a verdict, not the absence of a second wire.
 
-**Only the name is addressed.** The summary is for a person reading the listing; a gate is asked for by name. A field the listing grows later is ignored rather than refused, which is what reading an additive interface means.
+**A gate is addressed by name, and `host_scope` is the one other field a caller acts on.** The summary is for a person reading the listing. `host_scope` is where a project declares that this gate must hold the host's exclusion ([above](#two-scopes-for-two-different-reasons)); **absent reads as false**, so a project that needs none writes none, and the bare listing form declares none at all. A field the listing grows later is ignored rather than refused, which is what reading an additive interface means.
 
 **A name outside the flow's vocabulary is skipped, not refused.** A project has gates the flow knows nothing about ([below](#a-project-has-gates-the-flow-knows-nothing-about)), and this listing is the part the flow can address.
 
@@ -451,7 +451,7 @@ The failure is not hypothetical: a wait capped below the time a real run takes t
 Two things follow:
 
 - **A wait bound is not a verdict.** Exhausting it is "no answer yet", which is a transient condition to retry — never a refusal to act on.
-- **Naming gates makes this tractable.** A formatting check and a full test suite have nothing in common in what they cost, so serializing per name lets the cheap ones run freely while only the expensive ones queue. A single undifferentiated gate would have to take the heaviest lock every time.
+- **Naming gates makes this tractable.** A formatting check and a full test suite have nothing in common in what they cost, and a name is what carries a project's declaration that this gate cannot run beside another — so serializing on the declaration lets the cheap ones run freely while only the expensive ones queue. A single undifferentiated gate would have to take the heaviest lock every time.
 
 ### Two scopes, for two different reasons
 
@@ -463,6 +463,38 @@ Serialization is not one thing. What is being protected differs, and so does how
 | **Project** | Shared state, across every machine | Landing a change on the mainline |
 
 **Host scope is about the quality of an answer.** A gate competing for the machine reports something about the load as much as about the code, so running it alone is what makes the measurement mean anything.
+
+> **There is one host-scope exclusion per `HostId`, its holder is an arena — `(HostId, ArenaId)` — and a project declares which of its gates and commands must hold it.**
+
+**One per host, not one per name.** The resource being protected is the machine, and two heavy suites under *different* names saturate it exactly as two runs of one name do — so a key made of the name lets the commonest case straight through. What keeps a formatting check out of the queue is the declaration, not the key: a gate that declares nothing never waits for anything.
+
+**The holder is an arena**, never a checkout path. A path can say which directory is busy and cannot say which of a host's arenas holds the machine, which is the one question an operator looking at a stalled queue is asking. [orchestrator.md](orchestrator.md) § Identities owns both halves of the pair.
+
+**`fit` never declares it.** `fit` is asked *because* the machine may be busy, and before an item is taken; a `fit` that queued behind a suite could not answer the question it exists for, and would make every arena on a working machine wait to be told the machine works.
+
+> **The exclusion is the orchestrator's, it needs no server, and every party that runs a declared gate or command on that machine takes it — including a person at a terminal.**
+
+Ownership is the same as the claim's and for the same reason: only a layer that can see more than one arena can serialize them. **It reaches one machine, so it needs nothing central** — which is why it holds identically under both drive models, and why a resolution with no lease service behind it is not thereby a resolution without this.
+
+**The participant set is closed, and a lock only some parties take is not a lock.** It binds the flow's own gate runner, the project's gate entry point, each of the three `CommandName`s, and a person running the same tools by hand. The operator is not a courtesy case: on a developer's machine they are the most frequent second party, and a peer run nothing coordinated with is exactly what invalidates a measurement while both sides read as healthy.
+
+> **It is taken immediately before the measurement and released immediately after, it is never held across a stop, and a process that dies releases it.**
+
+The lifecycle is the one project scope carries below, for the reason given there: a lock held in a stalled arena starves everything behind it. What is different here is who does the releasing. **The release is an authority independent of the holder** — the machine itself, when the process ends — because a holder that has crashed, been killed or gone quiet is precisely the holder that cannot keep a promise to release, and a lock that survives it disables the machine until somebody notices.
+
+**It lives outside every resource a gate touches.** A lock kept inside the cache a contended gate writes is a lock whose own directory is part of the contention it exists to prevent.
+
+> **A party that cannot take the exclusion does not run the measurement. It refuses, naming the exclusion it could not take; it never proceeds unserialized.**
+
+The alternative is the failure this is hardest to detect from: a machine where the lock cannot be created runs everything at once and says nothing, so the measurements it produces are wrong in a way that reproduces nowhere and that no report mentions. A refusal costs one run; a silent pass costs the investigation.
+
+**The queue needs no bound of its own.** Every holder's run is bounded by its own declared timeout and released by its own death, so a wait is finite by construction rather than by a cap — which matters, because a cap set below what a real run costs turns every busy period into false failures.
+
+> **The wait is recorded as waiting, never as work, and it is reported by the party that held it** ([orchestrator.md](orchestrator.md) § Ledger).
+
+> **`fit` answers whether this machine may be given work at all; host scope answers whether this measurement may run now. A machine busy with a peer arena's suite is fit.**
+
+The two are adjacent and must not merge. `fit` is measured before a dispatch, and unfitness withholds the item entirely ([environment.md](environment.md) § Unfit is a wait); host scope is met inside a run already under way, and costs a queue. A project that spelled *someone else is running* as unfit would withhold work from a healthy machine, and would lose the distinction between a machine that cannot be given work and one that merely must not be given it **yet**.
 
 **Project scope is about a loop terminating**, which is a stronger requirement than it sounds. Landing is rebase → measure the merge result → push, and a push that lands first invalidates every merge result measured against the old mainline. With two arenas landing at once and no serialization, each one's push sends the other back to rebase and re-measure, and both can do this indefinitely — not a conflict to resolve but a livelock, where the work is sound, the gate passes every time, and nothing ever lands.
 

@@ -1,6 +1,9 @@
 package flow
 
-import "slices"
+import (
+	"slices"
+	"time"
+)
 
 // Outcome is what a RUNNER observed of one gate or command process. It is not
 // a verdict and not a number the gate chose: the gate measures, the runner
@@ -117,6 +120,19 @@ type GateRun struct {
 	// was absent, where the envelope stopped parsing. It is prose and nothing
 	// keys on it.
 	Detail string
+
+	// Waited is how long this run spent queued for the host-scope exclusion
+	// before it was spawned — zero when the gate declared none, or when the
+	// exclusion was free.
+	//
+	// IT IS NOT PART OF THE MEASUREMENT AND NOT PART OF THE WORK. A gate that
+	// queued and then ran is exactly as authoritative as one that ran at once,
+	// which is why it is carried beside the outcome rather than folded into it.
+	// It is here so the party that held the wait can report it as waiting:
+	// docs/orchestrator.md § Ledger requires that time blocked on a declared
+	// exclusion reaches AddWaiting and never AddDuration, and the runner is the
+	// only party that knows the wait happened.
+	Waited time.Duration
 }
 
 // GateVerdict is a JUDGING layer's answer about one measurement: whether the

@@ -24,6 +24,7 @@ func (b *Orchestrator) Worktree(ctx context.Context, ref flow.ItemRef) (flow.Wor
 		b:        b,
 		ref:      ref,
 		issueNum: issueNum,
+		gates:    b.SupportedGates(),
 	}, nil
 }
 
@@ -31,6 +32,24 @@ type worktree struct {
 	b        *Orchestrator
 	ref      flow.ItemRef
 	issueNum int
+
+	// gates is what the project declared, read HERE and not inside RunGate.
+	//
+	// The declaration comes from the gate entry point, and asking it is a
+	// process spawn (DiscoverGates). RunGate is the one place that must not pay
+	// one: it is already spawning that binary for the measurement, and a second
+	// spawn ahead of it would run the project's entry point before the
+	// pre-measurement snapshot — so a listing query that touched the tree, or
+	// that hung on a child it left behind, would be charged to a gate that had
+	// not started. Resolved at construction, the answer is memoised on the
+	// orchestrator, costs nothing after the first worktree, and is fixed for
+	// the life of the run, which is what SupportedGates already promises.
+	//
+	// A worktree built any other way carries none, and declares nothing
+	// host-scoped. That is only reachable inside this package, where the
+	// runner's own tests build one directly to exercise the spawn; every caller
+	// outside it comes through Orchestrator.Worktree.
+	gates []flow.GateDef
 
 	// mergeRestorePoint is the HEAD SHA saved by PrepareMergeResult, used by
 	// RevertMergePrep to undo the local merge simulation.
@@ -279,16 +298,34 @@ func (w *worktree) RunGate(ctx context.Context, name flow.GateName) (flow.GateRu
 		return flow.GateRun{}, fmt.Errorf("worktree.RunGate: %q is not a declared gate name", name)
 	}
 
+	// Hold the host-scope exclusion for the whole measurement where the project
+	// declared this gate needs it, and for no longer: taken before the first
+	// snapshot and released after the last, because both snapshots are part of
+	// the one measurement and neither costs anything to hold through.
+	release, waited, err := w.holdHostScope(ctx, name)
+	if err != nil {
+		// No outcome — nothing ran, so there is nothing to judge — but the
+		// queue this run sat in before giving up is still reported. A figure
+		// that counted a wait only when it ended in a measurement would
+		// understate contention exactly where contention is worst.
+		return flow.GateRun{Waited: waited}, err
+	}
+	defer release()
+
 	// Capture tracked state before spawning so the runner can detect a gate
 	// that modified the worktree. See docs/gates-and-commands.md § "The
 	// non-modification rule is checked, not assumed".
 	before, err := w.b.snapshotTree(ctx)
 	if err != nil {
-		return flow.GateRun{}, fmt.Errorf("worktree.RunGate: cannot snapshot worktree before gate: %w", err)
+		return flow.GateRun{Waited: waited}, fmt.Errorf("worktree.RunGate: cannot snapshot worktree before gate: %w", err)
 	}
 
 	argv := append(append([]string{}, gateEntryPoint...), string(name), envelopeFlag)
 	run, err := runGate(ctx, w.b.cfg.WorktreeDir, name, argv, w.b.cfg.GateTimeout)
+	// Set on every path, including the error one: the queue was paid for
+	// whatever became of the gate, and the party that held it is the only one
+	// that can say so.
+	run.Waited = waited
 	if err != nil {
 		return run, err
 	}

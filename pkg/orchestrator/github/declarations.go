@@ -168,14 +168,16 @@ func DiscoverGates(ctx context.Context, root string) []flow.GateDef {
 	}
 
 	var gates []flow.GateDef
-	for _, name := range listedGateNames(out) {
-		if !name.Valid() {
+	for _, listed := range listedGates(out) {
+		if !listed.Name.Valid() {
 			// A name this SDK does not know is not a gate it can ask for. It
 			// is skipped rather than refused: the entry point is free to have
 			// gates of its own, and this list is what the SDK can address.
 			continue
 		}
-		gates = append(gates, flow.Gate(name, slices.Contains(flow.RequiredGates(), name)))
+		def := flow.Gate(listed.Name, slices.Contains(flow.RequiredGates(), listed.Name))
+		def.HostScope = listed.HostScope && hostScopeAllowed(listed.Name)
+		gates = append(gates, def)
 	}
 	slices.SortFunc(gates, func(a, c flow.GateDef) int { return strings.Compare(string(a.Name), string(c.Name)) })
 	return gates
@@ -199,37 +201,64 @@ func askGateList(ctx context.Context, root string, args []string) ([]byte, bool)
 	return out, true
 }
 
-// gateListing is the machine-readable form of the listing. Only the name is
-// read: the listing carries a summary per gate as well, and this SDK addresses
-// a gate by name. Anything it grows later is ignored here rather than refused,
-// which is what reading an additive interface means.
+// gateListing is the machine-readable form of the listing. Two fields are read:
+// the NAME, which is how a gate is addressed, and HOST_SCOPE, which is where a
+// project declares that this gate must hold the host-scope exclusion while it
+// runs (docs/gates-and-commands.md § Two scopes). The listing carries a summary
+// per gate as well, for a person reading it; anything it grows later is ignored
+// here rather than refused, which is what reading an additive interface means.
+//
+// ABSENT READS AS FALSE, which is what makes the field additive rather than a
+// flag day: every entry point already in circulation declares no host scope,
+// and that is the correct reading of them — a project that never said its
+// suites contend has not said it.
 type gateListing struct {
-	Gates []struct {
-		Name flow.GateName `json:"name"`
-	} `json:"gates"`
+	Gates []listedGate `json:"gates"`
 }
 
-// listedGateNames reads the names out of whichever form came back.
+// listedGate is one row of the listing, in whichever form it arrived.
+type listedGate struct {
+	Name      flow.GateName `json:"name"`
+	HostScope bool          `json:"host_scope"`
+}
+
+// listedGates reads the rows out of whichever form came back.
 //
 // Both are accepted for as long as both are in circulation, and the parser is
 // the half that cannot be dropped on a flag day: an entry point that refuses
 // --json may still answer the bare query in JSON, because its own stdout is a
 // pipe either way. What retires with gateListLegacyArgs is the second spawn
 // (#414), not the ability to read a line.
-func listedGateNames(out []byte) []flow.GateName {
+//
+// THE BARE FORM CARRIES NO FIELDS, so every row it yields declares no host
+// scope. That is not a loss to work around: a rendering of one name per line
+// has nowhere to put a declaration, and inventing one would mean guessing which
+// of a project's gates are heavy — the guess the whole mechanism exists to stop
+// anyone making.
+func listedGates(out []byte) []listedGate {
 	var listing gateListing
 	if err := json.Unmarshal(out, &listing); err == nil {
-		names := make([]flow.GateName, 0, len(listing.Gates))
-		for _, g := range listing.Gates {
-			names = append(names, g.Name)
-		}
-		return names
+		return listing.Gates
 	}
-	var names []flow.GateName
+	var rows []listedGate
 	for _, line := range strings.Split(string(out), "\n") {
 		if name := flow.GateName(strings.TrimSpace(line)); name != "" {
-			names = append(names, name)
+			rows = append(rows, listedGate{Name: name})
 		}
 	}
-	return names
+	return rows
 }
+
+// hostScopeAllowed reports whether a gate may declare host scope at all.
+//
+// `fit` may not, and the refusal is here rather than left to a project's good
+// sense because the cost of getting it wrong is silent and total:
+// docs/gates-and-commands.md § Two scopes states that `fit` is asked BECAUSE
+// the machine may be busy, and before an item is taken. A `fit` that queued
+// behind a suite could not answer the question it exists for, and every arena
+// on a working machine would wait to be told the machine works — with the wait
+// reported as fitness, which is the one reading that cannot be debugged from.
+//
+// It is keyed on the CONCEPT, so `fit:disk` and `fit:services` are covered:
+// instances are the project's and the concept is what carries the meaning.
+func hostScopeAllowed(name flow.GateName) bool { return name.Concept() != flow.GateFit }

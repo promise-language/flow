@@ -55,6 +55,8 @@ This is the whole of what the classification buys, and each clause forbids somet
 
 **It divides into instances like any other concept.** `fit:disk`, `fit:toolchain`, `fit:services` — separately runnable, so a wait on one condition re-measures that condition rather than the whole set. The concept is closed and the instances are the project's, exactly as for `tested`.
 
+**A machine busy with a peer arena's gate is fit.** Contention for the hardware is not unfitness — it does not withhold work, it queues one measurement — and it has its own mechanism in [gates-and-commands.md](gates-and-commands.md) § Two scopes. A project that spelled *someone else is running* as a `fit` failure would report a healthy machine as unable to be given work at all.
+
 **It does not appear among the concerns a change is measured against.** `formatted`, `builds`, `checked`, `tested` and `covered` are properties of the code, and a project reads that table to decide what its `integration` is made of. `fit` belongs in neither place: a machine that cannot build is not a change that may not land.
 
 ### A `fit` gate may come from the tree, because the tree is not what it judges
