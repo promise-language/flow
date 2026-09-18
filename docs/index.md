@@ -30,6 +30,8 @@ under-report and read as nearly done.
   against it, and the names for those things.
 - [environment.md](environment.md) — What makes a machine fit to be given an item, and what
   follows from unfitness.
+- [trunk-health.md](trunk-health.md) — What it means for a trunk commit to be sound, how that
+  fact is established and read, and what a step does when its gate comes back red.
 - [disclosure.md](disclosure.md) — What the flow sends outward and the guard every outward byte
   passes.
 - [agent.md](agent.md) — The `Agent` interface and what a substrate must provide behind it: the
