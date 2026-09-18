@@ -144,6 +144,100 @@ func TestWaitingWorktree_FilesTheWaitAfterTheStepDeadlineFired(t *testing.T) {
 	}
 }
 
+// commandWorktree reports a COMMAND that queued.
+type commandWorktree struct {
+	flow.Worktree
+	waited time.Duration
+}
+
+func (c commandWorktree) Run(context.Context, flow.CommandName) (flow.CommandRun, error) {
+	return flow.CommandRun{Command: flow.CommandVerify, Outcome: flow.OutcomeMeasured, Waited: c.waited}, nil
+}
+
+// A COMMAND'S WAIT IS FILED BY THE SAME OWNER AS A GATE'S. Nothing in the tree
+// produces this figure yet — a command has no way to declare host scope until
+// #434 lands the channel — and that is exactly why it needs a case of its own:
+// until then, deleting waitingWorktree.Run costs nothing that any test notices,
+// and the declaration would arrive to find its wait filed by nobody, or by a
+// second writer added beside the one that files the gate's. Two writers for one
+// accounting is how a total stops adding up.
+func TestWaitingWorktree_FilesACommandsWaitThroughTheSameOwner(t *testing.T) {
+	orch := &deadlineHonouringOrchestrator{}
+	step := &stepCtx{
+		ctx: context.Background(),
+		app: &App{Orchestrator: orch},
+		li:  flow.LifecycleItem{ArtifactId: "plan"},
+	}
+
+	wt := reportingWaits(step, commandWorktree{waited: 7 * time.Minute})
+	run, err := wt.Run(context.Background(), flow.CommandVerify)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// The run itself is forwarded whole. A wrapper that filed the wait and then
+	// reported something else about the command would be worse than one that
+	// filed nothing.
+	if run.Outcome != flow.OutcomeMeasured || run.Command != flow.CommandVerify {
+		t.Errorf("run = %+v, want the command run the worktree reported", run)
+	}
+	if orch.waiting != 7*time.Minute {
+		t.Errorf("Waiting filed = %v, want the 7m the command queued for", orch.waiting)
+	}
+}
+
+// --- the ledger write is dropped, never promoted to a failure ---------------
+
+// refusingLedger cannot record anything, and counts being asked so a case can
+// tell "the write was attempted and failed" from "no write was attempted".
+type refusingLedger struct {
+	flow.Orchestrator
+	asked int
+}
+
+func (o *refusingLedger) AddWaiting(context.Context, flow.ItemRef, flow.StepId, time.Duration) error {
+	o.asked++
+	return errors.New("the orchestrator is unreachable")
+}
+
+// measuredQueuedWorktree reports a gate that queued and then measured — the
+// ordinary host-scoped run, not an error path.
+type measuredQueuedWorktree struct {
+	flow.Worktree
+	waited time.Duration
+}
+
+func (m measuredQueuedWorktree) RunGate(_ context.Context, name flow.GateName) (flow.GateRun, error) {
+	return flow.GateRun{Gate: name, Outcome: flow.OutcomeMeasured, Waited: m.waited}, nil
+}
+
+// LOSING THE ACCOUNTING MUST NOT LOSE THE ANSWER. The measurement is what the
+// caller asked for; the ledger write is bookkeeping beside it. A wrapper that
+// turned an unreachable orchestrator into a failed gate would mark a sound
+// change unsound because a write did not land, and would do it on exactly the
+// runs that queued — the expensive ones.
+func TestWaitingWorktree_ARefusedLedgerWriteDoesNotCostTheMeasurement(t *testing.T) {
+	orch := &refusingLedger{}
+	step := &stepCtx{
+		ctx: context.Background(),
+		app: &App{Orchestrator: orch},
+		li:  flow.LifecycleItem{ArtifactId: "plan"},
+	}
+
+	wt := reportingWaits(step, measuredQueuedWorktree{waited: 3 * time.Minute})
+	run, err := wt.RunGate(context.Background(), "tested")
+	if err != nil {
+		t.Fatalf("RunGate: %v — a refused ledger write became a gate failure", err)
+	}
+	if run.Outcome != flow.OutcomeMeasured {
+		t.Errorf("outcome = %q, want the measurement the runner reported", run.Outcome)
+	}
+	// The write was attempted. Without this the case would also pass for a
+	// wrapper that quietly stopped filing waits at all.
+	if orch.asked != 1 {
+		t.Errorf("the ledger was asked %d times, want once", orch.asked)
+	}
+}
+
 // --- the optional capability the wrapper must not swallow -------------------
 
 // examiningWorktree is a worktree that answers the push guard, which

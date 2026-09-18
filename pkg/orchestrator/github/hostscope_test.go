@@ -220,6 +220,66 @@ func TestRunGate_UndeclaredGateTakesNothing(t *testing.T) {
 	}
 }
 
+// AN INSTANCE DECLARES FOR ITSELF ALONE. `tested:go` and `tested:wasm` are
+// separately runnable, so they are separately declared, and a project that
+// wants one serialized and not the other is making an ordinary choice about its
+// own suites. A reader that matched on the concept would take the machine for
+// every sibling of a heavy suite — the undifferentiated lock the declaration
+// exists to avoid, reached by accident.
+func TestRunGate_AnInstanceDeclaresForItselfAlone(t *testing.T) {
+	f := useFakeHostScope(t)
+	w, _ := hostScopeWorktree(t,
+		`{"gates":[{"name":"tested:go","host_scope":true},{"name":"tested:wasm"}]}`,
+		`echo '{"gate":"tested"}'`)
+
+	if _, err := w.RunGate(context.Background(), "tested:wasm"); err != nil {
+		t.Fatalf("RunGate(tested:wasm): %v", err)
+	}
+	if takes, _ := f.snapshot(); takes != 0 {
+		t.Errorf("tested:wasm queued %d times on its sibling's declaration", takes)
+	}
+
+	// The sibling that DID declare one still gets it, so the case cannot pass
+	// by the reader having stopped matching altogether.
+	if _, err := w.RunGate(context.Background(), "tested:go"); err != nil {
+		t.Fatalf("RunGate(tested:go): %v", err)
+	}
+	if takes, _ := f.snapshot(); takes != 1 {
+		t.Errorf("the exclusion was taken %d times for the gate that declared one, want once", takes)
+	}
+}
+
+// The queue is reported even when the RUNNER is what failed after the gate was
+// spawned — a caller that went away mid-run gets a zero GateRun back from
+// runGate, so the figure survives only because it is written onto the run after
+// that call rather than before the error check. A wait paid for and then lost
+// to a cancelled caller is still this arena's wall clock spent on contention.
+func TestRunGate_TheQueueIsReportedWhenTheRunnerFailsMidRun(t *testing.T) {
+	f := useFakeHostScope(t)
+	f.waitFor = 50 * time.Millisecond
+	// The gate outlives the caller by a wide margin, so what ends this run is
+	// the context and nothing else.
+	w, _ := hostScopeWorktree(t,
+		`{"gates":[{"name":"tested","host_scope":true}]}`,
+		`sleep 2; echo '{"gate":"tested"}'`)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+	run, err := w.RunGate(ctx, "tested")
+	if err == nil {
+		t.Fatal("RunGate reported an answer for a caller that went away while the gate ran")
+	}
+	if run.Outcome != "" {
+		t.Errorf("outcome = %q, want none — the caller went away, so nothing was observed", run.Outcome)
+	}
+	if run.Waited < 50*time.Millisecond {
+		t.Errorf("Waited = %s, want the queue this run paid for before it was spawned", run.Waited)
+	}
+	if _, stillHeld := f.snapshot(); stillHeld != 0 {
+		t.Error("the exclusion is still held after the runner gave up")
+	}
+}
+
 // A gate this machine does not declare at all takes nothing, and that is not a
 // hole: a name absent from the listing is a name the entry point could not have
 // been asked about, and refusing here would report "the tools are not built" as
