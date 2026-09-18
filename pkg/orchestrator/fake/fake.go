@@ -744,6 +744,13 @@ func (b *Orchestrator) blockersOf(rec *itemRecord) []flow.Blocker {
 // The reason names the KIND of block and never an item — the refs are the
 // reference, and prose repeating them is a second copy nothing can act on and
 // nothing updates when a blocker lands.
+//
+// TestBlockedness_AnswersForEveryParkKind walks flow.AllParkKinds() and writes
+// down what every member answers, including the six that fall out of the park
+// switch reporting the item not blocked at all, so a kind added to the
+// vocabulary cannot take that answer unnoticed. Those six answers are the ones
+// the GitHub orchestrator answers differently for the same park; #431 decides
+// which side moves.
 func (b *Orchestrator) blockednessOf(rec *itemRecord) (bool, flow.BlockKind, string) {
 	for _, id := range rec.blockedBy {
 		other := b.items[id]

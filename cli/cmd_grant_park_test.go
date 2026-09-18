@@ -389,6 +389,42 @@ func TestGrantPark_RefusesRefusedPark(t *testing.T) {
 	}
 }
 
+// A `blocked` park is the kind the generic remedy is written for, and until this
+// test nothing pinned what that remedy SAYS. TestRemedyFor_AnswersForEveryParkKind
+// records the row by comparing remedyFor's answer against the genericRemedy
+// constant itself, which holds for whatever the constant contains — the whole
+// cli suite passes with `const genericRemedy = ""`, and an operator would read a
+// refusal with a blank line where the next action belongs.
+//
+// So this asserts the INSTRUCTION, at the place the operator reads it: the point
+// of the remedy is that the refusal does not end on a no (#324). Distinguishing
+// substrings rather than the sentence, the same discipline the table applies to
+// the seven kinds with arms of their own — the wording is an operator's line and
+// pinning it verbatim would make every rephrasing a test edit.
+func TestGrantPark_BlockedParkRefusalNamesTheNextAction(t *testing.T) {
+	env := newParkGrantEnv(t)
+	env.park(t, flow.ParkRequest{
+		Kind:   flow.ParkBlocked,
+		Step:   "plan",
+		Reason: "waiting on the release manager",
+	})
+
+	code := env.grant()
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2; stderr=%q", code, env.err.String())
+	}
+	// Both halves of the next action: what the operator does, and that the step
+	// runs again once they have.
+	for _, want := range []string{"not a budget cap", "Clear the blocker", "re-run the step"} {
+		if !strings.Contains(env.err.String(), want) {
+			t.Errorf("stderr = %q, want it to contain %q", env.err.String(), want)
+		}
+	}
+	if got := env.budget(t, "plan").MaxInvocations; got != 3 {
+		t.Errorf("MaxInvocations = %d, want 3 (unchanged — no budget written)", got)
+	}
+}
+
 // The refused remedy does not carry the fix: it sends the operator to the
 // park's reason and names `status` as where that is printed. That is a remedy
 // only if the reason a mis-declared step leaves behind actually reaches

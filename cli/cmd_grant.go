@@ -723,8 +723,20 @@ func parkDetailSuffix(park *flow.ParkRequest, state *flow.Item) string {
 	return fmt.Sprintf(" (%s: %q)", pending[0].ID, questionSummary(pending[0].AgentQuestion))
 }
 
+// genericRemedy is the line a park with no arm of its own takes. It is the
+// `blocked` kind's own remedy — a person clears what the item waits on — and it
+// doubles as the safe answer for a kind this binary does not know, which is a
+// park written by a newer one. Named rather than written inline so the test that
+// states what each kind falls to compares against this value instead of keeping
+// a second copy of the sentence.
+const genericRemedy = "Clear the blocker on the item, then re-run the step."
+
 // remedyFor names what actually clears each park kind, so the refusal ends
 // with the next action instead of just a no.
+//
+// TestRemedyFor_AnswersForEveryParkKind walks flow.AllParkKinds() and writes
+// down what every member answers, including the two that take genericRemedy, so
+// a kind added to the vocabulary cannot land in the fall-through unnoticed.
 func remedyFor(kind flow.ParkKind) string {
 	switch kind {
 	case flow.ParkQuestion:
@@ -746,7 +758,7 @@ func remedyFor(kind flow.ParkKind) string {
 		// about them, which is nothing.
 		return "Nothing to grant — this park consumed no budget and no grant clears it: the agent account's allowance is spent. The park's reason (`status` prints it) names the window and the instant it resets; re-run the step then."
 	}
-	return "Clear the blocker on the item, then re-run the step."
+	return genericRemedy
 }
 
 func printGrantHuman(app *App, payload grantPayload, state *flow.Item) {

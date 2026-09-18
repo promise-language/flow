@@ -304,3 +304,67 @@ func TestParkLabels_AreAllRecognisedAsParks(t *testing.T) {
 		}
 	}
 }
+
+// Every member of the park vocabulary has a label written down, including the
+// three that take parkLabel's fall-through — `blocked`, `step-did-not-complete`
+// and `remote-unreachable`. Five kinds carry the generic label in all; the other
+// two reach it through arms of their own, and the entries below say which is
+// which. The crosswalk walks flow.AllParkKinds(), so a kind added to the
+// vocabulary lands here rather than in `default: l.Blocked()`, where a kind that
+// belongs under the generic label and one that does not read exactly alike
+// (#324).
+//
+// TestParkLabels_AreAllRecognisedAsParks above proves every kind's label is
+// recognised as advertising a park; this one proves WHICH label each kind gets.
+func TestParkLabel_LabelsEveryKindDeliberately(t *testing.T) {
+	l := newLabels("flow:")
+	want := map[flow.ParkKind]string{
+		// The fall-through, and the kind the generic label is named for.
+		flow.ParkBlocked: l.Blocked(),
+		// Arms of their own, both returning the generic label: a deterministic
+		// refusal and a write-contract violation are blocked until a person
+		// acts, and no budget grant clears either.
+		flow.ParkRefused:       l.Blocked(),
+		flow.ParkWriteContract: l.Blocked(),
+		// The fall-through, and right: advertised as blocked since before it
+		// left the blocked kind (#325); docs/github-schema.md § Labels and
+		// TestParkLabel_StepDidNotCompleteIsAdvertisedAsBlocked hold why.
+		flow.ParkStepDidNotComplete: l.Blocked(),
+		// The fall-through, and #322 holds that it is the WRONG answer for this
+		// kind: an unreachable remote is a condition that clears on its own, and
+		// the generic label reads back as waits-on-person. Written down here so
+		// the fall-through is visible; #322 is the item that changes this line.
+		flow.ParkRemoteUnreachable: l.Blocked(),
+		flow.ParkQuestion:          l.NeedsAnswer(),
+		flow.ParkTreasurerRefused:  l.TreasurerRefused("plan"),
+		flow.ParkInfraTransient:    l.InfraTransient(),
+		flow.ParkAccountExhausted:  l.AccountExhausted(),
+	}
+	kinds := flow.AllParkKinds()
+	if len(kinds) != len(want) {
+		t.Fatalf("AllParkKinds() has %d members, but %d labels are written down: %v", len(kinds), len(want), kinds)
+	}
+	for _, kind := range kinds {
+		label, ok := want[kind]
+		if !ok {
+			t.Errorf("park kind %q has no label written down here", kind)
+			continue
+		}
+		if got := parkLabel(l, &flow.ParkRequest{Kind: kind, Step: "plan"}); got != label {
+			t.Errorf("parkLabel(%q) = %q, want %q", kind, got, label)
+		}
+	}
+	// A kind this binary does not know — a park written by a newer one — still
+	// gets a label. The fall-through is load-bearing rather than tidy: Park
+	// passes this result straight to AddLabels, so an empty answer would post a
+	// park that no listing reads as parked.
+	if got := parkLabel(l, &flow.ParkRequest{Kind: "from-the-future", Step: "plan"}); got != l.Blocked() {
+		t.Errorf("parkLabel(unknown kind) = %q, want %q — an unrecognised kind is still advertised as parked", got, l.Blocked())
+	}
+	// No park, no label: the add and the remove go through this one function, so
+	// an item that is not parked must name nothing rather than name the generic
+	// label.
+	if got := parkLabel(l, nil); got != "" {
+		t.Errorf("parkLabel(nil) = %q, want the empty string", got)
+	}
+}

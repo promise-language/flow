@@ -2049,3 +2049,105 @@ func TestBackend_RecordSession_RefusesAnUnknownItem(t *testing.T) {
 		t.Error("RecordSession on an unregistered item = nil, want an error naming the item")
 	}
 }
+
+// Every member of the park vocabulary has a blockedness written down, including
+// the six that fall out of the switch reporting the item not blocked at all.
+// The crosswalk walks flow.AllParkKinds(), so a kind added to the vocabulary
+// lands here rather than in that fall-through, where a park nobody must act on
+// and a park waiting on a person read exactly alike (#324).
+//
+// Read through Get rather than by calling blockednessOf: this package's tests
+// are external, and the three fields the projection carries are what the listing
+// and the advance actually act on.
+//
+// SIX KINDS REPORT NOT BLOCKED HERE AND waits-on-person ON GITHUB, where the
+// same parks carry flow:blocked. That divergence is recorded, not endorsed:
+// #324 is only that neither side is proven over the vocabulary, and which of the
+// two is right is #431.
+func TestBlockedness_AnswersForEveryParkKind(t *testing.T) {
+	type blockedness struct {
+		blocked bool
+		kind    flow.BlockKind
+		reason  string
+	}
+	// The six that report not blocked. Written out rather than left as the
+	// zero value of a missing entry, so "no answer written down" stays
+	// distinguishable from "the answer is: nothing".
+	notBlocked := blockedness{}
+	want := map[flow.ParkKind]blockedness{
+		flow.ParkBlocked:            notBlocked,
+		flow.ParkStepDidNotComplete: notBlocked,
+		flow.ParkInfraTransient:     notBlocked,
+		flow.ParkRemoteUnreachable:  notBlocked,
+		flow.ParkRefused:            notBlocked,
+		flow.ParkWriteContract:      notBlocked,
+		// A park that registered no question still waits: there is nothing to
+		// have answered, so nobody has.
+		flow.ParkQuestion:         {true, flow.WaitsOnPerson, "waiting for an answer"},
+		flow.ParkTreasurerRefused: {true, flow.WaitsOnPerson, "the treasurer refused the next dispatch"},
+		// Nobody must act and there is nothing addressable to go work — the
+		// allowance returns at an instant the park records.
+		flow.ParkAccountExhausted: {true, flow.WaitsOnCondition, "the agent account's allowance is spent"},
+	}
+	kinds := flow.AllParkKinds()
+	if len(kinds) != len(want) {
+		t.Fatalf("AllParkKinds() has %d members, but %d blockedness answers are written down: %v", len(kinds), len(want), kinds)
+	}
+	for _, kind := range kinds {
+		w, ok := want[kind]
+		if !ok {
+			t.Errorf("park kind %q has no blockedness written down here", kind)
+			continue
+		}
+		t.Run(string(kind), func(t *testing.T) {
+			b := fake.New()
+			ref := addItem(b, "1")
+			if err := b.Park(t.Context(), ref, flow.ParkRequest{Kind: kind, Step: "plan", Reason: "why"}); err != nil {
+				t.Fatalf("Park: %v", err)
+			}
+			info, err := b.Get(t.Context(), ref, "test", func(flow.ItemType) bool { return true }, nil)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			got := blockedness{info.Blocked, info.BlockKind, info.BlockReason}
+			if got != w {
+				t.Errorf("a %q park reports blocked=%v kind=%q reason=%q, want blocked=%v kind=%q reason=%q",
+					kind, got.blocked, got.kind, got.reason, w.blocked, w.kind, w.reason)
+			}
+		})
+	}
+}
+
+// A park kind this binary does not know — one written by a newer binary, which
+// Park stores without inspecting it — reports the item NOT BLOCKED, the same
+// answer the six known kinds above fall out of the switch with.
+//
+// Written down because the other two crosswalks #324 proved each pin their own
+// unknown-kind answer (parkLabel labels it blocked, remedyFor gives it the
+// generic remedy) and this one did not. It is the answer with the most reach:
+// not blocked is what ListAutoSelectable reads, so the item is OFFERED — a
+// runner keeps picking up a park it did not write and cannot read. That
+// consequence, not the switch's shape, is what this holds; whether it is the
+// right answer is #431's question.
+func TestBlockedness_AnUnknownParkKindDoesNotBlock(t *testing.T) {
+	b := fake.New()
+	ref := addItem(b, "1")
+	if err := b.Park(t.Context(), ref, flow.ParkRequest{Kind: "from-the-future", Step: "plan", Reason: "why"}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+	info, err := b.Get(t.Context(), ref, "test", func(flow.ItemType) bool { return true }, nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if info.Blocked || info.BlockKind != "" || info.BlockReason != "" {
+		t.Errorf("an unknown-kind park reports blocked=%v kind=%q reason=%q, want not blocked at all",
+			info.Blocked, info.BlockKind, info.BlockReason)
+	}
+	selectable, err := b.ListAutoSelectable(t.Context(), nil, nil)
+	if err != nil {
+		t.Fatalf("ListAutoSelectable: %v", err)
+	}
+	if len(selectable) != 1 {
+		t.Errorf("ListAutoSelectable = %v, want the parked item offered — that is what reporting it unblocked costs", selectable)
+	}
+}

@@ -198,3 +198,74 @@ func TestCmdGrant_TypeOutsideTheRemitStillGrants(t *testing.T) {
 		t.Error("nothing was granted — the grant must land on the ledger of an item outside the remit")
 	}
 }
+
+// Every member of the park vocabulary has a remedy written down, including the
+// two that take the fall-through. The crosswalk walks flow.AllParkKinds(), so a
+// kind added to the vocabulary lands here rather than in `remedyFor`'s default,
+// where a wrong instruction reads exactly like a right one (#324).
+//
+// The answer is recorded as a DISTINGUISHING SUBSTRING rather than the whole
+// sentence: these lines are paragraphs an operator reads, and pinning them
+// verbatim would make every wording change a test edit while proving nothing
+// more than that the arm exists.
+func TestRemedyFor_AnswersForEveryParkKind(t *testing.T) {
+	// want holds the substring a kind's own arm must carry. A kind mapped to ""
+	// takes genericRemedy, deliberately — see below.
+	//
+	// A "" row proves WHICH LINE the kind takes and not what that line says:
+	// the comparison is against the constant, so it holds however the constant
+	// reads. What the generic line must actually tell an operator is pinned
+	// end-to-end by TestGrantPark_BlockedParkRefusalNamesTheNextAction.
+	want := map[flow.ParkKind]string{
+		// The generic line IS the blocked park's remedy: a person clears what
+		// the item waits on, then the step runs again. There is nothing an arm
+		// of its own would say differently.
+		flow.ParkBlocked: "",
+		// Never reached: planPark calls remedyFor only on the branch it takes
+		// for a park that is NOT treasurer-refused. A treasurer-refused park is
+		// the one `grant` acts on itself — topping up the parked axis is the
+		// whole command — so the generic line stands as the answer to a
+		// question nothing asks.
+		flow.ParkTreasurerRefused:   "",
+		flow.ParkQuestion:           "Answer the question on the item",
+		flow.ParkStepDidNotComplete: "the step left its job undone",
+		flow.ParkInfraTransient:     "Re-run the step once the infrastructure is back",
+		// The same arm as infra-transient, shared on purpose: neither consumed
+		// budget and neither is cleared by a grant.
+		flow.ParkRemoteUnreachable: "Re-run the step once the infrastructure is back",
+		flow.ParkRefused:           "the failure is deterministic",
+		flow.ParkWriteContract:     "outside its declared contract",
+		flow.ParkAccountExhausted:  "the agent account's allowance is spent",
+	}
+	kinds := flow.AllParkKinds()
+	if len(kinds) != len(want) {
+		t.Fatalf("AllParkKinds() has %d members, but %d remedies are written down: %v", len(kinds), len(want), kinds)
+	}
+	for _, kind := range kinds {
+		substr, ok := want[kind]
+		if !ok {
+			t.Errorf("park kind %q has no remedy written down here", kind)
+			continue
+		}
+		got := remedyFor(kind)
+		if substr == "" {
+			if got != genericRemedy {
+				t.Errorf("remedyFor(%q) = %q, want the generic line %q — this kind is recorded as taking the fall-through", kind, got, genericRemedy)
+			}
+			continue
+		}
+		if got == genericRemedy {
+			t.Errorf("remedyFor(%q) fell through to the generic line; it is recorded as having an arm of its own naming %q", kind, substr)
+			continue
+		}
+		if !strings.Contains(got, substr) {
+			t.Errorf("remedyFor(%q) = %q, want it to mention %q", kind, got, substr)
+		}
+	}
+	// A kind this binary does not know — a park written by a newer one — takes
+	// the generic line. It is the one instruction that is never actively wrong:
+	// whatever stopped the item, a person looking at it is the way forward.
+	if got := remedyFor("from-the-future"); got != genericRemedy {
+		t.Errorf("remedyFor(unknown kind) = %q, want the generic line %q", got, genericRemedy)
+	}
+}
