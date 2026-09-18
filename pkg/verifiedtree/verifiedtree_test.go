@@ -213,6 +213,64 @@ func TestTreeIDWithAZeroLengthIndex(t *testing.T) {
 	}
 }
 
+// A LINKED WORKTREE HAS ITS OWN INDEX, AND IT IS THE ONE TO SEED FROM. This is
+// where a resolution works, so it is where the record is written and read.
+// `<root>/.git` there is a FILE, not a directory, so a guess at
+// `<root>/.git/index` reads nothing at all, and the superproject's index
+// describes a tree nobody is working on — both answer about content the guard
+// in this checkout will never be shown.
+func TestTreeIDInALinkedWorktree(t *testing.T) {
+	main := newRepo(t, true)
+	linked := filepath.Join(t.TempDir(), "linked")
+	gitIn(t, main, "worktree", "add", "-q", "-b", "side", linked)
+
+	writeFile(t, filepath.Join(linked, "kept.txt"), "changed here\n")
+	writeFile(t, filepath.Join(linked, "fresh.txt"), "new\n")
+	// Staged in the linked worktree's own index and nowhere else: the
+	// superproject's index has never seen it.
+	gitIn(t, linked, "add", "fresh.txt")
+
+	got, err := TreeID(context.Background(), linked)
+	if err != nil {
+		t.Fatalf("TreeID in a linked worktree: %v", err)
+	}
+	mainTree, err := TreeID(context.Background(), main)
+	if err != nil {
+		t.Fatalf("TreeID in the superproject: %v", err)
+	}
+	if got == mainTree {
+		t.Errorf("TreeID answered the superproject's tree %s for the linked worktree", got)
+	}
+	if want := stagedByGit(t, linked); got != want {
+		t.Errorf("TreeID = %s, git add -A + write-tree in the linked worktree = %s", got, want)
+	}
+}
+
+// The blessing has to work where the flow works. The linked worktree shares
+// the committed .gitignore, so the record is ignored there too.
+func TestBlessAndCheckInALinkedWorktree(t *testing.T) {
+	main := newRepo(t, true)
+	linked := filepath.Join(t.TempDir(), "linked")
+	gitIn(t, main, "worktree", "add", "-q", "-b", "side", linked)
+	writeFile(t, filepath.Join(linked, "fresh.txt"), "new\n")
+
+	tree, err := Bless(context.Background(), linked)
+	if err != nil {
+		t.Fatalf("Bless in a linked worktree: %v", err)
+	}
+	record, err := Check(linked)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !Blesses(record, tree) {
+		t.Fatalf("the linked worktree's record %q does not bless the tree it just blessed %q", record, tree)
+	}
+	// The superproject is a different checkout and nothing blessed it.
+	if got, err := Check(main); err != nil || got != "" {
+		t.Errorf("Check(superproject) = %q, %v — a worktree's blessing leaked", got, err)
+	}
+}
+
 func TestTreeIDOutsideACheckout(t *testing.T) {
 	if _, err := TreeID(context.Background(), t.TempDir()); !errors.Is(err, ErrNotACheckout) {
 		t.Errorf("TreeID outside a checkout: %v, want ErrNotACheckout", err)
