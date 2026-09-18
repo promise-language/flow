@@ -47,11 +47,12 @@ type Orchestrator struct {
 	// wanting one says so with SetCapabilities.
 	capabilities map[flow.AccountId][]flow.Capability
 
-	verifyOK        bool         // controls the exit code of the verify command
-	commandOutcome  flow.Outcome // controls what Worktree.Run observes
-	gateOutcome     flow.Outcome // controls what Worktree.RunGate observes
-	verdict         *bool        // controls what Worktree.Judge answers; nil = acceptable
-	supportsRequest bool         // controls whether Worktree.Request() returns non-nil
+	verifyOK        bool          // controls the exit code of the verify command
+	commandOutcome  flow.Outcome  // controls what Worktree.Run observes
+	gateOutcome     flow.Outcome  // controls what Worktree.RunGate observes
+	gateWaited      time.Duration // controls the host-scope queue every gate reports
+	verdict         *bool         // controls what Worktree.Judge answers; nil = acceptable
+	supportsRequest bool          // controls whether Worktree.Request() returns non-nil
 
 	// supportedArtifacts is the orchestrator's canonical artifact schema
 	// returned by SupportedArtifacts. nil (the default) means "use the standard
@@ -259,6 +260,15 @@ func (b *Orchestrator) SetCommandOutcome(o flow.Outcome) {
 // model — a caller that must tell "could not start" from "died" cannot be
 // exercised against a fake that only knows pass and fail.
 func (b *Orchestrator) SetGateOutcome(o flow.Outcome) { b.gateOutcome = o }
+
+// SetGateWait makes every gate report that it queued for the host-scope
+// exclusion before it ran (docs/gates-and-commands.md § Two scopes).
+//
+// The wait is part of the protocol the fake models, not a detail of one
+// backend: a run that queued is exactly as authoritative as one that did not,
+// and the figure exists so the party that can name the step files it as
+// waiting rather than as work. Default zero — nothing queued.
+func (b *Orchestrator) SetGateWait(d time.Duration) { b.gateWaited = d }
 
 // SetGateVerdict controls what Worktree.Judge answers about a measured run.
 // Default: acceptable.
@@ -1704,6 +1714,7 @@ func (b *Orchestrator) Worktree(ctx context.Context, ref flow.ItemRef) (flow.Wor
 	wt.verifyOK = b.verifyOK
 	wt.commandOutcome = b.commandOutcome
 	wt.gateOutcome = b.gateOutcome
+	wt.gateWaited = b.gateWaited
 	wt.verdict = b.verdict
 	wt.supportsRequest = b.supportsRequest
 	wt.nothingToCommit = b.nothingToCommit
@@ -1790,6 +1801,7 @@ type fakeWorktree struct {
 	// truthfully across invocations.
 	branches        map[flow.BranchName]bool
 	gateOutcome     flow.Outcome
+	gateWaited      time.Duration
 	commandOutcome  flow.Outcome
 	verdict         *bool
 	verifyOK        bool
@@ -1925,7 +1937,7 @@ func (w *fakeWorktree) RunGate(ctx context.Context, name flow.GateName) (flow.Ga
 	if outcome == "" {
 		outcome = flow.OutcomeMeasured
 	}
-	run := flow.GateRun{Gate: name, Outcome: outcome, ExitCode: -1}
+	run := flow.GateRun{Gate: name, Outcome: outcome, ExitCode: -1, Waited: w.gateWaited}
 	switch outcome {
 	case flow.OutcomeMeasured:
 		run.ExitCode = 0

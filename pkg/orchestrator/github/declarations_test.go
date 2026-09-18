@@ -561,3 +561,109 @@ func gateNameList(names []flow.GateName) string {
 	}
 	return strings.Join(out, ",")
 }
+
+// hostScopeOf reports what the listing declared for one gate, and fails when
+// the gate is absent — an assertion against a name that was never listed would
+// read as "declared nothing" and pass for the wrong reason.
+func hostScopeOf(t *testing.T, defs []flow.GateDef, name flow.GateName) bool {
+	t.Helper()
+	for _, d := range defs {
+		if d.Name == name {
+			return d.HostScope
+		}
+	}
+	t.Fatalf("gate %q is not in the listing %v", name, names2(defs))
+	return false
+}
+
+// The declaration reaches the SDK. A project says which of its gates cannot run
+// beside another, and this is the only channel it has to say it in.
+func TestSupportedGates_CarriesTheHostScopeDeclaration(t *testing.T) {
+	requireRealProcesses(t)
+	dir := t.TempDir()
+	writeGateEntryPoint(t, dir, `case "$*" in
+"--list --json") printf '{"gates":[{"name":"integration","host_scope":true},{"name":"tested:go","summary":"go suite","host_scope":true},{"name":"formatted","host_scope":false},{"name":"builds"}]}\n' ;;
+*) exit 2 ;;
+esac`)
+
+	got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates()
+	if !hostScopeOf(t, got, flow.GateIntegration) {
+		t.Error("integration declared host_scope and the SDK dropped it")
+	}
+	if !hostScopeOf(t, got, "tested:go") {
+		t.Error("tested:go declared host_scope and the SDK dropped it")
+	}
+	// The two ways of declaring nothing must read alike. An absent field is how
+	// every entry point in circulation answers, and reading it as anything but
+	// false would make the field a flag day rather than an additive growth.
+	if hostScopeOf(t, got, "formatted") {
+		t.Error("formatted declared host_scope:false and the SDK read a declaration")
+	}
+	if hostScopeOf(t, got, "builds") {
+		t.Error("builds declared no host_scope at all and the SDK read one — absent must read as false")
+	}
+}
+
+// `fit` may not declare it, whatever the project wrote. It is asked BECAUSE the
+// machine may be busy and before an item is taken, so a `fit` that queued
+// behind a suite would report the wait as fitness — the one reading nobody can
+// debug from. Instances are covered with the concept: `fit:disk` is `fit`.
+func TestSupportedGates_FitMayNotDeclareHostScope(t *testing.T) {
+	requireRealProcesses(t)
+	dir := t.TempDir()
+	writeGateEntryPoint(t, dir, `case "$*" in
+"--list --json") printf '{"gates":[{"name":"fit","host_scope":true},{"name":"fit:disk","host_scope":true},{"name":"tested","host_scope":true}]}\n' ;;
+*) exit 2 ;;
+esac`)
+
+	got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates()
+	if hostScopeOf(t, got, flow.GateFit) {
+		t.Error("fit declared host_scope and the SDK honoured it")
+	}
+	if hostScopeOf(t, got, "fit:disk") {
+		t.Error("fit:disk declared host_scope and the SDK honoured it — the refusal is on the concept, not the spelling")
+	}
+	// The refusal is `fit`'s alone and must not spill onto the listing.
+	if !hostScopeOf(t, got, "tested") {
+		t.Error("tested lost its declaration because fit was refused one")
+	}
+}
+
+// The bare listing has nowhere to put a field, so every gate it names declares
+// nothing. Guessing which of them are heavy would be exactly the guess the
+// declaration exists to stop anyone making.
+func TestSupportedGates_TheBareFormDeclaresNoHostScope(t *testing.T) {
+	requireRealProcesses(t)
+	dir := t.TempDir()
+	writeGateEntryPoint(t, dir, `case "$*" in
+"--list") printf 'fit\nintegration\ntested\n' ;;
+*) exit 2 ;;
+esac`)
+
+	got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates()
+	for _, d := range got {
+		if d.HostScope {
+			t.Errorf("gate %q declared host scope from a listing that has no field for it", d.Name)
+		}
+	}
+}
+
+// A listing that grew a field this reader does not know is read, not refused —
+// which is what "the object is the interface, and it grows by adding fields"
+// means. The fields it does know still arrive.
+func TestSupportedGates_UnknownFieldsDoNotCostTheKnownOnes(t *testing.T) {
+	requireRealProcesses(t)
+	dir := t.TempDir()
+	writeGateEntryPoint(t, dir, `case "$*" in
+"--list --json") printf '{"gates":[{"name":"tested","host_scope":true,"cost":"high","parts":["a"]}],"generated_at":"now"}\n' ;;
+*) exit 2 ;;
+esac`)
+
+	got := (&Orchestrator{cfg: Config{WorktreeDir: dir}}).SupportedGates()
+	if strings.Join(names2(got), ",") != "tested" {
+		t.Fatalf("SupportedGates() = %v, want the one the listing named", names2(got))
+	}
+	if !hostScopeOf(t, got, "tested") {
+		t.Error("a field this reader does not know cost it one it does")
+	}
+}

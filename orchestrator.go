@@ -526,6 +526,21 @@ type ClaimInfo struct {
 type GateDef struct {
 	Name     GateName
 	Required bool
+
+	// HostScope is the project's declaration that this gate cannot run beside
+	// another on the same machine, and must hold the host-scope exclusion while
+	// it does (docs/gates-and-commands.md § Two scopes).
+	//
+	// IT IS THE PROJECT'S TO DECLARE AND NOBODY ELSE'S TO INFER. Only the
+	// project knows what its suites cost, and a gate that declares nothing
+	// never waits for anything — which is what keeps a formatting check out of
+	// a queue a test suite belongs in.
+	//
+	// The declaration is what the exclusion is keyed on, NOT the name. Two
+	// heavy suites under different names saturate one machine exactly as two
+	// runs of one name do, so a key made of the name would let the commonest
+	// case straight through.
+	HostScope bool
 }
 
 // Gate returns a GateDef. Convenience constructor so call sites read as
@@ -567,6 +582,12 @@ type CommandRun struct {
 	// Detail is the runner's account for a person: which signal, which program
 	// was absent. It is prose and nothing keys on it.
 	Detail string
+
+	// Waited is how long this run spent queued for the host-scope exclusion
+	// before it was spawned — zero when the command declared none, or when the
+	// exclusion was free. GateRun.Waited says at length why it is carried
+	// beside the outcome rather than folded into it.
+	Waited time.Duration
 }
 
 // AgentSession is the resolution's handle on its agent conversation, and the
@@ -1216,6 +1237,11 @@ type Worktree interface {
 	// "died", so a caller can tell a failing check from a command that never
 	// executed — and the two have different budget consequences. A NON-NIL ERROR
 	// MEANS NO COMMAND WAS RUN AND NO OUTCOME EXISTS.
+	//
+	// It MAY WAIT where the project declared the command host-scoped, on the
+	// same terms RunGate states: waiting is not failing, the wait is carried on
+	// CommandRun.Waited, and a runner that cannot take the exclusion returns an
+	// error rather than running the command unserialized.
 	Run(ctx context.Context, name CommandName) (CommandRun, error)
 
 	// RunGate runs the named GATE in the worktree and reports what the RUNNER
@@ -1248,10 +1274,21 @@ type Worktree interface {
 	// answer would discard the very work the step is in the middle of. A gate
 	// that modifies lands on OutcomeBrokeContract.
 	//
-	// A gate MAY WAIT before it runs — some are too heavy to run beside another
-	// — and waiting is not failing: a gate that queued and then ran is exactly as
-	// authoritative as one that ran at once, while a gate that gave up waiting
-	// has not measured anything.
+	// A gate MAY WAIT before it runs, where the project declared it host-scoped
+	// (GateDef.HostScope): some are too heavy to run beside another, and
+	// running one alone is what makes its measurement mean anything
+	// (docs/gates-and-commands.md § Two scopes). Waiting is not failing — a
+	// gate that queued and then ran is exactly as authoritative as one that ran
+	// at once, while a gate that gave up waiting has not measured anything —
+	// and the wait is carried out on GateRun.Waited so the party that held it
+	// can report it through AddWaiting.
+	//
+	// A RUNNER THAT CANNOT TAKE THE EXCLUSION DOES NOT RUN THE GATE. It returns
+	// a non-nil error, which is what "a request the runner could not attempt"
+	// already means here, and never proceeds unserialized: a measurement taken
+	// beside a peer is wrong in a way that reproduces nowhere, and a runner
+	// that quietly took it would produce that failure with nothing in the
+	// report to say so.
 	RunGate(ctx context.Context, name GateName) (GateRun, error)
 
 	// Judge asks the PROJECT whether a measurement is acceptable.

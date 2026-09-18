@@ -1967,10 +1967,12 @@ func (s *stepCtx) acquireWorktree() (flow.Worktree, error) {
 	if s.worktree != nil || s.wtErr != nil {
 		return s.worktree, s.wtErr
 	}
-	s.worktree, s.wtErr = s.app.Orchestrator.Worktree(s.ctx, s.claim.ItemRef)
-	if s.wtErr != nil {
+	wt, err := s.app.Orchestrator.Worktree(s.ctx, s.claim.ItemRef)
+	if err != nil {
+		s.wtErr = err
 		return nil, s.wtErr
 	}
+	s.worktree = reportingWaits(s, wt)
 	return s.worktree, nil
 }
 
