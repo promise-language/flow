@@ -28,7 +28,7 @@
 
 **`PermissionMode` maps to itself.** The SDK's five spellings are all `--permission-mode` values this harness accepts, each with the meaning [agent.md](agent.md) § Permission modes assigns it; the harness's further modes are not reachable through the interface. `plan` ends at the harness's plan-submission tool (§ The event stream).
 
-**`Effort` maps to itself.** `low`, `medium`, `high` and `max` are all `--effort` values. The harness's levels depend on the model; a level the model refuses is the harness's refusal, reported as the prompt's failure, not a value this client substitutes.
+**`Effort` is carried verbatim to `--effort`, and `Efforts` declares what may be carried.** For each model, `Efforts(model)` returns the `--effort` values the harness accepts for that model, from least to most — drawn from `low`, `medium`, `high`, `xhigh` and `max` — and a level outside that set is refused at the chokepoint before anything is spawned ([agent.md](agent.md) § Effort levels). Nothing is mapped: another agent's level is refused here, not translated.
 
 **`MaxCostUSD` is enforced**, and `flow/claude` implements `AgentLimits` answering `true`. A stop at the cap is a `result` event with subtype `error_max_budget_usd`, reported as `cost-cap` with the prompt's cost kept.
 
@@ -116,4 +116,5 @@ An absent or zero `expiresAt` is unknown, not expired.
 
 ## Open questions
 
+- **Which levels each model accepts, and `ultracode`.** The harness states that its effort levels depend on the model without publishing which, so § Request mapping's per-model sets are not yet established from the harness itself, and `Efforts` declares no level it has not verified. `ultracode` asks for `xhigh` with further agents orchestrated; whether it is declared depends on that work staying inside the prompt ([agent.md](agent.md) § Long-running work).
 - **A relocated API base.** The usage endpoint's base is fixed above. Whether an install pointed elsewhere — a proxy, a gateway — publishes its usage at the base it was pointed at, and where that choice is stated for a reader to find, changes whether pacing reads the right account behind one.

@@ -16,7 +16,7 @@
 | `-c projects."<Worktree>".trust_level="trusted"` | The arena's project layer, so its committed hook wiring loads (§ Guards) |
 | `--dangerously-bypass-hook-trust` | The committed hook runs without a per-checkout review nobody is present to give (§ Guards) |
 | `--model <Model>` | `Model`, when non-empty |
-| `-c model_reasoning_effort=<level>` | `Effort`, mapped (§ Request mapping) |
+| `-c model_reasoning_effort=<level>` | `Effort`, verbatim, when non-empty (§ Request mapping) |
 | `--sandbox <mode> --ask-for-approval never` | `PermissionMode`, mapped (§ Request mapping) |
 | `resume <ResumeSessionID>` | The handle, when the chokepoint stamped one (§ Sessions) |
 
@@ -44,7 +44,7 @@
 
 **`plan` has no plan-submission tool here.** `PlanSubmitted` is always false and the plan is `LastText`. A `todo_list` item — the harness's running checklist — is progress reporting, not a submitted plan, and is never read as `PlanText`.
 
-**`Effort` maps by name onto `model_reasoning_effort`:** `low`, `medium` and `high` to the level of the same name, and `max` to `xhigh`, the harness's highest. A level the model refuses is the harness's refusal, reported as the prompt's failure.
+**`Effort` is carried verbatim to `model_reasoning_effort`, and `Efforts` declares what may be carried.** For each model, `Efforts(model)` returns the reasoning-effort values the harness accepts for that model, from least to most — drawn from `minimal`, `low`, `medium`, `high` and `xhigh` — and a level outside that set is refused at the chokepoint before anything is spawned ([agent.md](agent.md) § Effort levels). Nothing is mapped: a level named for another agent — Claude's `max`, say — is refused here, not rounded to this harness's highest.
 
 **`MaxCostUSD` is not enforced.** The harness accepts no spend limit, so `flow/codex` implements `AgentLimits` answering `false`, and every run that grants a cost allowance through it announces that the allowance does not bound a prompt ([agent.md](agent.md) § MaxCostUSD contract).
 
@@ -136,6 +136,7 @@ Diagnostics combine the parse error, the exit status, the failure message and th
 ## Open questions
 
 - **The minimum version.** The oldest release on which every obligation above holds — `exec --json` with this event vocabulary, `PreToolUse` on `apply_patch`, project trust honoured from `-c`, `--dangerously-bypass-hook-trust`, and a resume that accepts every argument in § Invocation — is not established. It is what `Doctor` enforces, and until it is named `Doctor` can refuse nothing.
+- **Which effort levels each model accepts.** § Request mapping draws the levels from the harness's reasoning-effort scale; which of them each model accepts — and whether the scale itself is the harness's documented one rather than a reading of it — is not established, and `Efforts` declares no level it has not verified.
 - **How a hook command runs under `exec`.** § Guards requires the command to block whenever the guard could not run. That depends on whether the harness runs the command through a shell, in which directory, and what it does with an exit code other than 2 — each of which decides whether the fail-closed spelling blocks or is silently skipped.
 - **Whether a resume accepts every argument.** § Sessions declines the handle otherwise; whether `exec resume` honours the sandbox, trust and hook arguments decides whether this substrate resumes at all.
 - **The refusal signal and published usage.** § The agent account requires the harness's own statement with the window and its reset. Whether `exec --json` carries one, what its event is called, and whether the account's usage is published anywhere readable without a prompt decide whether this substrate can be paced before a dispatch or classify a refusal at all; until they are known, an exhausted allowance is indistinguishable from an ordinary failure, which [environment.md](environment.md) forbids.
