@@ -45,11 +45,22 @@ import (
 // inode, and both run at once believing they are alone.
 const lockName = "host-scope.lock"
 
-// holderRecord is written into the locked file while the exclusion is held, so
-// that an operator looking at a stalled machine can see which arena has it.
+// maxHolderRecord bounds a read of the holder record. The record is one arena,
+// a pid and an instant, and the arena's larger half is a filesystem path — so
+// this is generous by two orders of magnitude and still refuses to size a
+// buffer from bytes on disk.
+const maxHolderRecord = 64 << 10
+
+// holderRecord is written into the locked file while the exclusion is held: it
+// is how an operator looking at a stalled machine sees which arena has it, and
+// it is what a nested party checks to find that the exclusion is its own
+// arena's already.
 //
-// It is diagnostic and nothing reads it to decide. The exclusion is the lock;
-// this is the name beside it.
+// THE SECOND USE IS WHY THE WRITE IS PART OF THE ACQUIRE. It is read only by a
+// party the kernel has just refused, so whoever it names is whoever holds the
+// lock — and a holder that could not write its name would be one its own tools
+// could not recognise, which is a deadlock rather than a missing diagnostic.
+// The PID and the instant are diagnostic; the arena is not.
 type holderRecord struct {
 	Arena flow.Arena `json:"arena"`
 	PID   int        `json:"pid"`
@@ -85,7 +96,15 @@ func Path() (string, bool) {
 // holder is the arena taking it — (HostId, ArenaId), never a checkout path. A
 // path can say which directory is busy and cannot say which of a host's arenas
 // holds the machine, which is the question an operator looking at a stalled
-// queue is asking.
+// queue is asking. It is also what the exclusion is re-entered on, below, so it
+// is load-bearing rather than only diagnostic.
+//
+// IT IS RE-ENTRANT TO THE ARENA THAT HOLDS IT. A caller whose own arena is
+// already inside the exclusion is granted it at once, with no wait, and gets a
+// release that does nothing — the acquisition it is nested inside is what owns
+// the machine. Every party in one arena takes it, and the nested ones do not
+// queue behind each other; see the block at the contended branch for why the
+// alternative is a deadlock rather than a slow run.
 //
 // IT REFUSES RATHER THAN DEGRADING. A machine with nowhere to put the lock, or
 // a platform with no way to hold one, gets an error and no exclusion — never a
@@ -119,52 +138,138 @@ func Acquire(ctx context.Context, holder flow.Arena) (release func(), waited tim
 		return nil, 0, fmt.Errorf("hostscope: cannot open %s: %w", path, err)
 	}
 
-	started := time.Now()
-	contended, err := lockExclusive(ctx, f)
+	// ZERO MEANS UNCONTENDED, NOT "TOO FAST TO SEE". The lock is asked for
+	// without blocking first, so a run that queued for nothing reports nothing —
+	// rather than the microseconds a clock around the syscall would report,
+	// which the ledger would then carry as contention and pay an orchestrator
+	// write for on every single run.
+	granted, err := tryLockExclusive(f)
 	if err != nil {
-		// lockExclusive owns f from here: on the ctx path the blocking lock is
-		// still outstanding and only it can know when to close.
-		if !contended {
-			return nil, 0, err
-		}
+		f.Close()
+		return nil, 0, err
+	}
+	if granted {
+		release, err := held(f, holder)
+		return release, 0, err
+	}
+
+	// CONTENDED — BUT BY WHOM? An exclusion this arena already holds is one
+	// this caller is already inside, and a lock is re-entrant to the party that
+	// holds it. Without this the participant set would be a deadlock rather
+	// than a queue: the runner takes the exclusion and then spawns the project's
+	// gate entry point, which is bound by the same rule and would queue behind
+	// its own parent until the gate's timeout killed it — so every gate a
+	// project declared host-scoped would report a timeout, and only those.
+	//
+	// THE PARTY IS THE ARENA, which is the granularity the holder is recorded
+	// at, and it is the one the norm can state: the parties inside one arena
+	// are one measurement by construction, because a claim is item ↔ arena.
+	// What it gives up is a person running a gate by hand inside a checkout a
+	// flow is currently measuring in — which is an operator reaching into a live
+	// arena, a thing no exclusion was going to make safe. An operator with their
+	// own checkout is their own arena and queues like anybody else.
+	//
+	// An empty holder can never match: Arena.Empty() is not an identity, and
+	// comparing one would let a caller that could not name itself re-enter
+	// anything that also could not.
+	//
+	// THE ONE READING THIS CANNOT RULE OUT is a name left behind by a holder the
+	// kernel reaped: the lock is free at that instant, so the next acquirer is
+	// granted it and blanks the record — but between its grant and that syscall
+	// the file still names the arena that died. A third party from THAT arena,
+	// asking inside that window, would read its own name and walk in. It is a
+	// crash, an immediate peer acquire and a same-arena acquire aligning inside
+	// one ftruncate, and closing it would take a lock-and-truncate the kernel
+	// does not offer. Writing the name is therefore the first thing a holder
+	// does, so the window is as narrow as the syscall.
+	if ours, ok := readHolder(f); ok && !holder.Empty() && ours == holder {
+		f.Close()
+		// A no-op release. The acquisition this call is nested inside owns the
+		// exclusion, and releasing it here would hand the machine away while
+		// the outer measurement is still running.
+		return func() {}, 0, nil
+	}
+
+	started := time.Now()
+	if err := waitLockExclusive(ctx, f); err != nil {
+		// waitLockExclusive owns f from here: the blocking lock may still be
+		// outstanding and only it can know when to close.
 		return nil, time.Since(started), err
 	}
-	// ZERO MEANS UNCONTENDED, NOT "TOO FAST TO SEE". lockExclusive asks without
-	// blocking first and says whether anything was in the way, so a run that
-	// queued for nothing reports nothing — rather than the microseconds a clock
-	// around the syscall would report, which the ledger would then carry as
-	// contention and pay an orchestrator write for on every single run.
-	if contended {
-		waited = time.Since(started)
+	release, err = held(f, holder)
+	if err != nil {
+		return nil, time.Since(started), err
 	}
+	return release, time.Since(started), nil
+}
 
-	writeHolder(f, holder)
-
+// held names the holder in the now-locked f and returns the release.
+//
+// THE NAME IS PART OF THE ACQUIRE, NOT A DIAGNOSTIC BESIDE IT, which is why a
+// failure here gives the exclusion back rather than proceeding without it. The
+// re-entrancy check above decides on this record: a holder that took the lock
+// and could not say whose it is leaves its own tools unable to recognise it,
+// and they would queue behind their own arena until their timeout killed them.
+// Refusing costs one run and says why; writing nothing costs every nested run
+// on the machine and says nothing.
+func held(f *os.File, holder flow.Arena) (func(), error) {
+	if err := writeHolder(f, holder); err != nil {
+		_ = unlock(f)
+		_ = f.Close()
+		return nil, err
+	}
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			// Clear the holder before unlocking, so the next acquirer never
-			// reads a name that has moved on. Best-effort: the exclusion is the
-			// lock, and failing to blank a diagnostic must not leave it held.
+			// reads a name that has moved on — which at this point is not
+			// cosmetic: a stale name is a name another party could mistake for
+			// its own and re-enter on.
 			_ = f.Truncate(0)
 			_ = unlock(f)
 			_ = f.Close()
 		})
-	}, waited, nil
+	}, nil
 }
 
-// writeHolder records who holds it. Best-effort by design: the exclusion has
-// already been taken by the time this runs, and refusing to proceed because a
-// diagnostic could not be written would trade a working lock for a failed run.
-func writeHolder(f *os.File, holder flow.Arena) {
+// writeHolder records who holds it.
+func writeHolder(f *os.File, holder flow.Arena) error {
 	b, err := json.Marshal(holderRecord{Arena: holder, PID: os.Getpid(), Since: time.Now()})
 	if err != nil {
-		return
+		return fmt.Errorf("hostscope: cannot render the holder of %s: %w", f.Name(), err)
 	}
 	if err := f.Truncate(0); err != nil {
-		return
+		return fmt.Errorf("hostscope: cannot clear the previous holder of %s: %w", f.Name(), err)
 	}
-	_, _ = f.WriteAt(b, 0)
+	if _, err := f.WriteAt(b, 0); err != nil {
+		return fmt.Errorf("hostscope: cannot record the holder of %s: %w", f.Name(), err)
+	}
+	return nil
+}
+
+// readHolder reads the record out of an already-open exclusion file.
+//
+// A record that is absent, torn or unparseable reads as NOBODY, and nobody is
+// never equal to a caller's own arena — so every way of failing to read this
+// lands on "queue", which is the answer that is wrong at worst by a wait.
+func readHolder(f *os.File) (flow.Arena, bool) {
+	b := make([]byte, maxHolderRecord)
+	n, err := f.ReadAt(b, 0)
+	if n == 0 && err != nil {
+		return flow.Arena{}, false
+	}
+	return parseHolder(b[:n])
+}
+
+func parseHolder(b []byte) (flow.Arena, bool) {
+	var rec holderRecord
+	if err := json.Unmarshal(b, &rec); err != nil {
+		return flow.Arena{}, false
+	}
+	if rec.Arena.Empty() {
+		return flow.Arena{}, false
+	}
+	return rec.Arena, true
 }
 
 // Holder reports the arena currently named in the exclusion's file, and false
@@ -172,7 +277,10 @@ func writeHolder(f *os.File, holder flow.Arena) {
 //
 // A READING, NOT A CHECK. It is what an operator asks to find out who has the
 // machine; it establishes nothing about whether the exclusion is held now, and
-// no caller may act on it — only taking the lock establishes that. The file is
+// no caller may act on it — only taking the lock establishes that. That is what
+// separates it from the read inside Acquire, which is made by a caller the
+// kernel has just refused and so is already standing on the fact this one
+// cannot supply. The file is
 // blanked on release, so an empty read is an exclusion nobody holds and a
 // non-empty one may be either a live holder or a name the kernel has already
 // let go of.
@@ -185,12 +293,5 @@ func Holder() (flow.Arena, bool) {
 	if err != nil || len(b) == 0 {
 		return flow.Arena{}, false
 	}
-	var rec holderRecord
-	if err := json.Unmarshal(b, &rec); err != nil {
-		return flow.Arena{}, false
-	}
-	if rec.Arena.Empty() {
-		return flow.Arena{}, false
-	}
-	return rec.Arena, true
+	return parseHolder(b)
 }

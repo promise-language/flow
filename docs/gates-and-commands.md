@@ -478,6 +478,14 @@ Ownership is the same as the claim's and for the same reason: only a layer that 
 
 **The participant set is closed, and a lock only some parties take is not a lock.** It binds the flow's own gate runner, the project's gate entry point, each of the three `CommandName`s, and a person running the same tools by hand. The operator is not a courtesy case: on a developer's machine they are the most frequent second party, and a peer run nothing coordinated with is exactly what invalidates a measurement while both sides read as healthy.
 
+> **It is re-entrant to the arena that holds it.** A party whose own arena already holds the exclusion is already inside it: it is granted the exclusion at once, waits for nothing, and releasing its own acquisition does not release the arena's.
+
+Without that clause the closed set above would be a deadlock rather than a queue, because two of the parties in it are parent and child on every driven run: the runner takes the exclusion and *then* spawns the project's gate entry point, which is bound by the same rule. A gate declared host-scoped would queue behind its own parent until the gate's timeout killed it — and only the gates a project marked as its most expensive, which is the worst possible place for a mechanism to fail.
+
+**The party is the arena**, which is the granularity the holder is already recorded at, and the parties inside one arena are one measurement by construction, because a claim is `item ↔ arena`. What that gives up is a person running a gate by hand *inside a checkout a flow is currently measuring in* — an operator reaching into a live arena, which no exclusion was going to make safe. An operator with their own checkout is their own arena and queues like anybody else, which is the case this is for.
+
+**So naming the holder is part of taking the exclusion, not a diagnostic beside it.** A holder that took it and could not say whose it is leaves its own tools unable to recognise it; it gives the exclusion back and says so, rather than holding a lock nothing nested can enter.
+
 > **It is taken immediately before the measurement and released immediately after, it is never held across a stop, and a process that dies releases it.**
 
 The lifecycle is the one project scope carries below, for the reason given there: a lock held in a stalled arena starves everything behind it. What is different here is who does the releasing. **The release is an authority independent of the holder** — the machine itself, when the process ends — because a holder that has crashed, been killed or gone quiet is precisely the holder that cannot keep a promise to release, and a lock that survives it disables the machine until somebody notices.

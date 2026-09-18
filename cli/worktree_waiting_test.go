@@ -88,6 +88,62 @@ func TestRunOne_AGateThatDidNotQueueFilesNoWait(t *testing.T) {
 	}
 }
 
+// --- the wait that outlives the context it was paid on ----------------------
+
+// deadlineHonouringOrchestrator answers a ledger write the way a real one does:
+// a write handed a context that is already done never reaches the item. The
+// fake ignores its context, so a case about a dead context cannot be written
+// against it — it would pass whether or not the write was made on one.
+type deadlineHonouringOrchestrator struct {
+	flow.Orchestrator
+	waiting time.Duration
+}
+
+func (o *deadlineHonouringOrchestrator) AddWaiting(ctx context.Context, _ flow.ItemRef, _ flow.StepId, d time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	o.waiting += d
+	return nil
+}
+
+// queuedWorktree reports a run that queued and then got nowhere, which is what
+// RunGate returns when the wait ends in the caller giving up.
+type queuedWorktree struct {
+	flow.Worktree
+	waited time.Duration
+}
+
+func (q queuedWorktree) RunGate(context.Context, flow.GateName) (flow.GateRun, error) {
+	return flow.GateRun{Waited: q.waited}, context.DeadlineExceeded
+}
+
+// THE WAIT THAT MATTERS MOST IS THE ONE FILED AFTER THE DEADLINE FIRED. RunGate
+// is given the step's own context, so a step that timed out while its gate sat
+// in the host-scope queue ends the wait and the context in the same instant —
+// and a ledger write made through that context reaches nothing. The figure is
+// then lost exactly where it is largest, and the step reads as slow work rather
+// than as an arena that spent its dispatch queueing (#435).
+func TestWaitingWorktree_FilesTheWaitAfterTheStepDeadlineFired(t *testing.T) {
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	orch := &deadlineHonouringOrchestrator{}
+	step := &stepCtx{
+		ctx: expired,
+		app: &App{Orchestrator: orch},
+		li:  flow.LifecycleItem{ArtifactId: "plan"},
+	}
+
+	wt := reportingWaits(step, queuedWorktree{waited: 20 * time.Minute})
+	if _, err := wt.RunGate(expired, "tested"); err == nil {
+		t.Fatal("RunGate reported success for a run that never got the exclusion")
+	}
+	if orch.waiting != 20*time.Minute {
+		t.Errorf("Waiting filed = %v, want the 20m the run spent queued — the write went out on the context the deadline had already ended", orch.waiting)
+	}
+}
+
 // --- the optional capability the wrapper must not swallow -------------------
 
 // examiningWorktree is a worktree that answers the push guard, which

@@ -15,8 +15,9 @@ import (
 //
 // A test that took the developer's real host-scope exclusion would block every
 // other arena on their machine for as long as it ran, and one that raced
-// against a real run would serialize with it. main_test.go redirects it for the
-// whole package so no test in it can.
+// against a real run would serialize with it. main_test.go redirects it to a
+// refusal for the whole package, so a test that reaches it without installing a
+// stand-in fails rather than taking the machine.
 var acquireHostScope = hostscope.Acquire
 
 // holdHostScope takes the host-scope exclusion when the project declared this

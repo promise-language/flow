@@ -1,13 +1,18 @@
 package github
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"testing"
+	"time"
+
+	"github.com/promise-language/flow"
 )
 
-// TestMain points the machine-wide GitHub cache (cache.go) at a throwaway
-// directory for the whole package, before any test runs.
+// TestMain points the two machine-wide seams this package reaches — the GitHub
+// cache (cache.go) and the host-scope exclusion (hostscope.go) — away from the
+// developer's machine for the whole package, before any test runs.
 //
 // The same doctrine cli/main_test.go carries for the quota cache, and for the
 // same reason: the record is SHARED by every flow process on the machine, so a
@@ -17,8 +22,14 @@ import (
 // limit that never existed. Redirecting it here rather than per test is what
 // makes it unforgettable: a test added later cannot omit it.
 //
+// The exclusion is the same hazard with a worse blast radius — it is LIVE
+// rather than cached, so a test that took the real one would block every other
+// arena on the machine for as long as it ran, and would serialize against
+// whatever real gate happened to be measuring.
+//
 // Individual tests that care about cache CONTENT take a fresh directory of
-// their own with useTempSeamCache.
+// their own with useTempSeamCache; tests about what the runner does with the
+// exclusion install a stand-in with useFakeHostScope.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "flow-github-cache-")
 	if err != nil {
@@ -26,6 +37,13 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	cacheDir = func() (string, bool) { return dir, true }
+	// A REFUSAL rather than a free pass, for the reason Acquire itself refuses:
+	// a stand-in that silently took nothing would let a case that meant to
+	// exercise the exclusion pass while measuring the opposite. A test that
+	// needs one says so.
+	acquireHostScope = func(context.Context, flow.Arena) (func(), time.Duration, error) {
+		return nil, 0, fmt.Errorf("the real host-scope exclusion is not reachable from a test: install a stand-in with useFakeHostScope")
+	}
 	code := m.Run()
 	// os.Exit skips deferred calls, so the cleanup is explicit.
 	os.RemoveAll(dir)

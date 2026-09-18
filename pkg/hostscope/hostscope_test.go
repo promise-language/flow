@@ -42,6 +42,28 @@ func testArena() flow.Arena {
 	return flow.Arena{Host: "build01", Id: flow.ArenaId("/srv/work/promise")}
 }
 
+// peerArena is a SECOND arena on the same host — another checkout on the same
+// machine, which is the party the exclusion exists to keep out.
+//
+// Every case about exclusion uses it rather than a second call from testArena.
+// The exclusion is re-entrant to the arena that holds it, so two parties naming
+// one arena are two parties inside one measurement and are meant to pass each
+// other straight through; a case that used it to prove exclusion would be
+// asserting the opposite of the rule and would fail.
+func peerArena() flow.Arena {
+	return flow.Arena{Host: "build01", Id: flow.ArenaId("/srv/work/promise-2")}
+}
+
+// arenaNamed maps the child process's arena selector onto the pair. The child
+// is told which arena to act as, because whether it queues or walks through is
+// the whole subject of half these cases.
+func arenaNamed(which string) flow.Arena {
+	if which == "peer" {
+		return peerArena()
+	}
+	return testArena()
+}
+
 // An uncontended acquire reports EXACTLY no wait, not a small one.
 //
 // The figure is filed to the ledger as contention, so "a few microseconds" is
@@ -64,8 +86,8 @@ func TestAcquire_UncontendedReportsExactlyNoWait(t *testing.T) {
 	}
 }
 
-// The property the whole mechanism rests on: while one party holds it, no other
-// party may. A second acquire returns only after the first releases, and says
+// The property the whole mechanism rests on: while one arena holds it, no other
+// arena may. A second acquire returns only after the first releases, and says
 // how long it was held up.
 func TestAcquire_SerializesTwoProcesses(t *testing.T) {
 	requireFlock(t)
@@ -79,9 +101,10 @@ func TestAcquire_SerializesTwoProcesses(t *testing.T) {
 	// A second PROCESS, not a second goroutine: flock is held per open file
 	// description, so two descriptors in one process would be the only case
 	// this mechanism does not have to survive and the one a same-process test
-	// would accidentally measure.
+	// would accidentally measure. And a second ARENA, because the exclusion is
+	// re-entrant to the one holding it — a peer is what it excludes.
 	held := 300 * time.Millisecond
-	second := waiterProcess(t, dir, held+2*time.Second)
+	second := waiterProcess(t, dir, "peer", held+2*time.Second)
 	waitUntilWaiting(t, second)
 
 	time.Sleep(held)
@@ -103,6 +126,123 @@ func TestAcquire_SerializesTwoProcesses(t *testing.T) {
 	}
 }
 
+// THE DEADLOCK THIS RULE EXISTS TO CLOSE. docs/gates-and-commands.md § Two
+// scopes binds the flow's own gate runner AND the project's gate entry point,
+// and the runner spawns the entry point from inside the exclusion. flock is held
+// per open file description, so a child that opened the lock path and asked for
+// it would block on its own parent — every gate a project declared host-scoped
+// would queue behind itself until the gate timeout killed it, and only those.
+//
+// A lock is re-entrant to the party that holds it, and at host scope the party
+// is the arena. So a second process in the SAME arena is granted at once.
+func TestAcquire_TheSameArenaIsAlreadyInsideIt(t *testing.T) {
+	requireFlock(t)
+	dir := useTempDir(t)
+
+	outer, _, err := Acquire(context.Background(), testArena())
+	if err != nil {
+		t.Fatalf("outer Acquire: %v", err)
+	}
+	defer outer()
+
+	// A real child process, because that is what the runner spawns and because
+	// a same-process call would not prove the descriptors are independent.
+	nested := waiterProcess(t, dir, "own", 5*time.Second)
+	out, err := nested.wait()
+	if err != nil {
+		t.Fatalf("a process in the holding arena could not enter the exclusion its own arena holds: %v\n%s", err, out)
+	}
+	// Zero, not merely short: it queued for nothing, and a figure the ledger
+	// carried as contention would report a queue on every nested run.
+	if !strings.Contains(out, "waited=0s") {
+		t.Errorf("the nested party reported a wait, but its own arena held the exclusion:\n%s", out)
+	}
+}
+
+// A re-entrant acquire holds nothing, so releasing it must not hand the machine
+// away while the acquisition it is nested inside is still measuring. The nested
+// release is the gate entry point's `defer`, and it runs long before the
+// runner's does.
+func TestAcquire_AReEntrantReleaseDoesNotFreeTheExclusion(t *testing.T) {
+	requireFlock(t)
+	useTempDir(t)
+
+	outer, _, err := Acquire(context.Background(), testArena())
+	if err != nil {
+		t.Fatalf("outer Acquire: %v", err)
+	}
+	defer outer()
+
+	// BOUNDED, because the regression here is a deadlock: without re-entrancy
+	// this call queues behind the acquire two lines above it and never returns,
+	// and a case that hangs the suite reports nothing to whoever broke it.
+	enter, cancelEnter := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelEnter()
+	nested, waited, err := Acquire(enter, testArena())
+	if err != nil {
+		t.Fatalf("nested Acquire: %v — an arena cannot enter the exclusion it already holds", err)
+	}
+	if waited != 0 {
+		t.Errorf("waited = %s entering an exclusion this arena already holds", waited)
+	}
+	nested()
+
+	// A peer must still be excluded. If the nested release had reached the
+	// lock, this would be granted — with the outer measurement still running.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if stolen, _, err := Acquire(ctx, peerArena()); err == nil {
+		stolen()
+		t.Fatal("a nested release freed the exclusion its outer acquire still holds")
+	}
+}
+
+// Re-entrancy is the ARENA's, not the host's. Two checkouts on one machine are
+// two parties, and letting the second through because it is on the same host
+// would be the whole mechanism switched off — this is the case that says the
+// rule above is a rule about the pair and not about the file.
+func TestAcquire_APeerArenaIsNotInsideIt(t *testing.T) {
+	requireFlock(t)
+	useTempDir(t)
+
+	outer, _, err := Acquire(context.Background(), testArena())
+	if err != nil {
+		t.Fatalf("outer Acquire: %v", err)
+	}
+	defer outer()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	release, _, err := Acquire(ctx, peerArena())
+	if err == nil {
+		release()
+		t.Fatal("a peer arena was granted an exclusion another arena held")
+	}
+}
+
+// A caller that cannot name itself re-enters nothing. The empty pair is not an
+// identity (docs/orchestrator.md § Identities), and comparing one would let any
+// party that could not say who it is walk into an exclusion held by another
+// that also could not.
+func TestAcquire_AnUnnamedCallerIsNeverAlreadyInside(t *testing.T) {
+	requireFlock(t)
+	useTempDir(t)
+
+	outer, _, err := Acquire(context.Background(), flow.Arena{})
+	if err != nil {
+		t.Fatalf("outer Acquire: %v", err)
+	}
+	defer outer()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	release, _, err := Acquire(ctx, flow.Arena{})
+	if err == nil {
+		release()
+		t.Fatal("an unnamed caller was treated as already inside an unnamed holder's exclusion")
+	}
+}
+
 // THE INVARIANT WITH NOTHING ELSE BEHIND IT. docs/gates-and-commands.md § Two
 // scopes requires that a process which dies releases the exclusion, and the
 // holder is exactly the party that cannot keep that promise. Nothing in this
@@ -113,7 +253,7 @@ func TestAcquire_AProcessThatDiesReleasesIt(t *testing.T) {
 	requireFlock(t)
 	dir := useTempDir(t)
 
-	holder := holderProcess(t, dir, time.Minute)
+	holder := holderProcess(t, dir, "peer", time.Minute)
 	waitUntilHeld(t, holder)
 
 	// Establish that the child really has it, or the acquire below proves
@@ -156,7 +296,9 @@ func TestAcquire_ContextCancelledWhileQueued(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
-	release, waited, err := Acquire(ctx, testArena())
+	// A peer, so this genuinely queues. The same arena would be waved through
+	// as already inside it, which is a different case and has its own test.
+	release, waited, err := Acquire(ctx, peerArena())
 	if err == nil {
 		release()
 		t.Fatal("Acquire returned a held exclusion for a caller that had given up")
@@ -230,6 +372,56 @@ func TestAcquire_UnusableDirectoryRefuses(t *testing.T) {
 	}
 }
 
+// AN EXCLUSION THAT CANNOT NAME ITS HOLDER IS NOT TAKEN. The name is what a
+// nested party in the same arena recognises, so a holder that could not write
+// one holds a lock its own gate entry point cannot enter — a deadlock dressed
+// as a successful acquire. It gives the exclusion back instead, and the proof
+// is that the next acquire is granted rather than queueing behind a ghost.
+//
+// A read-only descriptor is the portable way to reach that state: flock is
+// granted on one, and ftruncate refuses a file not open for writing. It is
+// asked of `held` directly, because Acquire has no way to open the file that
+// badly and this is the step whose contract changed.
+func TestHeld_AnExclusionItCannotNameIsGivenBack(t *testing.T) {
+	requireFlock(t)
+	dir := useTempDir(t)
+
+	path := filepath.Join(dir, lockName)
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if granted, err := tryLockExclusive(f); err != nil || !granted {
+		f.Close()
+		t.Fatalf("tryLockExclusive on a free exclusion: granted=%v err=%v", granted, err)
+	}
+
+	release, err := held(f, testArena())
+	if err == nil {
+		release()
+		t.Fatal("held reported an exclusion it could not name a holder for")
+	}
+	if release != nil {
+		t.Error("a refused acquire returned a release")
+	}
+	if !strings.Contains(err.Error(), "holder") {
+		t.Errorf("err = %v, want it to name what it could not record", err)
+	}
+
+	// THE LOCK WAS GIVEN BACK. A refusal that kept it would disable the machine
+	// for everything behind it, which is worse than the missing name.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	next, _, err := Acquire(ctx, peerArena())
+	if err != nil {
+		t.Fatalf("Acquire after a refused one: %v — the refusal left the exclusion held", err)
+	}
+	next()
+}
+
 // Release is deferred, and a deferred call that ran twice must not unlock an
 // exclusion a later party has since been granted.
 func TestRelease_IsIdempotent(t *testing.T) {
@@ -244,7 +436,7 @@ func TestRelease_IsIdempotent(t *testing.T) {
 	release()
 
 	// A second party takes it, and the stale release must not reach it.
-	holder := holderProcess(t, dir, 3*time.Second)
+	holder := holderProcess(t, dir, "peer", 3*time.Second)
 	waitUntilHeld(t, holder)
 	release()
 
@@ -366,19 +558,19 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
-// holderProcess starts a child that takes the exclusion, prints "held", and
-// then sleeps until killed or until hold elapses.
-func holderProcess(t *testing.T, dir string, hold time.Duration) *child {
-	return spawn(t, dir, "hold", hold)
+// holderProcess starts a child that takes the exclusion as arena, prints
+// "held", and then sleeps until killed or until hold elapses.
+func holderProcess(t *testing.T, dir, arena string, hold time.Duration) *child {
+	return spawn(t, dir, "hold", arena, hold)
 }
 
-// waiterProcess starts a child that queues for the exclusion and prints how
-// long it waited once granted.
-func waiterProcess(t *testing.T, dir string, patience time.Duration) *child {
-	return spawn(t, dir, "wait", patience)
+// waiterProcess starts a child that asks for the exclusion as arena and prints
+// how long it waited once granted.
+func waiterProcess(t *testing.T, dir, arena string, patience time.Duration) *child {
+	return spawn(t, dir, "wait", arena, patience)
 }
 
-func spawn(t *testing.T, dir, mode string, d time.Duration) *child {
+func spawn(t *testing.T, dir, mode, arena string, d time.Duration) *child {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
@@ -388,6 +580,7 @@ func spawn(t *testing.T, dir, mode string, d time.Duration) *child {
 	cmd.Env = append(os.Environ(),
 		"FLOW_HOSTSCOPE_CHILD="+mode,
 		"FLOW_HOSTSCOPE_DIR="+dir,
+		"FLOW_HOSTSCOPE_ARENA="+arena,
 		"FLOW_HOSTSCOPE_FOR="+d.String(),
 	)
 	out := &syncBuffer{}
@@ -440,9 +633,11 @@ func TestHostScopeChild(t *testing.T) {
 		t.Fatalf("child: %v", err)
 	}
 
+	arena := arenaNamed(os.Getenv("FLOW_HOSTSCOPE_ARENA"))
+
 	switch mode {
 	case "hold":
-		release, _, err := Acquire(context.Background(), testArena())
+		release, _, err := Acquire(context.Background(), arena)
 		if err != nil {
 			t.Fatalf("child: Acquire: %v", err)
 		}
@@ -457,7 +652,7 @@ func TestHostScopeChild(t *testing.T) {
 		os.Stdout.Sync()
 		ctx, cancel := context.WithTimeout(context.Background(), d)
 		defer cancel()
-		release, waited, err := Acquire(ctx, testArena())
+		release, waited, err := Acquire(ctx, arena)
 		if err != nil {
 			t.Fatalf("child: Acquire: %v", err)
 		}

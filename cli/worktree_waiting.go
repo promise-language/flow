@@ -43,11 +43,8 @@ func reportingWaits(s *stepCtx, wt flow.Worktree) flow.Worktree {
 // an error. A gate that queued twenty minutes and then could not be spawned
 // still spent twenty minutes of this arena's wall clock on contention, and a
 // figure that counted it only when the gate went on to succeed would understate
-// contention exactly where contention is worst.
-//
-// A failed ledger write is dropped rather than turned into a gate failure, the
-// same way stampResult drops AddDuration: the measurement is what the caller
-// asked for, and losing the accounting for it must not lose the answer too.
+// contention exactly where contention is worst. fileWait is what makes that
+// true on the error path as well as the ordinary one.
 func (w *waitingWorktree) RunGate(ctx context.Context, name flow.GateName) (flow.GateRun, error) {
 	run, err := w.Worktree.RunGate(ctx, name)
 	w.fileWait(run.Waited)
@@ -81,9 +78,32 @@ func (w *waitingWorktree) ExaminePush(ctx context.Context) error {
 	return flow.ExaminePush(ctx, w.Worktree)
 }
 
+// waitReportTimeout bounds the ledger write below, which is made on a context
+// detached from the step's. Detaching removes the deadline that would otherwise
+// bound it, and a write with no bound at all could hold a dispatch open on an
+// orchestrator that has stopped answering — so it gets one of its own, long
+// enough for an ordinary API round trip and no longer.
+const waitReportTimeout = 30 * time.Second
+
+// fileWait writes the queue time to the ledger.
+//
+// IT WRITES ON A CONTEXT DETACHED FROM THE STEP'S, and that is the whole of why
+// this is not a one-liner. The largest wait this method is ever handed is the
+// one produced by the step's own deadline firing while the run sat in the queue
+// (#435): RunGate is given the step's context, so the deadline that ended the
+// wait also ended the context — and filing through it would drop precisely the
+// figure that says why the step timed out. The claim in RunGate's comment above,
+// that the wait is filed on every path including the failing one, is true only
+// with the detach; without it the failing path is the one path that cannot file.
+//
+// A failed write is still dropped rather than turned into a gate failure, the
+// same way stampResult drops AddDuration: the measurement is what the caller
+// asked for, and losing the accounting for it must not lose the answer too.
 func (w *waitingWorktree) fileWait(d time.Duration) {
 	if d <= 0 {
 		return
 	}
-	_ = w.step.app.Orchestrator.AddWaiting(w.step.ctx, w.step.claim.ItemRef, w.step.li.Result(), d)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(w.step.ctx), waitReportTimeout)
+	defer cancel()
+	_ = w.step.app.Orchestrator.AddWaiting(ctx, w.step.claim.ItemRef, w.step.li.Result(), d)
 }
