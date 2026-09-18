@@ -990,3 +990,62 @@ func TestBackend_Discover_ItemInfoCarriesTheFilingTime(t *testing.T) {
 		t.Errorf("FiledAt = %v, want %v", items[0].FiledAt, filed)
 	}
 }
+
+// What each park kind READS BACK AS. blockedness is keyed on labels, so the
+// crosswalk over the vocabulary is the composition: parkLabel gives the label a
+// park of that kind is advertised under, and this is the blockedness a listing
+// derives from it.
+//
+// It walks flow.AllParkKinds() because that composition is where the mapping
+// goes lossy — nine kinds onto five labels — and a kind added to the vocabulary
+// picks up whatever its label already means, with nothing saying so (#324).
+// TestParkLabel_LabelsEveryKindDeliberately states which label each kind gets;
+// this states what that label then says about the item.
+func TestBlockedness_AnswersForEveryParkKindsLabel(t *testing.T) {
+	l := newLabels("flow:")
+	b := &Orchestrator{labels: l}
+	type blockedness struct {
+		kind   flow.BlockKind
+		reason string
+	}
+	// The four kinds that share flow:blocked all read back as the generic
+	// operator-action block, plus `blocked` itself. Whether that is right for
+	// remote-unreachable is #322, and whether the fake — which reports all five
+	// of these not blocked at all — is the side that should move is #431; that
+	// this is what happens here is what this test holds.
+	generic := blockedness{flow.WaitsOnPerson, "blocked pending operator action"}
+	want := map[flow.ParkKind]blockedness{
+		flow.ParkBlocked:            generic,
+		flow.ParkStepDidNotComplete: generic,
+		flow.ParkRemoteUnreachable:  generic,
+		flow.ParkRefused:            generic,
+		flow.ParkWriteContract:      generic,
+		flow.ParkQuestion:           {flow.WaitsOnPerson, "waiting for an answer"},
+		flow.ParkTreasurerRefused:   {flow.WaitsOnPerson, "budget exhausted on a step"},
+		flow.ParkInfraTransient:     {flow.WaitsOnCondition, "waiting on a transient infrastructure condition"},
+		flow.ParkAccountExhausted:   {flow.WaitsOnCondition, "waiting on the agent account's allowance to return"},
+	}
+	kinds := flow.AllParkKinds()
+	if len(kinds) != len(want) {
+		t.Fatalf("AllParkKinds() has %d members, but %d blockedness answers are written down: %v", len(kinds), len(want), kinds)
+	}
+	for _, kind := range kinds {
+		w, ok := want[kind]
+		if !ok {
+			t.Errorf("park kind %q has no blockedness written down here", kind)
+			continue
+		}
+		label := parkLabel(l, &flow.ParkRequest{Kind: kind, Step: "plan"})
+		blocked, gotKind, gotReason := b.blockedness(nil, []string{label})
+		// Every park blocks the item. One that read as workable would be
+		// offered for selection while the condition that stopped it stands.
+		if !blocked {
+			t.Errorf("a %q park, labelled %q, reports the item not blocked", kind, label)
+			continue
+		}
+		if gotKind != w.kind || gotReason != w.reason {
+			t.Errorf("a %q park, labelled %q, reports kind=%q reason=%q, want kind=%q reason=%q",
+				kind, label, gotKind, gotReason, w.kind, w.reason)
+		}
+	}
+}
