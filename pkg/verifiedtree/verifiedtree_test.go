@@ -213,6 +213,34 @@ func TestTreeIDWithAZeroLengthIndex(t *testing.T) {
 	}
 }
 
+// AN UNREADABLE INDEX IS NOT AN EMPTY ONE. Only an ABSENT index means the
+// tracked set is empty; any other read failure means it is UNKNOWN, and
+// carrying on without it silently drops exactly the tracked-but-ignored and
+// force-added paths the seed exists to keep. The answer would still look like a
+// tree id, and it would name content no `git add -A` in this checkout can
+// stage — the silent disagreement with the guard that this package exists to
+// end.
+func TestTreeIDFailsWhenTheIndexCannotBeRead(t *testing.T) {
+	dir := newRepo(t, true)
+	writeFile(t, filepath.Join(dir, "ignored", "kept"), "tracked\n")
+	gitIn(t, dir, "add", "-f", "ignored/kept")
+	gitIn(t, dir, "commit", "-q", "-m", "track an ignored file")
+
+	// A directory where the index file belongs: `git rev-parse --git-path`
+	// still names it, and reading it fails for a reason that is not absence.
+	index := filepath.Join(dir, ".git", "index")
+	if err := os.Remove(index); err != nil {
+		t.Fatalf("remove the index: %v", err)
+	}
+	if err := os.Mkdir(index, 0o755); err != nil {
+		t.Fatalf("put a directory where the index belongs: %v", err)
+	}
+
+	if got, err := TreeID(context.Background(), dir); err == nil {
+		t.Errorf("TreeID = %s over an index it could not read, want an error — the tracked set was guessed", got)
+	}
+}
+
 // A LINKED WORKTREE HAS ITS OWN INDEX, AND IT IS THE ONE TO SEED FROM. This is
 // where a resolution works, so it is where the record is written and read.
 // `<root>/.git` there is a FILE, not a directory, so a guess at
@@ -426,6 +454,73 @@ func TestBlessCreatesTheDirectoryAndLeavesNoTemporary(t *testing.T) {
 	}
 }
 
+// THE VERIFY LOOP RE-BLESSES, AND THE SECOND RUN IS ABOUT DIFFERENT CONTENT.
+// A record naming the earlier tree must be replaced — not kept, not appended
+// to. Kept, and the guard refuses the very commit the green run just cleared;
+// appended to, and the record stops being one tree id and blesses nothing at
+// all. The tests above only ever bless the same tree twice, so a write that
+// declines to overwrite passes all of them.
+func TestBlessReplacesTheRecordWhenTheTreeMoves(t *testing.T) {
+	dir := newRepo(t, true)
+
+	first, err := Bless(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("Bless: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "fresh.txt"), "new\n")
+	second, err := Bless(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("second Bless: %v", err)
+	}
+	if second == first {
+		t.Fatalf("the tree did not move across the two blessings (%s), so this proves nothing", first)
+	}
+
+	body, err := os.ReadFile(Path(dir))
+	if err != nil {
+		t.Fatalf("read record: %v", err)
+	}
+	if string(body) != second+"\n" {
+		t.Errorf("record = %q, want exactly %q — the second blessing did not replace the first", body, second+"\n")
+	}
+}
+
+// A BLESSING THAT WAS NOT RECORDED MUST NOT BE REPORTED AS ONE. Bless hands
+// back the tree it recorded and its caller prints it and moves on; a swallowed
+// write failure is a run that reports green and blesses nothing, which is the
+// whole shape of the failure this package exists to end. The temporary goes
+// with it: a write that could not finish must not leave litter in the
+// directory the next reader lists.
+func TestBlessReportsARecordItCouldNotWrite(t *testing.T) {
+	dir := newRepo(t, true)
+	// A non-empty directory where the record belongs: the rename over it
+	// cannot succeed on any platform.
+	if err := os.MkdirAll(filepath.Join(Path(dir), "in-the-way"), 0o755); err != nil {
+		t.Fatalf("put a directory where the record belongs: %v", err)
+	}
+
+	tree, err := Bless(context.Background(), dir)
+	if err == nil {
+		t.Error("Bless reported a blessing it did not record")
+	}
+	if tree != "" {
+		t.Errorf("Bless = %q after a failed write, want \"\" — a caller cannot tell this from a recorded tree", tree)
+	}
+
+	recordDir := filepath.Dir(Path(dir))
+	entries, err := os.ReadDir(recordDir)
+	if err != nil {
+		t.Fatalf("read %s: %v", recordDir, err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(Path(dir)) {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("%s holds %v, want only the path that was in the way — the failed write left its temporary behind", recordDir, names)
+	}
+}
+
 func TestCheckStates(t *testing.T) {
 	valid := strings.Repeat("a1", 20)
 	for _, tc := range []struct {
@@ -442,6 +537,12 @@ func TestCheckStates(t *testing.T) {
 		{"too short", valid[:39] + "\n", ""},
 		{"a tree id", valid + "\n", valid},
 		{"a tree id with no newline", valid, valid},
+		// A record that reached a Windows checkout through a translating
+		// filter, or a hand that edited it there. The carriage return must not
+		// turn a blessed tree into "nothing blessed this", which would refuse
+		// every commit on that machine with a record that looks correct to
+		// anyone reading it.
+		{"a tree id with a carriage return", valid + "\r\n", valid},
 		{"a sha-256 tree id", strings.Repeat("b2", 32) + "\n", strings.Repeat("b2", 32)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -537,6 +638,59 @@ func TestBlessIfEqualRecordsOnlyTheNamedTree(t *testing.T) {
 	}
 	if got, _ := Check(dir); got != tree {
 		t.Errorf("a mismatched BlessIfEqual disturbed the record: %q, want %q", got, tree)
+	}
+}
+
+// THE JOIN IS THE CASE THE PACKAGE WAS BUILT FOR, AND IT SPANS TWO CHECKOUTS.
+// A runner recognises that the same work over the same tree has already been
+// done, and the green result it hands back was measured somewhere else
+// entirely — a different clone, on a different host, with its own object
+// database and its own history. The blessing has to be recorded HERE, from an
+// id computed THERE, so the id may carry nothing checkout-local: not a path,
+// not a git directory, not a commit. Every test above asks one checkout both
+// questions, and a tree id that quietly depended on where it was computed
+// would agree with itself in all of them and make every real join a no-op.
+func TestATreeIDFromAnotherCheckoutBlessesThisOne(t *testing.T) {
+	measured := newRepo(t, true) // where the green result was produced
+	here := newRepo(t, true)     // the checkout asking to be blessed
+
+	// Identical content, reached differently: committed there, staged and
+	// unstaged here. The tree is about content, so none of that may show.
+	for _, dir := range []string{measured, here} {
+		writeFile(t, filepath.Join(dir, "kept.txt"), "changed\n")
+		writeFile(t, filepath.Join(dir, "fresh.txt"), "new\n")
+		writeFile(t, filepath.Join(dir, "ignored", "junk"), "junk\n")
+	}
+	gitIn(t, measured, "add", "-A")
+	gitIn(t, measured, "commit", "-q", "-m", "the content the result was measured over")
+	gitIn(t, here, "add", "fresh.txt")
+
+	result, err := TreeID(context.Background(), measured)
+	if err != nil {
+		t.Fatalf("TreeID where the result was measured: %v", err)
+	}
+
+	ok, err := BlessIfEqual(context.Background(), here, result)
+	if err != nil {
+		t.Fatalf("BlessIfEqual from a joined result: %v", err)
+	}
+	if !ok {
+		mine, err := TreeID(context.Background(), here)
+		if err != nil {
+			t.Fatalf("TreeID here: %v", err)
+		}
+		t.Fatalf("a result measured over identical content did not bless this checkout: there %s, here %s", result, mine)
+	}
+
+	// The join must leave the checkout in the state a run would have: what a
+	// commit here is about to record is what the record blesses.
+	staged := stagedByGit(t, here)
+	record, err := Check(here)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !Blesses(record, staged) {
+		t.Errorf("the record %q does not bless the tree a commit here would record %q", record, staged)
 	}
 }
 
