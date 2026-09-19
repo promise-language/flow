@@ -126,8 +126,14 @@ func TestWriteContract_DirtyTreeViolation(t *testing.T) {
 	if res.Park == nil || res.Park.Kind != flow.ParkWriteContract {
 		t.Fatalf("park = %+v, want ParkWriteContract", res.Park)
 	}
-	if !strings.Contains(res.Park.Reason, "uncommitted changes") {
-		t.Errorf("reason = %q, want contains 'uncommitted changes'", res.Park.Reason)
+	// The reason names the tree the step was HANDED, not the tree it left. That
+	// clause is the whole correction: an absolute check refused the same step for
+	// a reason that was not true of it, and an operator reading the park has to
+	// be able to tell the two apart.
+	if !strings.Contains(res.Park.Reason, "uncommitted changes") ||
+		!strings.Contains(res.Park.Reason, "handed clean") {
+		t.Errorf("reason = %q, want it to name both the uncommitted changes and the clean tree they were made in",
+			res.Park.Reason)
 	}
 }
 
@@ -161,6 +167,63 @@ func TestWriteContract_InheritedDirtIsNotAViolation(t *testing.T) {
 	}
 	if res.Status != string(flow.StatusDone) {
 		t.Fatalf("status = %q (park %+v), want done: the step edited nothing", res.Status, res.Park)
+	}
+}
+
+// The route the step ELECTED is taken, which is the whole of what the absolute
+// check cost: "the step parks write-contract and the route it elected is never
+// taken — the handoff is unreachable regardless of what the graph declares."
+// Completing is not the deliverable; reaching the successor is, so the journal
+// and the pending step are what this asserts rather than the status alone.
+//
+// The shape is the one the item names: an operation was refused, the refusal is
+// what left the tree dirty, and the step answers it by handing off to the step
+// that repairs — with a contract that permits it none of the three writes,
+// because it performed none of them. The repair is elected by its RESULT, which
+// is `commit` here only because that is the artifact the fixture registers.
+func TestWriteContract_InheritedDirtReachesTheElectedHandoff(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("open request", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			if _, err := ctx.Worktree(); err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Next("commit", "the commit was refused").Markdown("refused"), nil
+		}, flow.StepConfig{
+			Prompts: flow.PromptsAgent, Role: "contributor", Entry: true,
+			Next:   []flow.StepId{"commit"},
+			Writes: flow.WriteContract{},
+		})
+		f.AddStep("repair disclosure", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "repaired").CommitHash("abc"), nil
+		}, flow.StepConfig{
+			Prompts: flow.PromptsAgent, Role: "contributor",
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+			Writes:      flow.WriteContract{MayCommit: true, MayEditTree: true},
+		})
+	}, &stubAgent{name: "stub"})
+
+	if _, err := be.Worktree(context.Background(), claim.ItemRef); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	be.SetDirty(true)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusDone) {
+		t.Fatalf("status = %q (park %+v), want done", res.Status, res.Park)
+	}
+	assertNext(t, res, "commit", false)
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.Journal) != 1 {
+		t.Fatalf("journal has %d entries, want 1 — the election is journaled with the result", len(state.Journal))
+	}
+	if state.Journal[0].Route.Next != "commit" {
+		t.Errorf("journaled route = %+v, want it to elect the repair step", state.Journal[0].Route)
 	}
 }
 
