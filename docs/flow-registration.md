@@ -23,7 +23,7 @@ The remit gates listing and selection, and nothing else. It is what makes an ite
 
 ## Roles
 
-A flow declares its **roles** before its steps: each a name, and the set of backend capabilities it requires.
+A flow declares its **roles** before its steps: each a name, and the set of orchestrator capabilities it requires.
 
 ```go
 f.Role("contributor", flow.CapPush)

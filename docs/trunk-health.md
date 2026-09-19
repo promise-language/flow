@@ -51,7 +51,7 @@ A step runs the project's gate over its own work and it comes back red. Exactly 
 
 > **Nothing an agent concludes is evidence of trunk health.** The classification is a measurement, reproducible by anyone who runs it, and no agent participates in reaching it in any form.
 
-**Where it runs is deliberately not fixed here.** An arena that happens to be idle, the check that admitted the commit, a job the backend schedules — each is a legitimate place to run it, and this document requires none of them. What it requires is that the answer is a measurement and not a judgement, because the record is read by parties that never met and a verdict they cannot reproduce is one they cannot compare.
+**Where it runs is deliberately not fixed here.** An arena that happens to be idle, the check that admitted the commit, a job the orchestrator schedules — each is a legitimate place to run it, and this document requires none of them. What it requires is that the answer is a measurement and not a judgement, because the record is read by parties that never met and a verdict they cannot reproduce is one they cannot compare.
 
 That is also why the rule is stated about the answer rather than about the party. *The orchestrator classifies, the agent does not* would be an arrangement, and arrangements admit exceptions. *The answer is mechanical* admits none: an agent's conclusion fails the requirement wherever it is reached and whoever asked for it, including when it is correct.
 
@@ -109,7 +109,7 @@ The measurement that establishes a commit green can be bought twice or once, and
 
 ### Reuse is a source of `green` only, and that is not the same as never reaching `red`
 
-A landing measurement that came back red admitted nothing — the commit does not exist to have health. So reuse produces one state, and a project recording only reused verdicts holds `green` for what landed through the flow and `unknown` for everything else: a commit a person pushed, a merge made through the backend's own interface, a revert applied directly.
+A landing measurement that came back red admitted nothing — the commit does not exist to have health. So reuse produces one state, and a project recording only reused verdicts holds `green` for what landed through the flow and `unknown` for everything else: a commit a person pushed, a merge made through the orchestrator's own interface, a revert applied directly.
 
 **`red` enters the record from a measurement over a commit already on the trunk**, and that does not require a job built for it. The arena that meets an `unknown` base and measures it before starting work (§ When the question is asked) is running exactly that measurement, in exactly the clean tree the safer source calls for — so a project recording reused verdicts and asking early reaches `red` routinely, paid for by whichever arena happened to arrive first.
 
@@ -153,7 +153,7 @@ They are one question in two tenses — who is answering it, and what the answer
 
 **The lock is an optimisation; the record is the correctness.** A lock that dies costs one duplicated run. A pending state stored where the record lives would cost an answer, and cost it permanently. Every ambiguity about a lock resolves toward releasing it.
 
-**Serializing for hardware is a different concern with a different key.** A project whose evaluations saturate a machine serializes them for that reason too, and that is host scope ([gates-and-commands.md](gates-and-commands.md) § Two scopes, for two different reasons). The two do not substitute: evaluations of *different* commits contend for hardware without duplicating anything, and evaluations of the *same* commit duplicate without necessarily contending. A backend may need both locks, and it needs them for unrelated reasons.
+**Serializing for hardware is a different concern with a different key.** A project whose evaluations saturate a machine serializes them for that reason too, and that is host scope ([gates-and-commands.md](gates-and-commands.md) § Two scopes, for two different reasons). The two do not substitute: evaluations of *different* commits contend for hardware without duplicating anything, and evaluations of the *same* commit duplicate without necessarily contending. An orchestrator may need both locks, and it needs them for unrelated reasons.
 
 ## How a base is established red
 
@@ -240,7 +240,7 @@ Case (3) is absent from this table deliberately: it parks on nothing, so there i
 
 A park naming its clearing condition in a sentence is a park whose release depends on reading that sentence correctly, forever, in every reader. The precedent is set: [environment.md](environment.md) § The agent account requires an exhausted allowance to carry the instant it returns, for this reason and with this result — a condition that states its own end is waited out rather than rediscovered.
 
-**A missing verdict clears by being supplied, and nothing about that is a person's act.** The block names the commit and the platform whose verdict is absent; it ends when one is recorded, whoever recorded it — a job the backend scheduled, or simply the next arena dispatched onto the same base with the question asked early (§ When the question is asked). That is the loop back to the placement choice: **asking late can arrive at a block whose clearing condition the project produces nothing to satisfy.** A project whose arrangement measures a base only when an arena asks for it up front should ask up front, where the arena that needs the answer is the one positioned to produce it.
+**A missing verdict clears by being supplied, and nothing about that is a person's act.** The block names the commit and the platform whose verdict is absent; it ends when one is recorded, whoever recorded it — a job the orchestrator scheduled, or simply the next arena dispatched onto the same base with the question asked early (§ When the question is asked). That is the loop back to the placement choice: **asking late can arrive at a block whose clearing condition the project produces nothing to satisfy.** A project whose arrangement measures a base only when an arena asks for it up front should ask up front, where the arena that needs the answer is the one positioned to produce it.
 
 **A red base waits on the trunk, not on its own history.** The arena has not rebased and cannot — that is what it is blocked on — so its ancestry is exactly the thing the fix is missing from, and a test against it never passes. What it waits for is a commit ahead of its base that is `green` on its platform, which is a fact about the trunk and the record, readable by anyone at any moment. A fix that lands and is never measured on this platform does not clear it, and that is correct rather than pedantic: the arena would rebase onto a base it knows nothing about and be back here.
 

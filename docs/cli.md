@@ -18,7 +18,7 @@ Every binary built on `cli.Run` exposes exactly this surface.
 | `resolve [<item-id>]` | Drive an item, one step at a time, until it finalizes, hands off, or stops |
 | `status [<item-id>]` | Report an item's route: the journal so far, the pending step, and whose move it is |
 | `quota` | Report the agent account's quota state |
-| `list` | Report items and where each stands — this binary's remit by default, everything the backend holds at its widest |
+| `list` | Report items and where each stands — this binary's remit by default, everything the orchestrator holds at its widest |
 | `answer [<item-id>] [<text>]` | Read the question a step is parked on, and answer it |
 | `edit <item-id> <change>…` | Change the item itself — its title, body, tags, dependencies, priority, urgency |
 | `remark <item-id> <text>` | Record a remark on the item |
@@ -33,13 +33,13 @@ The set is closed in both directions: no command is added by a project, and no c
 
 ## Addressing an item
 
-Every command that names an item accepts the backend's own identifier, verbatim.
+Every command that names an item accepts the orchestrator's own identifier, verbatim.
 
-Resolution is direct: the backend turns the typed string into an `ItemRef` without enumerating candidates. An item that exists but is not currently eligible is still addressable — eligibility governs what is *offered*, never what can be *named*.
+Resolution is direct: the orchestrator turns the typed string into an `ItemRef` without enumerating candidates. An item that exists but is not currently eligible is still addressable — eligibility governs what is *offered*, never what can be *named*.
 
 Matching is exact. A typed id never resolves to an item whose identifier merely contains it.
 
-> Not yet true of the github backend, which has no direct resolver and falls back to substring matching over the eligible set — [#6](https://github.com/promise-language/flow/issues/6).
+> Not yet true of the GitHub orchestrator, which has no direct resolver and falls back to substring matching over the eligible set — [#6](https://github.com/promise-language/flow/issues/6).
 
 ## Output
 
@@ -124,7 +124,7 @@ A step that parks exits 0 — parking is a designed outcome, not a failure. A st
 
 `status` reports an item's route: the journal so far — each completed execution with who ran it, in which role, electing what and why — the **pending step** and its declared ways forward, **whose move it is** (the awaited role, or the awaited signal), the park when there is one with what would clear it, the treasurer's spend so far — cost and active time, with time spent waiting on exclusions reported apart — **how many agent sessions the resolution has opened** and how many its route accounts for, and **which step is running right now**.
 
-**The session count is reported with its breakdown, and an excess is flagged.** A resolution that has opened more sessions than its journal accounts for paid for conversations its route never asked for, and the excess is very nearly the only signal that happened — nothing else about such a resolution looks wrong afterwards ([resolution.md](resolution.md) § The treasurer). The count answers *how many*; the breakdown answers *why*, because the two causes have different fixes: a handle that was gone is a limit of the substrate or the backend, and a refused request is a defect in the flow. **An excess is flagged only against a route this binary can read** — where no flow handles the item there is no number to compare with, and reporting one would be an accusation rather than a measurement.
+**The session count is reported with its breakdown, and an excess is flagged.** A resolution that has opened more sessions than its journal accounts for paid for conversations its route never asked for, and the excess is very nearly the only signal that happened — nothing else about such a resolution looks wrong afterwards ([resolution.md](resolution.md) § The treasurer). The count answers *how many*; the breakdown answers *why*, because the two causes have different fixes: a handle that was gone is a limit of the substrate or the orchestrator, and a refused request is a defect in the flow. **An excess is flagged only against a route this binary can read** — where no flow handles the item there is no number to compare with, and reporting one would be an accusation rather than a measurement.
 
 The journal is reported in order, and the pending step in exactly one state — parked, waiting, ready, running, or **executing elsewhere**. A step being actively worked on is not the same thing as one that has yet to start, and reporting both as pending loses the distinction an operator most often needs.
 
@@ -192,11 +192,11 @@ The identifier comes from `status`, which lists the item's questions and which o
 
 ## Editing an item
 
-`edit` changes the item itself — its title, its body, its tags, the items it waits on, its priority and its urgency. Every other write in this set is **lifecycle state**: the lease, the flow's record, an answer to a question a step parked on. Without this one, changing an item means writing to the backend's own store in whatever format that backend happens to use — which is unportable, unvalidated, invisible to the layer that would have checked it, and requires a caller of this binary to know a storage format it exists to abstract.
+`edit` changes the item itself — its title, its body, its tags, the items it waits on, its priority and its urgency. Every other write in this set is **lifecycle state**: the lease, the flow's record, an answer to a question a step parked on. Without this one, changing an item means writing to the orchestrator's own store in whatever format that orchestrator happens to use — which is unportable, unvalidated, invisible to the layer that would have checked it, and requires a caller of this binary to know a storage format it exists to abstract.
 
 **One command, not one per field**, because the orchestrator's editor is a transaction ([orchestrator.md](orchestrator.md) § Editing) and a command per field would be a transaction per field. One invocation stages every change given and lands them together or not at all, so nobody has to ask which half took.
 
-**There is one flag per editor method**, and they carry no rules of their own. What can be written together is the orchestrator's to decide: it refuses at the commit rather than applying the part it can, and the refusal reaches the operator **as the orchestrator worded it** — a backend whose store keeps item fields and dependencies apart says so, and says to split the edit, and a line substituted here would report a permanent limitation in place of a combination to re-shape.
+**There is one flag per editor method**, and they carry no rules of their own. What can be written together is the orchestrator's to decide: it refuses at the commit rather than applying the part it can, and the refusal reaches the operator **as the orchestrator worded it** — an orchestrator whose store keeps item fields and dependencies apart says so, and says to split the edit, and a line substituted here would report a permanent limitation in place of a combination to re-shape.
 
 **`--body-file` is a second way to give the body, not a second field.** A rewritten description is a file long before it is an argument — that is what the observed workaround reached for — so the body may be given inline or read from a path, and giving it both ways is a usage error. What the report names is the **field**: an invocation that read the body from a file says the body changed, because anything acting on the report is asking what moved, not which flag carried it.
 
@@ -206,7 +206,7 @@ The identifier comes from `status`, which lists the item's questions and which o
 
 **A value outside a closed vocabulary is rejected by name, before anything is written** — the rule `--sort` already follows (§ Invocation errors). `--priority` and `--urgency` take the values [orchestrator.md](orchestrator.md) § Priority and urgency defines and nothing else.
 
-**A dependency is named the way every item is named** (§ Addressing an item): `--block-on` and `--unblock` take the backend's own identifier and resolve it through the same resolver the item id goes through, before the edit opens. An identifier that names nothing costs no write.
+**A dependency is named the way every item is named** (§ Addressing an item): `--block-on` and `--unblock` take the orchestrator's own identifier and resolve it through the same resolver the item id goes through, before the edit opens. An identifier that names nothing costs no write.
 
 This is the operator's half of a facility the SDK already had. A run that discovers a dependency records it itself (§ Availability); `--block-on` and `--unblock` are how a person records or retracts one — the act § Availability already assumes when it says *"An operator who wants the block to survive that retracts the blocker and records the real one"*.
 
@@ -218,11 +218,11 @@ This is the operator's half of a facility the SDK already had. A run that discov
 
 **It is an append, not a field, which is why it is not one of `edit`'s flags.** A remark is published *beside* the request rather than changing it, and folding it into the editor would either break "all of them or none of them" — the one property that editor exists to give — or make a remark unusable in combination, since publishing one is a write of a different shape from setting a field.
 
-**The item id is first and always required.** It is never read as the text and the text is never read as an id: a remark whose first word is a number would otherwise be indistinguishable from a reference, and a backend read would decide what the invocation meant.
+**The item id is first and always required.** It is never read as the text and the text is never read as an id: a remark whose first word is a number would otherwise be indistinguishable from a reference, and an orchestrator read would decide what the invocation meant.
 
 **The text may be given inline or read from a path** — `--body-file`, as `edit`'s body is — and giving it both ways is a usage error. Prose worth recording is regularly longer than a shell argument, which is what the observed workaround reached for.
 
-**A remark is not an answer.** It is recorded on an item whether or not a step is waiting for a human, and recording one never clears a wait: `answer` is the command that answers, and it names the question it answers. A backend whose answer store is the same place a remark lands owes that separation to whoever records one — see [github-schema.md](github-schema.md) § Remarks for how this one keeps it.
+**A remark is not an answer.** It is recorded on an item whether or not a step is waiting for a human, and recording one never clears a wait: `answer` is the command that answers, and it names the question it answers. An orchestrator whose answer store is the same place a remark lands owes that separation to whoever records one — see [github-schema.md](github-schema.md) § Remarks for how this one keeps it.
 
 **Empty text records nothing**, and exits 1. A remark that says nothing is a publication nobody asked for and nothing can take back — the same judgement § Answering makes about an operator who is asked and says nothing.
 
@@ -234,7 +234,7 @@ This is the operator's half of a facility the SDK already had. A run that discov
 
 `claim` acquires an exclusive claim and is idempotent for the holder: re-claiming an item this worktree already holds succeeds and changes nothing.
 
-A claim is refused when the item is already held, **when this worktree already holds a different item**, when the target worktree is unfit, when the item awaits a role this account's detected capabilities cannot assume, when its placement restrictions exclude this arena, or when the backend's own preconditions are unmet. Every refusal is **typed** — the caller can tell the reasons apart without reading prose — and carries:
+A claim is refused when the item is already held, **when this worktree already holds a different item**, when the target worktree is unfit, when the item awaits a role this account's detected capabilities cannot assume, when its placement restrictions exclude this arena, or when the orchestrator's own preconditions are unmet. Every refusal is **typed** — the caller can tell the reasons apart without reading prose — and carries:
 
 - a one-line human reason,
 - the failing check's own output, reproduced verbatim and unmodified,
@@ -244,7 +244,7 @@ A refusal that another item might survive is distinguished from one that no item
 
 **A recovery is named, and a recovery that is correct only on a clean tree is not printed on a dirty one.** `git checkout <base>` over a dirty tree does not fail — git carries the modifications across, leaving the base branch holding work that belongs to something else, which the next clean-tree check, `verify` and `git add -A` all then see. So a claim refused on both counts **reports the dirty tree**: the tree is what has to be dealt with first, which is the order § Releasing already prescribes for the same pair of conditions. A claim refused on a dirty tree names both ways out — committing the work, or setting it aside — because leaving the act unnamed is what sends an operator to the checkout. The act is the claim's own: a release refused on the same condition names the one § Releasing prescribes instead, because there the tree holds the item's work and setting it aside is the orphaning that refusal exists to prevent.
 
-**The distinction reaches a caller outside the process.** `claim` is a one-shot report (§ Output): its result goes to stdout in the selected mode, for **every** outcome — a claim taken, a typed refusal, and a stop that never reached the backend — and a refused claim carries the **code**, the item-scope classification under the same name `item_scoped` a result reporting a stop uses, the reason, the failing check and its output, and the override where one exists. A driver running one `claim` per arena across a fleet reads the same distinction `resolve`'s auto-selection reads in-process; nothing recovers it by parsing the rendered prose, and a stop that classifies nothing omits `item_scoped` rather than guessing at it.
+**The distinction reaches a caller outside the process.** `claim` is a one-shot report (§ Output): its result goes to stdout in the selected mode, for **every** outcome — a claim taken, a typed refusal, and a stop that never reached the orchestrator — and a refused claim carries the **code**, the item-scope classification under the same name `item_scoped` a result reporting a stop uses, the reason, the failing check and its output, and the override where one exists. A driver running one `claim` per arena across a fleet reads the same distinction `resolve`'s auto-selection reads in-process; nothing recovers it by parsing the rendered prose, and a stop that classifies nothing omits `item_scoped` rather than guessing at it.
 
 **An occupied worktree is its own refusal, and it is not overridable.** A claim binds `item ↔ arena` until the item is resolved, and that binding survives a park, a stopped run and a restart — so a worktree holding one item is not free for a second, and the refusal names the item it holds and says to finish or release that one first. It reads as a distinct code from *already held*, because the two ask for opposite actions: an item another person holds can be taken over deliberately, where an item **this** worktree holds has nobody to take it from. That is also why `--force` does not reach it. Overriding here would not settle a dispute; it would overwrite this worktree's own claim record while the first item's uncommitted work, branch and build outputs stay in this tree — state that exists nowhere else and that nothing can recover by re-reading, so the first item is simply orphaned. An operator who wanted the ordinary path and got that would not be told.
 
@@ -287,19 +287,19 @@ Releasing reads the worktree's status, so **the project must ignore the CLI's ow
 
 `list` reports **every item this binary could process**, whatever state it is in — not only the ones the operator can pick up right now.
 
-Restricting it to available work would make the listing unable to answer the question that follows it: *why isn't the item I expected here?* An item held by someone else, or explicitly disabled, is absent for a reason the operator needs, and a listing that omits it sends them to the backend's web UI to find out — which is the gap this command exists to close.
+Restricting it to available work would make the listing unable to answer the question that follows it: *why isn't the item I expected here?* An item held by someone else, or explicitly disabled, is absent for a reason the operator needs, and a listing that omits it sends them to the orchestrator's own interface to find out — which is the gap this command exists to close.
 
-Scope is the binary's own remit. An item outside it is not listed: it is not hidden by policy, it simply is not this binary's work, and browsing the backend's full contents is the backend's own job, not this command's.
+Scope is the binary's own remit. An item outside it is not listed: it is not hidden by policy, it simply is not this binary's work, and browsing the orchestrator's full contents is the orchestrator's own job, not this command's.
 
 `list` is a report. It never claims, never mutates, and never starts work.
 
 ### Scope
 
-Items nest in seven levels, from everything the backend holds down to what runs unattended:
+Items nest in seven levels, from everything the orchestrator holds down to what runs unattended:
 
 | # | Level | `--scope` |
 |---|---|---|
-| 1 | Every item the backend holds, open and closed | `all` |
+| 1 | Every item the orchestrator holds, open and closed | `all` |
 | 2 | Every **open** item | `open` |
 | 3 | Open items **this binary could process** — the flow's remit accepts the type | `processable` *(default)* |
 | 4 | …of those, the ones that are **this operator's, here** — awaiting a role this account can assume, with placement restrictions this arena meets | `actionable` |
@@ -309,9 +309,9 @@ Items nest in seven levels, from everything the backend holds down to what runs 
 
 `--scope` names how far up the ladder to report. The levels nest, so each scope includes every level below it. The value set is closed and its names are the level names — there is no second spelling, and no scope that is not a level.
 
-The default is `processable`: the binary's own remit, which is what an operator is nearly always asking about. Wider scopes are available because the question *"where did item X go?"* is a real one and answering it should not require leaving the tool — but they are opt-in, because at levels 1 and 2 the listing includes items this binary can do nothing with, and on a large backend there are many of them.
+The default is `processable`: the binary's own remit, which is what an operator is nearly always asking about. Wider scopes are available because the question *"where did item X go?"* is a real one and answering it should not require leaving the tool — but they are opt-in, because at levels 1 and 2 the listing includes items this binary can do nothing with, and on a large tracker there are many of them.
 
-For open-ended browsing the backend's own interface remains the better tool. `--scope all` exists to answer a question about work, not to be a second issue browser.
+For open-ended browsing the orchestrator's own interface remains the better tool. `--scope all` exists to answer a question about work, not to be a second issue browser.
 
 ### Availability
 
@@ -335,7 +335,7 @@ Each state is exactly the boundary between two adjacent levels: `closed` is in l
 
 An item deliberately disabled, an item waiting on another item that is still open, and an item whose pending step is a signal wait — nobody's move until the orchestrator observes the signal — are all `blocked`: in this binary's remit, and not workable by anyone right now. They differ in the **reason**, which is reported alongside, and which says whether a person must act or whether it will clear on its own.
 
-They are not separate states. Splitting them would put two states on one boundary, and the causes are open-ended — disabled, unmet dependency, unmet prerequisite, whatever a backend adds next — while the boundaries are fixed at six. States enumerate where an item sits; reasons explain why. Only the first can stay closed.
+They are not separate states. Splitting them would put two states on one boundary, and the causes are open-ended — disabled, unmet dependency, unmet prerequisite, whatever an orchestrator adds next — while the boundaries are fixed at six. States enumerate where an item sits; reasons explain why. Only the first can stay closed.
 
 When the reason is an unfinished dependency, the **blocking items are reported by reference** — their identifiers, as data — not named inside the reason text.
 
@@ -349,15 +349,15 @@ Nothing further is resolved on their behalf. A blocker's title, who holds it, wh
 
 A filter is not widened to include blockers. `--tag` and `--scope` mean what they say; a blocker outside the filter is still named, and still addressable.
 
-**The SDK carries dependencies; it does not interpret them.** Whether one item waits on another is the backend's knowledge, and the backend supplies the state, the reason and the references. Nothing here resolves a blocker, walks a graph, or decides when one clears — those answers are the backend's, and this binary only relays what it is told and offers a way to record what a run discovers.
+**The SDK carries dependencies; it does not interpret them.** Whether one item waits on another is the orchestrator's knowledge, and the orchestrator supplies the state, the reason and the references. Nothing here resolves a blocker, walks a graph, or decides when one clears — those answers are the orchestrator's, and this binary only relays what it is told and offers a way to record what a run discovers.
 
-Recording one is supported rather than incidental. A dependency is found part-way through work at least as often as it is known when an item is filed, so a run that discovers one has somewhere to put it. A backend whose store has no dependency notion still answers — it refuses what it cannot represent, which tells a caller something, where silently accepting and forgetting would not. See [orchestrator.md](orchestrator.md).
+Recording one is supported rather than incidental. A dependency is found part-way through work at least as often as it is known when an item is filed, so a run that discovers one has somewhere to put it. An orchestrator whose store has no dependency notion still answers — it refuses what it cannot represent, which tells a caller something, where silently accepting and forgetting would not. See [orchestrator.md](orchestrator.md).
 
 `auto` and `available` are distinct because `list` and `resolve` draw from different sets. `list` reports work that could be taken; auto-selection draws only from work already opted in. Widening what an operator can see never widens what an unattended `resolve` will start on — and because both commands accept the same `--tag` filter, they read as symmetrical and are not. The state is what makes that visible in the listing rather than a rule the reader has to know.
 
 ### Tags
 
-A tag is a free-form label carried by an item. Each backend maps its own vocabulary onto tags — issue labels, tracker tags — and `list` reports an item's tags in full, not only those a flow recognises. Tags are how an operator picks work by area, and how an unattended `resolve` is scoped to a subset of it.
+A tag is a free-form label carried by an item. Each orchestrator maps its own vocabulary onto tags — issue labels, tracker tags — and `list` reports an item's tags in full, not only those a flow recognises. Tags are how an operator picks work by area, and how an unattended `resolve` is scoped to a subset of it.
 
 `list --tag <t> [--tag <t>…]` filters conjunctively, matching `resolve`.
 
@@ -371,7 +371,7 @@ A tag is a free-form label carried by an item. Each backend maps its own vocabul
 | `newest` | Filing time, newest first |
 | `oldest` | Filing time, oldest first |
 
-The default is `resolution` because *what would run next* is what a listing is nearly always being asked, and a backend's own order answers it only by coincidence.
+The default is `resolution` because *what would run next* is what a listing is nearly always being asked, and an orchestrator's own order answers it only by coincidence.
 
 **`resolution` is the SDK's comparison, never a second copy of it.** The SDK owns what `critical` outranks and each orchestrator owns the sort ([orchestrator.md](orchestrator.md) § Priority and urgency); a CLI ordering with rules of its own would be the rule with two owners that forbids. At scope `auto` it therefore reproduces exactly the order `List` already returns there.
 
@@ -394,7 +394,7 @@ Each row carries a **work mark**: whether a run is advancing the item right now,
 - **Leased** — an arena holds the claim and nothing here shows it running.
 - **Parked** — a step stopped without completing, in the words of the park's **kind**. The kind is a closed set with a fixed meaning per member; the one-line reason stays `status`'s.
 
-**Where** is the holding arena, as far as the orchestrator can honestly name it: an item this arena holds reads `here`, and anything else reads `another arena` — a backend that publishes only an arena fingerprint, never a machine name ([disclosure.md](disclosure.md)), cannot say more, and nothing is invented in its place. The account is always shown.
+**Where** is the holding arena, as far as the orchestrator can honestly name it: an item this arena holds reads `here`, and anything else reads `another arena` — an orchestrator that publishes only an arena fingerprint, never a machine name ([disclosure.md](disclosure.md)), cannot say more, and nothing is invented in its place. The account is always shown.
 
 A claim survives a park, so a parked item is usually also leased and **the marks combine**. **Parked is not blocked**: a blocked item waits on other items or on a condition, a parked item waits on what its kind names, and both can show at once.
 
@@ -404,7 +404,7 @@ Every item carries two values, and `list` and `status` report both.
 
 | | Set by | Values | Says |
 |---|---|---|---|
-| **Priority** | Whatever manages the backend — a triage automation, a flow, a script | `critical`, `high`, `medium`, `low` | Where the work sits in the order it is taken in |
+| **Priority** | Whatever manages the work — a triage automation, a flow, a script | `critical`, `high`, `medium`, `low` | Where the work sits in the order it is taken in |
 | **Urgency** | A person | `next`, `default`, `deferred` | Whether to jump that order, or stay out of it |
 
 **Priority orders; it never excludes.** Every item in the auto-selectable set is resolved given enough time, so `low` is not a lesser class of work — it is later work. Nothing on this axis keeps an item from being taken, and the one value on either axis that does is `deferred`, which is an operator's decision rather than an assessment of the work.
@@ -452,7 +452,7 @@ A reading that could not be taken is a command that could not complete, unlike t
 Before the first dispatch, `resolve` names **what is running it**, **what it is working on**, the **repository account** it acts as, the roles that account can assume, and — when it differs from that one — the account that filed the item.
 
 - **Which binary.** The embedding binary's own version, printed verbatim and omitted entirely when it has none. A binary that cannot say what it is cannot be the subject of a bug report ([org/cli-guide.md](org/cli-guide.md) §7), and a `-version` flag answers only somebody who thinks to ask — the narration is what gets pasted into the report, and a modified local build and a tagged release are different facts about a transcript. It is a **print, not a check**: the value is one the host already holds, and nothing about it may read a marker, reach a network, or fail before the run starts.
-- **Which item.** Its title, through the same one-line bound every other free backend text goes through, dropped when the item has none. `owner/repo#N` is not something an operator can check, and the one line before a run that spends real money is where a mistyped number should be caught — not at the first prompt, or in the pull request. The title costs no additional request: the standing announcement already loads the item to read the filer. The load is best-effort, and a failed read prints the ref alone. **It prints; it does not ask** — an interactive acknowledgement would break every unattended `resolve`.
+- **Which item.** Its title, through the same one-line bound every other free orchestrator text goes through, dropped when the item has none. `owner/repo#N` is not something an operator can check, and the one line before a run that spends real money is where a mistyped number should be caught — not at the first prompt, or in the pull request. The title costs no additional request: the standing announcement already loads the item to read the filer. The load is best-effort, and a failed read prints the ref alone. **It prints; it does not ask** — an interactive acknowledgement would break every unattended `resolve`.
 
 Each answers a question whose only other answer is to run the command and watch.
 
@@ -482,7 +482,7 @@ It selects the item in one of three ways:
 
 Selecting nothing is not an error. No eligible item, or no item carrying the tags, exits 0.
 
-Auto-selection never picks a `blocked` item. An item waiting on a blocker that is still open is not merely undesirable to start — starting it wastes a claim and a run on work that cannot proceed, and the backend that knows about the dependency is the one that keeps it out of the selectable set.
+Auto-selection never picks a `blocked` item. An item waiting on a blocker that is still open is not merely undesirable to start — starting it wastes a claim and a run on work that cannot proceed, and the orchestrator that knows about the dependency is the one that keeps it out of the selectable set.
 
 **Selection is not the only place the dependency counts.** `resolve <item-id>`, `resolve` on the active claim, and `run-step` each read the item's blockedness before anything is dispatched, and an item waiting on an unfinished item stops there: nothing dispatched, nothing spent, the claim kept, the pending step still pending, and the report naming the block kind and the blockers still open — exit 1, the code for a condition somebody must clear. Deferring withholds an item from auto-selection alone; a blocker withholds it from every route, whoever asked for it. What clears it is finishing the blockers — elsewhere, with nobody touching this item — and [resolution.md](resolution.md) § Blocked on items states the stop.
 
@@ -526,7 +526,7 @@ A skip is unchanged. A preflight refusal says this cycle will not run, and there
 
 Every invocation reports exactly one status: `done`, `skipped`, `parked`, `blocked`, or `failed`.
 
-These five are the vocabulary. A backend that mirrors them mirrors all five.
+These five are the vocabulary. An orchestrator that mirrors them mirrors all five.
 
 `done` means work completed. An item that no flow will ever act on — because its type is outside every remit — is not `done`, and is never finalized on that basis: reporting success for work that was never attempted hides a misconfiguration, and finalizing makes it irreversible. It is `blocked`, and the reason names the item's type and the remit.
 
@@ -534,7 +534,7 @@ The human narration includes duration and cost when present, as a parenthetical 
 
 ## Startup
 
-A binary refuses to start, with a named error and exit 2, when its configuration cannot produce correct behaviour: an artifact its backend cannot store, a signal its backend cannot observe, a flow with no steps, a route naming an undeclared step, a step from which finalization is unreachable, a step tagged with an undeclared role, a step declaring a worktree state the binary cannot resolve branch names for, a coverage naming an undeclared role or naming none at all, a missing agent.
+A binary refuses to start, with a named error and exit 2, when its configuration cannot produce correct behaviour: an artifact its orchestrator cannot store, a signal its orchestrator cannot observe, a flow with no steps, a route naming an undeclared step, a step from which finalization is unreachable, a step tagged with an undeclared role, a step declaring a worktree state the binary cannot resolve branch names for, a coverage naming an undeclared role or naming none at all, a missing agent.
 
 **A declared worktree state needs branch names.** A step's `Needs` is established before dispatch and its `Leaves` is verified before capture ([resolution.md](resolution.md) § Steps and the worktree), both from the one resolver the binary supplies — so a flow declaring any state but `any` and `as-found` without one names a state nothing can ever put the worktree into. It is knowable from configuration alone, and the refusal names the step and the field. A flow that declares neither asks the resolver nothing and starts without it.
 

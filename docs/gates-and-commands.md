@@ -436,7 +436,7 @@ A gate is named as a **concept** and an optional **instance**: `tested`, or `tes
 
 So the vocabulary is closed where everyone must understand it, and open where only the project knows how its work divides.
 
-### Gates may have to wait, and the backend is what makes them
+### Gates may have to wait, and the orchestrator is what makes them
 
 Some gates cannot run beside another. A full suite that saturates a machine measures its own contention as much as it measures the code, and two of them at once give both a worse answer than either alone would.
 
@@ -512,7 +512,7 @@ Serializing the landing turns that into a queue. The loop's bound then catches g
 
 **And the round is the lock's whole life.** It is never held across a stop — a park, a crash, an arena gone quiet — because a lock in a stalled arena starves every landing behind it. The cost of that necessity is borne by the stopped work, not the queue: work that stops mid-landing resumes *behind* whatever landed meanwhile, arbitrarily far behind after an outage, and it re-enters through the drift judgment ([orchestrator.md](orchestrator.md) § Drift is evidence for judgment) rather than by resuming a lock nothing kept for it.
 
-**Both scopes are the backend's**, because only it knows what shares a machine and what shares a mainline. And waiting is not failing at either scope.
+**Both scopes are the orchestrator's**, because only it knows what shares a machine and what shares a mainline. And waiting is not failing at either scope.
 
 ### A project has gates the flow knows nothing about
 
