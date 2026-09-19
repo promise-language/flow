@@ -758,7 +758,7 @@ See the forge [blueprint][forge-blueprint] for the full file layout
 | `resolve [<id>]` (alias `run-all`) | drive the FULL lifecycle: loop `run-step` until the item finalizes or the run stops (parked, skipped, or failed). With `<id>` claims it first; with no claim and no id, auto-selects `ListEligible()[0]`. Narrates progress on stderr; in JSON mode streams each step's `InvocationResult` to stdout |
 | `status [<id>]` | read-only lifecycle checklist (uses `StateInspector` when there's no claim) |
 | `grant` | read the item's park and top up **exactly** the axis that parked it. Refuses (writing nothing) when the park is not a budget cap — a question park is cleared by answering, not by granting |
-| `grant --all [--invocations N] [--cost USD] [--prompts N]` | sweep every pending step, raising each axis to at least *consumed + headroom*. Steps that already have headroom are not written at all |
+| `grant --all [--invocations N] [--cost USD] [--prompts N]` | sweep every step still ahead on the item's route — where it stands, and everything declared routes reach from there, a handback's rework round included — raising each axis to at least *consumed + headroom*. Steps that already have headroom are not written at all |
 | `grant <step-id> --invocations N --cost USD --prompts N --timeout SECONDS` | additively extend one step's budget. `<step-id>` is the id passed to `AddStep` (e.g. `plan`) — the first column of `status`. The human label (`"write plan"`) is **refused**, as is a signal id (signal steps own no budget) |
 | `release` | drop the claim |
 

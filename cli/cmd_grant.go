@@ -129,12 +129,12 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 		payload.Park = parkPayloadOf(state.Park)
 		out = app.planPark(f, state, claim.ItemRef.Display, amounts)
 	}
-	// A refusal has already explained itself on stderr; the exit code is the
+	// A stop has already explained itself on stderr; the exit code is the
 	// signal. Anything else falls through and emits a payload — including the
 	// "nothing to do" cases, so a piped caller always gets one JSON object per
 	// successful invocation instead of having to treat empty stdout as a case.
-	if out.refused {
-		return 2
+	if out.stop != 0 {
+		return out.stop
 	}
 	payload.Note = out.note
 	plans := out.plans
@@ -162,19 +162,32 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 }
 
 // planOutcome is what a planner returns: work to do, a reason there is none,
-// or a refusal.
+// or a stop.
 //
-// The distinction between `note` and `refused` is the distinction between "you
+// The distinction between `note` and a stop is the distinction between "you
 // asked for something reasonable and there was nothing to do" (exit 0, with a
-// payload) and "you asked for something that cannot be done" (exit 2, stderr
-// only).
+// payload) and "nothing was granted and here is why" (stderr only). Which stop
+// it is, the exit code carries — see refuse and cannotComplete, and
+// docs/cli.md § Exit codes for what each code means.
 type planOutcome struct {
-	plans   []plannedGrant
-	note    string
-	refused bool
+	plans []plannedGrant
+	note  string
+	// stop is the exit code when the planner produced no plan and said why on
+	// stderr; zero when it did not stop.
+	stop int
 }
 
-func refuse() planOutcome                   { return planOutcome{refused: true} }
+// refuse is the stop for an ASK that cannot be done — an unknown step id, a
+// park nothing can be granted against — which `grant` has always answered 2.
+func refuse() planOutcome { return planOutcome{stop: 2} }
+
+// cannotComplete is the stop for a defect in the ITEM rather than in the ask —
+// a route that cannot say where the item stands. `resolve` and `run-step`
+// answer the same Position refusal with the same code (see App.refuseArena), so
+// a driver reading the exit code gets one answer about one condition whichever
+// command met it.
+func cannotComplete() planOutcome { return planOutcome{stop: 1} }
+
 func nothingToDo(note string) planOutcome   { return planOutcome{note: note} }
 func planned(p ...plannedGrant) planOutcome { return planOutcome{plans: p} }
 
@@ -253,7 +266,7 @@ func (app *App) planPark(f *flow.Flow, state *flow.Item, display string, a grant
 		// message in a sentence.
 		fmt.Fprintf(app.Err, "grant: no park recorded on %s — nothing to top up.\n", display)
 		fmt.Fprintln(app.Err, "       Use `grant <step-id> --invocations N` to grant explicitly,")
-		fmt.Fprintln(app.Err, "       or `grant --all` to sweep every pending step.")
+		fmt.Fprintln(app.Err, "       or `grant --all` to sweep every step still ahead on the route.")
 		return refuse()
 	}
 	if park.Kind != flow.ParkTreasurerRefused {
@@ -430,7 +443,7 @@ func (app *App) planAll(f *flow.Flow, state *flow.Item, a grantAmounts) planOutc
 		// the defect and write nothing. `grant <step-id>` still reaches a step
 		// by name on an item whose route has broken.
 		fmt.Fprintln(app.Err, "grant:", err)
-		return refuse()
+		return cannotComplete()
 	}
 	if pos.Finalized {
 		return nothingToDo("this item has finalized — nothing to top up")

@@ -719,23 +719,27 @@ func TestGrantAll_FinalizedItemHasNothingAhead(t *testing.T) {
 }
 
 // A journal electing a step the flow does not register is an item standing
-// nowhere. The sweep refuses rather than guessing, and writes nothing — naming
-// a step explicitly is what still reaches one on an item in that state.
-func TestGrantAll_RefusesWhenThePositionCannotBeDerived(t *testing.T) {
+// nowhere. The sweep stops rather than guessing, and writes nothing — naming a
+// step explicitly is what still reaches one on an item in that state.
+//
+// Exit 1, not 2: the invocation was understood and it is the ITEM that cannot
+// answer, which docs/cli.md § Exit codes gives 1 to — and which is the code
+// `resolve` and `run-step` already give this same Position refusal.
+func TestGrantAll_StopsWhenThePositionCannotBeDerived(t *testing.T) {
 	env := newReworkGrantEnv(t)
 	env.dispatches(t, "implementation", 3)
 	recordRoute(t, env,
 		resultEntry("plan", "next", 1, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"}),
 	)
 
-	if code := env.grant("--all"); code != 2 {
-		t.Fatalf("exit = %d, want 2; stderr=%q", code, env.err.String())
+	if code := env.grant("--all"); code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%q", code, env.err.String())
 	}
 	if !strings.Contains(env.err.String(), `names no registered lifecycle item`) {
 		t.Errorf("stderr = %q, want the position's own refusal", env.err.String())
 	}
 	if got := env.budget(t, "implementation").MaxInvocations; got != 3 {
-		t.Errorf("implementation MaxInvocations = %d, want 3 — a refusal must not write", got)
+		t.Errorf("implementation MaxInvocations = %d, want 3 — a stop must not write", got)
 	}
 }
 
