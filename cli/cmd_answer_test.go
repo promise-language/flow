@@ -892,6 +892,59 @@ func TestCmdAnswer_AFailedRegistrationRecordsNoAnswer(t *testing.T) {
 	assertNoQuestions(t, be, itemID)
 }
 
+// idlessAskBackend reports SUCCESS and registers nothing an answer can name:
+// its AskQuestion returns no question id, and its PostAnswer would accept
+// anything. This is the nonconformance stepCtx.AskQuestions already refuses at
+// the ask route; the answer route has to refuse it too, or the one command that
+// rescues a stranded park reports the park cleared while it still stands.
+type idlessAskBackend struct {
+	flow.Orchestrator
+	posted bool
+}
+
+func (b *idlessAskBackend) AskQuestion(context.Context, flow.ItemRef, flow.AgentQuestion) (flow.Question, error) {
+	return flow.Question{}, nil
+}
+
+func (b *idlessAskBackend) PostAnswer(context.Context, flow.ItemRef, flow.QuestionId, string) error {
+	b.posted = true
+	return nil
+}
+
+func TestCmdAnswer_ARegistrationWithNoIdRecordsNoAnswer(t *testing.T) {
+	app, out, errBuf, _, itemID := strandedParkSetup(t)
+	wrapped := &idlessAskBackend{Orchestrator: app.Orchestrator}
+	app.Orchestrator = wrapped
+
+	if code := app.cmdAnswer(context.Background(), []string{itemID, "yes"}); code != 1 {
+		t.Fatalf("cmdAnswer = %d, want 1; stdout=%q", code, out.String())
+	}
+	if wrapped.posted {
+		t.Error("an answer was posted against an empty question id — it lands nowhere")
+	}
+	if !strings.Contains(errBuf.String(), "no question id") {
+		t.Errorf("stderr = %q, want the missing id named", errBuf.String())
+	}
+	if strings.Contains(out.String(), "answered") {
+		t.Errorf("stdout = %q, want nothing reported as answered", out.String())
+	}
+}
+
+// --answered IS A READING FORM, so it reaches the park's question like the
+// others rather than reporting an item with nothing on it. The history of a
+// stranded park is the one question it is waiting on, unanswered.
+func TestCmdAnswer_AnsweredOnAParkWithNoQuestionPrintsIt(t *testing.T) {
+	app, out, errBuf, be, itemID := strandedParkSetup(t)
+
+	if code := app.cmdAnswer(context.Background(), []string{itemID, "--answered"}); code != 0 {
+		t.Fatalf("cmdAnswer = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), strandedParkReason) {
+		t.Errorf("stdout = %q, want the park's question printed", out.String())
+	}
+	assertNoQuestions(t, be, itemID)
+}
+
 // The read forms reach --json on a stranded park too, so a tool sees what the
 // item is waiting on instead of an error. The id is empty because nothing
 // registered one — an identifier `--question` could never match must not be

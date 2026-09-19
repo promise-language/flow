@@ -198,6 +198,17 @@ func (app *App) recordAnswer(ctx context.Context, ref flow.ItemRef, target flow.
 		if err != nil {
 			return "", fmt.Errorf("register the question %s parked on: %w", ref.Display, err)
 		}
+		// THE RETURN IS WHERE A QuestionId COMES FROM, and one that comes back
+		// without an id registered nothing an answer can be recorded against —
+		// which is the state this whole path exists to get an item out of.
+		// Stop here, as the ask route stops (stepCtx.AskQuestions), rather than
+		// post against an empty id: an orchestrator lenient enough to accept it
+		// would report an answer that landed nowhere, and the operator would be
+		// told the park was cleared while it still stands.
+		if rec.ID == "" {
+			return "", fmt.Errorf("registering the question %s parked on recorded no question id, "+
+				"so there is nothing to record an answer against", ref.Display)
+		}
 		target = rec
 	}
 	// The id is passed THROUGH, not merely selected for the output line. It is
