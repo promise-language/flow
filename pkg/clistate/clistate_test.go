@@ -897,3 +897,43 @@ func TestSaveThatFailsAtTheRenameLeavesNoTemporaryFile(t *testing.T) {
 			"a temp file here is one per interrupted write, forever", flowDir, names)
 	}
 }
+
+// The temp file goes in the LEASE's own directory, which is what makes the
+// rename a rename. Staged anywhere else it is a cross-filesystem move — a copy,
+// which is the truncate-then-write this exists to avoid, and on most systems
+// not even that: os.Rename returns EXDEV and no lease can be written at all.
+// A checkout on a mounted volume with the system temp on the root disk, or a
+// container whose /tmp is a tmpfs, is exactly that arrangement.
+//
+// The other tests here cannot see it. They run where the two directories share
+// a filesystem, so a Save staged in the system temp renames cleanly and every
+// assertion still holds. Taking the process temp directory away is what tells
+// the two apart portably: a Save that never uses it does not notice.
+func TestSaveStagesBesideTheLeaseNotInTheProcessTempDirectory(t *testing.T) {
+	dir := t.TempDir()
+	flowDir := filepath.Join(dir, ".flow")
+	t.Setenv("FLOW_DIR", flowDir)
+
+	// Every variable os.TempDir() consults, pointed at nothing.
+	gone := filepath.Join(dir, "no-such-temp-dir")
+	for _, v := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(v, gone)
+	}
+
+	c := flow.Claim{
+		OrchestratorName: "fake",
+		Arena:            flow.Arena{Host: "build01", Id: "/w/one"},
+		Account:          "alice",
+		ItemRef:          flow.ItemRef{OrchestratorName: "fake", Display: "test#1", Ref: json.RawMessage(`"1"`)},
+	}
+	if err := clistate.Save(c); err != nil {
+		t.Fatalf("Save reached for the process temp directory: %v", err)
+	}
+	got, err := clistate.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got == nil || got.ItemRef.Display != "test#1" {
+		t.Fatalf("Load = %+v, want the lease that was just saved", got)
+	}
+}

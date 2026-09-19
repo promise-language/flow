@@ -515,6 +515,49 @@ func TestCmdResolve_UndetectableCapabilitiesHandNothingOff(t *testing.T) {
 	}
 }
 
+// recordingHandoffRelease lets the release through and keeps what it was
+// handed, for the one assertion nothing else can make: which overrides a
+// handoff carries.
+type recordingHandoffRelease struct {
+	*fake.Orchestrator
+	overrides []flow.ClaimOverride
+	called    bool
+}
+
+func (b *recordingHandoffRelease) Release(ctx context.Context, ref flow.ItemRef, ov []flow.ClaimOverride) error {
+	b.overrides, b.called = ov, true
+	return b.Orchestrator.Release(ctx, ref, ov)
+}
+
+// A handoff is an ORDINARY release. `--force` is the operator's emergency and
+// never a step's — "Nothing inside a resolution forces a release"
+// (docs/cli.md § Releasing) — so the overrides the handoff carries must be none
+// at all.
+//
+// Nothing else here can catch this. Every other double discards the argument,
+// so a handoff that quietly sent the three `--force` builds would pass the whole
+// suite while dropping a claim over a dirty tree and an off-base HEAD inside a
+// run — the orphaned work those two refusals exist to prevent, produced by the
+// one caller the document says may never ask for it.
+func TestCmdResolve_AHandoffReleasesWithNoOverrides(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	inner.SetCapabilities("", flow.CapPush, flow.CapMerge)
+	be := &recordingHandoffRelease{Orchestrator: inner}
+	app, errBuf := handoffTestAppCovering(t, be, "contributor")
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if !be.called {
+		t.Fatal("the handoff never released the claim, so this proves nothing about what it carried")
+	}
+	if len(be.overrides) != 0 {
+		t.Errorf("overrides = %v, want none: a resolution that forces its own release bypasses the "+
+			"two worktree preconditions from inside the run", be.overrides)
+	}
+}
+
 // refusingRelease lets everything else through but fails the release.
 type refusingRelease struct {
 	*fake.Orchestrator

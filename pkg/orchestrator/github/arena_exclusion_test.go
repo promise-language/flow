@@ -1464,6 +1464,26 @@ func TestBackend_Release_OverridesBypassTheWorktreePreconditions(t *testing.T) {
 			}
 		})
 	})
+	// And the mirror, which is the direction that matters more: the dirty tree
+	// is the condition holding the work nothing else has. A gate reading
+	// "any override at all" rather than this one's would let a release meant to
+	// excuse an off-base HEAD carry uncommitted work off the item as well, and
+	// the subtests above cannot see it — each passes only its own flag.
+	t.Run("stale-base does not bypass a dirty tree", func(t *testing.T) {
+		_, one, _ := twoArenas(t)
+		one.claimed(t)
+		one.rec.handlers["status --porcelain --untracked-files=normal"] = func([]string) ([]byte, error) {
+			return []byte(" M flow.go\n"), nil
+		}
+		one.run(func() {
+			err := one.b.Release(t.Context(), one.b.refFromIssue(42),
+				[]flow.ClaimOverride{flow.OverrideStaleBase})
+			var refused flow.ErrClaimRefused
+			if !errors.As(err, &refused) || refused.Code != "dirty-tree" {
+				t.Fatalf("err = %v, want the dirty-tree refusal to stand", err)
+			}
+		})
+	})
 }
 
 // Displacement across ACCOUNTS, not only across arenas. `claim --force` from a
@@ -1763,4 +1783,88 @@ func TestBackend_Release_AHolderWhoseRecordIsAlreadyGoneStillClearsItsLease(t *t
 			t.Errorf("active = %+v, want none — the lease is what this release came for", active)
 		}
 	})
+}
+
+// A forced release takes apart the record that is ON THE ITEM, which is not
+// this arena's own. Every other test here runs one login, so the two are the
+// same bytes and a release reading its own identity instead of the record
+// passes them all. Across accounts they come apart, and reading the wrong one
+// is a release that reports success having removed nothing: `flow:owner:bob`
+// and bob's assignment stay, so the item still reads held forever
+// (docs/github-schema.md § Labels), and alice's own assignment — which the
+// release never had any business touching — is stripped instead.
+func TestBackend_Release_ByItemIdTakesApartTheRecordOnTheItemNotOurOwnIdentity(t *testing.T) {
+	mock, _, two := twoArenas(t)
+	mock.mu.Lock()
+	// bob's arena holds it, and alice is on the item for a reason of her own.
+	mock.issueLabels = []string{"flow:implement", two.b.labels.Owner("bob"), two.b.labels.Arena("beefbeefbeefbeef")}
+	mock.assignees = []string{"bob", "alice"}
+	mock.mu.Unlock()
+
+	two.run(func() {
+		if err := two.b.Release(t.Context(), two.b.refFromIssue(42),
+			[]flow.ClaimOverride{flow.OverrideAlreadyHeld}); err != nil {
+			t.Fatalf("a forced release of another account's record: %v", err)
+		}
+	})
+
+	names := mock.labelNames()
+	if contains(names, two.b.labels.Owner("bob")) {
+		t.Errorf("labels = %v, want bob's owner half gone — it is the half that says a lease was taken", names)
+	}
+	if contains(names, two.b.labels.Arena("beefbeefbeefbeef")) {
+		t.Errorf("labels = %v, want the RECORD's arena half gone, not this arena's", names)
+	}
+	mock.mu.Lock()
+	assignees := append([]string(nil), mock.assignees...)
+	mock.mu.Unlock()
+	if contains(assignees, "bob") {
+		t.Errorf("assignees = %v, want the account recorded on the item unassigned", assignees)
+	}
+	if !contains(assignees, "alice") {
+		t.Errorf("assignees = %v, want alice untouched — the release addressed bob's record, not this arena's account",
+			assignees)
+	}
+}
+
+// `flow:arena:<fingerprint>` with no owner half is **not a claim**
+// (docs/github-schema.md § Labels: "the account half is what says a lease was
+// taken, and a fingerprint alone names an arena without saying it holds
+// anything"). So there is nothing here to release, even though the fingerprint
+// is this arena's own — the reading that would otherwise make it look like ours
+// to drop.
+//
+// It is the arena half that survives a claim rollback stopping between its two
+// removals, so this is a state the schema explicitly contemplates rather than a
+// contrived one; and proceeding would unassign whoever is on the item, because
+// with no owner half recorded the account falls back to this arena's.
+func TestBackend_Release_ByItemIdRefusesAnArenaLabelWithNoOwnerHalf(t *testing.T) {
+	mock, _, two := twoArenas(t)
+	mock.mu.Lock()
+	mock.issueLabels = []string{"flow:implement", two.b.labels.Arena(two.b.arenaFingerprint())}
+	mock.assignees = []string{"alice"}
+	mock.mutations = nil
+	mock.mu.Unlock()
+
+	two.run(func() {
+		err := two.b.Release(t.Context(), two.b.refFromIssue(42), nil)
+		var refused flow.ErrClaimRefused
+		if !errors.As(err, &refused) {
+			t.Fatalf("error is not ErrClaimRefused: %T: %v — a bare arena half is not a lease to give up", err, err)
+		}
+		if refused.Code != "not-claimed" {
+			t.Errorf("Code = %q, want not-claimed", refused.Code)
+		}
+	})
+
+	mock.mu.Lock()
+	mutations := append([]string(nil), mock.mutations...)
+	assignees := append([]string(nil), mock.assignees...)
+	mock.mu.Unlock()
+	if len(mutations) != 0 {
+		t.Errorf("a refused release wrote to GitHub: %v", mutations)
+	}
+	if !contains(assignees, "alice") {
+		t.Errorf("assignees = %v, want the assignment untouched", assignees)
+	}
 }
