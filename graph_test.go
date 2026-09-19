@@ -334,3 +334,147 @@ func TestValidateGraph_AcceptsADeclaredRoleNoStepPerforms(t *testing.T) {
 	})
 	wantGraphOK(t, f)
 }
+
+// ---------------------------------------------------------------------------
+// ReachableFrom: what an item standing somewhere can still run.
+// ---------------------------------------------------------------------------
+
+// reachableIds is what the assertions below compare: the walk's answer as step
+// ids, which is the identity everything downstream of it keys on.
+func reachableIds(f *Flow, from StepId) []StepId {
+	var out []StepId
+	for _, li := range f.ReachableFrom(from) {
+		out = append(out, li.Result())
+	}
+	return out
+}
+
+// The walk carries across a signal wait — a wait's one successor is what makes
+// the steps beyond it reachable — and it starts at `from` itself, because that
+// is where the item stands and the first thing that runs from there.
+func TestReachableFrom_CrossesASignalWaitAndIncludesTheStartingStep(t *testing.T) {
+	f := soloFlow("x")
+	f.AddSignalStep("create pr", "pr-open", noopHandler, StepConfig{
+		Prompts: PromptsAgent,
+		Role:    soloRole,
+		Entry:   true,
+		Next:    []StepId{"pr-merged"},
+	})
+	f.AwaitSignal("await merge", "pr-merged", StepConfig{Next: []StepId{"merge-commit"}})
+	f.AddStep("record merge commit", "merge-commit", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
+		Role:        soloRole,
+		MayFinalize: []Disposition{DispositionResolved},
+	})
+	wantGraphOK(t, f)
+
+	want := []StepId{"pr-open", "pr-merged", "merge-commit"}
+	if got := reachableIds(f, "pr-open"); !slices.Equal(got, want) {
+		t.Errorf("ReachableFrom(pr-open) = %v, want %v", got, want)
+	}
+}
+
+// A handback is a cycle, and the walk must terminate on it — and answer with
+// every step of it, from either end. This is the shape a rework round stands
+// on: a step whose result is already recorded is still ahead.
+func TestReachableFrom_TerminatesOnACycleAndCoversIt(t *testing.T) {
+	f := soloFlow("x")
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts: PromptsAgent,
+		Role:    soloRole,
+		Entry:   true,
+		Next:    []StepId{"impl"},
+	})
+	f.AddStep("implement", "impl", noopHandler, StepConfig{
+		Prompts: PromptsAgent,
+		Role:    soloRole,
+		Next:    []StepId{"review"},
+	})
+	f.AddStep("review the work", "review", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
+		Role:        soloRole,
+		Next:        []StepId{"impl"},
+		MayFinalize: []Disposition{DispositionResolved},
+	})
+	wantGraphOK(t, f)
+
+	// Registration order, not visit order: `impl` is declared before `review`
+	// and comes back first however the walk arrived at them.
+	want := []StepId{"impl", "review"}
+	if got := reachableIds(f, "impl"); !slices.Equal(got, want) {
+		t.Errorf("ReachableFrom(impl) = %v, want %v", got, want)
+	}
+	if got := reachableIds(f, "review"); !slices.Equal(got, want) {
+		t.Errorf("ReachableFrom(review) = %v, want %v", got, want)
+	}
+}
+
+// A step behind the walk is not in the answer: nothing routes back to `plan`,
+// so an item past it can never run it again.
+func TestReachableFrom_OmitsWhatNoRouteArrivesAt(t *testing.T) {
+	f := soloFlow("x")
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts: PromptsAgent,
+		Role:    soloRole,
+		Entry:   true,
+		Next:    []StepId{"impl"},
+	})
+	f.AddStep("implement", "impl", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
+		Role:        soloRole,
+		MayFinalize: []Disposition{DispositionResolved},
+	})
+	wantGraphOK(t, f)
+
+	if got := reachableIds(f, "impl"); !slices.Equal(got, []StepId{"impl"}) {
+		t.Errorf("ReachableFrom(impl) = %v, want [impl]", got)
+	}
+}
+
+// An id the flow does not register stands nowhere, so nothing is reachable from
+// it — answered empty rather than by inventing a step for the id.
+func TestReachableFrom_UnknownIdReachesNothing(t *testing.T) {
+	f := soloFlow("x")
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
+		Role:        soloRole,
+		Entry:       true,
+		MayFinalize: []Disposition{DispositionResolved},
+	})
+	wantGraphOK(t, f)
+
+	if got := f.ReachableFrom("typo"); len(got) != 0 {
+		t.Errorf("ReachableFrom(typo) = %v, want empty", got)
+	}
+}
+
+// The same answer read from inside the walk: a SUCCESSOR naming no registered
+// item is skipped, not followed to a step that does not exist. ValidateGraph
+// refuses such a route before anything runs, so a validated flow never poses
+// this — but ReachableFrom is exported and answers about the graph as
+// registered, and a walk that queued the missing id's nil step would panic on
+// the next hop instead of answering.
+func TestReachableFrom_SkipsASuccessorNamingNoRegisteredItem(t *testing.T) {
+	f := soloFlow("x")
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts: PromptsAgent,
+		Role:    soloRole,
+		Entry:   true,
+		Next:    []StepId{"impl", "never-registered"},
+	})
+	f.AddStep("implement", "impl", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
+		Role:        soloRole,
+		MayFinalize: []Disposition{DispositionResolved},
+	})
+	// Deliberately NOT a validated flow — and asserted so, because a fixture
+	// that quietly became valid would stop asking the question.
+	if err := f.ValidateGraph(); err == nil {
+		t.Fatal("ValidateGraph accepted the dangling successor; this fixture no longer poses the half-built case")
+	}
+
+	want := []StepId{"plan", "impl"}
+	if got := reachableIds(f, "plan"); !slices.Equal(got, want) {
+		t.Errorf("ReachableFrom(plan) = %v, want %v", got, want)
+	}
+}

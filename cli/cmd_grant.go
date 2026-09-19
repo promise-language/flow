@@ -55,7 +55,7 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 	prompts := fs.Int("prompts", 0, "prompts-per-invocation to grant")
 	cost := fs.Float64("cost", 0, "cost (USD) to grant (park/--all: headroom over spend)")
 	timeout := fs.Int("timeout", 0, "timeout seconds to grant")
-	all := fs.Bool("all", false, "top up every pending step instead of the parked one")
+	all := fs.Bool("all", false, "top up every step still ahead on the route instead of the parked one")
 	dryRun := fs.Bool("dry-run", false, "print what would be granted; write nothing")
 	of := addOutputFlags(fs)
 	if !app.parseArgs(fs, args) {
@@ -75,7 +75,7 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 		return app.usageError("grant: unexpected argument %q (grant takes at most one step id)", fs.Arg(1))
 	}
 	if fs.NArg() == 1 && *all {
-		return app.usageError("grant: --all sweeps every pending step; it cannot be combined with the step id %q", fs.Arg(0))
+		return app.usageError("grant: --all sweeps every step still ahead on the route; it cannot be combined with the step id %q", fs.Arg(0))
 	}
 	if *invocations < 0 || *prompts < 0 || *cost < 0 || *timeout < 0 {
 		return app.usageError("grant: --invocations / --prompts / --cost / --timeout must be >= 0")
@@ -129,12 +129,12 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 		payload.Park = parkPayloadOf(state.Park)
 		out = app.planPark(f, state, claim.ItemRef.Display, amounts)
 	}
-	// A refusal has already explained itself on stderr; the exit code is the
+	// A stop has already explained itself on stderr; the exit code is the
 	// signal. Anything else falls through and emits a payload — including the
 	// "nothing to do" cases, so a piped caller always gets one JSON object per
 	// successful invocation instead of having to treat empty stdout as a case.
-	if out.refused {
-		return 2
+	if out.stop != 0 {
+		return out.stop
 	}
 	payload.Note = out.note
 	plans := out.plans
@@ -162,19 +162,32 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 }
 
 // planOutcome is what a planner returns: work to do, a reason there is none,
-// or a refusal.
+// or a stop.
 //
-// The distinction between `note` and `refused` is the distinction between "you
+// The distinction between `note` and a stop is the distinction between "you
 // asked for something reasonable and there was nothing to do" (exit 0, with a
-// payload) and "you asked for something that cannot be done" (exit 2, stderr
-// only).
+// payload) and "nothing was granted and here is why" (stderr only). Which stop
+// it is, the exit code carries — see refuse and cannotComplete, and
+// docs/cli.md § Exit codes for what each code means.
 type planOutcome struct {
-	plans   []plannedGrant
-	note    string
-	refused bool
+	plans []plannedGrant
+	note  string
+	// stop is the exit code when the planner produced no plan and said why on
+	// stderr; zero when it did not stop.
+	stop int
 }
 
-func refuse() planOutcome                   { return planOutcome{refused: true} }
+// refuse is the stop for an ASK that cannot be done — an unknown step id, a
+// park nothing can be granted against — which `grant` has always answered 2.
+func refuse() planOutcome { return planOutcome{stop: 2} }
+
+// cannotComplete is the stop for a defect in the ITEM rather than in the ask —
+// a route that cannot say where the item stands. `resolve` and `run-step`
+// answer the same Position refusal with the same code (see App.refuseArena), so
+// a driver reading the exit code gets one answer about one condition whichever
+// command met it.
+func cannotComplete() planOutcome { return planOutcome{stop: 1} }
+
 func nothingToDo(note string) planOutcome   { return planOutcome{note: note} }
 func planned(p ...plannedGrant) planOutcome { return planOutcome{plans: p} }
 
@@ -253,7 +266,7 @@ func (app *App) planPark(f *flow.Flow, state *flow.Item, display string, a grant
 		// message in a sentence.
 		fmt.Fprintf(app.Err, "grant: no park recorded on %s — nothing to top up.\n", display)
 		fmt.Fprintln(app.Err, "       Use `grant <step-id> --invocations N` to grant explicitly,")
-		fmt.Fprintln(app.Err, "       or `grant --all` to sweep every pending step.")
+		fmt.Fprintln(app.Err, "       or `grant --all` to sweep every step still ahead on the route.")
 		return refuse()
 	}
 	if park.Kind != flow.ParkTreasurerRefused {
@@ -411,17 +424,35 @@ func parkIncrement(axes []flow.BudgetAxis, row flow.LedgerRow, eff, policy flow.
 	return g
 }
 
-// planAll sweeps every pending step, raising each axis to at least
-// consumption + headroom. The max() shape means a step that already has room
-// yields a zero delta and no write at all.
+// planAll sweeps every step still ahead on the item's route, raising each axis
+// to at least consumption + headroom. The max() shape means a step that already
+// has room yields a zero delta and no write at all.
+//
+// The selection is the ROUTE's, taken from where the item actually stands
+// (flow.Position) and the steps declared routes reach from there — never from
+// the artifact records. A step's artifact being recorded says nothing about
+// whether it will run again: the graph declares handbacks, so an item can stand
+// at a step that has already completed, and "reaching a step a second time is
+// not an anomaly but a route" (docs/resolution.md § Deriving the next step). A
+// sweep that read the checklist skipped every step of a rework round — the
+// producing phase an operator most needs topped up.
 func (app *App) planAll(f *flow.Flow, state *flow.Item, a grantAmounts) planOutcome {
+	pos, err := f.Position(state)
+	if err != nil {
+		// A sweep that cannot tell where the item stands must not guess: name
+		// the defect and write nothing. `grant <step-id>` still reaches a step
+		// by name on an item whose route has broken.
+		fmt.Fprintln(app.Err, "grant:", err)
+		return cannotComplete()
+	}
+	if pos.Finalized {
+		return nothingToDo("this item has finalized — nothing to top up")
+	}
 	var plans []plannedGrant
-	for _, li := range f.Items() {
+	for _, li := range f.ReachableFrom(pos.Step.Result()) {
+		// Signal steps and waits carry no budget, so there is nothing to top
+		// up on one — the same rule resolveGrantTarget states to an operator.
 		if li.Kind != flow.LifecycleArtifact {
-			continue
-		}
-		// Only steps with work left: a step that has completed needs no budget.
-		if artifactState(state, li.ArtifactId) != statePending {
 			continue
 		}
 		row := state.Ledger.Row(li.Result())
@@ -434,7 +465,7 @@ func (app *App) planAll(f *flow.Flow, state *flow.Item, a grantAmounts) planOutc
 		})
 	}
 	if len(plans) == 0 {
-		return nothingToDo("no pending steps on this item — nothing to top up")
+		return nothingToDo("no budgeted steps remain ahead on this item's route — nothing to top up")
 	}
 	return planned(plans...)
 }
@@ -779,7 +810,7 @@ func printGrantHuman(app *App, payload grantPayload, state *flow.Item) {
 	// that matters is what changed.
 	switch {
 	case len(payload.Granted) == 0 && len(payload.Unchanged) > 0:
-		fmt.Fprintln(app.Out, "all pending steps already have headroom")
+		fmt.Fprintln(app.Out, "all steps ahead already have headroom")
 	case len(payload.Unchanged) > 0:
 		fmt.Fprintf(app.Out, "unchanged (already had headroom): %s\n", strings.Join(payload.Unchanged, ", "))
 	}

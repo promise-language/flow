@@ -159,7 +159,7 @@ reaction to a budget park — and it refuses (without writing) when the item
 is parked on anything else, since granting budget would not unpark it.
 
   grant                     top up the parked step's blocked axes
-  grant --all               sweep every pending step to headroom over consumption
+  grant --all               sweep every step still ahead to headroom over consumption
   grant <step-id> --cost 5  additive grant to one step
 
 <step-id> is a step's ID — the artifact id from AddStep (e.g. "plan"), which
