@@ -9,7 +9,9 @@
 
 An item is an issue. GitHub's Issues API returns **pull requests** as well, and the two are numbered out of one space, so a number a person types can name either.
 
-The two paths that meet one answer differently, and the difference is which end the number came from. **`List` skips a pull request** — a listing of what can be worked has nothing to say about one, and an entry nothing will ever take is not an answer. **Every by-ref path refuses it** — `Claim`, `Get` and `Load` alike — because a number typed by a person is a number they meant, and the by-ref path is the only place a pull request number can arrive by accident. The refusal is **item-scoped**: this ref is the problem and another might succeed. Nothing overrides it; no flag can make a pull request into an item.
+The two paths that meet one answer differently, and the difference is which end the number came from. **`List` skips a pull request** — a listing of what can be worked has nothing to say about one, and an entry nothing will ever take is not an answer. **A by-ref path that takes an item or describes one refuses it** — `Claim`, `Get` and `Load` alike — because a number typed by a person is a number they meant, and by-ref is the only place a pull request number can arrive by accident. The refusal is **item-scoped**: this ref is the problem and another might succeed. Nothing overrides it; no flag can make a pull request into an item.
+
+**A by-ref path that gives a lease back refuses nothing on the kind of thing it names**, and `Release` is the one that matters. A claim record already standing on a pull request is given up exactly as any other is, and a refusal there would make that record permanently unclearable — the check would then preserve the state it exists to prevent. The refusal belongs where the lease is taken, not where it is surrendered.
 
 Labels are one namespace too, so a pull request **can** carry `flow:*` labels. A claim record on one is a defect, not a state this schema defines: `flow:owner:<login>` and `flow:arena:<fingerprint>` mean an arena holds an item, and a pull request is not one.
 

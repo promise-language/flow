@@ -113,6 +113,38 @@ func TestBackend_Claim_RefusesAPullRequestBeforeTheWorktreePreconditions(t *test
 	}
 }
 
+// NO OVERRIDE REACHES IT (docs/github-schema.md § Items are issues: "Nothing
+// overrides it; no flag can make a pull request into an item"). Every override
+// the CLI can pass, passed at once: each names a safety check an operator chose
+// to bypass, and none of them is about what kind of thing the ref names. This
+// is the case the position alone does not settle — `claim --force` skips the
+// whole already-held block, so a check that drifted into it would still answer
+// correctly for every test above and not for this one.
+func TestBackend_Claim_RefusesAPullRequestUnderEveryOverride(t *testing.T) {
+	b, mock, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
+	mock.mu.Lock()
+	mock.issueIsPullRequest = true
+	mock.mu.Unlock()
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), []flow.ClaimOverride{
+		flow.OverrideAlreadyHeld, flow.OverrideDirtyTree, flow.OverrideStaleBase, flow.OverrideUnadmitted,
+	})
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+	}
+	if refused.Code != "not-an-item" {
+		t.Errorf("Code = %q, want %q — no flag makes a pull request an item", refused.Code, "not-an-item")
+	}
+	mock.mu.Lock()
+	mutations := append([]string(nil), mock.mutations...)
+	mock.mu.Unlock()
+	if len(mutations) != 0 {
+		t.Errorf("a forced claim on a pull request wrote to GitHub: %v", mutations)
+	}
+}
+
 // Get must answer identically to List for the same item at the same moment
 // (docs/orchestrator.md § Required surface). List skips a pull request, so Get
 // cannot describe one.
