@@ -39,6 +39,6 @@ task-tracking systems (see the [README](README.md), and
    entities (item, flow, step, artifact, signal, claim, arena) is what makes the
    model reliable. New surface should match the patterns already in the SDK.
 3. Run the quality gate (`bin/verify`) and keep it green; add tests for new
-   behavior. The reference backends and the in-memory `pkg/backend/fake` are the
-   models to follow.
+   behavior. The reference orchestrators and the in-memory `pkg/orchestrator/fake`
+   are the models to follow.
 4. Open a pull request and sign the CLA when prompted.

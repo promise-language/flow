@@ -2,7 +2,7 @@
 
 A Go SDK for **declarative, stateless-per-step automation against
 task-tracking systems.** You write a flow as an ordinary Go binary; the SDK
-turns each invocation into *one* advance-the-state step against an orchestrator
+turns each invocation into *one* advance-the-state step against a tracked
 item (a GitHub Issue out of the box, or any orchestrator you plug in).
 
 - **No server.** A flow binary is a single static `main()` that imports the
@@ -87,6 +87,7 @@ of most bugs.
 
 | Entity | Lifetime | What it is |
 |---|---|---|
+| **Orchestrator** | code | What the SDK talks to (`flow.Orchestrator`). It leases items to arenas, holds their state, runs gates and commands in a worktree, and lands what those produce. Where it keeps state is its own business — a store is something an orchestrator *uses*, not what it is. Local (the GitHub orchestrator, `pkg/orchestrator/github`) or remote (a service dispatching to many arenas). See [docs/orchestrator.md](docs/orchestrator.md). |
 | **Item** | persistent | The unit of work (a GitHub Issue, a tracker task). Carries a `Type` (routes flow selection), a title/body, durable **artifacts**, **signals**, and questions. The orchestrator supplies it; it is opaque to the SDK beyond these fields. |
 | **Flow** | code | An ordered list of **lifecycle items** (steps) selected for an item by its `Type` and `RequireSignal` preconditions. The binary *is* the source of truth — no YAML. |
 | **Step / lifecycle item** | code | One entry in a flow. Three kinds: an **artifact step** (`AddStep`, runs a handler that produces one artifact), a **signal step** (`AddSignalStep`, runs a handler whose side effect makes the orchestrator set a signal), or a **pure wait** (`AwaitSignal`, no handler). |
@@ -94,7 +95,7 @@ of most bugs.
 | **Signal** | persistent | An orchestrator-*observed* boolean (`pr-open`, `pr-merged`). Never handler-writable — the orchestrator sets it from a side effect or a poll. |
 | **Claim (lease)** | persistent | An exclusive binding **item ↔ arena**. "This item's work lives in this worktree." One arena holds at most one claim; one item is claimed by at most one arena. |
 | **Arena** | long-lived | A worktree plus a stable identity. Where work physically happens. Must survive at least one item's full lifecycle (across any restarts), then may be reclaimed. For the GitHub orchestrator the arena is simply the local checkout; `.flow/active.json` records the claim. |
-| **Runner** | transient | (Server-backed orchestrators only.) The process serving an arena. URL/port/PID churn on every restart; **resolve it from the orchestrator every time** — never store it durably. The GitHub orchestrator has no runner: the flow binary is self-contained. |
+| **Runner** | transient | (Remote orchestrators only.) The process serving an arena. URL/port/PID churn on every restart; **resolve it from the orchestrator every time** — never store it durably. The GitHub orchestrator has no runner: the flow binary is self-contained. |
 | **Agent** | per-call | The SDK's metered handle on an LLM CLI (`ctx.Agent()`). The single spend chokepoint. |
 | **Budget** | persistent | Per-step caps on four axes (invocations, prompts/invocation, cost, timeout). Seeded once; only `grant` mutates them. |
 
@@ -222,7 +223,7 @@ referencing an unknown `ArtifactId`; or an
 
 ### 3. How a step is dispatched (`run-step` → `RunOne`)
 
-Every `run-step` runs the same orchestrator (`cli/cmd_run.go` → `RunOne`):
+Every `run-step` runs the same dispatcher (`cli/cmd_run.go` → `RunOne`):
 
 1. **Resolve the active claim** via `Orchestrator.LookupActiveClaim(owner)` — the
    single source of truth for "what am I working on." Never a local cache.
@@ -552,11 +553,13 @@ patch before parking — and your orchestrator should too.
 
 ## Implement a custom orchestrator
 
-An orchestrator is the pluggable storage + worktree boundary. Implement
-`flow.Orchestrator` and the SDK gives you the entire CLI, the orchestrator, budget
-enforcement, and the flow-author API for free. Both the GitHub orchestrator
-(`pkg/orchestrator/github`) and the proprietary tracker orchestrator satisfy the same
-interface.
+An orchestrator is what the SDK talks to: it leases items to arenas, holds
+their state, runs gates and commands in a worktree, and lands what those
+produce ([docs/orchestrator.md](docs/orchestrator.md)). Implement
+`flow.Orchestrator` and the SDK gives you the entire CLI, the `run-step`
+dispatcher, budget enforcement, and the flow-author API for free. Both the
+GitHub orchestrator (`pkg/orchestrator/github`) and the proprietary tracker
+orchestrator satisfy the same interface.
 
 ### The required interface
 
@@ -795,7 +798,7 @@ form: `<bin> --help` / `-help` / `-h` (or `<bin> help`) prints the command list,
 and `<bin> <command> --help` (likewise `-help` / `-h`) prints that command's
 usage and exits 0 without running it.
 
-**Planned** (share the same `RunOne` orchestrator; not yet implemented):
+**Planned** (share the same `RunOne` dispatcher; not yet implemented):
 - `auto` / `process` — bundle `claim` + `resolve` + `release` for cron-driven
   sweeps over a queue of eligible items.
 
@@ -818,7 +821,7 @@ usage and exits 0 without running it.
 ├── preflight.go            PreflightFunc + ChainPreflight
 ├── errs.go wire.go         sentinel errors + ParkRequest/InvocationResult/Question/AgentQuestion
 ├── telemetry.go            Telemetry sink for ctx.Notify
-├── cli/                    program CLI (app.go, cmd_claim/run/status/grant/release/doctor/list) + RunOne orchestrator
+├── cli/                    program CLI (app.go, cmd_claim/run/status/grant/release/doctor/list) + RunOne dispatcher
 ├── claude/                 reference Agent impl: spawns the claude CLI via stream-json
 ├── pkg/orchestrator/fake/       in-memory orchestrator for SDK tests (read this first when writing your own)
 ├── pkg/orchestrator/github/ GitHub-Issues orchestrator: state-comment index, claim race-lock, worktree, signal polling, orphan-branch artifact spillover

@@ -28,7 +28,7 @@ Everything else a resolution can stop on is a property of the item: a budget cap
 |---|---|---|
 | **The machine** | No space left where the worktree or the build writes; the agent cannot be invoked; anything the project knows its work requires and does not have | A person acting on the machine — or the machine recovering, which is not knowable in advance |
 | **The delivered tree** | The gate entry point or the verify command absent or not executable; normative documentation absent | Whoever delivered the tree |
-| **A remote** | The backend or a git remote unreachable | The remote returning |
+| **A remote** | The orchestrator or a git remote unreachable | The remote returning |
 | **The agent account** | The allowance the agent substrate spends against is exhausted | The window resetting, at an instant the substrate publishes |
 
 Two of these owners are already the runner's — the host, and whoever declared the gate or delivered the tree — and they are kept apart here for the reason `gates-and-commands.md` gives there: collapsing them costs attribution even where it never costs a wrong retry.
@@ -166,7 +166,7 @@ The two points are not alternatives. The first avoids starting work that cannot 
 
 | Measured by | Members |
 |---|---|
-| The SDK | The backend is reachable; the agent can be invoked; the verify command and the gate entry point exist and are executable; normative documentation is present |
+| The SDK | The orchestrator is reachable; the agent can be invoked; the verify command and the gate entry point exist and are executable; normative documentation is present |
 | The project's `fit` gate | Whatever the project knows its work requires — disk, toolchain, services |
 | The agent substrate's published usage | Whether the account's allowance is exhausted, and when each window resets |
 

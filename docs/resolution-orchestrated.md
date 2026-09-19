@@ -47,7 +47,7 @@ Infrastructure failures consume no attempt. The binary that observed a transient
 
 ## No branch, no pull request
 
-Where the orchestrated backend commits directly to the mainline, there is no per-item branch and no pull request, and the SDK's branch and request surfaces do not apply.
+Where the orchestrator commits directly to the mainline, there is no per-item branch and no pull request, and the SDK's branch and request surfaces do not apply.
 
 A step that assumes a branch, or that terminates in a request, is a step that does not run in this model. Flows written for both models do not assume either mechanism.
 

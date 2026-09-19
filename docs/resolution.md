@@ -71,7 +71,7 @@ A consuming project enforces this within its own tree the way this one does: its
 
 ## The item and its lifecycle
 
-An **item** is a unit of work owned by a backend. A **flow** is a set of steps that resolves items of a given type — a graph, not a sequence. Each step declares what may run after it, and the route an item actually takes is elected step by step as it is worked.
+An **item** is a unit of work owned by an orchestrator. A **flow** is a set of steps that resolves items of a given type — a graph, not a sequence. Each step declares what may run after it, and the route an item actually takes is elected step by step as it is worked.
 
 A **step** is an independent function. It receives the item, the journal of everything that has happened so far, and the context to work in; it does its work; and it ends in one act that records its result and elects the route onward — the next step, or finalization. Producing and routing are inseparable: a result cannot be recorded without saying where the resolution goes from here.
 
@@ -83,15 +83,15 @@ The lifecycle is: **claim → advance one step at a time → finalize**, the cla
 
 A resolution involves people, and the flow knows who they are. Three layers, each defined by how it is established:
 
-- An **account** is an identity in the backend's own namespace. Two accounts matter to every item — the **creator**, who filed it, and the **runner**, whose credentials the current resolution acts as — and one more per role, below.
-- A **capability** is a verifiable fact about an account on the repository: it can push, it can merge, it can approve. Capabilities are **detected from the backend, never declared** — an account's word for what it may do is worth exactly what the backend will actually permit, so the backend is asked rather than told.
+- An **account** is an identity in the orchestrator's own namespace. Two accounts matter to every item — the **creator**, who filed it, and the **runner**, whose credentials the current resolution acts as — and one more per role, below.
+- A **capability** is a verifiable fact about an account on the repository: it can push, it can merge, it can approve. Capabilities are **detected from the orchestrator, never declared** — an account's word for what it may do is worth exactly what the orchestrator will actually permit, so the orchestrator is asked rather than told.
 - A **role** is a part the flow defines — contributor, maintainer, reviewer — and the vocabulary it routes and authorizes by. Every step is tagged with the role that performs it. A role names the capabilities it requires. The roles a runner *could* assume are **derived from its detected capabilities**, never assigned by hand and never assumed by assertion; the roles it *may* assume are those narrowed by the **coverage** it declares — the roles it is meant to play. Capability is the ceiling and coverage is the choice within it: a runner may decline a role its account could back, and nothing it declares can add a role its account cannot.
 
 > **Every step belongs to exactly one role, and only a runner that may assume that role executes it.**
 
 > **A role is assumable only where the runner both declares it and its account backs it.**
 
-The role check is what keeps a resolution from starting work it cannot finish; the backend's own permissions are the enforcement of last resort — an account without the merge capability cannot merge, whatever it believes its role to be. The two layers agree by construction, because the first is derived from the second. Coverage only ever narrows, so it cannot disagree with either: a declared role the account cannot back is simply not assumable — a handoff at that boundary, not a misconfiguration.
+The role check is what keeps a resolution from starting work it cannot finish; the orchestrator's own permissions are the enforcement of last resort — an account without the merge capability cannot merge, whatever it believes its role to be. The two layers agree by construction, because the first is derived from the second. Coverage only ever narrows, so it cannot disagree with either: a declared role the account cannot back is simply not assumable — a handoff at that boundary, not a misconfiguration.
 
 The creator's account matters beyond attribution: the creator's detected standing is an input a step may route on, which is how a flow gives an untrusted source's item a stricter route than a maintainer's own.
 
@@ -212,7 +212,7 @@ The treasurer keeps a **durable ledger**: time and cost, per step and for the re
 
 > **A resolution that has opened more sessions than its journal accounts for has paid for conversations its route never asked for. The count must be reported and an excess flagged.**
 
-The excess is the signal, and it is very nearly the only one: nothing else about such a resolution looks wrong afterwards. What it does not say by itself is *why* — whether the machinery decided a moment was special and started over, which is a defect in the flow, or the handle was simply gone, which is a limit of the substrate or the backend (§ The agent session). Both cost the same and have different fixes, so the flag names the count and the record names the cause. The comparison is within the vantage the treasurer already has, which reads the journal and its own ledger and nothing else.
+The excess is the signal, and it is very nearly the only one: nothing else about such a resolution looks wrong afterwards. What it does not say by itself is *why* — whether the machinery decided a moment was special and started over, which is a defect in the flow, or the handle was simply gone, which is a limit of the substrate or the orchestrator (§ The agent session). Both cost the same and have different fixes, so the flag names the count and the record names the cause. The comparison is within the vantage the treasurer already has, which reads the journal and its own ledger and nothing else.
 
 **A count that matches the journal and is still high is a routing problem, not a session one.** A route crossing a declaring step repeatedly opens a session each time, correctly; what that reports is a resolution going around, which is the runaway the treasurer detects by its own means. The two are told apart by which record disagrees — the ledger against the journal, or the journal against itself.
 
@@ -230,11 +230,11 @@ It is consulted at exactly three chokepoints, each **before** the act it governs
 
 **The third chokepoint is what makes § Nothing is bought twice enforceable rather than merely detectable.** A count reconciled afterwards says a session was opened that should not have been, once the conversation it replaced is already gone. A chokepoint answers at the moment: the machinery that decided this dispatch was special enough to start over has to say so to a party that knows what the route declared, and be told no. It is the same shape as refusing a prompt from a step that declared it would not prompt — the refusal lands before the thing it is refusing has cost anything, which is the only point at which refusing it is worth anything.
 
-**What it refuses is a decision, not a circumstance.** A session the machinery chose to start, where the route declared none, is refused. A session that had to be opened because the handle was gone — the substrate declined it, or the backend keeps none — was nobody's decision and is approved and counted (§ The agent session).
+**What it refuses is a decision, not a circumstance.** A session the machinery chose to start, where the route declared none, is refused. A session that had to be opened because the handle was gone — the substrate declined it, or the orchestrator keeps none — was nobody's decision and is approved and counted (§ The agent session).
 
 **A refusal does not stop the resolution.** The safe direction is the cheap one: the session that was about to be discarded is kept, the dispatch proceeds on it, and the attempt is recorded. Parking would stop work over something no operator can clear, since the fix is in the graph or in the machinery rather than on the item; continuing silently would leave it invisible, which is what the record is for.
 
-**So the count answers "how many", and the record answers "why".** An excess over what the journal accounts for says the resolution paid for conversations the graph did not ask for — which is worth knowing whether the cause was machinery starting over or a backend that keeps no handle. Which of those it was is in what each request recorded, and the two have different fixes: one is a defect in the flow, the other a limit of the backend it runs on.
+**So the count answers "how many", and the record answers "why".** An excess over what the journal accounts for says the resolution paid for conversations the graph did not ask for — which is worth knowing whether the cause was machinery starting over or an orchestrator that keeps no handle. Which of those it was is in what each request recorded, and the two have different fixes: one is a defect in the flow, the other a limit of the orchestrator it runs on.
 
 **A declared new session is not the treasurer's to second-guess.** Where a step declared one, the reason is independence — a judgement that must not be coloured by the reasoning that produced what it judges ([flow-registration.md](flow-registration.md) § Session continuity) — and that is a property of the graph, not a spending decision. The treasurer records it, counts it, and approves it. What it refuses is a request the route does not account for, and what it stops is a route opening them without going anywhere, which is the runaway it detects by its own means.
 
@@ -282,7 +282,7 @@ The draft is **scaffolding, not a result**:
 - **It is never published.** For a refused write the text to keep *is* the text a guard refused, so a store that could go outward is a store that cannot hold it.
 - **It is cleared when the step completes**, and when the claim is released or the item finalized. Scaffolding that outlives its work becomes stale prose a later reader mistakes for a record; reasoning left behind after the work is over is a disclosure sitting around for no benefit.
 - **It is optional, and the progress rule is why a parking step rarely wants to skip it.** A step that does not use it behaves exactly as one would without the mechanism — but every dispatch must leave behind something the next one starts from (§ The treasurer), and a step whose work lives nowhere durable — no commit, no tree — has only the draft to leave. Parking without one re-derives the same reasoning at full price on resume, and the treasurer counts both times.
-Where the draft physically lives is the backend's: beside its claim state on a machine that holds one, or with the claim on a server, so that an arena can lose its disk without losing the record.
+Where the draft physically lives is the orchestrator's: beside its claim state on a machine that holds one, or with the claim on a server, so that an arena can lose its disk without losing the record.
 
 **A draft is not the session, and the two must not be folded together.** A draft belongs to one step, is read only when item and step both match, and is cleared when that step completes. The agent session belongs to the resolution and outlives every step on the route (§ The agent session). Keying the session like a draft would end it at the first step boundary; clearing a draft like a session would feed one step's unfinished reasoning to the next. They are stored beside each other and neither is the other's key.
 
@@ -294,11 +294,11 @@ The **session** is the conversation a resolution has with its agent. It is **the
 
 It is state of the same kind as the draft and lives with it — beside the claim on a machine that holds one, or with the claim on a server — and it is subject to the same rules: it is never published, it is not part of what a reviewer reads, and it is cleared when the claim is released or the item finalized. What differs is scope and lifetime, and those differ deliberately.
 
-**A backend that cannot store it is not incorrect, only expensive.** Where there is nowhere to keep the handle, every dispatch opens a session and every step starts from the prompt it was given — which is exactly what the best-effort rule below already requires a step to tolerate. The mechanism is absent rather than broken.
+**An orchestrator that cannot store it is not incorrect, only expensive.** Where there is nowhere to keep the handle, every dispatch opens a session and every step starts from the prompt it was given — which is exactly what the best-effort rule below already requires a step to tolerate. The mechanism is absent rather than broken.
 
 **The handle is offered, never depended on.** A substrate may decline to resume, expire the conversation, or have no such notion at all. So a resolution hands the handle over and proceeds correctly without it: the prompt and the draft are what make a dispatch right, and the handle decides only what it costs. **A step whose result differs depending on whether the substrate honoured the handle has made an optimisation load-bearing, and is wrong for that reason rather than for an expensive one.**
 
-**A handle that is unavailable is not a new session being declared.** A substrate may decline one; a backend may have nowhere to keep one. In both the conversation ended somewhere the system did not choose, and what follows is the best-effort clause above doing its job — not a decision to start over, and so not what the treasurer's third chokepoint refuses (§ The treasurer).
+**A handle that is unavailable is not a new session being declared.** A substrate may decline one; an orchestrator may have nowhere to keep one. In both the conversation ended somewhere the system did not choose, and what follows is the best-effort clause above doing its job — not a decision to start over, and so not what the treasurer's third chokepoint refuses (§ The treasurer).
 
 > **The distinction is who decided.** A resolution that chose to discard its context must have declared it. A resolution whose context was taken from it carries on, and says so.
 

@@ -3,7 +3,7 @@
 > **Tag:** `github-schema` — remaining work to complete this document: the query named in
 > [`docs/index.md`](index.md).
 
-**Normative.** This document defines how state, the journal, and history are stored on a GitHub issue by the GitHub backend. It is written for readers who have no SDK — the wire format is the contract.
+**Normative.** This document defines how state, the journal, and history are stored on a GitHub issue by the GitHub orchestrator. It is written for readers who have no SDK — the wire format is the contract.
 
 ## Items are issues
 
@@ -98,7 +98,7 @@ The `sessions` object is the treasurer's count of the agent sessions this resolu
 | Field | Type | Meaning |
 |---|---|---|
 | `declared` | int | Sessions the route asked for: the resolution's first, and one per execution of a step declaring `fresh`. |
-| `handle_gone` | int | Sessions opened because the handle was gone — the substrate declined it, or the backend keeps none. Nobody's decision. |
+| `handle_gone` | int | Sessions opened because the handle was gone — the substrate declined it, or the orchestrator keeps none. Nobody's decision. |
 | `refused` | int | Requests to discard a live conversation the route does not account for. **Nothing was opened**; the attempt is recorded so it is not invisible. |
 
 A state comment written before the treasurer counted sessions carries no `sessions` key, and reads back as zeroes.
@@ -120,7 +120,7 @@ Each entry in the `questions` array:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `id` | string | The backend-assigned question identifier, named by `answer --question`. |
+| `id` | string | The orchestrator-assigned question identifier, named by `answer --question`. |
 | `header` | string | Short scannable label. |
 | `text` | string | The full prompt. |
 | `format` | string | One of: `text`, `yes_no`, `choice`. |
@@ -230,7 +230,7 @@ All labels use a configurable prefix (default `flow:`). The label set is closed.
 | `flow:treasurer-refused:<id>` | The treasurer refused further spend on the step producing `<id>`. |
 | `flow:type:<type>` | Item type derivation label. |
 | `flow:<binary-name>` | The binary that owns this item. |
-| `flow:priority:<critical\|high\|low>` | Where the work sits in the order it is taken in, as whatever manages the backend ranks it. **Absent means `medium`.** |
+| `flow:priority:<critical\|high\|low>` | Where the work sits in the order it is taken in, as whatever manages the work ranks it. **Absent means `medium`.** |
 | `flow:urgency:<next\|deferred>` | What an operator wants done about the item now: start it next, or do not start it unattended. **Absent means `default`.** |
 
 **Both halves of the claim record are needed, and the arena half is a digest.** A lease binds `item ↔ arena` ([orchestrator.md](orchestrator.md) § Required surface → Claiming), so the arena is what the exclusion compares; `flow:owner:<login>` records the account credited, and on the ordinary deployment — one operator, several worktrees — every arena writes the same one, so it cannot separate them. It is a **fingerprint** rather than the pair because [disclosure.md](disclosure.md) closes the categories a flow may not publish and two of the five are exactly what an arena is made of: "Local filesystem paths" (the `ArenaId` is the absolute worktree path) and "Host and account identifiers — machine names, arena names, internal hostnames". Labels are a guarded surface in that document's table. The digest supports equality and nothing else, which is the only operation the exclusion needs, and the same `(HostId, ArenaId)` yields the same digest across restarts, which is the stability [orchestrator.md](orchestrator.md) requires of an `ArenaId`. **Do not read this row as "publish the arena name".**
@@ -259,7 +259,7 @@ A label name is unique within a repository and its creation is atomic, so creati
 
 ## Signals from GitHub state
 
-The backend derives four signals by polling the pull request on the claim branch:
+The GitHub orchestrator derives four signals by polling the pull request on the claim branch:
 
 | Signal | Set when |
 |---|---|
@@ -288,7 +288,7 @@ Claiming uses a label-based race to achieve exclusivity without server-side lock
 5. **Losers** remove their own claim label and return `ErrClaimRefused`. A token that wins is a live attempt, so the refusal names the winner and how long ago it started.
 6. **Winner**: adds self as assignee, posts `flow:owner:<login>` and `flow:arena:<fingerprint>` **in one request**, removes the transient `flow:claim:<token>` label. Before posting them it removes the previous holder's markers — an owner label naming another account, and an arena label naming another arena. Under one account the owner label is byte-identical between two arenas, so the arena label is the only thing a take-over displaces; the two go in together because a window with one present and not the other is a window in which every reader of the record decides differently.
 
-The token exists only *inside* one claim attempt — every exit from the attempt removes it. A process that dies between step 1 and its removal therefore strands a token that no process holds and nothing expires, and because the smallest token wins, that one token blocks the item for every later claimer, permanently. Collection in step 3 is what makes the token self-limiting, so recovery is an ordinary `claim` rather than an operator deleting the label through the backend.
+The token exists only *inside* one claim attempt — every exit from the attempt removes it. A process that dies between step 1 and its removal therefore strands a token that no process holds and nothing expires, and because the smallest token wins, that one token blocks the item for every later claimer, permanently. Collection in step 3 is what makes the token self-limiting, so recovery is an ordinary `claim` rather than an operator deleting the label through GitHub's own interface.
 
 **The window is sized for the clocks, not for the attempt.** Age is read against the collecting claimer's own clock — there is no shared one — so ten minutes covers not the attempt itself, which is two API calls, but the disagreement between the clocks of two claimers racing from different machines. The rule holds while those agree to within a window: a claimer running more than a window behind the others mints tokens they read as already abandoned, and they settle the race without it.
 
@@ -308,11 +308,11 @@ Idempotence reads the **source** issue, not search: the state comment's `filed` 
 
 ## Drafts
 
-The GitHub backend's draft store is the worktree-local `.flow/draft/` directory. Drafts are keyed by issue number and step result id. Nothing in this directory touches the GitHub API — the structural separation from the outward-facing code **is** the "never published" guarantee. Drafts are cleared when the claim is released (via `clistate.Clear`).
+The GitHub orchestrator's draft store is the worktree-local `.flow/draft/` directory. Drafts are keyed by issue number and step result id. Nothing in this directory touches the GitHub API — the structural separation from the outward-facing code **is** the "never published" guarantee. Drafts are cleared when the claim is released (via `clistate.Clear`).
 
 ## The agent session
 
-The backend's session store is the worktree-local `.flow/session/` directory, beside the draft tree and never published for the same structural reason: nothing in it touches the GitHub API. One file per issue — the session belongs to the resolution ([resolution.md](resolution.md) § The agent session), so it is **keyed by the issue number alone**, and keying it like a draft would end the conversation at the first step boundary. The record holds the substrate's handle and the step whose `fresh` declaration it already honoured; the issue number is stored in the file as well as in its path, so two ids that sanitise onto one name lose a record rather than hand one resolution another's conversation. It is cleared when the claim is released (via `clistate.Clear`) and when the item's record is reset.
+The orchestrator's session store is the worktree-local `.flow/session/` directory, beside the draft tree and never published for the same structural reason: nothing in it touches the GitHub API. One file per issue — the session belongs to the resolution ([resolution.md](resolution.md) § The agent session), so it is **keyed by the issue number alone**, and keying it like a draft would end the conversation at the first step boundary. The record holds the substrate's handle and the step whose `fresh` declaration it already honoured; the issue number is stored in the file as well as in its path, so two ids that sanitise onto one name lose a record rather than hand one resolution another's conversation. It is cleared when the claim is released (via `clistate.Clear`) and when the item's record is reset.
 
 **Nothing of the session record reaches the issue.** The handle and the boundary it was stored with are not in the state comment, not in the journal, and not in any published body: the handle names a conversation holding the resolution's whole reasoning, and the boundary says which step's reasoning it is.
 
