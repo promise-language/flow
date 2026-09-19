@@ -995,6 +995,35 @@ type Orchestrator interface {
 	// No claim — the person answering does not hold the item.
 	PostAnswer(ctx context.Context, ref ItemRef, id QuestionId, text string) error
 
+	// Remark publishes one piece of prose on the item: what was decided, what
+	// was found, why something was released. It is the operator's ordinary
+	// maintenance write, and without it the only route is the backend's own
+	// interface — unportable, unvalidated, and invisible to this contract.
+	//
+	// NO CLAIM, for the reason PostAnswer takes none: the party recording a
+	// remark is not the party holding the item, and usually that nobody holds
+	// it is the point.
+	//
+	// IT IS AN APPEND, NOT A FIELD, which is why it is not on ItemEditor. Every
+	// field ItemEditor can change, Item reports — so a remark staged there
+	// would oblige Item and Load to carry a comment thread nothing in this
+	// contract reads. A remark is recorded the way a park record is: written
+	// out, and read back through the orchestrator's own interface.
+	//
+	// Empty text is REFUSED. A remark that says nothing is a publication
+	// nobody asked for, and it cannot be taken back.
+	//
+	// IT IS NOT AN ANSWER AND RESOLVES NOTHING. An orchestrator whose answer
+	// store is the place a remark lands — the thread it asked the question in,
+	// say — MUST keep the two apart: a remark recorded while a step waits on a
+	// human that reads back as the reply clears the wait with nobody having
+	// decided, and the step resumes on prose no one offered. PostAnswer answers
+	// a question, and it names the one it answers.
+	//
+	// Publishing, so it passes whatever guards outward writes (docs/disclosure.md).
+	// An orchestrator with nowhere to keep one refuses with ErrUnsupported.
+	Remark(ctx context.Context, ref ItemRef, text string) error
+
 	// AskQuestion records ONE agent-asked question on the item. The
 	// orchestrator assigns it a QuestionId and persists the payload; THE RETURN
 	// IS WHERE A QuestionId COMES FROM.

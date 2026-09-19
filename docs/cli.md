@@ -20,6 +20,8 @@ Every binary built on `cli.Run` exposes exactly this surface.
 | `quota` | Report the agent account's quota state |
 | `list` | Report items and where each stands — this binary's remit by default, everything the backend holds at its widest |
 | `answer [<item-id>] [<text>]` | Read the question a step is parked on, and answer it |
+| `edit <item-id> <change>…` | Change the item itself — its title, body, tags, dependencies, priority, urgency |
+| `remark <item-id> <text>` | Record a remark on the item |
 | `grant <step> <axis> <amount>` | Extend the treasurer's allowance for a step and clear a matching treasurer park |
 | `doctor` | Report whether this environment is fit to be given an item |
 
@@ -52,7 +54,7 @@ Passing both `--json` and `--human` is a usage error, detected before the comman
 
 Commands fall into two shapes, and the shape determines the streams.
 
-### One-shot reports — `list`, `status`, `quota`, `grant`, `doctor`, `claim`, `run-step`
+### One-shot reports — `list`, `status`, `quota`, `grant`, `doctor`, `claim`, `run-step`, `edit`, `remark`
 
 The report *is* the output. It goes to **stdout**, rendered in the selected mode.
 
@@ -177,6 +179,46 @@ Both directions of getting this wrong are the same mistake. A marker that outliv
 Answering does not resume the item. Resumption is a separate, deliberate act — `resolve` or `run-step` — because somebody has to decide the answer is complete and the work should continue.
 
 If the item has more than one outstanding question, the one being answered is named explicitly. Answering is never applied to an unspecified question.
+
+## Editing an item
+
+`edit` changes the item itself — its title, its body, its tags, the items it waits on, its priority and its urgency. Every other write in this set is **lifecycle state**: the lease, the flow's record, an answer to a question a step parked on. Without this one, changing an item means writing to the backend's own store in whatever format that backend happens to use — which is unportable, unvalidated, invisible to the layer that would have checked it, and requires a caller of this binary to know a storage format it exists to abstract.
+
+**One command, not one per field**, because the orchestrator's editor is a transaction ([orchestrator.md](orchestrator.md) § Editing) and a command per field would be a transaction per field. One invocation stages every change given and lands them together or not at all, so nobody has to ask which half took.
+
+**There is one flag per editor method**, and they carry no rules of their own. What can be written together is the orchestrator's to decide: it refuses at the commit rather than applying the part it can, and the refusal reaches the operator **as the orchestrator worded it** — a backend whose store keeps item fields and dependencies apart says so, and says to split the edit, and a line substituted here would report a permanent limitation in place of a combination to re-shape.
+
+**`--body-file` is a second way to give the body, not a second field.** A rewritten description is a file long before it is an argument — that is what the observed workaround reached for — so the body may be given inline or read from a path, and giving it both ways is a usage error. What the report names is the **field**: an invocation that read the body from a file says the body changed, because anything acting on the report is asking what moved, not which flag carried it.
+
+**It takes no claim.** Correcting a title, retracting a blocker or deferring an item is not something the holder does — usually that nobody holds the item is the point — so `edit` addresses the item by id, like `status` and `answer`, and works from any machine. That is [orchestrator.md](orchestrator.md) § Editing's rule, and this is the command that depends on it.
+
+**An edit that stages nothing is a usage error, not a no-op.** Exit 0 covers "there was nothing to do"; an invocation that asked for nothing is a different thing, and reporting success for it would tell an operator who mistyped a flag that their change landed.
+
+**A value outside a closed vocabulary is rejected by name, before anything is written** — the rule `--sort` already follows (§ Invocation errors). `--priority` and `--urgency` take the values [orchestrator.md](orchestrator.md) § Priority and urgency defines and nothing else.
+
+**A dependency is named the way every item is named** (§ Addressing an item): `--block-on` and `--unblock` take the backend's own identifier and resolve it through the same resolver the item id goes through, before the edit opens. An identifier that names nothing costs no write.
+
+This is the operator's half of a facility the SDK already had. A run that discovers a dependency records it itself (§ Availability); `--block-on` and `--unblock` are how a person records or retracts one — the act § Availability already assumes when it says *"An operator who wants the block to survive that retracts the blocker and records the real one"*.
+
+**Manual control is not among the flags.** No command asserts it ([orchestrator.md](orchestrator.md) § Editing), and this one does not either.
+
+## Remarking
+
+`remark` records prose on the item: what was decided, what was found, why something was released. It is the ordinary accompaniment to every other act here — a release, a hold, a correction — and the one item write [orchestrator.md](orchestrator.md) did not already carry.
+
+**It is an append, not a field, which is why it is not one of `edit`'s flags.** A remark is published *beside* the request rather than changing it, and folding it into the editor would either break "all of them or none of them" — the one property that editor exists to give — or make a remark unusable in combination, since publishing one is a write of a different shape from setting a field.
+
+**The item id is first and always required.** It is never read as the text and the text is never read as an id: a remark whose first word is a number would otherwise be indistinguishable from a reference, and a backend read would decide what the invocation meant.
+
+**The text may be given inline or read from a path** — `--body-file`, as `edit`'s body is — and giving it both ways is a usage error. Prose worth recording is regularly longer than a shell argument, which is what the observed workaround reached for.
+
+**A remark is not an answer.** It is recorded on an item whether or not a step is waiting for a human, and recording one never clears a wait: `answer` is the command that answers, and it names the question it answers. A backend whose answer store is the same place a remark lands owes that separation to whoever records one — see [github-schema.md](github-schema.md) § Remarks for how this one keeps it.
+
+**Empty text records nothing**, and exits 1. A remark that says nothing is a publication nobody asked for and nothing can take back — the same judgement § Answering makes about an operator who is asked and says nothing.
+
+**It takes no claim**, for the reason `answer` needs none: the party recording a remark is not the party holding the item.
+
+**It publishes.** The remark is visible to everyone who can see the item, so it passes the guard every outward write passes ([disclosure.md](disclosure.md)), and a refusal reaches the operator with what the guard found.
 
 ## Claiming
 
@@ -492,7 +534,7 @@ Startup validation is exhaustive before any work begins. A misconfiguration is n
 
 Startup validation covers what can be checked from configuration alone. What requires touching the environment is `doctor`'s job.
 
-**Validation is scoped to the invoked command.** A command is refused only for configuration it needs. Gate declarations are irrelevant to `list`, `status`, `answer` and `release`, and a binary starts for them on a checkout whose project tools have not been built — that is the state between the two halves of bring-up, not a misconfiguration. `claim`, `run-step` and `resolve` meet the check at their own boundary: each refuses when the orchestrator cannot run what a step will ask for — a missing `integration` or `fit` gate, a missing `verify` command, or a declared name outside those closed sets — and the refusal names what to run: the project's build, and `doctor` for the whole environment picture. That refusal is an environment condition, so it exits **1**, not 2.
+**Validation is scoped to the invoked command.** A command is refused only for configuration it needs. Gate declarations are irrelevant to `list`, `status`, `answer`, `edit`, `remark` and `release`, and a binary starts for them on a checkout whose project tools have not been built — that is the state between the two halves of bring-up, not a misconfiguration. `claim`, `run-step` and `resolve` meet the check at their own boundary: each refuses when the orchestrator cannot run what a step will ask for — a missing `integration` or `fit` gate, a missing `verify` command, or a declared name outside those closed sets — and the refusal names what to run: the project's build, and `doctor` for the whole environment picture. That refusal is an environment condition, so it exits **1**, not 2.
 
 **Every condition the boundary refuses on is one `doctor` reports.** The refusal sends its reader there for the rest of the picture, so a condition visible to one and not the other leaves that reader with a command that will not run and a report saying everything is fine.
 

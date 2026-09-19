@@ -390,6 +390,10 @@ func RunWithArgs(app App, args []string) int {
 		return app.cmdRun(ctx, rest)
 	case "answer":
 		return app.cmdAnswer(ctx, rest)
+	case "edit":
+		return app.cmdEdit(ctx, rest)
+	case "remark":
+		return app.cmdRemark(ctx, rest)
 	case "quota":
 		return app.cmdQuota(ctx, rest)
 	case "resolve":
@@ -781,6 +785,11 @@ usage:
   %[1]s quota                        report the agent account's quota state
   %[1]s list [--scope SCOPE] [--tag T] list items this flow can process
   %[1]s answer [<item-id>] [<text>]    read the parked question; answer it
+  %[1]s edit <item-id> <change>…     change the item: --title, --body, --add-tag,
+                                     --remove-tag, --block-on, --unblock,
+                                     --priority, --urgency. All of them land
+                                     together or none do
+  %[1]s remark <item-id> "<text>"    record a remark on the item
   %[1]s claim <item-id>              acquire a claim on an item
   %[1]s run-step                     advance ONE lifecycle item (one prompt → one artifact)
   %[1]s resolve [<item-id>]          run ALL steps until finalized or parked.
@@ -797,8 +806,9 @@ usage:
                                      or off the base branch)
   %[1]s reseed [--force]              clear seed state (artifacts, budgets, park) on the active claim
 
-answer, status, list, quota, grant, claim, run-step, and resolve print human-readable text on a
-terminal and JSON when piped or redirected; --json / --human (or FLOW_OUTPUT=json|human)
+answer, edit, remark, status, list, quota, grant, claim, run-step, and resolve print
+human-readable text on a terminal and JSON when piped or redirected;
+--json / --human (or FLOW_OUTPUT=json|human)
 force one. resolve's human text is its progress narration on stderr, which it
 prints in both modes — in human mode it writes nothing to stdout at all.`, bin)
 }

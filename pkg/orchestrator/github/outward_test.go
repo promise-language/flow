@@ -972,6 +972,10 @@ func driveAResolution(t *testing.T, b *Orchestrator, tape *spawnTape) (prURL flo
 	if err := blockers.Commit(ctx); err != nil {
 		t.Fatalf("Commit blockers: %v", err)
 	}
+	// A remark is neither an edit nor an answer: its own act, its own write.
+	if err := b.Remark(ctx, claim.ItemRef, "released: the arena was needed elsewhere"); err != nil {
+		t.Fatalf("Remark: %v", err)
+	}
 
 	w := &worktree{b: b, issueNum: 42}
 	prURL, err = w.Open(ctx, "main", "a pull request title", "a pull request body")

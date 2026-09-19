@@ -30,6 +30,7 @@ The set is closed: a disclosure is persisted public state, and a write not on th
 | **Assignees** | A login the flow chose to publish — the claim owner, visible on the issue |
 | **The item's own request** | Title and body, rewritten through `ItemEditor` |
 | **Item dependencies** | Which items this one waits on |
+| **A remark** | Prose recorded on the item about the work — what was decided, what was found, why something was released |
 
 Commit messages, the diff, and labels are the ones most easily forgotten, because they reach the public surface through git rather than through an API call. They are disclosures all the same: a push is a publication.
 

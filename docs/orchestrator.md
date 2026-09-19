@@ -349,6 +349,26 @@ The orchestrator stores the ledger and decides none of it: admission, allowances
 
 **A backend with nowhere to keep a handle answers a permanent typed refusal** rather than pretending to store one. It is then expensive rather than incorrect: every dispatch opens a session, every step starts from the prompt it was given, and nothing is wrong — the handle is offered and never depended on ([resolution.md](resolution.md) § The agent session), so the mechanism is absent rather than broken.
 
+### Remarks
+
+| Method | Contract |
+|---|---|
+| `Remark(ctx, ItemRef, string)` → `error` | Records one piece of prose on the item; the `string` is its text. **No claim**, and **empty text is refused**. Feeds `remark`. |
+
+`Remark` records prose on the item: what was decided, what was found, why something was released. It is on the required surface for the reason `Park` and `AddBlocker` are — it is the same kind of durable statement about an item, and an orchestrator that can write the others can write this. Without it the only route is the backend's own interface, which is unportable, unvalidated, and invisible to the layer that would have checked it.
+
+**It is an append, not a field, and that is why it is not on `ItemEditor`.** Every field the editor can change, `Item` reports (§ `Item`), so staging a remark there would oblige `Item` and `Load` to carry a comment thread — a second read surface, on the load path, for something no part of this contract consumes. It is recorded the way a park record is: written out, and read back through the orchestrator's own interface. **Nothing here reads a remark back**, and an orchestrator is not asked to make one addressable.
+
+**It takes no claim**, for the reason `PostAnswer` takes none and editing takes none: the party recording a remark is not the party holding the item, and usually that nobody holds it is the point.
+
+**Empty text is refused.** A remark that says nothing is a publication nobody asked for, it cannot be taken back, and accepting it would put an empty record on the item that every consumer reads as well-formed.
+
+**A remark is not an answer, and recording one resolves nothing.** An orchestrator whose answer store is the place a remark lands — the thread it asked the question in, say — owes that separation to the caller: a remark recorded while a step waits on a human must not be read back as the reply, or the wait clears with nobody having decided and the step resumes on prose no one offered. `PostAnswer` is how a question is answered, and it names the question. This is the one obligation a remark's storage carries beyond keeping the text.
+
+**Publishing.** The result is visible to everyone who can see the item and is not undone by forgetting it happened, so it is an outward write and subject to whatever guards those — see [disclosure.md](disclosure.md), where it is the `remark` act. It is a distinct act from `item-edit` because the two carry different things and a guard decides differently about each: `item-edit` rewrites the **request**, where a remark is an observation appended beside it.
+
+**An orchestrator with nowhere to keep one refuses**, typed, so *never supported here* is distinguishable from *not right now*.
+
 ### Completion
 
 | Method | Contract |
@@ -467,6 +487,7 @@ That is why so little here is optional. A capability an orchestrator lacks is st
 - **A blocker it cannot resolve**, and **an item declared as its own blocker.** See "Dependencies".
 - **Finalizing an item whose `ItemStatus` is `open`.** Only an item the orchestrator already considers finished may have its flow run recorded as complete.
 - **A `Reset` of a record it cannot clear.** Typed, so *never supported here* is distinguishable from *not right now*.
+- **A remark it has nowhere to keep**, and **a remark with no text.** The first is permanent and typed; the second is a bad parameter, since an empty publication says nothing and cannot be taken back. See "Remarks".
 - **A trunk-health verdict whose tree is not the commit's**, and **one contradicting a verdict already on record** — typed distinctly from each other, because a stale measurement and a disagreement between two live ones have different fixes. An orchestrator with nowhere to keep verdicts refuses `RecordTrunkHealth` permanently and answers `unknown` to every read: honest in both directions, and the degradation is the one [trunk-health.md](trunk-health.md) § Reuse is a source of `green` only prices.
 - **A session it has nowhere to keep.** An orchestrator with no store for the agent-session handle refuses `SaveAgentSession` permanently and reads as absence. It is then expensive rather than incorrect — every dispatch buys a conversation the resolution would otherwise still hold — and that is the degradation being a declined answer rather than a missing method buys: the caller can price it, where an unimplemented store would only look like a resolution that never continued anything.
 

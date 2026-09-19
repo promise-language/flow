@@ -58,7 +58,7 @@ func checkPointerLine(t *testing.T, what, line string) {
 
 // Every command rejects an unrecognised flag the same way.
 func TestUnknownFlag_NamedOnEveryCommand(t *testing.T) {
-	for _, cmd := range []string{"doctor", "list", "claim", "release", "status", "run-step", "resolve", "grant"} {
+	for _, cmd := range []string{"doctor", "list", "claim", "release", "status", "run-step", "resolve", "grant", "edit", "remark"} {
 		t.Run(cmd, func(t *testing.T) {
 			app, out, errBuf := newArgparseApp(t)
 			code := RunWithArgs(*app, []string{cmd, "--bogus"})
@@ -164,7 +164,7 @@ func TestUsageError_Arity(t *testing.T) {
 // Contradictory options: --json --human on every command that takes them, and
 // grant's --all against an explicit step id.
 func TestUsageError_ContradictoryOptions(t *testing.T) {
-	for _, cmd := range []string{"list", "status", "grant", "resolve", "run-step"} {
+	for _, cmd := range []string{"list", "status", "grant", "resolve", "run-step", "edit", "remark"} {
 		t.Run(cmd, func(t *testing.T) {
 			app, out, errBuf := newArgparseApp(t)
 			code := RunWithArgs(*app, []string{cmd, "--json", "--human"})
