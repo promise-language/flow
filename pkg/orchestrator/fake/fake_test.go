@@ -1611,6 +1611,41 @@ func TestBackend_ReleaseAZeroRefFreesTheArenaAndTouchesNoItem(t *testing.T) {
 	}
 }
 
+// The arena's own record is the lease AND the drafts AND the session
+// (docs/orchestrator.md § Required surface → Release: "that record is
+// arena-wide — the lease, the drafts and the session go together"). So a
+// zero-ref release takes the same three the ordinary one takes, and only the
+// claim ON the item is spared.
+//
+// A double that dropped the lease alone would keep reasoning whose claim is
+// gone, and hand it back to whoever claims that item next — the same failure
+// TestBackend_ReleaseDropsWorkInProgress exists for, reached by the other route.
+func TestBackend_ReleaseAZeroRefDropsTheArenasDraftAndSession(t *testing.T) {
+	ctx := context.Background()
+	b := fake.New()
+	ref := addItem(b, "1")
+	if _, err := b.Claim(ctx, ref, nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if err := b.SaveWorkInProgress(ctx, ref, "plan", "reasoning"); err != nil {
+		t.Fatalf("SaveWorkInProgress: %v", err)
+	}
+	if err := b.SaveAgentSession(ctx, ref, flow.AgentSession{SessionID: "sess-1", Boundary: "review"}); err != nil {
+		t.Fatalf("SaveAgentSession: %v", err)
+	}
+
+	if err := b.Release(ctx, flow.ItemRef{}, nil); err != nil {
+		t.Fatalf("Release of a ref naming nothing: %v", err)
+	}
+
+	if got, err := b.LoadWorkInProgress(ctx, ref, "plan"); got != "" || err != nil {
+		t.Errorf("LoadWorkInProgress = (%q, %v), want (\"\", nil): the claim it belonged to is gone", got, err)
+	}
+	if got, err := b.LoadAgentSession(ctx, ref); got != (flow.AgentSession{}) || err != nil {
+		t.Errorf("LoadAgentSession = (%+v, %v), want none: a handle kept past its claim names the last one's work", got, err)
+	}
+}
+
 // ClearAgentSession takes ONE item's record. Nothing in the SDK calls it — the
 // session is cleared by releasing the claim or resetting the record — so it is
 // reached only by whoever is driving this double, and a method that quietly did
