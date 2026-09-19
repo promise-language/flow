@@ -1864,6 +1864,12 @@ func TestCmdResolve_ManualHoldStopsTheRunWithoutDispatching(t *testing.T) {
 	if !strings.Contains(errBuf.String(), "skipped") {
 		t.Errorf("stderr = %q, want the skip reported", errBuf.String())
 	}
+	// And the line above the stop does not say the step ran. The advance stops
+	// on the hold before it dispatches, so `running "write plan"…` would report
+	// a step that never started.
+	if strings.Contains(errBuf.String(), "running \"") {
+		t.Errorf("stderr announced a step as running above the hold; got:\n%s", errBuf.String())
+	}
 	// The run ended at the hold rather than looping to the runaway guard: the
 	// journal stays empty and the item is not finalized.
 	state, err := be.Load(context.Background(), be.Ref("1"))
@@ -2303,6 +2309,25 @@ func TestCmdResolve_AnIterationThatDispatchesNothingIsNotPaced(t *testing.T) {
 			},
 			wantCode: 1, // a condition somebody must clear
 			narrates: "waits on unfinished dependencies — not dispatching",
+		},
+		{
+			// A manual hold: an operator is driving the item by hand, RunOne
+			// skips before any dispatch, and the flag is on the item the peek
+			// already loaded. Holding this pass for headroom would sit the run
+			// in front of a window it is never going to spend from — and
+			// register the wait on an item nobody is going to advance.
+			name: "an item under manual control",
+			build: func(t *testing.T) (*App, *bytes.Buffer) {
+				be := fake.New()
+				be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+				app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+					t.Fatal("handler must not run")
+					return flow.StepResult{}, nil
+				})
+				setManual(t, be, be.Ref("1"), true)
+				return app, errBuf
+			},
+			narrates: "is under manual control — not dispatching",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
