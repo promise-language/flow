@@ -109,8 +109,61 @@ func Save(c flow.Claim) error {
 		return fmt.Errorf("marshal claim: %w", err)
 	}
 	path := filepath.Join(dir, activeJSONRel)
-	if err := os.WriteFile(path, b, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
+	if err := writeAtomic(path, b, 0o644); err != nil {
+		return err
+	}
+	return nil
+}
+
+// writeAtomic replaces path's contents in one step: a temp file in the SAME
+// directory, then a rename over the target.
+//
+// os.WriteFile truncates and then writes, so an interrupted or out-of-space
+// write leaves a zero-length or half-written file where the record was. For the
+// lease that is not a lost update but a wedged worktree: Load returns a parse
+// error, LookupActiveClaim passes it on, and every command that reads the lease
+// stops on it — including release, whose job is to clear exactly this (#212).
+// A store whose write can destroy the record it is replacing is what produces
+// that state, so the write is made not to.
+//
+// Same directory because that is what makes the rename atomic — across
+// filesystems it is a copy, and a copy is the truncate-then-write this exists
+// to avoid. The explicit Chmod is not decoration: os.CreateTemp makes 0600, so
+// without it the renamed file would silently carry a mode nobody asked for.
+func writeAtomic(path string, b []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp file in %s: %w", dir, err)
+	}
+	tmp := f.Name()
+	// Every failure from here on removes the temp file: one left behind is
+	// litter in a directory the project is required to gitignore, and on the
+	// lease path it would accumulate one per interrupted write.
+	cleanup := func(werr error) error {
+		f.Close()
+		_ = os.Remove(tmp)
+		return werr
+	}
+	if _, err := f.Write(b); err != nil {
+		return cleanup(fmt.Errorf("write %s: %w", tmp, err))
+	}
+	// Before the rename, so the bytes are on disk under the name that is about
+	// to become the record — a rename that beats its own contents to the platter
+	// leaves the same unreadable file by another route.
+	if err := f.Sync(); err != nil {
+		return cleanup(fmt.Errorf("sync %s: %w", tmp, err))
+	}
+	if err := f.Chmod(perm); err != nil {
+		return cleanup(fmt.Errorf("chmod %s: %w", tmp, err))
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename %s to %s: %w", tmp, path, err)
 	}
 	return nil
 }

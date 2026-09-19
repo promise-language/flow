@@ -138,7 +138,7 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 		if reason, held := b.heldByAnotherArena(names, owner, weHold); held {
 			return flow.Claim{}, flow.ErrClaimRefused{
 				Code: "already-held", ItemScoped: true,
-				Reason:   fmt.Sprintf("issue #%d %s", issueNum, reason),
+				Reason:   fmt.Sprintf("issue #%d %s (use --force to take over)", issueNum, reason),
 				Override: "force",
 			}
 		}
@@ -263,7 +263,7 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 			_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
 			return flow.Claim{}, flow.ErrClaimRefused{
 				Code: "already-held", ItemScoped: true,
-				Reason:   fmt.Sprintf("issue #%d %s", issueNum, reason),
+				Reason:   fmt.Sprintf("issue #%d %s (use --force to take over)", issueNum, reason),
 				Override: "force",
 			}
 		}
@@ -568,32 +568,72 @@ func (b *Orchestrator) refuseDirtyTree(ctx context.Context, recovery, override s
 //   - HEAD off the base branch, because the next claim would inherit the
 //     released item's branch.
 //
-// The same two conditions Claim enforces, with the same typed codes, and with
-// NO override: a flag that dropped the claim and left the tree as it was would
-// produce exactly the orphaned state the refusal exists to prevent — work no
-// item holds and no branch carries. Nor would it leave the arena usable: an
-// unforced Claim refuses that same tree, so the claim that would follow a
-// forced release is one carrying OverrideDirtyTree, which starts the second
-// item on the first one's leftovers. The way past a refused release is git,
-// deliberately — commit the work to the item's branch
-// or discard it, check out the base, release — because that is the moment
-// somebody decides what happens to the work. An arena that is GONE is recovered
-// from another arena with the already-held override on Claim; that emergency
-// path is unchanged and is not this one.
+// The same two conditions Claim enforces, with the same typed codes. The
+// ORDINARY way past them is git, deliberately — commit the work to the item's
+// branch or discard it, check out the base, release — because that is the
+// moment somebody decides what happens to the work, instead of it becoming
+// nobody's. OverrideDirtyTree and OverrideStaleBase bypass them anyway, and
+// what that costs is exactly what the refusals exist to prevent: work no item
+// holds and no branch carries, in a tree an unforced Claim then refuses. It is
+// the operator's emergency — an arena being decommissioned, a lease record
+// naming nothing — and never a step's (docs/cli.md § Releasing).
 //
 // The dirty check runs first, for the reason refuseOffBase records — the same
 // order Claim uses, because it is the same pair of conditions read at the other
 // end of the lease.
 //
+// A ZERO ref names no item: the arena's own record alone comes off and NOTHING
+// on the backend is touched or even read. That is the exit for an arena whose
+// lease record cannot be parsed — a record nothing can read names no item to
+// release, so there is nothing to address (#212). The worktree preconditions
+// still run: the tree may hold work belonging to whatever the unreadable record
+// named, and a release that cannot say which item it was leaves even less to
+// attribute it to.
+//
+// A ref this arena does NOT hold needs OverrideAlreadyHeld. The holding arena's
+// tree, drafts and session are not readable from here at all, so the two
+// preconditions cannot be evaluated against it — refusing is the honest answer
+// and the override is the operator saying they know what is there.
+//
 // Addressed by ref: the account is ambient, so it is read rather than taken off
 // a claim value the caller might be holding after the lease was revoked.
-func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef) error {
+func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef, overrides []flow.ClaimOverride) error {
 	// Giving the lease up ends any landing round with it, and the mainline's
 	// exclusion is never held across a stop (landing.go). Before the refusals
 	// below, because every ambiguity about a lock resolves toward releasing it:
 	// an arena on its way out holding the mainline is the failure this must not
 	// produce, and a refused release is not a round.
 	b.releaseLanding()
+	if !slices.Contains(overrides, flow.OverrideDirtyTree) {
+		if refused, err := b.refuseDirtyTree(ctx, dirtyTreeRecoveryAtRelease, "force"); err != nil {
+			return fmt.Errorf("github.Release: %w", err)
+		} else if refused != nil {
+			return *refused
+		}
+	}
+	if !slices.Contains(overrides, flow.OverrideStaleBase) {
+		// No fetch and no base-stale check: a stale local trunk strands nothing.
+		base, err := b.DefaultBranch(ctx)
+		if err != nil {
+			return fmt.Errorf("github.Release: resolve default branch: %w", err)
+		}
+		if refused, err := b.refuseOffBase(ctx, base, "force"); err != nil {
+			return fmt.Errorf("github.Release: %w", err)
+		} else if refused != nil {
+			return *refused
+		}
+	}
+	// A ref that names nothing: the local record is the whole of what comes
+	// off, and no request is made. Placed after the preconditions and before
+	// every read, because there is no issue number to read anything WITH — this
+	// is the arena whose lease record could not be parsed, and the only thing
+	// known about it is that it is this arena's.
+	if len(ref.Ref) == 0 {
+		if err := clistate.Clear(); err != nil {
+			return fmt.Errorf("github.Release: clear active claim file: %w", err)
+		}
+		return nil
+	}
 	issueNum, err := b.issueNumber(ref)
 	if err != nil {
 		return err
@@ -601,21 +641,6 @@ func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef) error {
 	owner, err := b.resolveAccount(ctx)
 	if err != nil {
 		return err
-	}
-	if refused, err := b.refuseDirtyTree(ctx, dirtyTreeRecoveryAtRelease, ""); err != nil {
-		return fmt.Errorf("github.Release: %w", err)
-	} else if refused != nil {
-		return *refused
-	}
-	// No fetch and no base-stale check: a stale local trunk strands nothing.
-	base, err := b.DefaultBranch(ctx)
-	if err != nil {
-		return fmt.Errorf("github.Release: resolve default branch: %w", err)
-	}
-	if refused, err := b.refuseOffBase(ctx, base, ""); err != nil {
-		return fmt.Errorf("github.Release: %w", err)
-	} else if refused != nil {
-		return *refused
 	}
 	// A DISPLACED arena — one whose item another arena under this same account
 	// took over with --force — is refused every other claim by the check at the
@@ -627,16 +652,100 @@ func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef) error {
 	// free while the taker runs it. So when the item names this account with an
 	// arena that is not ours, only the local lease file is cleared. Every other
 	// case — our own record, no record, a record naming no arena — proceeds.
+	//
+	// Displacement is BOTH halves: this arena's lease says it holds the item,
+	// and the item's record names a holder that is not this arena. The second
+	// half alone also describes the arena deliberately releasing somebody else's
+	// record by id — identical labels, opposite intent — and answering that by
+	// clearing the caller's own lease and reporting success is how #212's second
+	// shape would have been closed wrongly. Every caller that existed before
+	// addressed Release with its own active claim, so the first half held in all
+	// of them and requiring it narrows nothing that was reachable.
+	//
+	// "Not this arena" is a different account OR a different arena under this
+	// one. The take-over that displaces can be either, and an arena displaced
+	// across accounts is in exactly the same position as one displaced across
+	// arenas: release is its only exit, and the record is not its to dismantle.
 	issue, err := b.out.GetIssue(ctx, issueNum)
 	if err != nil {
 		return fmt.Errorf("github.Release: get issue %d: %w", issueNum, err)
 	}
-	if holder, fingerprint := b.holderFromLabels(labelNamesOf(issue.Labels)); holder.Account == owner &&
-		fingerprint != "" && fingerprint != b.arenaFingerprint() {
+	// The lease is read ONCE here, and every decision below that depends on it
+	// reads this answer rather than the file again. Two reads of one question
+	// are two chances to answer it differently, and the two consequences here
+	// are opposite: whether to refuse, and whether to DESTROY this arena's
+	// drafts and session. The error is kept rather than folded into "not ours",
+	// because the clearing at the bottom is not entitled to that reading.
+	names := labelNamesOf(issue.Labels)
+	activeNum, activeNamed, activeErr := b.activeIssue(ctx)
+	weHold := activeErr == nil && activeNamed && activeNum == issueNum
+	holder, fingerprint := b.holderFromLabels(names)
+	// "The record on this item is somebody else's" — ONE predicate, the SAME one
+	// Claim refuses on, read once here and used by both decisions below. A
+	// second comparison over the same labels would be a second source of truth
+	// for the same fact, free to drift from the one at the other end of the
+	// lease.
+	//
+	// It is the helper's weHoldIt argument that tells an owner label with NO
+	// arena label beside it — the record written before the arena half existed
+	// (docs/github-schema.md § Labels) — apart from a foreign one: it names no
+	// arena to differ from ours, so to the arena whose lease says it holds the
+	// item it is that arena's own record in the older spelling, and its owner
+	// half still has to come off.
+	foreignReason, recordIsForeign := b.heldByAnotherArena(names, owner, weHold)
+	if weHold && recordIsForeign {
 		if err := clistate.Clear(); err != nil {
 			return fmt.Errorf("github.Release: clear active claim file: %w", err)
 		}
 		return nil
+	}
+	// A record belonging to somebody else needs the override. Reaching here with
+	// recordIsForeign set means weHold is false — the displacement above already
+	// returned — so this is an arena addressing a record it never held.
+	//
+	// The reason it is refused at all: that arena's tree, drafts and session are
+	// not readable from here, so the two preconditions above cannot be evaluated
+	// against the arena the release would actually free — refusing is the honest
+	// answer, and --force is the operator saying they know what is there
+	// (docs/cli.md § Releasing).
+	if recordIsForeign && !slices.Contains(overrides, flow.OverrideAlreadyHeld) {
+		// The same code and the same fields Claim's refusal carries for this
+		// record, because it is the same comparison read at the other end of
+		// the lease. The ACT is the one difference: a release drops the record
+		// and takes nothing over, so it does not borrow Claim's "take over"
+		// wording — and the override line renders the flag.
+		return flow.ErrClaimRefused{
+			Code: "already-held", ItemScoped: true,
+			Reason: fmt.Sprintf("issue #%d %s — its arena's tree cannot be read from here, "+
+				"so the release preconditions cannot be checked", issueNum, foreignReason),
+			Override: "force",
+		}
+	}
+	// NOTHING TO DROP. The owner half is what says a lease was taken
+	// (docs/github-schema.md § Labels), so an item carrying none carries no
+	// claim record at all — and an arena whose own lease does not name the item
+	// either has nothing here that a release could take apart.
+	//
+	// It is refused rather than waved through, because proceeding would take
+	// this arena's ambient account off an item the flow never claimed: the
+	// assignee removal below addresses the account recorded ON THE ITEM, and
+	// with no record there it would fall back to ours and strip an assignment a
+	// person made by hand. `release <item-id>` is how a mistyped or stale id
+	// reaches an arbitrary item, so the answer has to be "there is nothing of
+	// yours here" and not a reported release that silently edited the tracker.
+	//
+	// No override: --force is for a record this arena cannot evaluate, and
+	// there is no record. Nothing is being kept from the operator.
+	//
+	// weHold is the whole of what separates this from the arena finishing a
+	// teardown that stopped part-way — that arena's lease still names the item,
+	// its labels are already gone, and the clearing below is what it came for.
+	if !weHold && holder.Account == "" {
+		return flow.ErrClaimRefused{
+			Code: "not-claimed", ItemScoped: true,
+			Reason: fmt.Sprintf("issue #%d carries no claim record, and this arena's lease does not "+
+				"name it — there is nothing to release", issueNum),
+		}
 	}
 	// The arena half comes off FIRST, and the order is the correctness of the
 	// pair — the two removals are separate requests, so one of them can be the
@@ -652,16 +761,51 @@ func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef) error {
 	// The rollback in Claim runs the same two removals the other way round for
 	// the same reason read from the other end: there the claim FAILED, so the
 	// state to leave is the one that reads free.
-	if err := b.out.RemoveLabel(ctx, issueNum, b.labels.Arena(b.arenaFingerprint())); err != nil && !isNotFound(err) {
+	//
+	// The three values come from the record ON THE ITEM rather than from this
+	// arena's own identity, because a forced release addresses a record that may
+	// be somebody else's. For this arena's own claim they are the same bytes, so
+	// the ordinary release is unchanged; for a foreign one they are the
+	// difference between taking the record apart and removing labels that were
+	// never there while leaving the ones that were.
+	releasedArena, releasedOwner := fingerprint, holder.Account
+	if releasedArena == "" {
+		releasedArena = b.arenaFingerprint()
+	}
+	if releasedOwner == "" {
+		releasedOwner = owner
+	}
+	if err := b.out.RemoveLabel(ctx, issueNum, b.labels.Arena(releasedArena)); err != nil && !isNotFound(err) {
 		return fmt.Errorf("remove arena label: %w", err)
 	}
 	// Left behind, the owner label makes the item read as held forever, and
 	// every other arena needs --force to touch it.
-	if err := b.out.RemoveLabel(ctx, issueNum, b.labels.Owner(string(owner))); err != nil && !isNotFound(err) {
+	if err := b.out.RemoveLabel(ctx, issueNum, b.labels.Owner(string(releasedOwner))); err != nil && !isNotFound(err) {
 		return fmt.Errorf("remove owner label: %w", err)
 	}
-	if err := b.out.RemoveAssignees(ctx, issueNum, []string{string(owner)}); err != nil && !isNotFound(err) {
+	if err := b.out.RemoveAssignees(ctx, issueNum, []string{string(releasedOwner)}); err != nil && !isNotFound(err) {
 		return fmt.Errorf("remove assignee: %w", err)
+	}
+	// clistate.Clear is ARENA-WIDE — it takes the lease file, the draft tree and
+	// the session with it — so it runs only when the lease can be read AND says
+	// this arena is either holding this item or holding nothing. Anything else
+	// would destroy the state of whatever this arena is part-way through, which
+	// is the "pay twice" the release refusals exist to prevent (docs/cli.md §
+	// Releasing, docs/resolution.md § Nothing is bought twice).
+	//
+	// A lease that cannot be READ is the case to be careful about, not the case
+	// to wave through. It does not mean the arena holds nothing: `.flow/draft/`
+	// and `.flow/session/` are separate files that a torn write to active.json
+	// leaves entirely intact, so an arena with an unreadable lease may be
+	// holding a resolution's whole reasoning. Releasing SOME OTHER item must not
+	// take that with it. Clearing an unreadable lease is the zero-ref release's
+	// job — reached deliberately, by an operator who asked for exactly that and
+	// is told what it did (#212).
+	if activeErr != nil {
+		return nil
+	}
+	if activeNamed && activeNum != issueNum {
+		return nil
 	}
 	if err := clistate.Clear(); err != nil {
 		return fmt.Errorf("github.Release: clear active claim file: %w", err)
@@ -715,6 +859,10 @@ func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef, d flow.Di
 			issueNum, status, flow.StatusTerminal, flow.ErrUnavailable)
 	}
 
+	// No override named, unlike Claim's and Release's calls: Finalize takes no
+	// overrides and ends in Release(ctx, ref, nil), so there is no flag that
+	// bypasses this one. Naming "force" here would point at a flag that does
+	// not reach it.
 	if refused, err := b.refuseDirtyTree(ctx, dirtyTreeRecoveryAtRelease, ""); err != nil {
 		return fmt.Errorf("github.Finalize: %w", err)
 	} else if refused != nil {
@@ -781,7 +929,7 @@ func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef, d flow.Di
 		}
 	}
 
-	return b.Release(ctx, ref)
+	return b.Release(ctx, ref, nil)
 }
 
 // LookupActiveClaim returns the claim THIS ARENA holds right now, or nil.

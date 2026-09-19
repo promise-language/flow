@@ -91,8 +91,10 @@ versus merely claimable (available) — so the answer to "would resolve pick
 this?" belongs in the listing.`},
 	"claim": {name: "claim", syntax: "<item-id>", summary: "acquire a claim on an item", runsGates: true,
 		detail: "Acquires a claim (lease) on <item-id> so this owner can advance it.\nTakes exactly one item id."},
-	"release": {name: "release", summary: "drop the active claim (refused while the worktree is dirty or off the base branch)",
-		detail: `Releases the claim currently held by this owner. Takes no arguments.
+	"release": {name: "release", syntax: "[<item-id>]", summary: "drop a claim (refused while the worktree is dirty or off the base branch)",
+		detail: `Releases the claim currently held by this owner. With <item-id>, releases the
+claim that item carries instead — the route to a record left behind by an arena
+that is gone, or by one this worktree no longer has a lease for.
 
 Releasing is the exception to the claim's lifetime, not a step in it: a claim
 binds item to worktree until the item is resolved, and it survives a park, a
@@ -101,9 +103,21 @@ next item, and it is REFUSED while the tree is dirty (untracked files included)
 or while HEAD is off the base branch — otherwise the work in the tree belongs to
 nobody afterwards, and the next claim starts on the last item's leftovers.
 
-There is no override. Commit the work to the item's branch or discard it, check
-out the base branch, then release. Nothing is deleted either way: the branch
-stays where it is.`},
+The ordinary way past a refusal is git: commit the work to the item's branch or
+discard it, check out the base branch, then release. Nothing is deleted either
+way — the branch stays where it is.
+
+  --force    release anyway (audited)
+
+--force is the OPERATOR's, for the emergencies a refusal cannot tell from
+ordinary work: an arena being decommissioned, a lease record nothing can read,
+a claim whose holding arena cannot be reached. It is also what a release by
+<item-id> needs when the item is held by another arena, because that arena's
+tree cannot be read from here at all. Nothing inside a resolution forces a
+release.
+
+A lease record this worktree cannot READ names no item: the bare form clears it
+and says so, and the ownership recorded on the item is left exactly as it is.`},
 	"reseed": {name: "reseed", syntax: "[--force]", summary: "clear the seed and start fresh",
 		detail: `Clears the active claim's artifact records, budget counters, and park
 state so the next run-step or resolve re-seeds from the current flow.

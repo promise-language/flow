@@ -66,7 +66,7 @@ func TestAgentSession_ReleaseLeavesNoRecord(t *testing.T) {
 	if err := b.SaveAgentSession(ctx, ref, flow.AgentSession{SessionID: "sess-1"}); err != nil {
 		t.Fatalf("SaveAgentSession: %v", err)
 	}
-	if err := b.Release(ctx, ref); err != nil {
+	if err := b.Release(ctx, ref, nil); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 	if got, err := b.LoadAgentSession(ctx, ref); got != (flow.AgentSession{}) || err != nil {

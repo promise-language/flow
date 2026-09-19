@@ -879,7 +879,37 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 	return c, nil
 }
 
-func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef) error {
+// Release relinquishes the lease. The overrides are accepted and ignored: this
+// double models no worktree, so it has neither of the two preconditions they
+// bypass, and it holds one arena, so there is no foreign record for
+// already-held to reach.
+//
+// A ZERO ref names no item and drops the arena's own record alone — the exit an
+// arena whose lease record cannot be parsed takes (docs/orchestrator.md §
+// Required surface → Release). Modelled here because it is a contract every
+// orchestrator answers, not a detail of the file the github one keeps.
+//
+// The arena's record is the lease AND the drafts AND the session, which
+// docs/orchestrator.md says go together. So the zero ref takes the same three
+// the ordinary release below takes; the one difference is that it names no item,
+// so the claim ON the item is left exactly where it is. A double that dropped
+// only the lease would hand the next claim a draft the release ended the life
+// of, which is the failure the ordinary release's comment already names.
+func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef, overrides []flow.ClaimOverride) error {
+	if len(ref.Ref) == 0 {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if b.active != nil {
+			if id, err := refID(b.active.ItemRef); err == nil {
+				if rec := b.items[id]; rec != nil {
+					rec.work = nil
+					rec.session = flow.AgentSession{}
+				}
+			}
+		}
+		b.active = nil
+		return nil
+	}
 	id, err := refID(ref)
 	if err != nil {
 		return err
@@ -1726,7 +1756,7 @@ func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef, d flow.Di
 	// A finished flow awaits nobody.
 	rec.awaits = flow.Awaits{}
 	b.mu.Unlock()
-	return b.Release(ctx, ref)
+	return b.Release(ctx, ref, nil)
 }
 
 // ---------------------------------------------------------------------------

@@ -515,13 +515,58 @@ func TestCmdResolve_UndetectableCapabilitiesHandNothingOff(t *testing.T) {
 	}
 }
 
+// recordingHandoffRelease lets the release through and keeps what it was
+// handed, for the one assertion nothing else can make: which overrides a
+// handoff carries.
+type recordingHandoffRelease struct {
+	*fake.Orchestrator
+	overrides []flow.ClaimOverride
+	called    bool
+}
+
+func (b *recordingHandoffRelease) Release(ctx context.Context, ref flow.ItemRef, ov []flow.ClaimOverride) error {
+	b.overrides, b.called = ov, true
+	return b.Orchestrator.Release(ctx, ref, ov)
+}
+
+// A handoff is an ORDINARY release. `--force` is the operator's emergency and
+// never a step's — "Nothing inside a resolution forces a release"
+// (docs/cli.md § Releasing) — so the overrides the handoff carries must be none
+// at all.
+//
+// Nothing else here can catch this. Every other double discards the argument,
+// so a handoff that quietly sent the three `--force` builds would pass the whole
+// suite while dropping a claim over a dirty tree and an off-base HEAD inside a
+// run — the orphaned work those two refusals exist to prevent, produced by the
+// one caller the document says may never ask for it.
+func TestCmdResolve_AHandoffReleasesWithNoOverrides(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	inner.SetCapabilities("", flow.CapPush, flow.CapMerge)
+	be := &recordingHandoffRelease{Orchestrator: inner}
+	app, errBuf := handoffTestAppCovering(t, be, "contributor")
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if !be.called {
+		t.Fatal("the handoff never released the claim, so this proves nothing about what it carried")
+	}
+	if len(be.overrides) != 0 {
+		t.Errorf("overrides = %v, want none: a resolution that forces its own release bypasses the "+
+			"two worktree preconditions from inside the run", be.overrides)
+	}
+}
+
 // refusingRelease lets everything else through but fails the release.
 type refusingRelease struct {
 	*fake.Orchestrator
 	err error
 }
 
-func (b *refusingRelease) Release(context.Context, flow.ItemRef) error { return b.err }
+func (b *refusingRelease) Release(context.Context, flow.ItemRef, []flow.ClaimOverride) error {
+	return b.err
+}
 
 // Dropping the claim is the promise a handoff makes. A release that fails stops
 // the run at exit 1 rather than reporting a handoff that did not happen.
@@ -580,8 +625,11 @@ func TestCmdResolve_ARefusedReleaseIsRenderedWithItsDetail(t *testing.T) {
 	if !strings.Contains(out, "\n  ?? scratch.md") {
 		t.Errorf("the detail is missing or not indented under the refusal; got %q", out)
 	}
+	// The renderer prints the override the backend sent and never invents one.
+	// This refusal carries none, so none is offered — a line pointing at a flag
+	// the refusal did not name is a signpost to an invocation that does nothing.
 	if strings.Contains(out, "override with") {
-		t.Errorf("offered an override for a release; nothing bypasses these checks. got %q", out)
+		t.Errorf("the renderer invented an override the refusal did not carry; got %q", out)
 	}
 	if n := strings.Count(out, "worktree has uncommitted or untracked changes"); n != 1 {
 		t.Errorf("the reason is printed %d times, want 1 — a repeat of it buries the detail; got %q", n, out)

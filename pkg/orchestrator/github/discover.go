@@ -564,27 +564,58 @@ func (b *Orchestrator) holderFromLabels(lblNames []string) (flow.Holder, string)
 // the documented break-glass and what #222 exists to make conditional.
 //
 // The reason is a clause naming the item's own state, without the issue number:
-// the caller has it, and prefixes it.
+// the caller has it, and prefixes it. It names no ACT either, because the act
+// differs by which end of the lease is asking — Claim offers taking the item
+// over, where Release is dropping the record and taking nothing — and one
+// wording for both is wrong at one of them.
 func (b *Orchestrator) heldByAnotherArena(lblNames []string, account flow.AccountId, weHoldIt bool) (reason string, held bool) {
 	holder, fingerprint := b.holderFromLabels(lblNames)
 	switch {
 	case holder.Account == "":
 		return "", false
 	case holder.Account != account:
-		return fmt.Sprintf("carries owner label for %s (use --force to take over)", holder.Account), true
+		return fmt.Sprintf("carries owner label for %s", holder.Account), true
 	case fingerprint == b.arenaFingerprint():
 		return "", false
 	case fingerprint != "":
 		return fmt.Sprintf(
-			"is held by another arena (%s) claiming as %s (use --force to take over)",
-			fingerprint, account), true
+			"is held by another arena (%s) claiming as %s", fingerprint, account), true
 	case weHoldIt:
 		return "", false
 	default:
 		return fmt.Sprintf(
-			"carries an owner label for %s but records no arena, and this arena does not hold it "+
-				"(use --force to take over)", account), true
+			"carries an owner label for %s but records no arena, and this arena does not hold it",
+			account), true
 	}
+}
+
+// activeIssue reads the lease file once and reports what it says, keeping the
+// three answers apart that "does this arena hold X?" collapses into two:
+//
+//	(n, true, nil)   — the lease names issue n
+//	(0, false, nil)  — the lease names nothing; this arena is free
+//	(0, false, err)  — the lease could not be READ, so the arena cannot say
+//
+// The third is the one callers must decide about rather than inherit. A reader
+// deciding what to OFFER may safely fold it into "not ours"; a caller deciding
+// what to DESTROY may not, because an arena that cannot say what it holds may
+// be holding a resolution's whole state (docs/resolution.md § Nothing is bought
+// twice). One read, and the error policy is chosen where the consequence is.
+func (b *Orchestrator) activeIssue(ctx context.Context) (int, bool, error) {
+	active, err := b.LookupActiveClaim(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	if active == nil {
+		return 0, false, nil
+	}
+	num, err := b.issueNumber(active.ItemRef)
+	if err != nil {
+		// A lease naming a ref this orchestrator cannot read as an issue number
+		// is a record it cannot act on — the same "cannot say" as a parse error.
+		return 0, false, err
+	}
+	return num, true, nil
 }
 
 // holdsItem answers "does this arena hold this item?" from the lease file —
@@ -597,12 +628,8 @@ func (b *Orchestrator) heldByAnotherArena(lblNames []string, account flow.Accoun
 // the claim closed on an unreadable lease rather than infer anything from it,
 // so it reads LookupActiveClaim itself.
 func (b *Orchestrator) holdsItem(ctx context.Context, issueNum int) bool {
-	active, err := b.LookupActiveClaim(ctx)
-	if err != nil || active == nil {
-		return false
-	}
-	activeNum, err := b.issueNumber(active.ItemRef)
-	return err == nil && activeNum == issueNum
+	num, named, err := b.activeIssue(ctx)
+	return err == nil && named && num == issueNum
 }
 
 // tagsOf reports EVERY label as a TagId — the operator's classification and

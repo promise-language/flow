@@ -741,3 +741,199 @@ func TestClearItemWorkIsIdempotent(t *testing.T) {
 		t.Errorf("second ClearItemWork = %v, want nil", err)
 	}
 }
+
+// The defect #212 is about, at its source: os.WriteFile truncates and then
+// writes, so a write cut off part-way leaves a zero-length or half-written file
+// where the lease was. That is not a lost update — it is a wedged worktree,
+// because Load then returns a parse error and every command that reads the
+// lease stops on it, release included.
+//
+// The property a temp-file-then-rename buys is exactly this one: a Save that
+// FAILS leaves the previous record readable.
+func TestSaveThatFailsLeavesThePreviousLeaseIntact(t *testing.T) {
+	dir := t.TempDir()
+	flowDir := filepath.Join(dir, ".flow")
+	t.Setenv("FLOW_DIR", flowDir)
+
+	first := flow.Claim{
+		OrchestratorName: "fake",
+		Arena:            flow.Arena{Host: "build01", Id: "/w/one"},
+		Account:          "alice",
+		ItemRef:          flow.ItemRef{OrchestratorName: "fake", Display: "test#1", Ref: json.RawMessage(`"1"`)},
+	}
+	if err := clistate.Save(first); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// A directory the temp file cannot be created in is the failure this can be
+	// provoked with; the real one is a crash or a full disk, which no test can
+	// arrange.
+	if err := os.Chmod(flowDir, 0o555); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(flowDir, 0o755) })
+	probe := filepath.Join(flowDir, "probe")
+	if err := os.WriteFile(probe, nil, 0o644); err == nil {
+		_ = os.Remove(probe)
+		t.Skip("this filesystem does not enforce directory permissions (running as root?), " +
+			"so the save cannot be made to fail")
+	}
+
+	second := first
+	second.ItemRef = flow.ItemRef{OrchestratorName: "fake", Display: "test#2", Ref: json.RawMessage(`"2"`)}
+	if err := clistate.Save(second); err == nil {
+		t.Fatal("Save must report a write it could not make")
+	}
+
+	// The whole point: the record is still THERE and still readable. Under
+	// os.WriteFile the file would have been truncated first, and this Load would
+	// return a parse error that nothing but a hand-deletion could clear.
+	got, err := clistate.Load()
+	if err != nil {
+		t.Fatalf("the failed Save destroyed the record it was replacing: %v", err)
+	}
+	if got == nil || got.ItemRef.Display != "test#1" {
+		t.Fatalf("Load = %+v, want the previous lease on test#1", got)
+	}
+}
+
+// A temp file left behind is litter in a directory the project must gitignore,
+// and on the lease path it would accumulate one per interrupted write.
+func TestSaveLeavesNoTemporaryFileBehind(t *testing.T) {
+	dir := t.TempDir()
+	flowDir := filepath.Join(dir, ".flow")
+	t.Setenv("FLOW_DIR", flowDir)
+
+	c := flow.Claim{
+		OrchestratorName: "fake",
+		Arena:            flow.Arena{Host: "build01", Id: "/w/one"},
+		Account:          "alice",
+		ItemRef:          flow.ItemRef{OrchestratorName: "fake", Display: "test#1", Ref: json.RawMessage(`"1"`)},
+	}
+	if err := clistate.Save(c); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := clistate.Save(c); err != nil {
+		t.Fatalf("second Save: %v", err)
+	}
+
+	entries, err := os.ReadDir(flowDir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != 1 || names[0] != "active.json" {
+		t.Errorf("%s holds %v, want active.json alone", flowDir, names)
+	}
+}
+
+// os.CreateTemp makes 0600. Without an explicit Chmod the rename would carry
+// that mode onto the lease file, changing it silently — so the mode is pinned
+// here rather than left to whichever call happens to create the file.
+func TestSaveKeepsTheLeaseFileMode(t *testing.T) {
+	dir := t.TempDir()
+	flowDir := filepath.Join(dir, ".flow")
+	t.Setenv("FLOW_DIR", flowDir)
+
+	if err := clistate.Save(flow.Claim{
+		OrchestratorName: "fake",
+		Arena:            flow.Arena{Host: "build01", Id: "/w/one"},
+		Account:          "alice",
+		ItemRef:          flow.ItemRef{OrchestratorName: "fake", Display: "test#1", Ref: json.RawMessage(`"1"`)},
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(flowDir, "active.json"))
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Errorf("mode = %v, want 0644", got)
+	}
+}
+
+// The success path above leaves no temp file because the rename consumed it.
+// The FAILURE path has to clear one deliberately, and it is the path that
+// matters: on the lease it would otherwise accumulate one temp file per
+// interrupted write, in a directory the project is required to gitignore and
+// that nothing else prunes.
+//
+// A rename onto a DIRECTORY is the failure that can be arranged portably: the
+// temp file is created, written, synced and closed, and only the last step
+// fails — which is the one branch the earlier tests cannot reach, since a
+// read-only directory stops the create before there is anything to clean up.
+func TestSaveThatFailsAtTheRenameLeavesNoTemporaryFile(t *testing.T) {
+	dir := t.TempDir()
+	flowDir := filepath.Join(dir, ".flow")
+	t.Setenv("FLOW_DIR", flowDir)
+
+	if err := os.MkdirAll(filepath.Join(flowDir, "active.json"), 0o755); err != nil {
+		t.Fatalf("put a directory where the lease file goes: %v", err)
+	}
+
+	err := clistate.Save(flow.Claim{
+		OrchestratorName: "fake",
+		Arena:            flow.Arena{Host: "build01", Id: "/w/one"},
+		Account:          "alice",
+		ItemRef:          flow.ItemRef{OrchestratorName: "fake", Display: "test#1", Ref: json.RawMessage(`"1"`)},
+	})
+	if err == nil {
+		t.Fatal("Save must report a write it could not make")
+	}
+
+	entries, rerr := os.ReadDir(flowDir)
+	if rerr != nil {
+		t.Fatalf("ReadDir: %v", rerr)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != 1 || names[0] != "active.json" {
+		t.Errorf("%s holds %v, want nothing but the target the rename could not replace — "+
+			"a temp file here is one per interrupted write, forever", flowDir, names)
+	}
+}
+
+// The temp file goes in the LEASE's own directory, which is what makes the
+// rename a rename. Staged anywhere else it is a cross-filesystem move — a copy,
+// which is the truncate-then-write this exists to avoid, and on most systems
+// not even that: os.Rename returns EXDEV and no lease can be written at all.
+// A checkout on a mounted volume with the system temp on the root disk, or a
+// container whose /tmp is a tmpfs, is exactly that arrangement.
+//
+// The other tests here cannot see it. They run where the two directories share
+// a filesystem, so a Save staged in the system temp renames cleanly and every
+// assertion still holds. Taking the process temp directory away is what tells
+// the two apart portably: a Save that never uses it does not notice.
+func TestSaveStagesBesideTheLeaseNotInTheProcessTempDirectory(t *testing.T) {
+	dir := t.TempDir()
+	flowDir := filepath.Join(dir, ".flow")
+	t.Setenv("FLOW_DIR", flowDir)
+
+	// Every variable os.TempDir() consults, pointed at nothing.
+	gone := filepath.Join(dir, "no-such-temp-dir")
+	for _, v := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(v, gone)
+	}
+
+	c := flow.Claim{
+		OrchestratorName: "fake",
+		Arena:            flow.Arena{Host: "build01", Id: "/w/one"},
+		Account:          "alice",
+		ItemRef:          flow.ItemRef{OrchestratorName: "fake", Display: "test#1", Ref: json.RawMessage(`"1"`)},
+	}
+	if err := clistate.Save(c); err != nil {
+		t.Fatalf("Save reached for the process temp directory: %v", err)
+	}
+	got, err := clistate.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got == nil || got.ItemRef.Display != "test#1" {
+		t.Fatalf("Load = %+v, want the lease that was just saved", got)
+	}
+}

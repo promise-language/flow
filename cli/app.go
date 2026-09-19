@@ -802,8 +802,9 @@ usage:
                                      additively extend one step's budget. <step-id> is the
                                      id from AddStep (e.g. "plan") — the first column of
                                      "status" — never the label (e.g. "write plan")
-  %[1]s release                      drop the active claim (refused while the worktree is dirty
-                                     or off the base branch)
+  %[1]s release [<item-id>]          drop the active claim (refused while the worktree is dirty
+                                     or off the base branch). With <item-id>, drops the claim
+                                     that item carries instead. --force overrides (audited).
   %[1]s reseed [--force]              clear seed state (artifacts, budgets, park) on the active claim
 
 answer, edit, remark, status, list, quota, grant, claim, run-step, and resolve print
