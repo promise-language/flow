@@ -98,6 +98,21 @@ type ghMock struct {
 	// the mock because it cannot be reached from outside one.
 	dropRepoLabelOnRead string
 
+	// refuseRepoLabelCreateStatus and refuseRepoLabelCreateBody answer a label
+	// creation that would otherwise SUCCEED with this status and body. The
+	// `already_exists` refusal below is served first and is untouched by them,
+	// because that one IS the exclusion: what these drive is every OTHER way a
+	// create can be refused — a validation failure that is not the name, a
+	// GitHub that is down — none of which may be read as somebody holding the
+	// mainline.
+	refuseRepoLabelCreateStatus int
+	refuseRepoLabelCreateBody   string
+
+	// failRepoLabelWrite answers the repository-label rewrite with 500, for the
+	// arena re-taking its own record against a GitHub that will not take the
+	// write.
+	failRepoLabelWrite bool
+
 	// comments
 	nextCommentID int64
 	comments      []ghMockComment
@@ -464,6 +479,14 @@ func (m *ghMock) server() *httptest.Server {
 				`{"resource":"Label","code":"already_exists","field":"name"}]}`)
 			return
 		}
+		// Served AFTER the name check, so a test driving another refusal still
+		// gets the real one where the name is genuinely taken.
+		if m.refuseRepoLabelCreateStatus != 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(m.refuseRepoLabelCreateStatus)
+			fmt.Fprint(w, m.refuseRepoLabelCreateBody)
+			return
+		}
 		m.repoLabels[body.Name] = body.Description
 		w.WriteHeader(http.StatusCreated)
 		writeJSON(w, map[string]any{"name": body.Name, "description": body.Description})
@@ -481,6 +504,10 @@ func (m *ghMock) server() *httptest.Server {
 			// conjured the name would make the exclusion takeable by a call
 			// that is not the create, and the mock would then be the only
 			// place two arenas could not both hold the mainline.
+			if m.failRepoLabelWrite {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
 			if _, ok := m.repoLabels[name]; !ok {
 				http.NotFound(w, r)
 				return

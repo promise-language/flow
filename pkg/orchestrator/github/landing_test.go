@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -518,6 +519,86 @@ func TestLanding_QueueIsFiledEvenWhenTheExclusionIsNeverTaken(t *testing.T) {
 	}
 }
 
+// THE FIGURE IS FILED THROUGH A CONTEXT OF ITS OWN, detached from the round's.
+//
+// The largest wait this is ever handed is the one the round's own deadline
+// produced while it sat in the queue — so a write made through that context
+// fails before it leaves, and the ledger comes out emptiest exactly where
+// contention was worst, which is the shape #435 records. The round's context is
+// already dead here, and the figure still lands.
+func TestLanding_QueueIsFiledThroughTheRoundsOwnDeadContext(t *testing.T) {
+	f := useFakeLanding(t)
+	f.waitFor = 9 * time.Minute
+	f.failWith = context.DeadlineExceeded
+	b, _, _ := landingBackend(t)
+	live := t.Context()
+
+	claim, err := b.Claim(live, b.refFromIssue(42), nil)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if err := b.RecordDispatch(live, claim.ItemRef, "merge"); err != nil {
+		t.Fatalf("RecordDispatch: %v", err)
+	}
+
+	// The round's context, already over — the state the queue left it in.
+	dead, cancel := context.WithCancel(live)
+	cancel()
+
+	w := landingWorktree(t, b)
+	if err := w.PrepareMergeResult(dead, "main"); err == nil {
+		t.Fatal("PrepareMergeResult = nil though the round gave up waiting")
+	}
+
+	state, err := b.Load(live, claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := state.Ledger.Row("merge").Waiting; got != 9*time.Minute {
+		t.Errorf("row.Waiting = %s, want 9m — the figure that says why the round gave up "+
+			"was filed through the context that ended it", got)
+	}
+}
+
+// THE FIGURE IS KEYED BY THE STEP THIS DISPATCH IS, which is the last one
+// RecordDispatch named. A round spans two dispatches — the merge-result
+// measurement and the land — so an orchestrator that noted the step once and
+// never again would file the land's queue against the measurement's row, and
+// the two rows are what a treasurer reads contention off.
+func TestLanding_QueueIsFiledAgainstTheLatestDispatch(t *testing.T) {
+	f := useFakeLanding(t)
+	f.waitFor = 6 * time.Minute
+	b, _, _ := landingBackend(t)
+	ctx := t.Context()
+
+	claim, err := b.Claim(ctx, b.refFromIssue(42), nil)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	for _, step := range []flow.StepId{"verify merge result", "merge"} {
+		if err := b.RecordDispatch(ctx, claim.ItemRef, step); err != nil {
+			t.Fatalf("RecordDispatch(%s): %v", step, err)
+		}
+	}
+
+	w := landingWorktree(t, b)
+	if err := w.Merge(ctx, "https://github.com/o/r/pull/1"); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+
+	state, err := b.Load(ctx, claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := state.Ledger.Row("merge").Waiting; got != 6*time.Minute {
+		t.Errorf("row.Waiting on merge = %s, want 6m", got)
+	}
+	if got := state.Ledger.Row("verify merge result").Waiting; got != 0 {
+		t.Errorf("row.Waiting on verify merge result = %s, want zero — "+
+			"the land's queue was charged to the measurement's row", got)
+	}
+}
+
 // Nothing dispatched this in this process — a caller driving the worktree
 // surface directly — so there is no row to key the figure by. The round still
 // happens; inventing a step would file contention against one that never ran.
@@ -851,6 +932,125 @@ func TestTakeLanding_CollectsAnUnreadableRecord(t *testing.T) {
 	hold.release()
 }
 
+// WHAT THE HOLDER ASKS BEFORE IT MERGES is whether the record is still its
+// own, and every answer that is not yes is a refusal. This is the backstop that
+// keeps a collection from costing a wrong landing, so the cases that are NOT a
+// peer's fingerprint matter as much as the one that is: a confirm that said yes
+// to a record that is absent, or to one nothing can read, would let a round
+// land on the strength of a record nobody wrote.
+func TestLandingHold_ConfirmRefusesEveryRecordButItsOwn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// reseed replaces the record after the hold was taken, and reports
+		// whether the confirm should pass.
+		reseed func(m *ghMock, a, bb *Orchestrator)
+		want   bool
+		// transient marks the refusals that say nothing about the change, so
+		// the work comes back to re-measure rather than being judged unfit.
+		transient bool
+	}{
+		{
+			name:   "still this arena's",
+			reseed: func(*ghMock, *Orchestrator, *Orchestrator) {},
+			want:   true,
+		},
+		{
+			name: "collected and re-taken by a peer",
+			reseed: func(m *ghMock, _, bb *Orchestrator) {
+				m.repoLabels["flow:landing"] = renderLandingHolder(bb.arenaFingerprint(), nowUTC())
+			},
+			transient: true,
+		},
+		{
+			name: "collected and taken by nobody",
+			reseed: func(m *ghMock, _, _ *Orchestrator) {
+				delete(m.repoLabels, "flow:landing")
+			},
+			transient: true,
+		},
+		{
+			name: "overwritten with something nothing can read",
+			reseed: func(m *ghMock, _, _ *Orchestrator) {
+				m.repoLabels["flow:landing"] = "not a record"
+			},
+			transient: true,
+		},
+		{
+			// No assertion on the KIND of refusal here: what matters is that a
+			// holder which could not find out refuses, because the alternative
+			// is landing on a question nobody answered.
+			name: "a GitHub that will not say",
+			reseed: func(m *ghMock, _, _ *Orchestrator) {
+				m.failRepoLabelRead = true
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, bb, mock := twoLandingArenas(t)
+			hold, _, err := takeLanding(t.Context(), a, a.arena())
+			if err != nil {
+				t.Fatalf("takeLanding: %v", err)
+			}
+			mock.mu.Lock()
+			tc.reseed(mock, a, bb)
+			mock.mu.Unlock()
+
+			err = hold.confirm(t.Context())
+			if tc.want {
+				if err != nil {
+					t.Fatalf("confirm = %v over this arena's own record, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("confirm = nil though the record is no longer this arena's — the round would land unserialized")
+			}
+			if tc.transient && !errors.Is(err, flow.ErrUnavailable) {
+				t.Errorf("confirm = %v, want it to read as transient: nothing about the change was found wanting", err)
+			}
+		})
+	}
+}
+
+// A ROUND THAT IS NOT OPEN CANNOT BE CONFIRMED, and the honest answer is the
+// same refusal. Nothing establishes this arena may land, and the one way to
+// reach here is that something ended the round in between — an arena that has
+// stopped is exactly an arena that may not land.
+func TestConfirmLanding_RefusesWhenNoRoundIsOpen(t *testing.T) {
+	b, _, _ := landingBackend(t)
+	err := b.confirmLanding(t.Context())
+	if err == nil {
+		t.Fatal("confirmLanding = nil with no round open; nothing had established this arena may land")
+	}
+	if !errors.Is(err, flow.ErrUnavailable) {
+		t.Errorf("err = %v, want it to read as transient", err)
+	}
+}
+
+// A RELEASE THAT CANNOT READ THE RECORD GIVES BACK NOTHING. It cannot establish
+// what is there is still its own, and a delete on a guess is the one outcome
+// worse than a record the bound will collect: the round that holds the mainline
+// now would lose it to a third arena while it is still inside its own.
+func TestLandingReleaser_LeavesARecordItCannotReadAlone(t *testing.T) {
+	a, _, mock := twoLandingArenas(t)
+	hold, _, err := takeLanding(t.Context(), a, a.arena())
+	if err != nil {
+		t.Fatalf("takeLanding: %v", err)
+	}
+	mock.mu.Lock()
+	mock.failRepoLabelRead = true
+	mock.mu.Unlock()
+
+	hold.release()
+
+	mock.mu.Lock()
+	_, stillThere := mock.repoLabels["flow:landing"]
+	mock.mu.Unlock()
+	if !stillThere {
+		t.Error("the release deleted a record it could not read; it cannot tell its own from the round that took over")
+	}
+}
+
 // A RELEASE NEVER TAKES SOMEBODY ELSE'S. A round that overran its bound has
 // already been collected, and whoever holds the mainline now is landing under
 // it — deleting that would put two arenas inside one round.
@@ -882,6 +1082,116 @@ func TestTakeLanding_RefusesAnUnnameableArena(t *testing.T) {
 	a, _, _ := twoLandingArenas(t)
 	if _, _, err := takeLanding(t.Context(), a, flow.Arena{}); err == nil {
 		t.Fatal("takeLanding = nil for an arena that cannot name itself")
+	}
+}
+
+// ONLY ONE REFUSAL MEANS SOMEBODY HOLDS THE MAINLINE, and every other one is
+// an error the take reports at once.
+//
+// This is what `already_exists` is read by its CODE for. 422 is shared with
+// refusals that must stay errors — a name too long, a colour that will not
+// parse — and a take that read the status alone would queue behind a name it
+// can never create, for as long as anyone let it run, reporting contention on
+// a repository where nothing is contending.
+//
+// The assertion is that the take came back, not merely that it failed: a take
+// that queued would also end in an error, and the error it ends in is the
+// deadline.
+func TestTakeLanding_ACreateRefusedForAnythingButTheNameIsAnError(t *testing.T) {
+	const otherValidationFailure = `{"message":"Validation Failed","errors":[` +
+		`{"resource":"Label","code":"invalid","field":"color"}]}`
+
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		// seed puts a record in the way, so the create that meets the refusal
+		// is the one INSIDE the queue loop rather than the first attempt. The
+		// two are separate calls, and a refusal read wrongly at either one
+		// hangs the round.
+		seed func(a, bb *Orchestrator) string
+	}{
+		{
+			name:   "a validation failure that is not the name, at the first attempt",
+			status: http.StatusUnprocessableEntity,
+			body:   otherValidationFailure,
+		},
+		{
+			name:   "a validation failure that is not the name, after collecting a dead record",
+			status: http.StatusUnprocessableEntity,
+			body:   otherValidationFailure,
+			seed: func(_, bb *Orchestrator) string {
+				return renderLandingHolder(bb.arenaFingerprint(), nowUTC().Add(-24*time.Hour))
+			},
+		},
+		{
+			name:   "a GitHub that will not take the write, at the first attempt",
+			status: http.StatusInternalServerError,
+			body:   `{"message":"boom"}`,
+		},
+		{
+			name:   "a GitHub that will not take the write, after collecting a dead record",
+			status: http.StatusInternalServerError,
+			body:   `{"message":"boom"}`,
+			seed: func(_, bb *Orchestrator) string {
+				return renderLandingHolder(bb.arenaFingerprint(), nowUTC().Add(-24*time.Hour))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, bb, mock := twoLandingArenas(t)
+			mock.mu.Lock()
+			mock.repoLabels = map[string]string{}
+			if tc.seed != nil {
+				mock.repoLabels["flow:landing"] = tc.seed(a, bb)
+			}
+			mock.refuseRepoLabelCreateStatus = tc.status
+			mock.refuseRepoLabelCreateBody = tc.body
+			mock.mu.Unlock()
+
+			prevPoll := landingPoll
+			landingPoll = time.Millisecond
+			defer func() { landingPoll = prevPoll }()
+			ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+			defer cancel()
+
+			_, _, err := takeLanding(ctx, a, a.arena())
+			if err == nil {
+				t.Fatal("takeLanding = nil though the create was refused")
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("the take queued behind a refusal that is not the name being taken (%v); "+
+					"it can never create this label and would wait for as long as it is given", err)
+			}
+		})
+	}
+}
+
+// A REWRITE THAT FAILS IS AN ERROR, NOT A QUEUE. The only refusal the re-take
+// may go on from is the record being gone, which is a create again. Anything
+// else left to fall through would meet its own record on the create, be told
+// the name is taken, and queue behind itself until the round ran out of time.
+func TestTakeLanding_ARewriteRefusedIsAnErrorAndNotAQueue(t *testing.T) {
+	a, _, mock := twoLandingArenas(t)
+	mock.mu.Lock()
+	mock.repoLabels = map[string]string{
+		"flow:landing": renderLandingHolder(a.arenaFingerprint(), nowUTC()),
+	}
+	mock.failRepoLabelWrite = true
+	mock.mu.Unlock()
+
+	prevPoll := landingPoll
+	landingPoll = time.Millisecond
+	defer func() { landingPoll = prevPoll }()
+	ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+	defer cancel()
+
+	_, _, err := takeLanding(ctx, a, a.arena())
+	if err == nil {
+		t.Fatal("takeLanding = nil though this arena's own record could not be rewritten")
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("the take queued behind its OWN record (%v); nothing else was ever going to release it", err)
 	}
 }
 
