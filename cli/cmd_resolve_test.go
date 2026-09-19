@@ -139,6 +139,31 @@ func (b *failingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, overr
 	return flow.Claim{}, b.claimErr
 }
 
+// loadFailsAfterClaimBackend fails every Load taken once the claim has been
+// taken — the loop's peek and RunOne's own read — while leaving the reads the
+// claim itself needs intact. Gated on the claim rather than on a call count so
+// the fixture does not have to know how many reads precede the loop.
+type loadFailsAfterClaimBackend struct {
+	*fake.Orchestrator
+	claimed bool
+	err     error
+}
+
+func (b *loadFailsAfterClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, overrides []flow.ClaimOverride) (flow.Claim, error) {
+	c, err := b.Orchestrator.Claim(ctx, ref, overrides)
+	if err == nil {
+		b.claimed = true
+	}
+	return c, err
+}
+
+func (b *loadFailsAfterClaimBackend) Load(ctx context.Context, ref flow.ItemRef) (*flow.Item, error) {
+	if b.claimed {
+		return nil, b.err
+	}
+	return b.Orchestrator.Load(ctx, ref)
+}
+
 // resolvingFailingListBackend implements flow.RefResolver (so the explicit-id
 // path takes the fast lane and never hits ListEligible) AND forces
 // ListEligible to error — together they prove the explicit-id branch of
@@ -2131,6 +2156,172 @@ func TestCmdResolve_PacingIsDecidedForEachPendingStep(t *testing.T) {
 	}
 	if strings.Contains(output[planAt:branchAt], "pacing — waiting") {
 		t.Errorf("a pacing wait sits between the agent step and the mechanical one; got:\n%s", output)
+	}
+	// And none after the last step either. The iteration that finalizes has no
+	// pending step at all, so it dispatches nothing and can spend nothing —
+	// two reads for the whole resolution, both the agent step's, and no third.
+	if finalizeAt := strings.Index(output, "no step eligible — finalizing…"); finalizeAt < 0 {
+		t.Fatalf("the run never reached the finalize pass; got:\n%s", output)
+	}
+	if strings.Contains(output[branchAt:], "pacing — waiting") {
+		t.Errorf("the finalize pass waited for quota headroom it cannot spend; got:\n%s", output)
+	}
+	if quotaReads != 2 {
+		t.Errorf("quota read %d times over the whole resolution, want 2 — only the agent step pays for a reading", quotaReads)
+	}
+}
+
+// AN ITERATION THAT DISPATCHES NOTHING IS NOT PACED. `Mechanical()` answers
+// "dispatching this step invokes no agent" for a step that declared it; an
+// iteration with no step to have declared anything is in the same class and
+// further along it — RunOne's three pre-dispatch exits invoke no agent because
+// they never reach a dispatch. Every completed resolution ends on one of them,
+// so pacing that pass withholds the item's terminal status — and everything a
+// scheduler does on seeing it — against spend the pass cannot make
+// (docs/cli.md § Resolving).
+func TestCmdResolve_AnIterationThatDispatchesNothingIsNotPaced(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		build    func(t *testing.T) (*App, *bytes.Buffer)
+		wantCode int
+		narrates string
+	}{
+		{
+			// The finalize pass — the iteration every completed resolution ends
+			// with. The step before it is mechanical so that NOTHING in the run
+			// has a reason to consult the quota: any reading at all is this
+			// pass's.
+			name: "the finalize pass",
+			build: func(t *testing.T) (*App, *bytes.Buffer) {
+				be := fake.New()
+				be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+				app, _, errBuf := resolveTestAppPrompts(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+					return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+				}, flow.PromptsNone)
+				return app, errBuf
+			},
+			narrates: "no step eligible — finalizing…",
+		},
+		{
+			// Outside the remit: RunOne blocks without dispatching, and the
+			// peek knows it from inRemit — before the pacing block, not after.
+			name: "an item outside the remit",
+			build: func(t *testing.T) (*App, *bytes.Buffer) {
+				be := fake.New()
+				be.AddItem("1", flow.Item{Type: "chore", Title: "1"}) // the fixture's flow accepts "task"
+				app, _, errBuf := resolveTestApp(t, be)
+				return app, errBuf
+			},
+			wantCode: 1, // a condition somebody must clear
+			narrates: "no flow accepts this item's type…",
+		},
+		{
+			// The remit's finalized exemption: the item is outside the remit
+			// AND takes the finalize path rather than the block. Either way
+			// nothing is dispatched, so the pacing verdict is the same.
+			name: "a finalized item outside the remit",
+			build: func(t *testing.T) (*App, *bytes.Buffer) {
+				be := fake.New()
+				be.AddItem("1", flow.Item{Type: "chore", Title: "1", Finalized: true})
+				be.SetStatus("1", flow.StatusTerminal, "completed")
+				app, _, errBuf := resolveTestApp(t, be)
+				return app, errBuf
+			},
+			narrates: "finalized ✓",
+		},
+		{
+			// Waiting on unfinished items: RunOne stops clean before dispatch,
+			// through the very predicate the peek reads.
+			name: "an item waiting on unfinished items",
+			build: func(t *testing.T) (*App, *bytes.Buffer) {
+				be := fake.New()
+				be.AddItem("1", flow.Item{Type: "task", Title: "waits"})
+				be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
+				item, err := be.ResolveRef(t.Context(), "1")
+				if err != nil {
+					t.Fatalf("ResolveRef: %v", err)
+				}
+				blocker, err := be.ResolveRef(t.Context(), "2")
+				if err != nil {
+					t.Fatalf("ResolveRef: %v", err)
+				}
+				blockOn(t, be, item, blocker)
+				app, _, errBuf := resolveTestApp(t, be)
+				return app, errBuf
+			},
+			wantCode: 1, // a condition somebody must clear
+			narrates: "waits on unfinished dependencies — not dispatching",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, errBuf := tc.build(t)
+			quotaReads := 0
+			// The reading the pacing tests above use: a window all but spent
+			// with almost none of it elapsed, so every read forces a (short)
+			// real wait and a consulted quota is visible twice over — as a read
+			// and as a pacing line. Just under 1.0, so this is pacing rather
+			// than the exhausted-window park.
+			app.Quota = func() ([]windowUsage, error) {
+				quotaReads++
+				return []windowUsage{{
+					Label:    "5h",
+					Length:   time.Second,
+					Used:     0.99,
+					ResetsAt: time.Now().Add(30 * time.Millisecond),
+				}}, nil
+			}
+
+			code := app.cmdResolve(context.Background(), []string{"1"})
+			if code != tc.wantCode {
+				t.Fatalf("exit code = %d, want %d; err=%q", code, tc.wantCode, errBuf.String())
+			}
+			output := errBuf.String()
+			// The pass under test actually happened — without this the
+			// assertions below would pass on a run that never got there.
+			if !strings.Contains(output, tc.narrates) {
+				t.Fatalf("the run never reached the pass under test (%q); got:\n%s", tc.narrates, output)
+			}
+			if quotaReads != 0 {
+				t.Errorf("quota read %d times, want 0 — a pass that dispatches nothing cannot spend, so the wait is skipped entirely", quotaReads)
+			}
+			if strings.Contains(output, "pacing — waiting") {
+				t.Errorf("a pass that dispatches nothing waited for quota headroom; got:\n%s", output)
+			}
+		})
+	}
+}
+
+// A FAILED PEEK IS NOT A PASS THAT DISPATCHES NOTHING. The peek is best-effort,
+// so a read that fails leaves it knowing nothing — and not knowing is not the
+// same as knowing no dispatch is coming. RunOne re-derives and may well
+// dispatch, so the run paces exactly as it did before rather than letting a
+// transient read error silently disable the wait.
+func TestCmdResolve_AnUnreadablePeekStillPaces(t *testing.T) {
+	be := &loadFailsAfterClaimBackend{Orchestrator: fake.New(), err: errors.New("backend unreachable")}
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	app, _, errBuf := resolveTestApp(t, be)
+	quotaReads := 0
+	app.Quota = func() ([]windowUsage, error) {
+		quotaReads++
+		return []windowUsage{{
+			Label:    "5h",
+			Length:   time.Second,
+			Used:     0.99,
+			ResetsAt: time.Now().Add(30 * time.Millisecond),
+		}}, nil
+	}
+
+	// RunOne's own load fails too — a peek that cannot read is a run that
+	// cannot advance — so the run ends on the condition, AFTER the wait.
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1 — the advance could not load the item; err=%q", code, errBuf.String())
+	}
+	output := errBuf.String()
+	if quotaReads != 1 {
+		t.Errorf("quota read %d times, want 1 — an unreadable peek paces as before", quotaReads)
+	}
+	if !strings.Contains(output, "pacing — waiting") {
+		t.Errorf("an unreadable peek skipped the wait, reporting as certain what it could not read; got:\n%s", output)
 	}
 }
 
