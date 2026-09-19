@@ -1316,6 +1316,23 @@ func (sc *stepCtx) axisReports() []flow.AxisReport {
 // pre-handler snapshot and the step's WriteContract. Returns an empty string
 // when the contract holds, or a violation reason string.
 //
+// ALL THREE COMPARISONS ARE DIFFERENTIAL. `Writes` is what the step may do to
+// the worktree WHILE IT RUNS, "checked after the step runs against what actually
+// happened" (docs/flow-registration.md § Step configuration,
+// docs/resolution.md § Steps and the worktree) — so each clause asks what THIS
+// step did, never what state the tree happens to be in. A step handed a dirty
+// tree that added nothing to it edited nothing, and reporting it as having
+// violated a contract it kept makes a refusal-driven handoff unbuildable: the
+// refusal is what left the tree dirty, and this check runs before the election
+// the step made in response is ever looked at.
+//
+// The boolean is the honest reading of MayEditTree and not a weaker stand-in for
+// the gate contract's CapturePatch comparison (docs/orchestrator.md). That one
+// answers a different question — a gate must leave the tree THE SAME, and may
+// not commit — and it does not transfer: CapturePatch diffs against HEAD, so a
+// step declaring MayCommit that commits inherited work moves HEAD, changes the
+// patch, and would be reported as having edited a tree it only recorded.
+//
 // Uses the parent ctx (not stepCtx) for the post-handler reads, since the
 // step's deadline may have been consumed.
 func checkWriteContract(ctx context.Context, wt flow.Worktree, snap *writeSnapshot, wc flow.WriteContract) string {
@@ -1335,10 +1352,14 @@ func checkWriteContract(ctx context.Context, wt flow.Worktree, snap *writeSnapsh
 			return fmt.Sprintf("commit moved: was %.12s, now %.12s", snap.commitSHA, sha)
 		}
 	}
-	if !wc.MayEditTree {
+	// A tree that was ALREADY dirty when the step was handed it has nothing to
+	// measure: whatever the step did, it did not turn a clean tree dirty, and
+	// that is the only thing MayEditTree forbids. So the read is skipped
+	// outright rather than taken and discarded.
+	if !wc.MayEditTree && !snap.dirty {
 		dirty, err := wt.IsDirty(ctx)
 		if err == nil && dirty {
-			return "tree has uncommitted changes to tracked files"
+			return "left uncommitted changes to tracked files in a tree it was handed clean"
 		}
 	}
 	return ""
@@ -1498,6 +1519,7 @@ func invocationID() string {
 type writeSnapshot struct {
 	branch    flow.BranchName
 	commitSHA flow.CommitSha
+	dirty     bool // tracked files were already changed when the step was handed the tree
 }
 
 // stepCtx is the concrete StepCtx the orchestrator hands to handlers. It
@@ -1979,11 +2001,17 @@ func (s *stepCtx) acquireWorktree() (flow.Worktree, error) {
 // snapshotWrites takes the write-contract snapshot, once per dispatch and only
 // before the handler runs.
 //
-// If either read fails, writeSnap stays nil — fail-open on an infrastructure
-// error, since the handler has not run yet — and the attempt is NOT repeated:
-// a second attempt could only succeed later, and a snapshot taken mid-handler
-// would judge the contract against a state the handler itself had already
-// changed.
+// If any of the three reads fails, writeSnap stays nil — fail-open on an
+// infrastructure error, since the handler has not run yet — and the attempt is
+// NOT repeated: a second attempt could only succeed later, and a snapshot taken
+// mid-handler would judge the contract against a state the handler itself had
+// already changed.
+//
+// All or nothing, and that is the rule already in force rather than a new one:
+// a failed branch read has always disabled the commit comparison too. The
+// snapshot is ONE measurement of the state the step was handed, and a half-taken
+// one would judge one clause of the contract against a recorded state and
+// another against nothing.
 func (s *stepCtx) snapshotWrites() {
 	if s.writeSnapTaken || s.worktree == nil {
 		return
@@ -1991,8 +2019,9 @@ func (s *stepCtx) snapshotWrites() {
 	s.writeSnapTaken = true
 	branch, berr := s.worktree.CurrentBranch(s.ctx)
 	sha, serr := s.worktree.RevParse(s.ctx, flow.HeadRevision)
-	if berr == nil && serr == nil {
-		s.writeSnap = &writeSnapshot{branch: branch, commitSHA: sha}
+	dirty, derr := s.worktree.IsDirty(s.ctx)
+	if berr == nil && serr == nil && derr == nil {
+		s.writeSnap = &writeSnapshot{branch: branch, commitSHA: sha, dirty: dirty}
 	}
 }
 
