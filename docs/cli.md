@@ -146,6 +146,12 @@ Process identity is checked, not just process existence — a process identifier
 
 `status` never starts, stops, or modifies anything. It reports.
 
+`status` also reports the item's **questions** — every one asked, each with its identifier, its text, and whether it has been answered.
+
+That is where the identifier `answer --question` takes comes from. A command that requires an id, alongside no command that produces one, is a command an operator cannot use without reading the store by hand — and reading the store by hand is what every one of these commands exists to make unnecessary.
+
+Answered questions stay listed. A question leaves the pending set by being answered, not by being removed, so the record of what was asked survives the answering, and an operator can see what a step wanted to know as well as what it was told.
+
 ### Why this is required
 
 A step can run for many minutes. Without this, an operator has no way to distinguish a long-running step from a stalled one, or from one that never started — and the only command whose job is to answer "what is happening?" cannot answer it. Nothing else reports it either: the narration from a running command is visible only in the terminal that launched it, and is gone from any other.
@@ -179,6 +185,10 @@ Both directions of getting this wrong are the same mistake. A marker that outliv
 Answering does not resume the item. Resumption is a separate, deliberate act — `resolve` or `run-step` — because somebody has to decide the answer is complete and the work should continue.
 
 If the item has more than one outstanding question, the one being answered is named explicitly. Answering is never applied to an unspecified question.
+
+The identifier comes from `status`, which lists the item's questions and which of them are still waiting.
+
+**A park that registered no question is still answerable.** The kind says a human must answer, and whether the asking step managed to register its question is not something the answerer can see or fix. With the item parked `question` and no question recorded at all, `answer` takes the park's own question as the one being answered, registers it so the answer has a question to be recorded against, and records the answer there. Nothing else changes: the question is thereafter listed by `status`, the outstanding-question marker clears with the last pending question, and resumption stays the separate deliberate act it is.
 
 ## Editing an item
 

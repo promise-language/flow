@@ -143,12 +143,16 @@ reach for: no item id, no question id to copy from anywhere.
 The item id is optional: it is needed only when this arena holds no claim, or
 to name a different item. An explicit id always wins.
 
-  --question ID   which question to answer (required when several are pending)
+  --question ID   which question to answer (required when several are pending).
+                  status lists the item's questions and their ids.
   --answered      print the whole history, not only the outstanding question
 
 Piped rather than on a terminal, or rendering JSON, the bare form prints every
 question and its answer and never waits for input. Answering does not resume
-the item — that is a separate, deliberate act (resolve or run-step).`},
+the item — that is a separate, deliberate act (resolve or run-step).
+
+An item parked on a question that registered none is still answerable: the
+park's own question is the one you answer, and answering registers it.`},
 
 	"edit": {name: "edit", syntax: "<item-id> <change>…", summary: "change the item itself — title, body, tags, dependencies, priority, urgency",
 		detail: `Changes the item, rather than the flow's record of working on it.
