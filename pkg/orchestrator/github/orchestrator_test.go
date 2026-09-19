@@ -2704,10 +2704,12 @@ func TestBackend_Claim_AStatusFailureIsAnErrorNotARefusal(t *testing.T) {
 }
 
 // OverrideDirtyTree alone does not carry the base checks with it: the operator
-// overrode the tree deliberately, and HEAD is still answered on its own. The
-// complement of TestBackend_Claim_OverrideStaleBaseStillChecksDirtyTree, which
-// matters more now that the two blocks are adjacent — collapsing them into one
-// predicate would pass that test and fail this one.
+// overrode the tree deliberately, and HEAD is still answered on its own.
+// TestBackend_Claim_OverrideDirtyTreeStillChecksStaleBase already says that of
+// the block's LAST check; this says it of its FIRST, which is the one the
+// override now sits directly in front of — a dirty tree reaching the base
+// checks at all is only reachable this way, and it is the one arm where the
+// checkout the ordering exists to suppress is still printed.
 func TestBackend_Claim_OverrideDirtyTreeStillChecksTheBranch(t *testing.T) {
 	b, _, rec := newClaimPrecondBackend(t)
 	scriptCleanWorktree(rec)
@@ -3004,6 +3006,21 @@ func TestBackend_Release_RefusesADirtyTree(t *testing.T) {
 	}
 	if refused.Override != "" {
 		t.Errorf("Override = %q, want none: nothing bypasses a release precondition", refused.Override)
+	}
+	// The act it names is the one the normative documents name, and NOT the
+	// stash the claim-side refusal offers. "commit the work to the item's branch
+	// or discard it … That is the moment somebody decides what happens to the
+	// work, instead of it becoming nobody's" (docs/orchestrator.md § Required
+	// surface → `Release`, docs/cli.md § Releasing). A stash is what that rules
+	// out: work no item holds and no branch carries — the orphaning this
+	// refusal exists to prevent — and an operator who took it would hand the
+	// item on with an empty branch where its work used to be.
+	if !strings.Contains(refused.Reason, "commit them to the item's branch") ||
+		!strings.Contains(refused.Reason, "discard them") {
+		t.Errorf("Reason = %q, want the way past a refused release the documents name", refused.Reason)
+	}
+	if strings.Contains(refused.Reason, "stash") {
+		t.Errorf("Reason names a stash at a release: %q", refused.Reason)
 	}
 	// What StatusPorcelain returns, which is the porcelain with the surrounding
 	// whitespace trimmed — the seam's own long-standing behaviour, asserted here

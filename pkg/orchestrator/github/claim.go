@@ -163,7 +163,7 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 	// also spares the fetch on a tree that was going to be refused anyway.
 	if !slices.Contains(overrides, flow.OverrideDirtyTree) {
 		// 1. Tree must be clean, including untracked files.
-		if refused, err := b.refuseDirtyTree(ctx, "force"); err != nil {
+		if refused, err := b.refuseDirtyTree(ctx, dirtyTreeRecoveryAtClaim, "force"); err != nil {
 			return flow.Claim{}, err
 		} else if refused != nil {
 			return flow.Claim{}, *refused
@@ -228,9 +228,9 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 	}
 	// The already-held comparison AGAIN, on the re-read — and it is the one
 	// that decides, because the preflight's is stale by the time the lease is
-	// taken. Between the two reads sit the worktree preconditions, and the
-	// first of those is `git fetch origin`: the window is seconds wide on a
-	// real repository, not the two API calls the token race is sized for.
+	// taken. Between the two reads sit the worktree preconditions, and one of
+	// those is `git fetch origin`: the window is seconds wide on a real
+	// repository, not the two API calls the token race is sized for.
 	//
 	// An arena that finished its own claim inside that window leaves a record
 	// this settle cannot see — the race settles among flow:claim:* tokens only,
@@ -475,6 +475,31 @@ func (b *Orchestrator) refuseOffBase(ctx context.Context, base flow.BranchName, 
 	}, nil
 }
 
+// The act each dirty-tree refusal names. Two, because the tree means different
+// things at the two ends of the lease and the same sentence cannot be right at
+// both.
+const (
+	// At a CLAIM the tree holds whatever was in the arena before this item, and
+	// setting it aside is safe: it is going somewhere the operator can get it
+	// back from, and the item that is about to be claimed has no relationship to
+	// it. Spelled --include-untracked because untracked files count towards this
+	// refusal, and a stash that left them behind would not clear it.
+	dirtyTreeRecoveryAtClaim = "commit them, or set them aside with: git stash push --include-untracked"
+
+	// At a RELEASE — and at the release Finalize ends with — the tree holds the
+	// ITEM's own work, and the two normative documents name the way past
+	// deliberately and identically: "commit the work to the item's branch or
+	// discard it, return to the base, release. That is the moment somebody
+	// decides what happens to the work, instead of it becoming nobody's"
+	// (docs/orchestrator.md § Required surface → `Release`, docs/cli.md
+	// § Releasing). A stash is exactly what those two rule out — work no item
+	// holds and no branch carries, which is the orphaned state this refusal
+	// exists to prevent — and naming one here would send an operator releasing a
+	// parked item to empty its branch into refs/stash and hand the item on with
+	// nothing on the branch left "for whoever comes back to it".
+	dirtyTreeRecoveryAtRelease = "commit them to the item's branch, or discard them"
+)
+
 // refuseDirtyTree is the "tree is clean, untracked files included" precondition,
 // shared by Claim, Release and Finalize. Same shape as refuseOffBase: the
 // refusal when the tree is dirty, nil when clean, an error when git could not
@@ -487,14 +512,16 @@ func (b *Orchestrator) refuseOffBase(ctx context.Context, base flow.BranchName, 
 // the lease file itself would answer here — StageAll already refuses a
 // project that does not.
 //
-// THE REASON NAMES BOTH WAYS OUT, as the other two worktree refusals name theirs
-// — base-stale names `git pull --ff-only`, not-on-base names `git checkout
+// THE REASON NAMES A WAY OUT, as the other two worktree refusals name theirs —
+// base-stale names `git pull --ff-only`, not-on-base names `git checkout
 // <base>`. This is the refusal an operator meets first at all three call sites,
 // and "the tree is dirty" without an act leaves them to invent one; the act they
 // reach for is the checkout, which is the one that misplaces the work (#206).
-// The stash is spelled with --include-untracked because untracked files count
-// here, and a stash that left them behind would not clear this refusal.
-func (b *Orchestrator) refuseDirtyTree(ctx context.Context, override string) (*flow.ErrClaimRefused, error) {
+//
+// The act is the CALLER'S, because the right one differs by end of the lease,
+// and one wording for both would be wrong at one of them — see the two
+// dirtyTreeRecovery constants.
+func (b *Orchestrator) refuseDirtyTree(ctx context.Context, recovery, override string) (*flow.ErrClaimRefused, error) {
 	porcelain, err := b.git.StatusPorcelain(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("check dirty tree: %w", err)
@@ -504,8 +531,7 @@ func (b *Orchestrator) refuseDirtyTree(ctx context.Context, override string) (*f
 	}
 	return &flow.ErrClaimRefused{
 		Code: "dirty-tree", ItemScoped: false,
-		Reason: "worktree has uncommitted or untracked changes — commit them, " +
-			"or set them aside with: git stash push --include-untracked",
+		Reason:   "worktree has uncommitted or untracked changes — " + recovery,
 		Detail:   porcelain,
 		Check:    "clean-tree",
 		Override: override,
@@ -556,7 +582,7 @@ func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef) error {
 	if err != nil {
 		return err
 	}
-	if refused, err := b.refuseDirtyTree(ctx, ""); err != nil {
+	if refused, err := b.refuseDirtyTree(ctx, dirtyTreeRecoveryAtRelease, ""); err != nil {
 		return fmt.Errorf("github.Release: %w", err)
 	} else if refused != nil {
 		return *refused
@@ -666,7 +692,7 @@ func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef, d flow.Di
 			issueNum, status, flow.StatusTerminal, flow.ErrUnavailable)
 	}
 
-	if refused, err := b.refuseDirtyTree(ctx, ""); err != nil {
+	if refused, err := b.refuseDirtyTree(ctx, dirtyTreeRecoveryAtRelease, ""); err != nil {
 		return fmt.Errorf("github.Finalize: %w", err)
 	} else if refused != nil {
 		return fmt.Errorf("github.Finalize: %w", *refused)
