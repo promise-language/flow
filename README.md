@@ -3,7 +3,8 @@
 A Go SDK for **declarative, stateless-per-step automation against
 task-tracking systems.** You write a flow as an ordinary Go binary; the SDK
 turns each invocation into *one* advance-the-state step against a tracked
-item (a GitHub Issue out of the box, or any orchestrator you plug in).
+item (a GitHub Issue out of the box, or whatever the orchestrator you plug
+in holds).
 
 - **No server.** A flow binary is a single static `main()` that imports the
   SDK and calls `cli.Run(app)`. End users install the binary, authenticate
