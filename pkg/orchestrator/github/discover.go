@@ -554,6 +554,35 @@ func (b *Orchestrator) heldByAnotherArena(lblNames []string, account flow.Accoun
 	}
 }
 
+// activeIssue reads the lease file once and reports what it says, keeping the
+// three answers apart that "does this arena hold X?" collapses into two:
+//
+//	(n, true, nil)   — the lease names issue n
+//	(0, false, nil)  — the lease names nothing; this arena is free
+//	(0, false, err)  — the lease could not be READ, so the arena cannot say
+//
+// The third is the one callers must decide about rather than inherit. A reader
+// deciding what to OFFER may safely fold it into "not ours"; a caller deciding
+// what to DESTROY may not, because an arena that cannot say what it holds may
+// be holding a resolution's whole state (docs/resolution.md § Nothing is bought
+// twice). One read, and the error policy is chosen where the consequence is.
+func (b *Orchestrator) activeIssue(ctx context.Context) (int, bool, error) {
+	active, err := b.LookupActiveClaim(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	if active == nil {
+		return 0, false, nil
+	}
+	num, err := b.issueNumber(active.ItemRef)
+	if err != nil {
+		// A lease naming a ref this orchestrator cannot read as an issue number
+		// is a record it cannot act on — the same "cannot say" as a parse error.
+		return 0, false, err
+	}
+	return num, true, nil
+}
+
 // holdsItem answers "does this arena hold this item?" from the lease file —
 // the arena-side half heldByAnotherArena needs for a record that names no
 // arena. A local file read, so asking once per item in a listing costs nothing.
@@ -564,12 +593,8 @@ func (b *Orchestrator) heldByAnotherArena(lblNames []string, account flow.Accoun
 // the claim closed on an unreadable lease rather than infer anything from it,
 // so it reads LookupActiveClaim itself.
 func (b *Orchestrator) holdsItem(ctx context.Context, issueNum int) bool {
-	active, err := b.LookupActiveClaim(ctx)
-	if err != nil || active == nil {
-		return false
-	}
-	activeNum, err := b.issueNumber(active.ItemRef)
-	return err == nil && activeNum == issueNum
+	num, named, err := b.activeIssue(ctx)
+	return err == nil && named && num == issueNum
 }
 
 // tagsOf reports EVERY label as a TagId — the operator's classification and

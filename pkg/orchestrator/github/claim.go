@@ -656,10 +656,15 @@ func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef, overrides 
 	if err != nil {
 		return fmt.Errorf("github.Release: get issue %d: %w", issueNum, err)
 	}
-	// The arena-side half of both decisions below, read once: "does this arena
-	// hold this item?", answered by the helper the listing already asks.
+	// The lease is read ONCE here, and every decision below that depends on it
+	// reads this answer rather than the file again. Two reads of one question
+	// are two chances to answer it differently, and the two consequences here
+	// are opposite: whether to refuse, and whether to DESTROY this arena's
+	// drafts and session. The error is kept rather than folded into "not ours",
+	// because the clearing at the bottom is not entitled to that reading.
 	names := labelNamesOf(issue.Labels)
-	weHold := b.holdsItem(ctx, issueNum)
+	activeNum, activeNamed, activeErr := b.activeIssue(ctx)
+	weHold := activeErr == nil && activeNamed && activeNum == issueNum
 	holder, fingerprint := b.holderFromLabels(names)
 	// "The record on this item is somebody else's" — ONE predicate, the SAME one
 	// Claim refuses on, read once here and used by both decisions below. A
@@ -702,6 +707,32 @@ func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef, overrides 
 			Override: "force",
 		}
 	}
+	// NOTHING TO DROP. The owner half is what says a lease was taken
+	// (docs/github-schema.md § Labels), so an item carrying none carries no
+	// claim record at all — and an arena whose own lease does not name the item
+	// either has nothing here that a release could take apart.
+	//
+	// It is refused rather than waved through, because proceeding would take
+	// this arena's ambient account off an item the flow never claimed: the
+	// assignee removal below addresses the account recorded ON THE ITEM, and
+	// with no record there it would fall back to ours and strip an assignment a
+	// person made by hand. `release <item-id>` is how a mistyped or stale id
+	// reaches an arbitrary item, so the answer has to be "there is nothing of
+	// yours here" and not a reported release that silently edited the tracker.
+	//
+	// No override: --force is for a record this arena cannot evaluate, and
+	// there is no record. Nothing is being kept from the operator.
+	//
+	// weHold is the whole of what separates this from the arena finishing a
+	// teardown that stopped part-way — that arena's lease still names the item,
+	// its labels are already gone, and the clearing below is what it came for.
+	if !weHold && holder.Account == "" {
+		return flow.ErrClaimRefused{
+			Code: "not-claimed", ItemScoped: true,
+			Reason: fmt.Sprintf("issue #%d carries no claim record, and this arena's lease does not "+
+				"name it — there is nothing to release", issueNum),
+		}
+	}
 	// The arena half comes off FIRST, and the order is the correctness of the
 	// pair — the two removals are separate requests, so one of them can be the
 	// last thing that happens. Release is GIVING THE LEASE UP, so the partial
@@ -741,21 +772,26 @@ func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef, overrides 
 	if err := b.out.RemoveAssignees(ctx, issueNum, []string{string(releasedOwner)}); err != nil && !isNotFound(err) {
 		return fmt.Errorf("remove assignee: %w", err)
 	}
-	// NOT when this arena holds a DIFFERENT item. clistate.Clear is arena-wide —
-	// it takes the lease file, the draft tree and the session with it — so
-	// running it while releasing somebody else's record would wipe the state of
-	// whatever THIS arena is part-way through, which is exactly the "pay twice"
-	// the release refusals exist to prevent (docs/cli.md § Releasing).
+	// clistate.Clear is ARENA-WIDE — it takes the lease file, the draft tree and
+	// the session with it — so it runs only when the lease can be read AND says
+	// this arena is either holding this item or holding nothing. Anything else
+	// would destroy the state of whatever this arena is part-way through, which
+	// is the "pay twice" the release refusals exist to prevent (docs/cli.md §
+	// Releasing, docs/resolution.md § Nothing is bought twice).
 	//
-	// Stated as "unless a different item is held" rather than "only when this
-	// one is": holding nothing, and holding a record nothing can read, are both
-	// cases where clearing can destroy no resolution's state, and where the
-	// clearing is the whole point — Finalize ends here with the lease already
-	// written off, and an arena whose lease is unreadable is #212's own exit.
-	if active, err := b.LookupActiveClaim(ctx); err == nil && active != nil {
-		if activeNum, nerr := b.issueNumber(active.ItemRef); nerr == nil && activeNum != issueNum {
-			return nil
-		}
+	// A lease that cannot be READ is the case to be careful about, not the case
+	// to wave through. It does not mean the arena holds nothing: `.flow/draft/`
+	// and `.flow/session/` are separate files that a torn write to active.json
+	// leaves entirely intact, so an arena with an unreadable lease may be
+	// holding a resolution's whole reasoning. Releasing SOME OTHER item must not
+	// take that with it. Clearing an unreadable lease is the zero-ref release's
+	// job — reached deliberately, by an operator who asked for exactly that and
+	// is told what it did (#212).
+	if activeErr != nil {
+		return nil
+	}
+	if activeNamed && activeNum != issueNum {
+		return nil
 	}
 	if err := clistate.Clear(); err != nil {
 		return fmt.Errorf("github.Release: clear active claim file: %w", err)

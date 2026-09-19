@@ -471,3 +471,35 @@ func TestCmdRelease_AnUntypedFailureKeepsThePlainLine(t *testing.T) {
 		t.Errorf("the backend's own account of the failure is missing; got %q", out)
 	}
 }
+
+// The backend's answer for an item that carries no claim record has to reach
+// the operator as a refusal, not as the "released <id>" line. `release
+// <item-id>` accepts any number, so this is what a mistyped id gets — and a
+// command that printed a release it did not make would leave the operator
+// believing a record was dropped that is still sitting on the item.
+func TestCmdRelease_NotClaimedIsRenderedAsARefusalWithNoOverride(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem("300", flow.Item{Type: "task", Title: "300"})
+	be := &releaseRefusing{Orchestrator: inner, err: flow.ErrClaimRefused{
+		Code:       "not-claimed",
+		ItemScoped: true,
+		Reason: "issue #300 carries no claim record, and this arena's lease does not name it — " +
+			"there is nothing to release",
+	}}
+	app, out, errBuf := releaseTestApp(t, be)
+
+	if code := app.cmdRelease(context.Background(), []string{"300"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
+	}
+	if out.String() != "" {
+		t.Errorf("stdout = %q, want nothing — no release was made", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "nothing to release") {
+		t.Errorf("stderr does not say what happened; got %q", errBuf.String())
+	}
+	// Nothing is being withheld, so nothing is offered: an override line here
+	// would point at a flag that reaches no record.
+	if strings.Contains(errBuf.String(), "override with") {
+		t.Errorf("offered an override for an item with no record; got %q", errBuf.String())
+	}
+}
