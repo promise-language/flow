@@ -124,7 +124,7 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 		if reason, held := b.heldByAnotherArena(names, owner, weHold); held {
 			return flow.Claim{}, flow.ErrClaimRefused{
 				Code: "already-held", ItemScoped: true,
-				Reason:   fmt.Sprintf("issue #%d %s", issueNum, reason),
+				Reason:   fmt.Sprintf("issue #%d %s (use --force to take over)", issueNum, reason),
 				Override: "force",
 			}
 		}
@@ -249,7 +249,7 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 			_ = b.out.RemoveLabel(ctx, issueNum, claimLabel)
 			return flow.Claim{}, flow.ErrClaimRefused{
 				Code: "already-held", ItemScoped: true,
-				Reason:   fmt.Sprintf("issue #%d %s", issueNum, reason),
+				Reason:   fmt.Sprintf("issue #%d %s (use --force to take over)", issueNum, reason),
 				Override: "force",
 			}
 		}
@@ -658,40 +658,48 @@ func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef, overrides 
 	}
 	// The arena-side half of both decisions below, read once: "does this arena
 	// hold this item?", answered by the helper the listing already asks.
+	names := labelNamesOf(issue.Labels)
 	weHold := b.holdsItem(ctx, issueNum)
-	holder, fingerprint := b.holderFromLabels(labelNamesOf(issue.Labels))
-	// An owner label with no arena label beside it is the record written before
-	// the arena half existed (docs/github-schema.md § Labels). It names no arena
-	// to differ from ours, so it is NOT a displacement — it is this arena's own
-	// record in the older spelling, and its owner half still has to come off.
-	recordIsForeign := holder.Account != "" &&
-		(holder.Account != owner || (fingerprint != "" && fingerprint != b.arenaFingerprint()))
+	holder, fingerprint := b.holderFromLabels(names)
+	// "The record on this item is somebody else's" — ONE predicate, the SAME one
+	// Claim refuses on, read once here and used by both decisions below. A
+	// second comparison over the same labels would be a second source of truth
+	// for the same fact, free to drift from the one at the other end of the
+	// lease.
+	//
+	// It is the helper's weHoldIt argument that tells an owner label with NO
+	// arena label beside it — the record written before the arena half existed
+	// (docs/github-schema.md § Labels) — apart from a foreign one: it names no
+	// arena to differ from ours, so to the arena whose lease says it holds the
+	// item it is that arena's own record in the older spelling, and its owner
+	// half still has to come off.
+	foreignReason, recordIsForeign := b.heldByAnotherArena(names, owner, weHold)
 	if weHold && recordIsForeign {
 		if err := clistate.Clear(); err != nil {
 			return fmt.Errorf("github.Release: clear active claim file: %w", err)
 		}
 		return nil
 	}
-	// A record belonging to somebody else needs the override, and "somebody
-	// else" is the SAME predicate Claim refuses on — one comparison read at the
-	// two ends of the lease, rather than a second one free to disagree with it.
-	// It already handles the half-record that names no arena, which is why it
-	// takes the arena-side answer as an argument.
+	// A record belonging to somebody else needs the override. Reaching here with
+	// recordIsForeign set means weHold is false — the displacement above already
+	// returned — so this is an arena addressing a record it never held.
 	//
 	// The reason it is refused at all: that arena's tree, drafts and session are
 	// not readable from here, so the two preconditions above cannot be evaluated
 	// against the arena the release would actually free — refusing is the honest
 	// answer, and --force is the operator saying they know what is there
 	// (docs/cli.md § Releasing).
-	if !slices.Contains(overrides, flow.OverrideAlreadyHeld) {
-		if reason, held := b.heldByAnotherArena(labelNamesOf(issue.Labels), owner, weHold); held {
-			return flow.ErrClaimRefused{
-				Code: "already-held", ItemScoped: true,
-				Reason: fmt.Sprintf("issue #%d %s — its arena's tree cannot be read from here, "+
-					"so the release preconditions cannot be checked", issueNum, reason),
-				Check:    "active-claim",
-				Override: "force",
-			}
+	if recordIsForeign && !slices.Contains(overrides, flow.OverrideAlreadyHeld) {
+		// The same code and the same fields Claim's refusal carries for this
+		// record, because it is the same comparison read at the other end of
+		// the lease. The ACT is the one difference: a release drops the record
+		// and takes nothing over, so it does not borrow Claim's "take over"
+		// wording — and the override line renders the flag.
+		return flow.ErrClaimRefused{
+			Code: "already-held", ItemScoped: true,
+			Reason: fmt.Sprintf("issue #%d %s — its arena's tree cannot be read from here, "+
+				"so the release preconditions cannot be checked", issueNum, foreignReason),
+			Override: "force",
 		}
 	}
 	// The arena half comes off FIRST, and the order is the correctness of the

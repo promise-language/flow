@@ -462,7 +462,8 @@ That is why so little here is optional. A capability an orchestrator lacks is st
 - **A disabled item claim.** An item carrying the disabled label is refused.
 - **A claim held by another.** Unless the operator passes the `already-held` override.
 - **A claim from an arena that already holds a different item.** **No override**: the arena is not free, and the first item's local state is not somewhere the claim can be taken from. Typed distinctly from `already-held`, because the actions differ — *take it over deliberately* against *finish or release what you hold*. Re-claiming the item this arena holds is not this, and stays idempotent.
-- **A release that would leave the arena unfit to be handed on** — a dirty worktree, or HEAD off the base branch — where the orchestrator has a local checkout. **No override**; see `Release`.
+- **A release that would leave the arena unfit to be handed on** — a dirty worktree, or HEAD off the base branch — where the orchestrator has a local checkout. Overridable by `dirty-tree` and `stale-base`, which is the operator's emergency and never a run's; see `Release`.
+- **A release addressing a claim this arena does not hold.** Unless the operator passes the `already-held` override: the holding arena's tree cannot be read from here, so the two preconditions above cannot be evaluated against the arena the release would free. Typed with the same code `Claim` uses for the same record, because it is the same comparison read at the other end of the lease.
 - **A claim from an arena the item's placement restrictions exclude.** Unless the operator passes the `unmet-placement` override.
 - **A blocker it cannot resolve**, and **an item declared as its own blocker.** See "Dependencies".
 - **Finalizing an item whose `ItemStatus` is `open`.** Only an item the orchestrator already considers finished may have its flow run recorded as complete.

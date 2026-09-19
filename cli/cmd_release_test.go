@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -185,6 +186,42 @@ func TestCmdRelease_ClearsALeaseRecordItCannotRead(t *testing.T) {
 	// operator — on stderr, where a report that is not the command's answer goes.
 	if !strings.Contains(errBuf.String(), "active.json") {
 		t.Errorf("the parse error naming the path was swallowed; got %q", errBuf.String())
+	}
+}
+
+// "Cannot RIGHT NOW" is not "cannot be read", and the two are different answers
+// a caller acts differently on (docs/orchestrator.md § Required does not mean
+// always possible). An orchestrator whose lease ledger lives off-host answers
+// ErrUnavailable while the service is down — it has NOT said this arena's record
+// is unreadable, and the next attempt will name the item. Falling through to the
+// zero ref there would ask the backend to take apart a lease nothing could name
+// afterwards, on the strength of a 503.
+func TestCmdRelease_ATransientLookupFailureStopsRatherThanClearing(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	if _, err := inner.Claim(context.Background(), itemRefFor("1"), nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	be := &unreadableLease{
+		Orchestrator: inner,
+		err:          fmt.Errorf("read the lease ledger: %w", flow.ErrUnavailable),
+	}
+	app, out, errBuf := releaseTestApp(t, be)
+
+	if code := app.cmdRelease(context.Background(), nil); code != 1 {
+		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
+	}
+	if be.released {
+		t.Errorf("Release was called with %+v — a service that will answer next time did not say the record is unreadable",
+			be.releasedRef)
+	}
+	if out.String() != "" {
+		t.Errorf("a stopped release reported a clearing it did not make; got %q", out.String())
+	}
+	// Named as the condition it is, so the operator retries rather than reading
+	// it as a broken lease file.
+	if !strings.Contains(errBuf.String(), "waiting on a condition") {
+		t.Errorf("stderr does not name the condition; got %q", errBuf.String())
 	}
 }
 

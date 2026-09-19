@@ -529,26 +529,28 @@ func (b *Orchestrator) holderFromLabels(lblNames []string) (flow.Holder, string)
 // the documented break-glass and what #222 exists to make conditional.
 //
 // The reason is a clause naming the item's own state, without the issue number:
-// the caller has it, and prefixes it.
+// the caller has it, and prefixes it. It names no ACT either, because the act
+// differs by which end of the lease is asking — Claim offers taking the item
+// over, where Release is dropping the record and taking nothing — and one
+// wording for both is wrong at one of them.
 func (b *Orchestrator) heldByAnotherArena(lblNames []string, account flow.AccountId, weHoldIt bool) (reason string, held bool) {
 	holder, fingerprint := b.holderFromLabels(lblNames)
 	switch {
 	case holder.Account == "":
 		return "", false
 	case holder.Account != account:
-		return fmt.Sprintf("carries owner label for %s (use --force to take over)", holder.Account), true
+		return fmt.Sprintf("carries owner label for %s", holder.Account), true
 	case fingerprint == b.arenaFingerprint():
 		return "", false
 	case fingerprint != "":
 		return fmt.Sprintf(
-			"is held by another arena (%s) claiming as %s (use --force to take over)",
-			fingerprint, account), true
+			"is held by another arena (%s) claiming as %s", fingerprint, account), true
 	case weHoldIt:
 		return "", false
 	default:
 		return fmt.Sprintf(
-			"carries an owner label for %s but records no arena, and this arena does not hold it "+
-				"(use --force to take over)", account), true
+			"carries an owner label for %s but records no arena, and this arena does not hold it",
+			account), true
 	}
 }
 

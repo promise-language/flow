@@ -1196,6 +1196,15 @@ func TestBackend_Release_ByItemIdRefusesAnotherArenasRecordWithoutForce(t *testi
 		if refused.Override != "force" {
 			t.Errorf("Override = %q, want force: a refusal with no way out is what sent operators to the label editor", refused.Override)
 		}
+		// The act a release offers is dropping the record, not taking the item
+		// over — Claim's wording read here would send an operator who asked to
+		// let go of a record to an invocation that picks one up.
+		if strings.Contains(refused.Reason, "take over") {
+			t.Errorf("Reason = %q, want no take-over advice at a release", refused.Reason)
+		}
+		if !strings.Contains(refused.Reason, "is held by another arena") {
+			t.Errorf("Reason = %q, want it to name the record that is in the way", refused.Reason)
+		}
 	})
 
 	// And nothing moved: the holder's record is intact on the item.

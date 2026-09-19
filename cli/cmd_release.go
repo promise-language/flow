@@ -52,6 +52,16 @@ func (app *App) cmdRelease(ctx context.Context, args []string) int {
 	default:
 		claim, err := app.Orchestrator.LookupActiveClaim(ctx)
 		switch {
+		case errors.Is(err, flow.ErrUnavailable):
+			// "Cannot RIGHT NOW" is a different answer from "cannot be read",
+			// and a caller acts differently on each (docs/orchestrator.md §
+			// Required does not mean always possible). An orchestrator whose
+			// lease ledger is off-host says this when the service is down — it
+			// has not said the record is unreadable, and the next attempt will
+			// name the item. Clearing on it would drop a lease nothing could
+			// name afterwards, so the run stops and is worth retrying.
+			fmt.Fprintln(app.Err, conditionOrError("release", err))
+			return 1
 		case err != nil:
 			// Not a failure to report and stop on: it is the state this command
 			// exists to get the arena out of. The error is printed because it
