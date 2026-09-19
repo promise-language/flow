@@ -5,6 +5,16 @@
 
 **Normative.** This document defines how state, the journal, and history are stored on a GitHub issue by the GitHub backend. It is written for readers who have no SDK — the wire format is the contract.
 
+## Items are issues
+
+An item is an issue. GitHub's Issues API returns **pull requests** as well, and the two are numbered out of one space, so a number a person types can name either.
+
+The two paths that meet one answer differently, and the difference is which end the number came from. **`List` skips a pull request** — a listing of what can be worked has nothing to say about one, and an entry nothing will ever take is not an answer. **A by-ref path that takes an item or describes one refuses it** — `Claim`, `Get` and `Load` alike — because a number typed by a person is a number they meant, and by-ref is the only place a pull request number can arrive by accident. The refusal is **item-scoped**: this ref is the problem and another might succeed. Nothing overrides it; no flag can make a pull request into an item.
+
+**A by-ref path that gives a lease back refuses nothing on the kind of thing it names**, and `Release` is the one that matters. A claim record already standing on a pull request is given up exactly as any other is, and a refusal there would make that record permanently unclearable — the check would then preserve the state it exists to prevent. The refusal belongs where the lease is taken, not where it is surrendered.
+
+Labels are one namespace too, so a pull request **can** carry `flow:*` labels. A claim record on one is a defect, not a state this schema defines: `flow:owner:<login>` and `flow:arena:<fingerprint>` mean an arena holds an item, and a pull request is not one.
+
 ## State comment
 
 Each issue carries at most one **state comment** — the machine-readable record `Load` returns. It is identified by HTML-comment markers and wrapped in a `<details>` element:
@@ -269,7 +279,7 @@ The token exists only *inside* one claim attempt — every exit from the attempt
 
 **Collection is not lease recovery.** It touches the claim-race token and nothing else: `flow:owner:<login>`, `flow:arena:<fingerprint>`, the assignee, and the worktree-local active claim are never removed on a timer. Those record ownership by a person, and recovering a claim held by something no longer running is a separate problem — governed by [resolution-orchestrated.md](resolution-orchestrated.md) under "Interruption", and requiring that the holder be observed to be gone rather than inferred from elapsed time. A settled race token has no holder to observe.
 
-Preflight checks before posting the claim label refuse items that are disabled, owned by another binary, held by **another arena** — whatever account it claims as, so an arena under this very login is refused like any other (unless `OverrideAlreadyHeld` is passed) — awaiting a role the claiming account's detected capabilities cannot assume — or carrying placement restrictions this arena does not meet (unless the `unmet-placement` override is passed). The already-held one of those is made **twice**, because it is the comparison the lease turns on and its subject — the claim record on the item — is what another party writes while the preconditions run: step 2 above repeats it on the re-read, and that reading is the one the lease is taken on.
+Preflight checks before posting the claim label refuse refs that are not issues at all (§ Items are issues), and items that are disabled, owned by another binary, held by **another arena** — whatever account it claims as, so an arena under this very login is refused like any other (unless `OverrideAlreadyHeld` is passed) — awaiting a role the claiming account's detected capabilities cannot assume — or carrying placement restrictions this arena does not meet (unless the `unmet-placement` override is passed). The already-held one of those is made **twice**, because it is the comparison the lease turns on and its subject — the claim record on the item — is what another party writes while the preconditions run: step 2 above repeats it on the re-read, and that reading is the one the lease is taken on.
 
 ## Filed items
 

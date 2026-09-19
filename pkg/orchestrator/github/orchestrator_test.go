@@ -44,6 +44,13 @@ type ghMock struct {
 	issueLabels []string
 	assignees   []string
 
+	// issueIsPullRequest serves the issue with the `pull_request` member the
+	// Issues API attaches to a pull request, which is what go-github's
+	// IsPullRequest reads. Off by default, so every other test in this package
+	// is the negative case: an ordinary issue is unaffected by the by-ref
+	// refusal.
+	issueIsPullRequest bool
+
 	// claimTokenRead models what a read of the issue does with the transient
 	// flow:claim:* labels — the two events Claim's zero-contender branch cannot
 	// tell apart. "hidden": stored but not served (a read too stale to show a
@@ -723,6 +730,13 @@ func (m *ghMock) handleIssue(w http.ResponseWriter, r *http.Request) {
 		"labels":     toLabelObjs(served),
 		"assignees":  toLoginObjs(m.assignees),
 		"updated_at": "2026-01-01T00:00:00Z",
+	}
+	if m.issueIsPullRequest {
+		// One extra member is the whole difference on the wire, exactly as
+		// TestBackend_Discover_SkipsPullRequests fakes it in the list response.
+		issue["pull_request"] = map[string]any{
+			"url": fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d", m.owner, m.repo, m.issueNum),
+		}
 	}
 	// The issue read is the one the seam REVALIDATES rather than ages: its
 	// labels ride in the same response and the claim protocol requires them

@@ -45,11 +45,25 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 		return flow.Claim{}, err
 	}
 
-	// Preflight: refuse if the issue is owned by another flow binary or
-	// explicitly disabled.
+	// Preflight: refuse if the ref names a pull request rather than an issue, if
+	// the issue is owned by another flow binary, or if it is explicitly
+	// disabled.
 	issue, err := b.out.GetIssue(ctx, issueNum)
 	if err != nil {
 		return flow.Claim{}, fmt.Errorf("get issue %d: %w", issueNum, err)
+	}
+	// FIRST, above the two label preflights and above every read of the lease.
+	// Those two answer "this item is stopped"; this one answers "this is not an
+	// item", and reporting that a pull request carries no disabled label is
+	// answering the wrong question about it. Being first also puts it above the
+	// idempotent holder return further down, for the reason
+	// TestBackend_Claim_HeldReclaimStillRefusesStopLabels records for disabled
+	// and other-binary: a holder mid-work is exactly who has to be stopped, and
+	// an arena holding a pull request — #140's state — is the case this exists
+	// for. It re-reads nothing: the issue is the fetch the preflight already
+	// made.
+	if refused := refusePullRequest(issue, issueNum); refused != nil {
+		return flow.Claim{}, *refused
 	}
 	names := labelNamesOf(issue.Labels)
 	if hasLabel(names, b.labels.Disabled()) {

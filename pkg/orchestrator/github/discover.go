@@ -84,6 +84,34 @@ func (b *Orchestrator) List(ctx context.Context, scope flow.ItemScope, binary fl
 	return out, nil
 }
 
+// refusePullRequest is the BY-REF half of the rule List applies in the loop
+// above: the Issues API returns pull requests, an issue number and a pull
+// request number come out of one space, and a pull request is not an item of
+// any type (docs/github-schema.md § Items are issues).
+//
+// The two halves answer differently ON PURPOSE. A listing of what can be worked
+// has nothing to say about a pull request, so List SKIPS one. A by-ref path is
+// the only place a number is typed by a person, so it REFUSES: a number
+// somebody typed is a number they meant, and describing a pull request as an
+// item is how #140 — a merged PR — came to carry a whole claim record.
+//
+// The predicate is go-github's own IsPullRequest, which both halves call; this
+// wraps it in the refusal and adds no second test of its own.
+//
+// ITEM-SCOPED: this ref is the problem and another might succeed, which is what
+// lets `resolve`'s auto-select loop try the next one. No Override — there is no
+// flag that could make a pull request into an item — and no Check, which names
+// a precondition and there is none here, as with disabled and other-binary.
+func refusePullRequest(iss *github.Issue, issueNum int) *flow.ErrClaimRefused {
+	if !iss.IsPullRequest() {
+		return nil
+	}
+	return &flow.ErrClaimRefused{
+		Code: "not-an-item", ItemScoped: true,
+		Reason: fmt.Sprintf("#%d is a pull request, not an issue", issueNum),
+	}
+}
+
 // Get answers about one item through the same derivation List uses.
 func (b *Orchestrator) Get(ctx context.Context, ref flow.ItemRef, binary flow.BinaryName, acceptsType func(flow.ItemType) bool, assumesRole func(flow.RoleName) bool) (*flow.ItemInfo, error) {
 	issueNum, err := b.issueNumber(ref)
@@ -93,6 +121,13 @@ func (b *Orchestrator) Get(ctx context.Context, ref flow.ItemRef, binary flow.Bi
 	iss, err := b.out.GetIssue(ctx, issueNum)
 	if err != nil {
 		return nil, fmt.Errorf("get issue %d: %w", issueNum, err)
+	}
+	// Answered identically to List, which skips what this refuses: the contract
+	// requires the two to agree about one item at one moment, and a Get that
+	// described a pull request would be answering about something List says is
+	// not there.
+	if refused := refusePullRequest(iss, issueNum); refused != nil {
+		return nil, *refused
 	}
 	info, err := b.itemInfoFor(ctx, iss, binary, acceptsType, assumesRole)
 	if err != nil {
