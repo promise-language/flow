@@ -3658,6 +3658,53 @@ func TestRunOne_ManualItemWithNoPendingStepStillFinalizes(t *testing.T) {
 	}
 }
 
+// Manual outranks the treasurer's gate, and the distinction is a WRITE. Every
+// other pre-dispatch stop leaves the item alone; the budget gate parks it, and
+// a park published on an item an operator is driving by hand advertises a
+// condition they did not hit and did not ask about. "Nothing was spent, and
+// the item reads exactly as it did" is what forbids it, and the only thing
+// that holds it is the hold being read FIRST.
+func TestRunOne_ManualHoldOutranksTheTreasurersGate(t *testing.T) {
+	t.Setenv("FLOW_DIR", filepath.Join(t.TempDir(), ".flow"))
+	planRuns := 0
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			planRuns++
+			return flow.StepResult{}, errors.New("boom")
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, &stubAgent{name: "stub"})
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxInvocations: 1}}
+
+	// The one invocation the cap allows, spent. The next advance is the one
+	// that would park — TestRunOne_ParksOnInvocationsExhaustion is that run
+	// without the hold.
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != string(flow.StatusFailed) {
+		t.Fatalf("first run: res = %+v, err = %v; want the cap consumed by a failed step", res, err)
+	}
+	setManual(t, be, claim.ItemRef, true)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusSkipped) {
+		t.Fatalf("res = %+v, want skipped — the hold, not the exhausted cap", res)
+	}
+	if res.Park != nil || be.ParkRequest("1") != nil {
+		t.Errorf("a park was published on a held item (%+v / %+v)", res.Park, be.ParkRequest("1"))
+	}
+	if planRuns != 1 {
+		t.Errorf("the plan ran %d times, want 1 — only the pre-hold dispatch", planRuns)
+	}
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if row := state.Ledger.Row("plan"); row.Dispatches != 1 {
+		t.Errorf("Dispatches = %d, want 1 — the held advance charged nothing", row.Dispatches)
+	}
+}
+
 // A step declares the blockers it finds and stops on them. The blocker is
 // recorded on the item, the stop is the same clean stop the pre-dispatch check
 // makes: blocked, kind waits-on-items, no park, no invocation charged, the
