@@ -224,8 +224,8 @@ func TestWriteContract_InheritedDirtDoesNotExcuseBranchOrCommit(t *testing.T) {
 
 // dirtyReadFailsOnceBackend hands out a worktree whose FIRST dirtiness read
 // fails — the one the snapshot takes — and which reports the truth afterwards.
-// It is the only arrangement that tells the all-or-nothing snapshot rule from a
-// snapshot that recorded "was clean" by default.
+// It is the only arrangement that tells a snapshot that recorded nothing from
+// one that recorded "was clean" by default.
 type dirtyReadFailsOnceBackend struct {
 	*fake.Orchestrator
 }
@@ -251,11 +251,10 @@ func (w *dirtyReadFailsOnceWorktree) IsDirty(ctx context.Context) (bool, error) 
 	return w.Worktree.IsDirty(ctx)
 }
 
-// A snapshot read that failed leaves NO snapshot, so no clause of the contract
-// is measured — the rule already in force for a failed branch read, extended to
-// the third read. The alternative, recording "was clean" when the answer could
-// not be taken, would manufacture exactly the violation this item exists to
-// stop reporting.
+// A dirtiness read that failed recorded nothing, so the dirty clause measures
+// nothing. The alternative, recording "was clean" when the answer could not be
+// taken, would manufacture exactly the violation this item exists to stop
+// reporting.
 func TestWriteContract_UnreadableDirtSnapshotSkipsTheCheck(t *testing.T) {
 	var be *fake.Orchestrator
 	acquired := false
@@ -283,7 +282,39 @@ func TestWriteContract_UnreadableDirtSnapshotSkipsTheCheck(t *testing.T) {
 		t.Fatal("the handler never acquired the worktree, so no snapshot was attempted and the test proves nothing")
 	}
 	if res.Status != string(flow.StatusDone) {
-		t.Fatalf("status = %q (park %+v), want done: an unreadable snapshot measures nothing", res.Status, res.Park)
+		t.Fatalf("status = %q (park %+v), want done: an unreadable dirtiness read measures nothing", res.Status, res.Park)
+	}
+}
+
+// Fail-open is PER CLAUSE, the way the post-handler side already works: a
+// dirtiness read that could not be taken costs the dirty clause and nothing
+// else. Discarding the whole snapshot over it would let a step that could not be
+// asked one question go unmeasured on two it could — the commit it moved is
+// readable either way.
+func TestWriteContract_UnreadableDirtStillMeasuresTheCommit(t *testing.T) {
+	app, backend, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			wt, err := ctx.Worktree()
+			if err != nil {
+				return flow.StepResult{}, err
+			}
+			if err := wt.Commit(ctx.Context(), "rogue commit"); err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
+	}, &stubAgent{name: "stub"})
+	app.Orchestrator = &dirtyReadFailsOnceBackend{Orchestrator: backend}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkWriteContract {
+		t.Fatalf("park = %+v, want ParkWriteContract", res.Park)
+	}
+	if !strings.Contains(res.Park.Reason, "commit moved") {
+		t.Errorf("reason = %q, want contains 'commit moved'", res.Park.Reason)
 	}
 }
 
