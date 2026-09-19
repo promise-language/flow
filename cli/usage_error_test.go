@@ -176,7 +176,7 @@ func TestUsageError_ContradictoryOptions(t *testing.T) {
 		app, out, errBuf := newArgparseApp(t)
 		code := RunWithArgs(*app, []string{"grant", "--all", "plan"})
 		checkUsageError(t, "grant --all plan", out.String(), errBuf.String(), code,
-			`grant: --all sweeps every pending step; it cannot be combined with the step id "plan"`)
+			`grant: --all sweeps every step still ahead on the route; it cannot be combined with the step id "plan"`)
 	})
 	t.Run("grant negative amount", func(t *testing.T) {
 		app, out, errBuf := newArgparseApp(t)

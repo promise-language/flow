@@ -55,7 +55,7 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 	prompts := fs.Int("prompts", 0, "prompts-per-invocation to grant")
 	cost := fs.Float64("cost", 0, "cost (USD) to grant (park/--all: headroom over spend)")
 	timeout := fs.Int("timeout", 0, "timeout seconds to grant")
-	all := fs.Bool("all", false, "top up every pending step instead of the parked one")
+	all := fs.Bool("all", false, "top up every step still ahead on the route instead of the parked one")
 	dryRun := fs.Bool("dry-run", false, "print what would be granted; write nothing")
 	of := addOutputFlags(fs)
 	if !app.parseArgs(fs, args) {
@@ -75,7 +75,7 @@ func (app *App) cmdGrant(ctx context.Context, args []string) int {
 		return app.usageError("grant: unexpected argument %q (grant takes at most one step id)", fs.Arg(1))
 	}
 	if fs.NArg() == 1 && *all {
-		return app.usageError("grant: --all sweeps every pending step; it cannot be combined with the step id %q", fs.Arg(0))
+		return app.usageError("grant: --all sweeps every step still ahead on the route; it cannot be combined with the step id %q", fs.Arg(0))
 	}
 	if *invocations < 0 || *prompts < 0 || *cost < 0 || *timeout < 0 {
 		return app.usageError("grant: --invocations / --prompts / --cost / --timeout must be >= 0")
@@ -411,17 +411,35 @@ func parkIncrement(axes []flow.BudgetAxis, row flow.LedgerRow, eff, policy flow.
 	return g
 }
 
-// planAll sweeps every pending step, raising each axis to at least
-// consumption + headroom. The max() shape means a step that already has room
-// yields a zero delta and no write at all.
+// planAll sweeps every step still ahead on the item's route, raising each axis
+// to at least consumption + headroom. The max() shape means a step that already
+// has room yields a zero delta and no write at all.
+//
+// The selection is the ROUTE's, taken from where the item actually stands
+// (flow.Position) and the steps declared routes reach from there — never from
+// the artifact records. A step's artifact being recorded says nothing about
+// whether it will run again: the graph declares handbacks, so an item can stand
+// at a step that has already completed, and "reaching a step a second time is
+// not an anomaly but a route" (docs/resolution.md § Deriving the next step). A
+// sweep that read the checklist skipped every step of a rework round — the
+// producing phase an operator most needs topped up.
 func (app *App) planAll(f *flow.Flow, state *flow.Item, a grantAmounts) planOutcome {
+	pos, err := f.Position(state)
+	if err != nil {
+		// A sweep that cannot tell where the item stands must not guess: name
+		// the defect and write nothing. `grant <step-id>` still reaches a step
+		// by name on an item whose route has broken.
+		fmt.Fprintln(app.Err, "grant:", err)
+		return refuse()
+	}
+	if pos.Finalized {
+		return nothingToDo("this item has finalized — nothing to top up")
+	}
 	var plans []plannedGrant
-	for _, li := range f.Items() {
+	for _, li := range f.ReachableFrom(pos.Step.Result()) {
+		// Signal steps and waits carry no budget, so there is nothing to top
+		// up on one — the same rule resolveGrantTarget states to an operator.
 		if li.Kind != flow.LifecycleArtifact {
-			continue
-		}
-		// Only steps with work left: a step that has completed needs no budget.
-		if artifactState(state, li.ArtifactId) != statePending {
 			continue
 		}
 		row := state.Ledger.Row(li.Result())
@@ -434,7 +452,7 @@ func (app *App) planAll(f *flow.Flow, state *flow.Item, a grantAmounts) planOutc
 		})
 	}
 	if len(plans) == 0 {
-		return nothingToDo("no pending steps on this item — nothing to top up")
+		return nothingToDo("no budgeted steps remain ahead on this item's route — nothing to top up")
 	}
 	return planned(plans...)
 }
@@ -779,7 +797,7 @@ func printGrantHuman(app *App, payload grantPayload, state *flow.Item) {
 	// that matters is what changed.
 	switch {
 	case len(payload.Granted) == 0 && len(payload.Unchanged) > 0:
-		fmt.Fprintln(app.Out, "all pending steps already have headroom")
+		fmt.Fprintln(app.Out, "all steps ahead already have headroom")
 	case len(payload.Unchanged) > 0:
 		fmt.Fprintf(app.Out, "unchanged (already had headroom): %s\n", strings.Join(payload.Unchanged, ", "))
 	}

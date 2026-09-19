@@ -112,21 +112,7 @@ func (f *Flow) validateRoles() error {
 // validateReachableFromEntry walks Next forward from the entry and refuses the
 // first registered step the walk never arrives at.
 func (f *Flow) validateReachableFromEntry() error {
-	seen := map[*step]bool{f.entry: true}
-	queue := []*step{f.entry}
-	for len(queue) > 0 {
-		s := queue[0]
-		queue = queue[1:]
-		for _, id := range s.next {
-			// Every id resolves: ValidateGraph checked that before calling.
-			succ := f.stepByResult[id]
-			if seen[succ] {
-				continue
-			}
-			seen[succ] = true
-			queue = append(queue, succ)
-		}
-	}
+	seen := f.reachable(f.entry)
 	// Registration order, so the first offender reported is the first one
 	// written — which is where a reader starts looking.
 	for _, s := range f.steps {
@@ -136,6 +122,66 @@ func (f *Flow) validateReachableFromEntry() error {
 		}
 	}
 	return nil
+}
+
+// reachable walks Next forward from one step and returns the set the walk
+// arrives at, `from` included — a step is where the item stands, and it is the
+// first thing that runs from there.
+//
+// THE ONE FORWARD WALK. The startup check that nothing is unroutable and the
+// runtime question of what an item may still run are the same traversal asked
+// for two reasons, and a second copy of it would be a second answer to which
+// routes the graph declares.
+//
+// An id naming no registered item is skipped rather than followed to a nil
+// step: ValidateGraph refuses those before this runs on its behalf, so a
+// validated flow has none, and a walk asked about a half-built one must not
+// invent a step for the id.
+//
+// A nil `from` reaches nothing. A flow with no entry is refused by
+// ValidateGraph before the entry is walked from, and an id that names nothing
+// is the same answer read from the other end.
+func (f *Flow) reachable(from *step) map[*step]bool {
+	if from == nil {
+		return map[*step]bool{}
+	}
+	seen := map[*step]bool{from: true}
+	queue := []*step{from}
+	for len(queue) > 0 {
+		s := queue[0]
+		queue = queue[1:]
+		for _, id := range s.next {
+			succ, ok := f.stepByResult[id]
+			if !ok || seen[succ] {
+				continue
+			}
+			seen[succ] = true
+			queue = append(queue, succ)
+		}
+	}
+	return seen
+}
+
+// ReachableFrom returns the lifecycle items an item standing at `from` can
+// still run: `from` itself, and every item some sequence of declared routes
+// arrives at from it. Registration order; empty when `from` names no
+// registered lifecycle item.
+//
+// It is the route's answer to "what is still ahead", and the only one there is:
+// a step no declared route reaches from here can never run again, and a step it
+// does reach can — including one whose result is already recorded, since
+// "reaching a step a second time is not an anomaly but a route"
+// (docs/resolution.md § Deriving the next step). Nothing about the artifact
+// records is consulted, here or in Position.
+func (f *Flow) ReachableFrom(from StepId) []LifecycleItem {
+	seen := f.reachable(f.stepByResult[from])
+	out := make([]LifecycleItem, 0, len(seen))
+	for _, s := range f.steps {
+		if seen[s] {
+			out = append(out, toLifecycleItem(s))
+		}
+	}
+	return out
 }
 
 // validateFinalizationReachable walks Next BACKWARD from every step that may

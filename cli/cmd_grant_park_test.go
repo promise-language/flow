@@ -602,21 +602,183 @@ func TestGrant_TooSmallLeavesParkAndReportsIt(t *testing.T) {
 // --all sweep and --dry-run
 // ---------------------------------------------------------------------------
 
-func TestGrantAll_ToppsUpPendingOnly(t *testing.T) {
-	env := newParkGrantEnv(t)
-	env.dispatches(t, "plan", 3)
-	appendResult(t, env.be, env.claim.ItemRef, "commit", "next", 1,
-		flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: "abc"})
-	before := env.budget(t, "commit").MaxInvocations
+// newReworkGrantEnv is the sweep's fixture for a route that hands work BACK —
+// the shape #245 declared and the one a checklist cannot see: `implementation`
+// and `commit` sit on a cycle, so an item standing on it reaches both again
+// however many of their results are already recorded, while `plan` is behind it
+// for good.
+//
+// It reuses parkGrantEnv whole: the only thing that differs from
+// newParkGrantEnv is the graph, and a second set of helpers over the same
+// backend would be a second answer to what the fixture's budget reads.
+func newReworkGrantEnv(t *testing.T) *parkGrantEnv {
+	t.Helper()
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Next("implementation", "the plan is written").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, Next: []flow.StepId{"implementation"}})
+		f.AddStep("implement", "implementation", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Next("commit", "the change is written").Patch(flow.PatchBody{}), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Next: []flow.StepId{"commit"}})
+		// The handback: review either sends the work back to implement or
+		// carries it on to the proposal.
+		f.AddStep("review the proposal", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Next("implementation", "rework it").CommitHash("abc"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Next: []flow.StepId{"implementation", "pr-open"}})
+		f.AddSignalStep("create pull request", "pr-open", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "the change is proposed"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, &stubAgent{name: "stub"})
+
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{
+		"plan":           {MaxInvocations: 3, MaxPromptsPerInvocation: 1, MaxCostUSD: 10, Timeout: 30 * time.Minute},
+		"implementation": {MaxInvocations: 3, MaxPromptsPerInvocation: 1, MaxCostUSD: 10, Timeout: 30 * time.Minute},
+		"commit":         {MaxInvocations: 3, MaxPromptsPerInvocation: 1, MaxCostUSD: 10, Timeout: 30 * time.Minute},
+	}
+
+	env := &parkGrantEnv{app: app, be: be, claim: claim, out: &bytes.Buffer{}, err: &bytes.Buffer{}}
+	app.Out, app.Err = env.out, env.err
+	return env
+}
+
+// The sweep on a rework round. Every artifact is recorded — the checklist reads
+// the whole item as done — and the route stands at `implementation` with the
+// producing phase ahead of it. The steps that phase runs are what `--all` must
+// top up; selecting by `Artifact(id).Resolved` selected none of them and
+// reported nothing to do (#315).
+func TestGrantAll_TopsUpAReworkRound(t *testing.T) {
+	env := newReworkGrantEnv(t)
+	recordRoute(t, env,
+		resultEntry("plan", "implementation", 1, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"}),
+		resultEntry("implementation", "commit", 1, flow.ArtifactBody{Type: flow.ArtifactPatch, Patch: flow.PatchBody{Diff: []byte("diff --git a/x b/x\n"), BaseBranch: "main"}}),
+		resultEntry("commit", "implementation", 1, flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: "abc"}),
+	)
+	// Both steps of the cycle have spent their allowance getting here.
+	env.dispatches(t, "implementation", 3)
+	env.dispatches(t, "commit", 3)
 
 	if code := env.grant("--all"); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
 	}
-	if got := env.budget(t, "plan").MaxInvocations; got != 4 {
-		t.Errorf("plan MaxInvocations = %d, want 4", got)
+	if got := env.budget(t, "implementation").MaxInvocations; got != 4 {
+		t.Errorf("implementation MaxInvocations = %d, want 4 — the step the item stands at", got)
 	}
-	if got := env.budget(t, "commit").MaxInvocations; got != before {
-		t.Errorf("commit MaxInvocations = %d, want %d (completed steps are skipped)", got, before)
+	if got := env.budget(t, "commit").MaxInvocations; got != 4 {
+		t.Errorf("commit MaxInvocations = %d, want 4 — still ahead on the route via the handback", got)
+	}
+	if strings.Contains(env.out.String(), "nothing to top up") {
+		t.Errorf("stdout = %q, want a sweep — an item with a producing phase ahead has steps to top up", env.out.String())
+	}
+}
+
+// The route's version of "a step that has completed needs no budget": a step no
+// declared route reaches from here can never run again, so the sweep leaves it
+// alone. `plan` is behind the cycle and nothing routes back to it.
+func TestGrantAll_SkipsWhatTheRouteCannotReach(t *testing.T) {
+	env := newReworkGrantEnv(t)
+	recordRoute(t, env,
+		resultEntry("plan", "implementation", 1, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"}),
+	)
+	env.dispatches(t, "plan", 3)
+	before := env.budget(t, "plan").MaxInvocations
+
+	if code := env.grant("--all"); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	if got := env.budget(t, "plan").MaxInvocations; got != before {
+		t.Errorf("plan MaxInvocations = %d, want %d — nothing routes back to it", got, before)
+	}
+	if got := env.budget(t, "implementation").MaxInvocations; got != 3 {
+		t.Errorf("implementation MaxInvocations = %d, want 3 (untouched — it has headroom)", got)
+	}
+}
+
+// A finalized item has no step ahead of it at all. The sweep says so and writes
+// nothing, rather than reporting the route as broken.
+func TestGrantAll_FinalizedItemHasNothingAhead(t *testing.T) {
+	env := newReworkGrantEnv(t)
+	env.dispatches(t, "commit", 3)
+	recordRoute(t, env,
+		resultEntry("plan", "implementation", 1, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"}),
+		flow.JournalEntry{
+			Step: "pr-open", Execution: 1,
+			Route: flow.Route{Finalize: flow.DispositionResolved},
+			By:    "tester", Role: "contributor",
+		},
+	)
+
+	if code := env.grant("--all"); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	if !strings.Contains(env.out.String(), "finalized") {
+		t.Errorf("stdout = %q, want the note naming the finalization", env.out.String())
+	}
+	if got := env.budget(t, "commit").MaxInvocations; got != 3 {
+		t.Errorf("commit MaxInvocations = %d, want 3 — nothing runs again on a finalized item", got)
+	}
+}
+
+// A journal electing a step the flow does not register is an item standing
+// nowhere. The sweep refuses rather than guessing, and writes nothing — naming
+// a step explicitly is what still reaches one on an item in that state.
+func TestGrantAll_RefusesWhenThePositionCannotBeDerived(t *testing.T) {
+	env := newReworkGrantEnv(t)
+	env.dispatches(t, "implementation", 3)
+	recordRoute(t, env,
+		resultEntry("plan", "next", 1, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"}),
+	)
+
+	if code := env.grant("--all"); code != 2 {
+		t.Fatalf("exit = %d, want 2; stderr=%q", code, env.err.String())
+	}
+	if !strings.Contains(env.err.String(), `names no registered lifecycle item`) {
+		t.Errorf("stderr = %q, want the position's own refusal", env.err.String())
+	}
+	if got := env.budget(t, "implementation").MaxInvocations; got != 3 {
+		t.Errorf("implementation MaxInvocations = %d, want 3 — a refusal must not write", got)
+	}
+}
+
+// Everything ahead can be unbudgeted: a signal step owns no budget, so an item
+// standing at the last one has nothing to top up. That is a note and exit 0,
+// not a refusal — the operator asked for something reasonable.
+func TestGrantAll_NoBudgetedStepAhead(t *testing.T) {
+	env := newParkGrantEnv(t)
+	env.dispatches(t, "plan", 3)
+	recordRoute(t, env,
+		resultEntry("plan", "commit", 1, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"}),
+		resultEntry("commit", "pr-open", 1, flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: "abc"}),
+	)
+
+	if code := env.grant("--all"); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	if !strings.Contains(env.out.String(), "nothing to top up") {
+		t.Errorf("stdout = %q, want the no-budgeted-step note", env.out.String())
+	}
+	if got := env.budget(t, "plan").MaxInvocations; got != 3 {
+		t.Errorf("plan MaxInvocations = %d, want 3 — the route has passed it", got)
+	}
+}
+
+// The sweep starts where the item stands: the step the last entry elected, and
+// what that step's routes reach — not the first step with nothing recorded.
+func TestGrantAll_TopsUpFromWhereTheItemStands(t *testing.T) {
+	env := newParkGrantEnv(t)
+	env.dispatches(t, "plan", 3)
+	env.dispatches(t, "commit", 3)
+	appendResult(t, env.be, env.claim.ItemRef, "plan", "commit", 1,
+		flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"})
+	before := env.budget(t, "plan").MaxInvocations
+
+	if code := env.grant("--all"); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	if got := env.budget(t, "commit").MaxInvocations; got != 4 {
+		t.Errorf("commit MaxInvocations = %d, want 4 — the step the item stands at", got)
+	}
+	if got := env.budget(t, "plan").MaxInvocations; got != before {
+		t.Errorf("plan MaxInvocations = %d, want %d (the route has passed it)", got, before)
 	}
 }
 

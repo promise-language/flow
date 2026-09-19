@@ -441,8 +441,9 @@ type grantPayload struct {
 	Mode string       `json:"mode"`
 	Park *parkPayload `json:"park,omitempty"`
 	// Note explains a successful invocation that granted nothing — a stale
-	// park, an item with no pending steps. Present so a caller reading JSON
-	// never has to infer "why is granted empty?" from an empty array.
+	// park, a finalized item, an item with no budgeted step still ahead of it.
+	// Present so a caller reading JSON never has to infer "why is granted
+	// empty?" from an empty array.
 	Note      string       `json:"note,omitempty"`
 	Granted   []grantDelta `json:"granted"`
 	Unchanged []string     `json:"unchanged"`
