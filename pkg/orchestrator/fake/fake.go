@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -148,6 +149,11 @@ type itemRecord struct {
 	questions   []flow.Question
 	nextQID     int
 	parkRequest *flow.ParkRequest
+
+	// remarks is the prose recorded on the item, in the order it was written.
+	// An append, not a field: nothing on flow.Item reports it, and Remarks
+	// below is a test accessor rather than part of the contract.
+	remarks []string
 
 	// blockedBy holds the fake ids of declared blockers. Blockedness is DERIVED
 	// from their statuses on every read, never stored — a stored bit beside a
@@ -1648,6 +1654,41 @@ func (b *Orchestrator) PostAnswer(ctx context.Context, ref flow.ItemRef, id flow
 	now := b.clock()
 	rec.questions[idx].UserAnswer = flow.UserAnswer{Answer: text, AnsweredAt: &now}
 	return nil
+}
+
+// Remark records one piece of prose on the item.
+//
+// No claim — the party recording it is not the party holding the item. Empty
+// text is refused: a remark that says nothing is a publication nobody asked
+// for.
+func (b *Orchestrator) Remark(ctx context.Context, ref flow.ItemRef, text string) error {
+	itemID, err := refID(ref)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(text) == "" {
+		return fmt.Errorf("fake: a remark on item %q must carry text", itemID)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return fmt.Errorf("fake: item %q not registered", itemID)
+	}
+	rec.remarks = append(rec.remarks, text)
+	return nil
+}
+
+// Remarks is a test helper — what Remark recorded, in order, addressed by the
+// fake's own item id. Not on the contract: nothing in it reads a remark back.
+func (b *Orchestrator) Remarks(itemID string) []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec := b.items[itemID]
+	if rec == nil {
+		return nil
+	}
+	return slices.Clone(rec.remarks)
 }
 
 // ---------------------------------------------------------------------------

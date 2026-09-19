@@ -150,6 +150,49 @@ Piped rather than on a terminal, or rendering JSON, the bare form prints every
 question and its answer and never waits for input. Answering does not resume
 the item — that is a separate, deliberate act (resolve or run-step).`},
 
+	"edit": {name: "edit", syntax: "<item-id> <change>…", summary: "change the item itself — title, body, tags, dependencies, priority, urgency",
+		detail: `Changes the item, rather than the flow's record of working on it.
+Every change given lands together or not at all — one invocation is one
+transaction — so you never have to ask which half took.
+
+  --title TEXT          replace the title
+  --body TEXT           replace the body
+  --body-file PATH      replace the body with a file's contents
+  --add-tag TAG         add a tag (repeatable)
+  --remove-tag TAG      remove a tag (repeatable)
+  --block-on <item-id>  record that this item waits on another (repeatable)
+  --unblock <item-id>   retract a dependency (repeatable)
+  --priority P          critical | high | medium | low
+  --urgency U           next | default | deferred
+
+At least one change is required: an edit that stages nothing is refused
+rather than reported as a no-op.
+
+It takes no claim. Correcting a title, or recording a dependency, is not
+something the holder does — usually nobody holds the item, which is the
+point — so it addresses the item by id and works from any machine.
+
+Some combinations are the backend's to refuse: the GitHub backend writes
+item fields and dependencies through different endpoints, so a stage
+mixing them, or staging several dependency changes, is refused with what
+to do instead rather than half-applied.`},
+	"remark": {name: "remark", syntax: "<item-id> (<text> | --body-file PATH)", summary: "record a remark on the item",
+		detail: `Records prose on the item: what was decided, what was found, why
+something was released.
+
+  remark <item-id> "<text>"
+  remark <item-id> --body-file notes.md
+
+The item id is always first and always required — it is never read as the
+text, and the text is never read as an id.
+
+A remark is an append, not a field, which is why it is not one of edit's
+flags: it is published beside the request rather than changing it. Empty
+text records nothing and exits 1.
+
+It takes no claim, and it publishes: the remark is visible to everyone who
+can see the item.`},
+
 	"grant": {name: "grant", syntax: "[<step-id>] [--all] [--invocations N] [--prompts N] [--cost USD] [--timeout SECONDS] [--dry-run]", summary: "top up a step's budget",
 		detail: `With no arguments: reads why the item parked and tops up the axis that
 parked it, plus any other axis already at its cap — a step out of both time

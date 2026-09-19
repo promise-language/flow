@@ -132,6 +132,17 @@ const (
 	// ActBlocker records that one item waits on another. The reference is
 	// published on the item and visible to everyone who can see it.
 	ActBlocker DisclosureAct = "blocker"
+
+	// ActRemark is prose recorded on the item about the work — what was
+	// decided, what was found, why something was released.
+	//
+	// It is distinct from ActItemEdit for the reason ActItemEdit is distinct
+	// from ActLabel: the two carry different things and a guard decides
+	// differently about each. ActItemEdit rewrites the REQUEST — what the item
+	// asks for — where a remark is an observation appended beside it, and a
+	// guard that treated the two alike would be judging a correction to the
+	// ask by the standard for an account of the work, or the reverse.
+	ActRemark DisclosureAct = "remark"
 )
 
 // AllDisclosureActs returns every declared act, in declaration order. A guard
@@ -141,7 +152,7 @@ func AllDisclosureActs() []DisclosureAct {
 	return []DisclosureAct{
 		ActArtifactComment, ActStateComment, ActParkRecord, ActQuestion, ActAnswer, ActLabel,
 		ActPullRequest, ActMerge, ActPush, ActAssignee, ActArtifactFile,
-		ActItemEdit, ActBlocker,
+		ActItemEdit, ActBlocker, ActRemark,
 	}
 }
 

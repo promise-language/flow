@@ -39,7 +39,7 @@ func TestTopLevelHelp_AllForms(t *testing.T) {
 func TestPerCommandHelp_PrintsAndDoesNotExecute(t *testing.T) {
 	commands := []string{
 		"doctor", "list", "claim", "release", "reseed",
-		"status", "grant", "run-step", "resolve",
+		"status", "grant", "run-step", "resolve", "edit", "remark",
 	}
 	for _, cmd := range commands {
 		for _, tok := range []string{"-h", "--h", "-help", "--help"} {

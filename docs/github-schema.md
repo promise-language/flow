@@ -169,6 +169,14 @@ The body format depends on the type:
 
 A step the route reaches again produces a further comment (append-only); `v=` carries the execution count, matching the journal entry's `execution`, and the journal entry's `body_at` names the comment that carries its payload.
 
+## Remarks
+
+A remark ([orchestrator.md](orchestrator.md) § Remarks) is an **ordinary issue comment carrying no marker at all** — its text and nothing else. It is the same shape an answer is posted in, and it is the shape for the same reason: every machine-readable write on an issue carries an HTML marker and every reader of them selects on one, so a comment without a marker is invisible to all of them and cannot be mistaken for state.
+
+That is also what makes a remark useful. It appears in the thread exactly where a person writing the same sentence by hand would have put it, and reads as what it is.
+
+**Nothing reads it back.** There is no remark store, no index and no id: the issue thread is where it lives, and the way to read it is the way a person reads any comment.
+
 ## Large artifact storage
 
 Artifacts too large for an issue comment (file and patch types always; markdown when exceeding the configured `MaxCommentBytes`) are stored on the **orphan branch** `flow-artifacts`:
