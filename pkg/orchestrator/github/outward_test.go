@@ -195,6 +195,14 @@ func outwardWrites() map[string]func(context.Context, *outward) error {
 		"DeleteRepoLabel": func(ctx context.Context, o *outward) error {
 			return o.DeleteRepoLabel(ctx, "flow:landing")
 		},
+		"SetRepoLabelDescription": func(ctx context.Context, o *outward) error {
+			// The rewrite needs a record to rewrite, and the create above is
+			// the only thing that makes one — a PATCH never conjures a name.
+			// Its own refusal under a refusing guard is not what this drive
+			// asserts; the rewrite's is, and it is reached either way.
+			_ = o.CreateRepoLabel(ctx, "flow:landing", "0123456789abcdef 6899a680")
+			return o.SetRepoLabelDescription(ctx, "flow:landing", "fedcba9876543210 6899a681")
+		},
 		"AddAssignees": func(ctx context.Context, o *outward) error {
 			return o.AddAssignees(ctx, 42, []string{"alice"})
 		},

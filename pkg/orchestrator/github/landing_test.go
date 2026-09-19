@@ -700,7 +700,7 @@ func TestTakeLanding_QueuedRoundReportsWhatItWaited(t *testing.T) {
 	}
 }
 
-// AN ARENA ADOPTS ITS OWN RECORD. Across a round that means the process that
+// AN ARENA RE-TAKES ITS OWN RECORD. Across a round that means the process that
 // began it is gone — one arena runs one round at a time — so the record is this
 // arena's to give back, and the release it gets is a real one. A no-op would
 // leave a stop holding the mainline until the bound collected it.
@@ -717,15 +717,85 @@ func TestTakeLanding_ArenaAdoptsItsOwnRecord(t *testing.T) {
 		t.Fatalf("takeLanding on this arena's own record: %v", err)
 	}
 	if waited != 0 {
-		t.Errorf("waited = %s adopting this arena's own record, want zero", waited)
+		t.Errorf("waited = %s re-taking this arena's own record, want zero", waited)
 	}
 	hold.release()
 	mock.mu.Lock()
 	_, stillThere := mock.repoLabels["flow:landing"]
 	mock.mu.Unlock()
 	if stillThere {
-		t.Error("adopting this arena's own record returned a release that gives nothing back")
+		t.Error("re-taking this arena's own record returned a release that gives nothing back")
 	}
+}
+
+// THE RE-TAKEN RECORD CARRIES THIS ROUND'S INSTANT, NOT THE ABANDONED ONE'S.
+// The instant is what the bound is measured from, so a round that inherited it
+// would begin with part of its bound spent — and one begun after a longer gap
+// with none of it left, collectible by the first peer to look, from under a
+// merge-result measurement that is still running.
+func TestTakeLanding_RetakingItsOwnRecordRestartsTheBound(t *testing.T) {
+	a, bb, mock := twoLandingArenas(t)
+	ctx := t.Context()
+
+	// A round this arena began and never gave back, abandoned long enough ago
+	// that a peer would collect it.
+	abandoned := nowUTC().Add(-2 * a.landingRoundBound())
+	mock.mu.Lock()
+	mock.repoLabels = map[string]string{"flow:landing": renderLandingHolder(a.arenaFingerprint(), abandoned)}
+	mock.mu.Unlock()
+
+	if _, _, err := takeLanding(ctx, a, a.arena()); err != nil {
+		t.Fatalf("takeLanding on this arena's own abandoned record: %v", err)
+	}
+
+	mock.mu.Lock()
+	desc := mock.repoLabels["flow:landing"]
+	mock.mu.Unlock()
+	held, at, ok := parseLandingHolder(desc)
+	if !ok || held != a.arenaFingerprint() {
+		t.Fatalf("the record reads %q, want this arena's fingerprint %q", desc, a.arenaFingerprint())
+	}
+	if !at.After(abandoned) {
+		t.Fatalf("the re-taken record still carries the abandoned round's instant %s; "+
+			"this round's bound is spent before it starts", at)
+	}
+
+	// And the bound now runs from this round, so a peer finds a live record and
+	// queues rather than collecting the mainline out from under it.
+	short, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
+	defer cancel()
+	prevPoll := landingPoll
+	landingPoll = time.Millisecond
+	defer func() { landingPoll = prevPoll }()
+	if _, _, err := takeLanding(short, bb, bb.arena()); err == nil {
+		t.Error("a peer collected the re-taken record; the round was never given its own bound")
+	}
+}
+
+// The rewrite is NOT a second way to take the exclusion: it fails when there is
+// no record, and the take falls back to the create — the one act GitHub refuses
+// when the name is taken — rather than reporting a hold over nothing.
+func TestTakeLanding_RecordVanishingUnderTheRetakeFallsBackToTheCreate(t *testing.T) {
+	a, _, mock := twoLandingArenas(t)
+
+	mock.mu.Lock()
+	mock.repoLabels = map[string]string{
+		"flow:landing": renderLandingHolder(a.arenaFingerprint(), nowUTC().Add(-time.Minute)),
+	}
+	mock.dropRepoLabelOnRead = "flow:landing"
+	mock.mu.Unlock()
+
+	hold, _, err := takeLanding(t.Context(), a, a.arena())
+	if err != nil {
+		t.Fatalf("takeLanding: %v", err)
+	}
+	mock.mu.Lock()
+	desc := mock.repoLabels["flow:landing"]
+	mock.mu.Unlock()
+	if held, _, ok := parseLandingHolder(desc); !ok || held != a.arenaFingerprint() {
+		t.Errorf("the record reads %q after a take that fell back to the create", desc)
+	}
+	hold.release()
 }
 
 // A RECORD PAST THE ROUND'S OWN BOUND IS COLLECTED. Not a timer on the lock:

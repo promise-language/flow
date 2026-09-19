@@ -92,6 +92,12 @@ type ghMock struct {
 	// holds the mainline.
 	failRepoLabelRead bool
 
+	// dropRepoLabelOnRead removes this label immediately after answering one
+	// read of it, and then clears itself: the window every take has between
+	// finding out who holds the mainline and acting on the answer. Driven from
+	// the mock because it cannot be reached from outside one.
+	dropRepoLabelOnRead string
+
 	// comments
 	nextCommentID int64
 	comments      []ghMockComment
@@ -463,13 +469,31 @@ func (m *ghMock) server() *httptest.Server {
 		writeJSON(w, map[string]any{"name": body.Name, "description": body.Description})
 	})
 
-	// GET/DELETE /repos/{o}/{r}/labels/{name} — the other two halves. A name
-	// that is not there is 404 on both, like the real API.
+	// GET/PATCH/DELETE /repos/{o}/{r}/labels/{name} — the other three halves. A
+	// name that is not there is 404 on all of them, like the real API.
 	mux.HandleFunc(prefix+"/labels/", func(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(r.URL.Path, prefix+"/labels/")
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		switch r.Method {
+		case http.MethodPatch:
+			// Rewrites the description and NEVER creates: a PATCH that
+			// conjured the name would make the exclusion takeable by a call
+			// that is not the create, and the mock would then be the only
+			// place two arenas could not both hold the mainline.
+			if _, ok := m.repoLabels[name]; !ok {
+				http.NotFound(w, r)
+				return
+			}
+			var body struct {
+				Description string `json:"description"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			m.repoLabels[name] = body.Description
+			writeJSON(w, map[string]any{"name": name, "description": body.Description})
 		case http.MethodGet:
 			if m.failRepoLabelRead {
 				http.Error(w, "boom", http.StatusInternalServerError)
@@ -479,6 +503,10 @@ func (m *ghMock) server() *httptest.Server {
 			if !ok {
 				http.NotFound(w, r)
 				return
+			}
+			if m.dropRepoLabelOnRead == name {
+				delete(m.repoLabels, name)
+				m.dropRepoLabelOnRead = ""
 			}
 			writeJSON(w, map[string]any{"name": name, "description": desc})
 		case http.MethodDelete:

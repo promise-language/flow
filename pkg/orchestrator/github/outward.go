@@ -257,9 +257,46 @@ func (o *outward) CreateRepoLabel(ctx context.Context, name, description string)
 	})
 }
 
+// SetRepoLabelDescription rewrites a repository-scoped label's description in
+// place, leaving the name — and so the exclusion itself — untouched.
+//
+// IT IS NOT A SECOND WAY TO TAKE THE EXCLUSION. Taking it is CreateRepoLabel
+// and only ever that, because only a create is refused when the name is there.
+// This is for the one holder that already has the record and needs the record
+// to say something else: an arena re-taking its OWN abandoned record, whose
+// instant is the previous round's and would otherwise measure this round's
+// bound from a clock that started before it (landing.go).
+//
+// IN PLACE RATHER THAN DELETE-AND-RETAKE, which is the whole reason it exists:
+// a delete followed by a create leaves the mainline momentarily unheld, and
+// anything polling in that gap takes an exclusion the arena believes it still
+// has. The description is the only field sent, so a name this cannot rename is
+// a name no request of this shape can collide over.
+//
+// A label that is not there is reported as errLabelMissing rather than absorbed:
+// the caller's next move is to CREATE one, and a rewrite that silently reported
+// success would leave it believing a record exists that does not.
+func (o *outward) SetRepoLabelDescription(ctx context.Context, name, description string) error {
+	d := flow.Disclosure{Act: flow.ActLabel, Text: stated(flow.OriginFlow, name, description)}
+	return o.publish(ctx, d, func(ctx context.Context) error {
+		_, _, err := o.client.Issues.EditLabel(ctx, o.owner, o.repo, name, &github.Label{
+			Description: github.Ptr(description),
+		})
+		if err != nil && isNotFound(err) {
+			return errLabelMissing
+		}
+		return err
+	})
+}
+
 // errLabelExists is CreateRepoLabel's typed refusal: the name is taken, which
 // for the exclusion means somebody else holds it.
 var errLabelExists = errors.New("a label with that name already exists")
+
+// errLabelMissing is SetRepoLabelDescription's: there is no label of that name
+// to rewrite, which for the exclusion means the record went away underneath the
+// rewrite and taking it is a create again.
+var errLabelMissing = errors.New("no label with that name exists")
 
 // isLabelExists reads GitHub's uniqueness refusal off the validation error,
 // by its code rather than its prose — unlike isAlreadyRecorded below, which has

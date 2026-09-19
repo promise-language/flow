@@ -158,7 +158,28 @@ func takeLanding(ctx context.Context, b *Orchestrator, holder flow.Arena) (hold 
 			// record is this arena's to give back, and a no-op here would leave
 			// it standing until the bound collected it — a stop holding the
 			// mainline, which is the one thing this must never do.
-			return b.landingHold(name, mine), 0, nil
+			//
+			// THE INSTANT IS REWRITTEN AND NEVER INHERITED. The instant is what
+			// the bound is measured from, and the one standing in the record is
+			// the ABANDONED round's — so a round that adopted it as it stands
+			// would begin with part of its bound already spent, or with none of
+			// it left, and be collected from under a measurement still running.
+			// That costs exactly what the exclusion exists to prevent: the
+			// expensive merge-result run is thrown away, and the round comes
+			// back to re-measure. This round starts now, so the record says now.
+			//
+			// IN PLACE, not delete-then-retake: a delete leaves the mainline
+			// momentarily unheld, and a peer polling in that gap takes an
+			// exclusion this arena is about to believe it holds.
+			switch err := b.out.SetRepoLabelDescription(ctx, name, renderLandingHolder(mine, nowUTC())); {
+			case err == nil:
+				return b.landingHold(name, mine), 0, nil
+			case !errors.Is(err, errLabelMissing):
+				return nil, nowUTC().Sub(started), fmt.Errorf(
+					"landing: cannot re-take this arena's own record of the mainline's exclusion: %w", err)
+			}
+			// The record went away under the rewrite. Taking it is a create
+			// again, which is what the rest of this iteration does.
 		case !ok || nowUTC().Sub(at) > b.landingRoundBound():
 			// A HOLDER THAT CANNOT STILL BE INSIDE ITS ROUND. Not a timer on
 			// the lock: the round carries its own declared bound — one gate
