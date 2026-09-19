@@ -366,12 +366,16 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		// Whether this iteration is going to dispatch a handler at all — the
 		// other half of the question the pacing wait answers, and the half no
 		// declaration can answer, because there is no step to have declared
-		// anything. Three of RunOne's pre-dispatch exits are decided from what
+		// anything. Four of RunOne's pre-dispatch exits are decided from what
 		// the peek already holds:
 		//
 		//   - !acts      — outside the remit: RunOne blocks, or, on an item
 		//                  already finalized, takes the finalize path.
 		//   - next == "" — no step eligible: RunOne finalizes.
+		//   - manual     — an operator is driving the item by hand: RunOne
+		//                  skips. Read AFTER next == "" because that is where
+		//                  the hold sits there — an item with nothing pending
+		//                  finalizes, hold or no hold.
 		//   - blocked    — waiting on unfinished items: RunOne stops clean.
 		//
 		// None of them dispatches anything, so none can spend, and holding one
@@ -395,7 +399,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		//
 		// The same predicates the narration below reads, so the two cannot
 		// disagree about whether a dispatch is coming.
-		dispatches := st == nil || (acts && next != "" && !blockedFromAdvancing(st))
+		dispatches := st == nil || (acts && next != "" && !st.Manual && !blockedFromAdvancing(st))
 
 		// Pace against subscription quota. The check is before dispatch so the
 		// delay costs nothing that is in flight.
@@ -452,6 +456,21 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		// pacing and the step's own run is announced when it actually begins.
 		if st != nil {
 			switch {
+			case next != "" && st.Manual:
+				// NOTHING IS ABOUT TO RUN, for the reason the blocked case
+				// below announces nothing: the advance stops on the hold
+				// before it dispatches, and `running "plan"…` above that stop
+				// says the step ran when it never started.
+				//
+				// FIRST, as the hold is first among RunOne's pre-dispatch
+				// stops: an item both held and blocked names the person
+				// driving it, not blockers that are theirs to clear. Guarded
+				// by next != "" because the hold sits after the no-flow
+				// finalize there — an item with nothing pending finalizes,
+				// hold or no hold, and announcing the hold above that would be
+				// the same misreport inverted.
+				fmt.Fprintf(app.Err, "resolve: %s is under manual control — not dispatching\n",
+					claim.ItemRef.Display)
 			case blockedFromAdvancing(st):
 				// NOTHING IS ABOUT TO RUN, so nothing is announced as running.
 				// The advance stops before dispatch on an item waiting for
@@ -573,7 +592,8 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			return 1
 		case flow.StatusSkipped:
 			// A preflight refusal — an already-finalized item, an item outside
-			// this binary's coverage. Nothing to re-dispatch: the next cycle
+			// this binary's coverage — or a manual hold, an item an operator
+			// has taken hand control of. Nothing to re-dispatch: the next cycle
 			// answers identically until somebody acts.
 			fmt.Fprintf(app.Err, "resolve: %s %s — run `status %s` to inspect\n", claim.ItemRef.Display, res.Status, claim.ItemRef.Display)
 			return 0

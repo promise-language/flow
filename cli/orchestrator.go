@@ -186,13 +186,46 @@ func RunOne(ctx context.Context, app *App, claim flow.Claim) (flow.InvocationRes
 	// when the last blocker lands the next advance runs it from here.
 	//
 	// The pending step is resolved once, here, and feeds every report from this
-	// point on: the two stops below and the base result the dispatch builds on.
-	// Each names the step itself as what the route still points at, because
+	// point on: the three stops below and the base result the dispatch builds
+	// on. Each names the step itself as what the route still points at, because
 	// nothing a stop does moves the route.
 	li, err := lifecycleItemOf(f, nextName)
 	if err != nil {
 		return flow.InvocationResult{}, err
 	}
+
+	// A manual hold. An operator has taken hand control, and nothing dispatches
+	// the item underneath them (docs/orchestrator.md § Editing). This is the
+	// consumer of Item.Manual: the flag is written through ItemEditor.SetManual
+	// alone — no command asserts it (docs/cli.md § Advancing one step) — and
+	// read here, where a dispatch would otherwise happen.
+	//
+	// "skipped", which is the status of an invocation that stopped BEFORE ANY
+	// DISPATCH because a pre-dispatch check found nothing runnable — a manual
+	// hold is the second of the two the vocabulary names (docs/resolution.md
+	// § Reporting). So nothing ran, nothing was spent, and the item reads
+	// exactly as it did: no seed, no budget gate, no invocation bump, no park.
+	// The claim is kept, and clearing the flag returns the item to automatic
+	// dispatch with the pending step still pending.
+	//
+	// FIRST among the pre-dispatch stops. Manual answers WHO MAY DISPATCH,
+	// which sits outside whether the step could run, so it precedes both stops
+	// below: an item both manual and blocked reports the person holding it
+	// rather than blockers that are theirs to clear, and the preflight — the
+	// one check here that can cost a read — never runs on an item nothing
+	// should be touching. After the no-flow block above, deliberately:
+	// finalizing is not a dispatch, and withholding it on a flag only its
+	// setter clears would strand a finished item exactly as the rule warns.
+	if state.Manual {
+		return stampNext(flow.InvocationResult{
+			Flow:   f.Name(),
+			Item:   claim.ItemRef.Display,
+			Step:   string(li.Result()),
+			Status: string(flow.StatusSkipped),
+			Reason: "under manual control — a person is driving this item by hand",
+		}, li), nil
+	}
+
 	if blockedFromAdvancing(state) {
 		return blockedOnItems(state, stampNext(flow.InvocationResult{
 			Flow: f.Name(),

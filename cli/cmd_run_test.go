@@ -287,6 +287,37 @@ func TestCmdRun_DoesNotMarkTheItemManual(t *testing.T) {
 	}
 }
 
+// `run-step` does not SET the hold, and it does honour one. A caller driving
+// one step at a time reads it on the machine channel like every other outcome,
+// and the exit is 0: a skip is not a failure of the command, and there is
+// nothing outside for anyone to clear — the person holding the item is the one
+// who hands it back.
+func TestCmdRun_ManualHoldReportsSkippedAndExitsZero(t *testing.T) {
+	t.Setenv(outputEnv, "")
+	app, be, claim := testApp(t, runStepStubFlow, &stubAgent{name: "stub"})
+	setManual(t, be, claim.ItemRef, true)
+	out := &bytes.Buffer{}
+	app.Out = out
+
+	if code := app.cmdRun(context.Background(), []string{"--json"}); code != 0 {
+		t.Fatalf("cmdRun = %d, want 0 — a manual hold is not a failure of the command", code)
+	}
+	got := decodeResultStream(t, out.String())
+	if len(got) != 1 {
+		t.Fatalf("stdout carried %d results, want exactly 1; got %q", len(got), out.String())
+	}
+	res := got[0]
+	if res.Status != string(flow.StatusSkipped) {
+		t.Errorf("status = %q, want %q", res.Status, flow.StatusSkipped)
+	}
+	if !strings.Contains(res.Reason, "manual control") {
+		t.Errorf("reason = %q, want it to name the manual hold", res.Reason)
+	}
+	if res.Step != "plan" || res.NextStep != "plan" {
+		t.Errorf("res = %+v, want the pending step reported and stamped — the skip did not move the route", res)
+	}
+}
+
 // The park is the other half of what the takeover took: setting manual
 // resolves any unresolved park, so a `run-step` that asserted it cleared the
 // stop a person put on the item — silently, once per call, for a caller that

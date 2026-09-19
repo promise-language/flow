@@ -3451,6 +3451,260 @@ func TestRunOne_BlockedItemWithNoPendingStepStillFinalizes(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// The manual hold (docs/orchestrator.md § Editing, docs/resolution.md
+// § Reporting).
+// ---------------------------------------------------------------------------
+
+// setManual sets or clears manual control through the editor — the contract's
+// one way to write it, and the only one: no command asserts it
+// (docs/cli.md § Advancing one step), so a test takes the same route an
+// operator's own tooling does.
+func setManual(t *testing.T, be flow.Orchestrator, item flow.ItemRef, manual bool) {
+	t.Helper()
+	ed, err := be.Edit(context.Background(), item)
+	if err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+	ed.SetManual(manual)
+	if err := ed.Commit(context.Background()); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+}
+
+// The consumer of Item.Manual. An operator has taken hand control, and nothing
+// dispatches the item underneath them — so the advance stops clean: skipped,
+// naming the pending step, and nothing else happens. No handler, no seed, no
+// dispatch charged, no park, and the claim is kept.
+func TestRunOne_ManualHoldStopsBeforeDispatch(t *testing.T) {
+	t.Setenv("FLOW_DIR", filepath.Join(t.TempDir(), ".flow"))
+	handlerRan := false
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			handlerRan = true
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, &stubAgent{name: "stub"})
+	setManual(t, be, claim.ItemRef, true)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusSkipped) {
+		t.Fatalf("status = %q, want skipped; res=%+v", res.Status, res)
+	}
+	if !strings.Contains(res.Reason, "manual control") {
+		t.Errorf("reason = %q, want it to name the manual hold — an operator reading this has to learn why nothing ran", res.Reason)
+	}
+	if handlerRan {
+		t.Error("the handler ran on an item under manual control")
+	}
+	// The route stands where it was: the stop names the step still pending,
+	// and stamps the successor the same way every other pre-dispatch stop does.
+	if res.Step != "plan" || res.Flow != "implement" {
+		t.Errorf("res = %+v, want the pending step and the flow named", res)
+	}
+	if res.NextStep != "plan" || res.NextMechanical == nil {
+		t.Errorf("next = (%q, %v), want the pending step stamped — nothing a stop does moves the route", res.NextStep, res.NextMechanical)
+	}
+	// Nothing was spent and the item reads exactly as it did.
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if row := state.Ledger.Row("plan"); row.Dispatches != 0 {
+		t.Errorf("Dispatches = %d, want 0 — a manual hold stops before any dispatch", row.Dispatches)
+	}
+	if len(state.Journal) != 0 {
+		t.Errorf("journal = %d entries, want 0 — nothing ran", len(state.Journal))
+	}
+	if state.Finalized {
+		t.Error("the item was finalized under a manual hold")
+	}
+	if res.Park != nil || be.ParkRequest("1") != nil {
+		t.Errorf("parked (%+v / %+v) — the stop is not a park", res.Park, be.ParkRequest("1"))
+	}
+	if held, _ := be.LookupActiveClaim(context.Background()); held == nil {
+		t.Error("the claim was released — the hold keeps the arena, it does not hand the item back")
+	}
+}
+
+// Clearing returns the item to automatic dispatch. This is the round trip the
+// contract turns on: an item that could be taken over and never handed back
+// would be stranded by the act of helping it, so the same advance that skipped
+// runs the step once the flag is cleared, from the step it was still pointing
+// at.
+func TestRunOne_ClearingTheManualHoldReturnsTheItemToDispatch(t *testing.T) {
+	t.Setenv("FLOW_DIR", filepath.Join(t.TempDir(), ".flow"))
+	planRuns := 0
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			planRuns++
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, &stubAgent{name: "stub"})
+
+	setManual(t, be, claim.ItemRef, true)
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne under the hold: %v", err)
+	}
+	if res.Status != string(flow.StatusSkipped) || planRuns != 0 {
+		t.Fatalf("under the hold: res = %+v (plan ran %d times), want skipped and nothing dispatched", res, planRuns)
+	}
+
+	// The operator hands the item back. Nothing else is touched.
+	setManual(t, be, claim.ItemRef, false)
+	if state, err := be.Load(context.Background(), claim.ItemRef); err != nil {
+		t.Fatalf("Load: %v", err)
+	} else if state.Manual {
+		t.Fatal("Manual is still set after clearing it — Load must report the current value")
+	}
+
+	res, err = RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne after clearing: %v", err)
+	}
+	if res.Status != "done" || planRuns != 1 {
+		t.Errorf("after clearing: res = %+v (plan ran %d times), want the step to run", res, planRuns)
+	}
+	if res.Step != "plan" {
+		t.Errorf("after clearing: step = %q, want %q — the skip left the route where it stood", res.Step, "plan")
+	}
+}
+
+// Manual outranks the item's own blockedness. The hold answers WHO MAY
+// DISPATCH, which sits outside whether the step could run: reporting `blocked`
+// would send an unattended driver hunting for blockers that are the hand
+// driver's to clear, and exit 1 on a condition nobody outside needs to act on.
+func TestRunOne_ManualHoldOutranksBlockedOnItems(t *testing.T) {
+	t.Setenv("FLOW_DIR", filepath.Join(t.TempDir(), ".flow"))
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			t.Fatal("handler must not run")
+			return flow.StepResult{}, nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, &stubAgent{name: "stub"})
+	be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
+	blockOn(t, be, claim.ItemRef, be.Ref("2"))
+	setManual(t, be, claim.ItemRef, true)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusSkipped) {
+		t.Fatalf("res = %+v, want skipped — the person holding the item, not the blockers", res)
+	}
+	if res.BlockKind != "" || len(res.BlockedBy) != 0 {
+		t.Errorf("res carries the block (%q / %+v), want the manual hold's own clean stop", res.BlockKind, res.BlockedBy)
+	}
+}
+
+// Manual outranks the preflight, and the preflight never runs. It is the one
+// pre-dispatch check here that can cost a read, and spending it on an item
+// nothing should be touching is what "nothing was spent" forbids.
+func TestRunOne_ManualHoldOutranksThePreflight(t *testing.T) {
+	t.Setenv("FLOW_DIR", filepath.Join(t.TempDir(), ".flow"))
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			t.Fatal("handler must not run")
+			return flow.StepResult{}, nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, &stubAgent{name: "stub"})
+	preflightRan := false
+	app.Preflight = func(context.Context, *flow.Item) error {
+		preflightRan = true
+		return fmt.Errorf("answer needed on %q: %w", "plan", flow.ErrBlocked)
+	}
+	setManual(t, be, claim.ItemRef, true)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusSkipped) {
+		t.Fatalf("res = %+v, want skipped", res)
+	}
+	if strings.Contains(res.Reason, "preflight") {
+		t.Errorf("Reason = %q is the preflight's, want the manual hold's", res.Reason)
+	}
+	if preflightRan {
+		t.Error("the preflight ran on an item under manual control")
+	}
+}
+
+// The check sits after the no-flow block: finalizing is not a dispatch, and
+// withholding it on a flag only its setter clears would strand a finished item
+// exactly as the rule warns.
+func TestRunOne_ManualItemWithNoPendingStepStillFinalizes(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.RequireSignal("pr-open") // never set, so no step is ever pending
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("ignored"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, &stubAgent{name: "stub"})
+	setManual(t, be, claim.ItemRef, true)
+	wrapped := &finalizingBackend{Orchestrator: be}
+	app.Orchestrator = wrapped
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != "done" || wrapped.finalizeCalls != 1 {
+		t.Errorf("res = %+v (finalize calls %d), want the finalize path", res, wrapped.finalizeCalls)
+	}
+}
+
+// Manual outranks the treasurer's gate, and the distinction is a WRITE. Every
+// other pre-dispatch stop leaves the item alone; the budget gate parks it, and
+// a park published on an item an operator is driving by hand advertises a
+// condition they did not hit and did not ask about. "Nothing was spent, and
+// the item reads exactly as it did" is what forbids it, and the only thing
+// that holds it is the hold being read FIRST.
+func TestRunOne_ManualHoldOutranksTheTreasurersGate(t *testing.T) {
+	t.Setenv("FLOW_DIR", filepath.Join(t.TempDir(), ".flow"))
+	planRuns := 0
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			planRuns++
+			return flow.StepResult{}, errors.New("boom")
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, &stubAgent{name: "stub"})
+	app.StepBudgets = map[flow.StepId]flow.StepBudget{"plan": {MaxInvocations: 1}}
+
+	// The one invocation the cap allows, spent. The next advance is the one
+	// that would park — TestRunOne_ParksOnInvocationsExhaustion is that run
+	// without the hold.
+	if res, err := RunOne(context.Background(), app, claim); err != nil || res.Status != string(flow.StatusFailed) {
+		t.Fatalf("first run: res = %+v, err = %v; want the cap consumed by a failed step", res, err)
+	}
+	setManual(t, be, claim.ItemRef, true)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusSkipped) {
+		t.Fatalf("res = %+v, want skipped — the hold, not the exhausted cap", res)
+	}
+	if res.Park != nil || be.ParkRequest("1") != nil {
+		t.Errorf("a park was published on a held item (%+v / %+v)", res.Park, be.ParkRequest("1"))
+	}
+	if planRuns != 1 {
+		t.Errorf("the plan ran %d times, want 1 — only the pre-hold dispatch", planRuns)
+	}
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if row := state.Ledger.Row("plan"); row.Dispatches != 1 {
+		t.Errorf("Dispatches = %d, want 1 — the held advance charged nothing", row.Dispatches)
+	}
+}
+
 // A step declares the blockers it finds and stops on them. The blocker is
 // recorded on the item, the stop is the same clean stop the pre-dispatch check
 // makes: blocked, kind waits-on-items, no park, no invocation charged, the

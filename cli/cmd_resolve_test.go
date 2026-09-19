@@ -1841,6 +1841,162 @@ func TestCmdResolve_BlockedOnItemsJSONCarriesTheKindAndBlockers(t *testing.T) {
 	}
 }
 
+// `resolve` stops at a manual hold on the first iteration: exit 0, nothing
+// dispatched, and the loop does not spin. The skip arm is the right end for it
+// — the next cycle answers identically until the person driving the item hands
+// it back, so there is nothing to re-dispatch and nobody outside to act.
+func TestCmdResolve_ManualHoldStopsTheRunWithoutDispatching(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	planRuns := 0
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+		planRuns++
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+	})
+	setManual(t, be, be.Ref("1"), true)
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if planRuns != 0 {
+		t.Errorf("the plan ran %d times, want 0 — nothing dispatches the item underneath the person driving it", planRuns)
+	}
+	if !strings.Contains(errBuf.String(), "skipped") {
+		t.Errorf("stderr = %q, want the skip reported", errBuf.String())
+	}
+	// And the line above the stop does not say the step ran. The advance stops
+	// on the hold before it dispatches, so `running "write plan"…` would report
+	// a step that never started.
+	if strings.Contains(errBuf.String(), "running \"") {
+		t.Errorf("stderr announced a step as running above the hold; got:\n%s", errBuf.String())
+	}
+	// The run ended at the hold rather than looping to the runaway guard: the
+	// journal stays empty and the item is not finalized.
+	state, err := be.Load(context.Background(), be.Ref("1"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.Journal) != 0 || state.Finalized {
+		t.Errorf("item advanced under the hold: %d journal entries, finalized=%v", len(state.Journal), state.Finalized)
+	}
+}
+
+// A HOLD TAKEN MID-RUN STOPS THE NEXT STEP. Taking over is something a person
+// does to a run already going — that is what "underneath the person now
+// driving it" describes — so the hold is read on every iteration off the
+// item's current state, not once when the run started. The run that has
+// already dispatched a step is exactly where a cached answer would not show.
+func TestCmdResolve_AHoldTakenMidRunStopsTheNextStep(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	commitRuns := 0
+	app, _, errBuf := resolveTestAppFlow(t, be, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			// The operator takes hand control while the first step runs.
+			setManual(t, be, be.Ref("1"), true)
+			return ctx.Next("commit", "planned").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Entry: true, Role: "contributor", Next: []flow.StepId{"commit"}})
+		f.AddStep("open branch", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			commitRuns++
+			return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("abc"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	})
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	output := errBuf.String()
+	// The premise: the run got past the first step. Without this the assertions
+	// below would pass on a run that stopped before it ever dispatched.
+	if !strings.Contains(output, "running \"write plan\"") {
+		t.Fatalf("the first step never ran, so nothing was taken over mid-run; got:\n%s", output)
+	}
+	if commitRuns != 0 {
+		t.Errorf("the second step ran %d times, want 0 — the hold landed before it was dispatched", commitRuns)
+	}
+	if !strings.Contains(output, "is under manual control — not dispatching") {
+		t.Errorf("the second iteration did not report the hold; got:\n%s", output)
+	}
+	state, err := be.Load(context.Background(), be.Ref("1"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.Journal) != 1 || state.Finalized {
+		t.Errorf("item = %d journal entries, finalized=%v; want the first step's entry alone and no finalize",
+			len(state.Journal), state.Finalized)
+	}
+}
+
+// THE LINE ABOVE THE STOP SAYS WHAT THE ADVANCE IS ABOUT TO DO. The peek reads
+// the hold where RunOne reads it — first among the pre-dispatch stops, and
+// after the no-flow finalize — so the two cannot disagree. Each case here is a
+// misreport if the peek reads it anywhere else: announcing blockers that are
+// the hand driver's to clear, or announcing a hold above an item that is
+// finalizing.
+func TestCmdResolve_TheHoldIsNarratedWhereTheAdvanceReadsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		build    func(t *testing.T) (*App, *bytes.Buffer)
+		narrates string
+		forbids  string
+	}{
+		{
+			// Held AND blocked on items. The advance reports the hold
+			// (TestRunOne_ManualHoldOutranksBlockedOnItems), so a narration
+			// naming the blockers sends the operator to clear dependencies on
+			// an item nothing is waiting on them for.
+			name: "held and blocked on items",
+			build: func(t *testing.T) (*App, *bytes.Buffer) {
+				be := fake.New()
+				be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+				be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
+				app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+					t.Fatal("handler must not run")
+					return flow.StepResult{}, nil
+				})
+				blockOn(t, be, be.Ref("1"), be.Ref("2"))
+				setManual(t, be, be.Ref("1"), true)
+				return app, errBuf
+			},
+			narrates: "is under manual control — not dispatching",
+			forbids:  "waits on unfinished dependencies",
+		},
+		{
+			// Held with nothing pending: the step that took the hold also
+			// finalized the route. The hold sits AFTER the no-flow finalize in
+			// the advance, so this pass finalizes — and a run that announced
+			// the hold and then reported the finalize would be the same
+			// misreport inverted.
+			name: "held with no eligible step",
+			build: func(t *testing.T) (*App, *bytes.Buffer) {
+				be := fake.New()
+				be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+				app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+					setManual(t, be, be.Ref("1"), true)
+					return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+				})
+				return app, errBuf
+			},
+			narrates: "no step eligible — finalizing…",
+			forbids:  "under manual control — not dispatching",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, errBuf := tc.build(t)
+			if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+				t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+			}
+			output := errBuf.String()
+			if !strings.Contains(output, tc.narrates) {
+				t.Errorf("stderr does not narrate %q; got:\n%s", tc.narrates, output)
+			}
+			if strings.Contains(output, tc.forbids) {
+				t.Errorf("stderr narrates %q, which is not what the advance did; got:\n%s", tc.forbids, output)
+			}
+		})
+	}
+}
+
 // A block from elsewhere — a preflight gate a person must clear — prints no
 // `blocked by:` line: there are no blockers to send the operator to.
 func TestCmdResolve_PreflightBlockPrintsNoBlockedByLine(t *testing.T) {
@@ -2269,6 +2425,25 @@ func TestCmdResolve_AnIterationThatDispatchesNothingIsNotPaced(t *testing.T) {
 			},
 			wantCode: 1, // a condition somebody must clear
 			narrates: "waits on unfinished dependencies — not dispatching",
+		},
+		{
+			// A manual hold: an operator is driving the item by hand, RunOne
+			// skips before any dispatch, and the flag is on the item the peek
+			// already loaded. Holding this pass for headroom would sit the run
+			// in front of a window it is never going to spend from — and
+			// register the wait on an item nobody is going to advance.
+			name: "an item under manual control",
+			build: func(t *testing.T) (*App, *bytes.Buffer) {
+				be := fake.New()
+				be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+				app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+					t.Fatal("handler must not run")
+					return flow.StepResult{}, nil
+				})
+				setManual(t, be, be.Ref("1"), true)
+				return app, errBuf
+			},
+			narrates: "is under manual control — not dispatching",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
