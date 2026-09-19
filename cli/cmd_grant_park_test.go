@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -641,18 +642,26 @@ func newReworkGrantEnv(t *testing.T) *parkGrantEnv {
 	return env
 }
 
-// The sweep on a rework round. Every artifact is recorded — the checklist reads
-// the whole item as done — and the route stands at `implementation` with the
-// producing phase ahead of it. The steps that phase runs are what `--all` must
-// top up; selecting by `Artifact(id).Resolved` selected none of them and
-// reported nothing to do (#315).
-func TestGrantAll_TopsUpAReworkRound(t *testing.T) {
-	env := newReworkGrantEnv(t)
+// reworkRound stands the item on the rework round: the plan written, the
+// change implemented, and the review handing it back to `implementation`.
+// Every artifact is recorded, so the checklist reads the whole item as done
+// while the route has a full producing phase ahead of it — the state the tests
+// below all start from.
+func reworkRound(t *testing.T, env *parkGrantEnv) {
+	t.Helper()
 	recordRoute(t, env,
 		resultEntry("plan", "implementation", 1, flow.ArtifactBody{Type: flow.ArtifactMarkdown, Markdown: "the plan"}),
 		resultEntry("implementation", "commit", 1, flow.ArtifactBody{Type: flow.ArtifactPatch, Patch: flow.PatchBody{Diff: []byte("diff --git a/x b/x\n"), BaseBranch: "main"}}),
 		resultEntry("commit", "implementation", 1, flow.ArtifactBody{Type: flow.ArtifactCommitHash, CommitHash: "abc"}),
 	)
+}
+
+// The sweep on a rework round: the steps the producing phase runs are what
+// `--all` must top up. Selecting by `Artifact(id).Resolved` selected none of
+// them and reported nothing to do (#315).
+func TestGrantAll_TopsUpAReworkRound(t *testing.T) {
+	env := newReworkGrantEnv(t)
+	reworkRound(t, env)
 	// Both steps of the cycle have spent their allowance getting here.
 	env.dispatches(t, "implementation", 3)
 	env.dispatches(t, "commit", 3)
@@ -668,6 +677,68 @@ func TestGrantAll_TopsUpAReworkRound(t *testing.T) {
 	}
 	if strings.Contains(env.out.String(), "nothing to top up") {
 		t.Errorf("stdout = %q, want a sweep — an item with a producing phase ahead has steps to top up", env.out.String())
+	}
+}
+
+// What the operator actually came for. A run that stopped for budget on a
+// rework round is PARKED, and `--all` is the sweep reached for when nobody
+// wants to name each step — so the outcome that matters is not an arithmetic
+// on a cap, it is the item being released. Reading the checklist granted
+// nothing here, and the item stayed parked however often the sweep was run.
+func TestGrantAll_UnparksAParkedReworkRound(t *testing.T) {
+	env := newReworkGrantEnv(t)
+	reworkRound(t, env)
+	env.dispatches(t, "implementation", 3)
+	env.park(t, treasurerRefused("implementation", flow.AxisInvocations))
+
+	if code := env.grant("--all"); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	if p := env.parked(t); p != nil {
+		t.Errorf("still parked on %s/%s — the sweep must clear the park it was run for", p.Step, p.Axis)
+	}
+	if !strings.Contains(env.out.String(), "unparked") {
+		t.Errorf("stdout = %q, want the unpark reported", env.out.String())
+	}
+}
+
+// The swept SET, stated once and whole: `implementation` and `commit`, and
+// nothing else. `plan` is behind the cycle and no route returns to it, and
+// `pr-open` is ahead but is a signal step, which owns no budget record to top
+// up. The per-step assertions above would not notice either one joining the
+// sweep; this is where selecting more than the route would show.
+func TestGrantAllJSON_SweepsExactlyTheRouteAhead(t *testing.T) {
+	env := newReworkGrantEnv(t)
+	reworkRound(t, env)
+	env.dispatches(t, "implementation", 3)
+
+	if code := env.grant("--all", "--json"); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	m := decode(t, env.out)
+	if m["mode"] != grantModeAll {
+		t.Errorf("mode = %v, want %q", m["mode"], grantModeAll)
+	}
+	if note, _ := m["note"].(string); note != "" {
+		t.Errorf("note = %q, want none — the sweep had steps to consider", note)
+	}
+	// Granted and unchanged together are what the sweep SELECTED; which of the
+	// two a step lands in is the increment's business, tested above.
+	var swept []string
+	granted, _ := m["granted"].([]any)
+	for _, g := range granted {
+		delta, _ := g.(map[string]any)
+		id, _ := delta["id"].(string)
+		swept = append(swept, id)
+	}
+	unchanged, _ := m["unchanged"].([]any)
+	for _, u := range unchanged {
+		id, _ := u.(string)
+		swept = append(swept, id)
+	}
+	slices.Sort(swept)
+	if want := []string{"commit", "implementation"}; !slices.Equal(swept, want) {
+		t.Errorf("swept = %v, want %v", swept, want)
 	}
 }
 
@@ -741,6 +812,18 @@ func TestGrantAll_StopsWhenThePositionCannotBeDerived(t *testing.T) {
 	if got := env.budget(t, "implementation").MaxInvocations; got != 3 {
 		t.Errorf("implementation MaxInvocations = %d, want 3 — a stop must not write", got)
 	}
+
+	// The way out the stop relies on: only the SWEEP needs to know where the
+	// item stands, so naming a step still reaches it on the same broken route.
+	// Were that to stop working too, the refusal would strand the item.
+	env.out.Reset()
+	env.err.Reset()
+	if code := env.grant("implementation", "--invocations", "2"); code != 0 {
+		t.Fatalf("grant by name: exit = %d, want 0; stderr=%q", code, env.err.String())
+	}
+	if got := env.budget(t, "implementation").MaxInvocations; got != 5 {
+		t.Errorf("implementation MaxInvocations = %d, want 5 — naming a step does not derive a position", got)
+	}
 }
 
 // Everything ahead can be unbudgeted: a signal step owns no budget, so an item
@@ -757,7 +840,10 @@ func TestGrantAll_NoBudgetedStepAhead(t *testing.T) {
 	if code := env.grant("--all"); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, env.err.String())
 	}
-	if !strings.Contains(env.out.String(), "nothing to top up") {
+	// The note names WHY there was nothing, not just that there was nothing:
+	// "nothing to top up" alone is also what a finalized item prints, and the
+	// two are different answers an operator acts on differently.
+	if !strings.Contains(env.out.String(), "no budgeted steps remain ahead") {
 		t.Errorf("stdout = %q, want the no-budgeted-step note", env.out.String())
 	}
 	if got := env.budget(t, "plan").MaxInvocations; got != 3 {

@@ -447,3 +447,34 @@ func TestReachableFrom_UnknownIdReachesNothing(t *testing.T) {
 		t.Errorf("ReachableFrom(typo) = %v, want empty", got)
 	}
 }
+
+// The same answer read from inside the walk: a SUCCESSOR naming no registered
+// item is skipped, not followed to a step that does not exist. ValidateGraph
+// refuses such a route before anything runs, so a validated flow never poses
+// this — but ReachableFrom is exported and answers about the graph as
+// registered, and a walk that queued the missing id's nil step would panic on
+// the next hop instead of answering.
+func TestReachableFrom_SkipsASuccessorNamingNoRegisteredItem(t *testing.T) {
+	f := soloFlow("x")
+	f.AddStep("write plan", "plan", noopHandler, StepConfig{
+		Prompts: PromptsAgent,
+		Role:    soloRole,
+		Entry:   true,
+		Next:    []StepId{"impl", "never-registered"},
+	})
+	f.AddStep("implement", "impl", noopHandler, StepConfig{
+		Prompts:     PromptsAgent,
+		Role:        soloRole,
+		MayFinalize: []Disposition{DispositionResolved},
+	})
+	// Deliberately NOT a validated flow — and asserted so, because a fixture
+	// that quietly became valid would stop asking the question.
+	if err := f.ValidateGraph(); err == nil {
+		t.Fatal("ValidateGraph accepted the dangling successor; this fixture no longer poses the half-built case")
+	}
+
+	want := []StepId{"plan", "impl"}
+	if got := reachableIds(f, "plan"); !slices.Equal(got, want) {
+		t.Errorf("ReachableFrom(plan) = %v, want %v", got, want)
+	}
+}
