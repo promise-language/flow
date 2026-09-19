@@ -260,8 +260,8 @@ func TestBackend_Claim_RefusesAnItemAnotherArenaHoldsUnderTheSameAccount(t *test
 }
 
 // The comparison has to hold when the LEASE IS TAKEN, not only when the
-// preflight read it. Between the two sit the worktree preconditions, and the
-// first is `git fetch origin` — seconds on a real repository, against a token
+// preflight read it. Between the two sit the worktree preconditions, and one of
+// them is `git fetch origin` — seconds on a real repository, against a token
 // race sized for two API calls. An arena that finishes its claim inside that
 // window is invisible to the settle, because the settle compares flow:claim:*
 // tokens and the holder removed its own token as the last act of Phase 3.

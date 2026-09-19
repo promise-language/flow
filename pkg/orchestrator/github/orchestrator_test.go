@@ -2078,6 +2078,30 @@ func TestBackend_Finalize_AlreadyOnBase(t *testing.T) {
 	}
 }
 
+// assertReleaseSideDirtyRecovery checks the act a dirty-tree refusal names at
+// the RELEASE end of the lease — Release itself, and the release Finalize ends
+// with. One assertion for both, because the two are the same wording BY DESIGN
+// and a swap at either call site has to fail somewhere.
+//
+// What it rules out is the CLAIM end's act. "commit the work to the item's
+// branch or discard it, return to the base, release. That is the moment
+// somebody decides what happens to the work, instead of it becoming nobody's"
+// (docs/orchestrator.md § Required surface → `Release`, docs/cli.md
+// § Releasing) — a stash is exactly what those rule out: work no item holds and
+// no branch carries, which is the orphaned state the refusal exists to prevent.
+// An operator who took it would hand the item on with an empty branch where its
+// work used to be.
+func assertReleaseSideDirtyRecovery(t *testing.T, reason string) {
+	t.Helper()
+	if !strings.Contains(reason, "commit them to the item's branch") ||
+		!strings.Contains(reason, "discard them") {
+		t.Errorf("Reason = %q, want the way past a refused release the documents name", reason)
+	}
+	if strings.Contains(reason, "stash") {
+		t.Errorf("Reason names a stash at the release end of the lease: %q", reason)
+	}
+}
+
 // Finalize ends in a Release, and Release refuses a dirty tree — untracked
 // files included, since after a release nothing is left to attribute them to.
 // So the same check runs FIRST, before the state comment is written: found out
@@ -2111,6 +2135,12 @@ func TestBackend_Finalize_RefusesDirtyWorktree(t *testing.T) {
 	if refused.Override != "" {
 		t.Errorf("Override = %q, want none: nothing bypasses the check at a release", refused.Override)
 	}
+	// Finalize is the THIRD call site of the shared check, and the one with no
+	// test of its own for what it tells the operator to do. It ends in a
+	// Release, so it takes the release end's act — a stash here would empty the
+	// item's branch into refs/stash at the very moment the item is recorded
+	// finished and handed on.
+	assertReleaseSideDirtyRecovery(t, refused.Reason)
 	if !strings.Contains(refused.Detail, "leftover.txt") {
 		t.Errorf("Detail = %q, want the porcelain output naming what is in the way", refused.Detail)
 	}
@@ -2319,6 +2349,7 @@ func scriptCleanWorktree(rec *gitRecorder) {
 
 func TestBackend_Claim_RefusesOnFetchFailure(t *testing.T) {
 	b, _, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
 	rec.handlers["fetch origin"] = func([]string) ([]byte, error) {
 		return nil, fmt.Errorf("git fetch origin: fatal: could not read from remote")
 	}
@@ -2347,6 +2378,7 @@ func TestBackend_Claim_RefusesOnFetchFailure(t *testing.T) {
 
 func TestBackend_Claim_RefusesWhenNotOnBase(t *testing.T) {
 	b, _, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
 	rec.handlers["fetch origin"] = func([]string) ([]byte, error) {
 		return nil, nil
 	}
@@ -2378,6 +2410,7 @@ func TestBackend_Claim_RefusesWhenNotOnBase(t *testing.T) {
 
 func TestBackend_Claim_RefusesWhenBaseStale(t *testing.T) {
 	b, _, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
 	rec.handlers["fetch origin"] = func([]string) ([]byte, error) {
 		return nil, nil
 	}
@@ -2583,6 +2616,157 @@ func TestBackend_Claim_NotOnBaseReasonNamesBothBranches(t *testing.T) {
 	if !strings.Contains(refused.Reason, "main") {
 		t.Errorf("Reason should mention base branch: %q", refused.Reason)
 	}
+	// And on a CLEAN tree it names the act, as the base-stale refusal names
+	// `git pull --ff-only`. This is the half that must not be lost while fixing
+	// the dirty one: the recovery is correct here, and only here.
+	if !strings.Contains(refused.Reason, "git checkout main") {
+		t.Errorf("Reason should name the recovery on a clean tree: %q", refused.Reason)
+	}
+}
+
+// Both conditions at once report the DIRTY one, because that is the order the
+// operator has to act in. `git checkout main` over a modified file does not
+// fail — git carries the modification across and leaves the base branch holding
+// work that belongs to something else — so "go to main" is the wrong first
+// instruction here, and printing it is how a tidy parked arena becomes a
+// contaminated one (#206).
+//
+// Twin of TestBackend_Release_DirtyAndOffBaseReportsTheDirtyTree: the same pair
+// of conditions read at the other end of the lease, answered the same way.
+func TestBackend_Claim_DirtyAndOffBaseReportsTheDirtyTree(t *testing.T) {
+	b, mock, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
+	rec.handlers["status --porcelain --untracked-files=normal"] = func([]string) ([]byte, error) {
+		return []byte(" M SETUP.md\n"), nil
+	}
+	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+		return []byte("flow/issue-42\n"), nil
+	}
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+	}
+	if refused.Code != "dirty-tree" {
+		t.Errorf("Code = %q, want dirty-tree: the tree is what has to be dealt with first", refused.Code)
+	}
+	// The unsafe instruction must not be printed at all — not merely ranked
+	// below the safe one.
+	if strings.Contains(refused.Reason, "git checkout") {
+		t.Errorf("Reason names a checkout while the tree is dirty: %q", refused.Reason)
+	}
+	// The base block did not run at ALL, which is the ordering stated rather
+	// than its visible symptom: a re-order that kept the dirty-tree refusal
+	// winning but computed it after the block would satisfy every assertion
+	// above and still pay a network round trip per refused arena — `resolve
+	// --auto` makes this call once per candidate. `fetch origin` is the block's
+	// first act, so its absence is the block's absence.
+	if rec.called("fetch origin") {
+		t.Error("the base checks ran on a tree already known to refuse the claim")
+	}
+	// Nothing reached the item: a worktree refusal is arena-scoped and precedes
+	// Phase 1, as it did before the order changed.
+	mock.mu.Lock()
+	mutations := append([]string(nil), mock.mutations...)
+	mock.mu.Unlock()
+	for _, m := range mutations {
+		if strings.Contains(m, "labels") || strings.Contains(m, "assignees") {
+			t.Errorf("a mutation reached GitHub despite the worktree refusal: %s", m)
+		}
+	}
+}
+
+// The dirty-tree refusal names both ways out, and the porcelain stays verbatim
+// beside them. Without an act named, the one an operator reaches for is the
+// checkout — the act the refusal above exists to keep them away from.
+func TestBackend_Claim_DirtyTreeReasonNamesBothRecoveries(t *testing.T) {
+	b, _, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
+	rec.handlers["status --porcelain --untracked-files=normal"] = func([]string) ([]byte, error) {
+		return []byte(" M SETUP.md\n?? scratch.txt\n"), nil
+	}
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+	}
+	if !strings.Contains(refused.Reason, "commit") {
+		t.Errorf("Reason should name committing as one way out: %q", refused.Reason)
+	}
+	// --include-untracked and not a bare stash: untracked files count towards
+	// this refusal, so a stash that left them behind would not clear it.
+	if !strings.Contains(refused.Reason, "git stash push --include-untracked") {
+		t.Errorf("Reason should name the stash that also clears it: %q", refused.Reason)
+	}
+	// The porcelain still rides along: the reason says what to do, the detail
+	// says what is in the way, and naming the act must not cost the evidence.
+	// Asserted by content and not byte-for-byte — StatusPorcelain's trimming of
+	// the first line's status column is #380 and not this test's subject.
+	for _, want := range []string{"SETUP.md", "?? scratch.txt"} {
+		if !strings.Contains(refused.Detail, want) {
+			t.Errorf("Detail = %q, want it to carry %q", refused.Detail, want)
+		}
+	}
+}
+
+// A `git status` that could not ANSWER is an error, not a refusal, and the base
+// checks are not consulted after it. Reported as dirty-tree it would name a
+// check that never ran and send the operator to clean a tree git could not read;
+// falling through to the base checks would print the checkout against a tree
+// whose state is unknown, which is the case this ordering exists to prevent.
+//
+// Same reasoning as TestBackend_Release_AGitFailureIsAnErrorNotARefusal, at the
+// claiming end.
+func TestBackend_Claim_AStatusFailureIsAnErrorNotARefusal(t *testing.T) {
+	b, _, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
+	rec.handlers["status --porcelain --untracked-files=normal"] = func([]string) ([]byte, error) {
+		return nil, fmt.Errorf("fatal: not a git repository")
+	}
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	if err == nil {
+		t.Fatal("Claim should fail when git status cannot answer")
+	}
+	var refused flow.ErrClaimRefused
+	if errors.As(err, &refused) {
+		t.Fatalf("a git failure was typed as the refusal %q", refused.Code)
+	}
+	if !strings.Contains(err.Error(), "not a git repository") {
+		t.Errorf("error = %v, want git's own words", err)
+	}
+	if rec.called("fetch origin") {
+		t.Error("the base checks ran after the tree read failed")
+	}
+}
+
+// OverrideDirtyTree alone does not carry the base checks with it: the operator
+// overrode the tree deliberately, and HEAD is still answered on its own.
+// TestBackend_Claim_OverrideDirtyTreeStillChecksStaleBase already says that of
+// the block's LAST check; this says it of its FIRST, which is the one the
+// override now sits directly in front of — a dirty tree reaching the base
+// checks at all is only reachable this way, and it is the one arm where the
+// checkout the ordering exists to suppress is still printed.
+func TestBackend_Claim_OverrideDirtyTreeStillChecksTheBranch(t *testing.T) {
+	b, _, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
+	rec.handlers["status --porcelain --untracked-files=normal"] = func([]string) ([]byte, error) {
+		return []byte(" M SETUP.md\n"), nil
+	}
+	rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+		return []byte("flow/issue-42\n"), nil
+	}
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), []flow.ClaimOverride{flow.OverrideDirtyTree})
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+	}
+	if refused.Code != "not-on-base" {
+		t.Errorf("Code = %q, want not-on-base", refused.Code)
+	}
 }
 
 // The base-stale refusal must include both SHAs and the recovery command.
@@ -2695,8 +2879,15 @@ func TestBackend_Claim_HeldReclaimOffBaseChangesNothing(t *testing.T) {
 	}
 
 	// "Changes nothing": no worktree probe, no token minted, no label written.
+	// BOTH probes are named, because either one alone would let the other move
+	// to the front of the preconditions unnoticed — which is exactly what
+	// happened when the clean-tree check became the first of them (#206). This
+	// is the report's own scenario, and the re-claim must reach none of them.
 	if rec.called("fetch origin") {
 		t.Error("a held re-claim ran the fresh-claim worktree preconditions")
+	}
+	if rec.called("status --porcelain") {
+		t.Error("a held re-claim read the tree: the fresh-claim preconditions are not its to meet")
 	}
 	mock.mu.Lock()
 	mutations := append([]string(nil), mock.mutations...)
@@ -2855,6 +3046,9 @@ func TestBackend_Release_RefusesADirtyTree(t *testing.T) {
 	if refused.Override != "" {
 		t.Errorf("Override = %q, want none: nothing bypasses a release precondition", refused.Override)
 	}
+	// The act it names is the one the normative documents name, and NOT the
+	// stash the claim-side refusal offers.
+	assertReleaseSideDirtyRecovery(t, refused.Reason)
 	// What StatusPorcelain returns, which is the porcelain with the surrounding
 	// whitespace trimmed — the seam's own long-standing behaviour, asserted here
 	// rather than restated, so this test says what the operator is shown.
