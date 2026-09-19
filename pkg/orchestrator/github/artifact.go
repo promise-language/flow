@@ -405,7 +405,14 @@ func (b *Orchestrator) moveAwaitsLabel(ctx context.Context, issueNum int, prev, 
 // identity — which is what gives a signal step a row as well as an artifact one.
 
 // RecordDispatch counts one dispatch of the pending step.
+//
+// It also NAMES that step to this orchestrator, which is not a second record of
+// it: a wait the orchestrator holds — the landing round's — has to be filed
+// against a ledger row, rows are keyed by StepId, and the worktree surface the
+// round is reached through is deliberately step-free. This is the argument the
+// caller already hands over, kept. See landing.go § fileLandingWait.
 func (b *Orchestrator) RecordDispatch(ctx context.Context, ref flow.ItemRef, step flow.StepId) error {
+	b.notePendingStep(ref, step)
 	return b.mutateLedgerRow(ctx, ref, step, "RecordDispatch", func(row *stateLedgerRowDoc, l *stateLedgerDoc) {
 		row.Dispatches++
 		row.LastRunAt = nowUTC()
@@ -975,6 +982,15 @@ func hasParkLabel(l labels, names []string) bool {
 // flow:treasurer-refused:<step-id> label and a timeline comment, so a human
 // scanning the issue list sees it too.
 func (b *Orchestrator) Park(ctx context.Context, ref flow.ItemRef, req flow.ParkRequest) error {
+	// A PARK IS A STOP, and the landing round's exclusion is never held across
+	// one: a lock in a stalled arena starves every landing behind it
+	// (docs/gates-and-commands.md § Two scopes). Work that stopped mid-landing
+	// comes back behind whatever landed meanwhile and re-enters through the
+	// drift election, rather than by resuming a lock nothing kept for it.
+	//
+	// First, before anything that can fail: a park that could not be recorded
+	// is still an arena that stopped.
+	b.releaseLanding()
 	issueNum, err := b.issueNumber(ref)
 	if err != nil {
 		return err

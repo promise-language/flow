@@ -78,6 +78,20 @@ type ghMock struct {
 	// failing must not depend on how many other requests happen to precede it.
 	failIssueRead bool
 
+	// repoLabels is the repository's own label objects — name → description —
+	// which is a different store from issueLabels above: one is what labels
+	// EXIST in the repository, the other is which of them this issue carries.
+	// The project-scope exclusion lives in the first (landing.go), and the
+	// refusal to create a name already there IS the exclusion, so a mock that
+	// let a duplicate through would let two arenas land at once and report that
+	// the code did.
+	repoLabels map[string]string
+
+	// failRepoLabelRead answers the repository-label read with 500, for the
+	// caller whose correctness is in what it does when it cannot find out who
+	// holds the mainline.
+	failRepoLabelRead bool
+
 	// comments
 	nextCommentID int64
 	comments      []ghMockComment
@@ -411,6 +425,70 @@ func (m *ghMock) server() *httptest.Server {
 				m.handleRemoveLabel(w, r, strings.TrimPrefix(parts[1], "labels/"))
 				return
 			}
+			http.NotFound(w, r)
+		}
+	})
+
+	// POST /repos/{o}/{r}/labels — repository label creation, which refuses a
+	// name already taken exactly as GitHub does: 422 carrying the
+	// `already_exists` validation code. That refusal is what the project-scope
+	// exclusion is made of, so it is modelled rather than approximated.
+	mux.HandleFunc(prefix+"/labels", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		var body struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.repoLabels == nil {
+			m.repoLabels = map[string]string{}
+		}
+		if _, taken := m.repoLabels[body.Name]; taken {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			fmt.Fprint(w, `{"message":"Validation Failed","errors":[`+
+				`{"resource":"Label","code":"already_exists","field":"name"}]}`)
+			return
+		}
+		m.repoLabels[body.Name] = body.Description
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(w, map[string]any{"name": body.Name, "description": body.Description})
+	})
+
+	// GET/DELETE /repos/{o}/{r}/labels/{name} — the other two halves. A name
+	// that is not there is 404 on both, like the real API.
+	mux.HandleFunc(prefix+"/labels/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, prefix+"/labels/")
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		switch r.Method {
+		case http.MethodGet:
+			if m.failRepoLabelRead {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
+			desc, ok := m.repoLabels[name]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			writeJSON(w, map[string]any{"name": name, "description": desc})
+		case http.MethodDelete:
+			if _, ok := m.repoLabels[name]; !ok {
+				http.NotFound(w, r)
+				return
+			}
+			delete(m.repoLabels, name)
+			w.WriteHeader(http.StatusNoContent)
+		default:
 			http.NotFound(w, r)
 		}
 	})

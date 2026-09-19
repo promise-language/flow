@@ -29,10 +29,23 @@ type Orchestrator struct {
 	git    *gitOps
 	labels labels
 
-	mu sync.Mutex // protects the caches below
+	mu sync.Mutex // protects the fields below
 	// cache of the most recently observed state-comment id per issue, so
 	// Load can PATCH in place without re-discovering on every call.
 	stateCommentCache map[int]int64
+	// landingHeld is the project-scope exclusion this arena is holding for a
+	// landing round in flight, or nil when no round is open.
+	//
+	// HERE AND NOT ON THE WORKTREE, because the round spans several worktree
+	// calls — the rebase, the measurement, the land — and Worktree builds a
+	// fresh one per call, so a hold kept there could not survive the span the
+	// exclusion exists to cover. See landing.go.
+	landingHeld *landingHold
+	// pendingStep is the step RecordDispatch last named for an issue, kept so
+	// that a wait this orchestrator HOLDS can be filed against the row that
+	// incurred it — docs/orchestrator.md § Ledger puts that report on the
+	// orchestrator, and a ledger row is keyed by StepId.
+	pendingStep map[int]flow.StepId
 	// account memoises the login the credentials act as. It is AMBIENT — no
 	// caller passes one — and it is derived exactly once, through one helper,
 	// so the identity `claim` writes and the one `list` compares against are

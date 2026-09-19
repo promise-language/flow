@@ -67,6 +67,22 @@ const (
 	// truthfully, and docs/github-schema.md's label set is closed — so it is a
 	// label, declared here with the rest.
 	labelSuffixManual = "manual"
+	// labelSuffixLanding is the PROJECT-SCOPE EXCLUSION — the one landing round
+	// this repository's mainline admits at a time
+	// (docs/gates-and-commands.md § Two scopes).
+	//
+	// THE ONLY LABEL THAT IS NEVER PUT ON AN ITEM. It is a repository-scoped
+	// object used as the exclusion itself: creating a label is refused when the
+	// name is taken, which is an atomic create-if-absent every machine working
+	// this mainline can see, and it needs no server. Its holder is recorded in
+	// the label's DESCRIPTION, written in the same request — see landing.go.
+	//
+	// It is declared here with the rest for the reason the vocabulary exists:
+	// otherBinaryLabel reads by exclusion, so a name under the prefix that this
+	// table does not know is read as another binary's, and an operator who
+	// attached this one to an issue by hand would make every claim on that item
+	// refuse.
+	labelSuffixLanding = "landing"
 )
 
 // structuralLabel is one row of the structural vocabulary: a suffix under the
@@ -154,6 +170,12 @@ var structuralLabels = []structuralLabel{
 	{suffix: labelSuffixPriorityPrefix, valued: true, maintained: true},
 	{suffix: labelSuffixUrgencyPrefix, valued: true, maintained: true},
 	{suffix: labelSuffixManual, maintained: true},
+	// Maintained, though nothing ever attaches it to an item: the landing
+	// exclusion is taken and given back by the orchestrator alone, so a copy
+	// somebody put on an issue is not one RemoveTag should take off — the only
+	// honest reading of it there is that the exclusion's own record was
+	// tampered with, and a caller able to clear it by hand could hide that.
+	{suffix: labelSuffixLanding, maintained: true},
 }
 
 // retiredSuffixes are spellings this vocabulary USED to write and no longer
@@ -208,6 +230,12 @@ func (l labels) Manual() string         { return l.named(labelSuffixManual) }
 
 // AccountExhausted advertises a park on the agent account's spent allowance.
 func (l labels) AccountExhausted() string { return l.named(labelSuffixAccountExhausted) }
+
+// Landing names the project-scope exclusion. ONE name for the repository, not
+// one per arena or per item: the resource being protected is the mainline, and
+// a name carrying the holder would let two arenas each create their own and
+// exclude nobody. Who holds it is the description's business, not the name's.
+func (l labels) Landing() string { return l.named(labelSuffixLanding) }
 
 // Per-binary owner labels.
 func (l labels) Binary(name string) string { return l.named(name) }

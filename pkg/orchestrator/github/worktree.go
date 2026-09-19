@@ -209,7 +209,28 @@ func (w *worktree) FindPR(ctx context.Context) (flow.PRInfo, error) {
 	}, nil
 }
 
+// Merge is the LANDING ACT of the round, and it happens inside the mainline's
+// exclusion — this backend lands through a request, so the merge is what
+// integration is here and the push of a claim branch is not
+// (docs/resolution-standalone.md § Where verify is required).
+//
+// It ENDS the round whatever becomes of the merge. A merge that failed landed
+// nothing, and an exclusion held past a round that is over starves every
+// landing behind it.
+//
+// It OPENS one if none is open, which is the degenerate case of a caller
+// landing something it never simulated: there is no merge-result measurement to
+// protect, and the exclusion is then over the act alone — weaker than a round,
+// and the most that can be said about a landing nobody measured. Ordinarily
+// PrepareMergeResult already holds it and this costs nothing.
 func (w *worktree) Merge(ctx context.Context, url flow.RequestUrl) error {
+	if err := w.b.holdLanding(ctx, w.ref); err != nil {
+		return err
+	}
+	defer w.b.releaseLanding()
+	if err := w.b.confirmLanding(ctx); err != nil {
+		return err
+	}
 	if err := w.b.out.MergePullRequest(ctx, string(url)); err != nil {
 		return err
 	}
@@ -222,7 +243,27 @@ func (w *worktree) Merge(ctx context.Context, url flow.RequestUrl) error {
 // PrepareMergeResult creates a local merge of origin/<base> into the current
 // branch so the integration gate measures the merge result, not just the
 // branch.
+//
+// IT OPENS THE LANDING ROUND, so it is where the mainline's exclusion is taken:
+// the serialized section is the round and not the landing act, because a lock
+// over the act alone leaves the measurement this sets up open to invalidation
+// (docs/gates-and-commands.md § Two scopes). The exclusion is held from here
+// through RebuildTools and the integration gate to Merge, which gives it back.
+//
+// A PREPARATION THAT FAILED ENDS THE ROUND. It measured nothing and will land
+// nothing, so there is no measurement left to protect.
 func (w *worktree) PrepareMergeResult(ctx context.Context, base flow.BranchName) error {
+	if err := w.b.holdLanding(ctx, w.ref); err != nil {
+		return err
+	}
+	if err := w.prepareMergeResult(ctx, base); err != nil {
+		w.b.releaseLanding()
+		return err
+	}
+	return nil
+}
+
+func (w *worktree) prepareMergeResult(ctx context.Context, base flow.BranchName) error {
 	head, err := w.b.git.HeadSHA(ctx)
 	if err != nil {
 		return fmt.Errorf("save restore point: %w", err)
@@ -239,6 +280,13 @@ func (w *worktree) PrepareMergeResult(ctx context.Context, base flow.BranchName)
 
 // RevertMergePrep restores the branch to the state it was in before the merge
 // simulation.
+//
+// IT DOES NOT END THE LANDING ROUND, and that is the whole reason this comment
+// is here. Undoing the local merge is what lets the branch be pushed as the
+// branch rather than as the merge, so it happens on the ordinary path between
+// the measurement and the land — and giving the exclusion back here would leave
+// the measurement it protects open to invalidation for exactly the window the
+// exclusion exists to close.
 func (w *worktree) RevertMergePrep(ctx context.Context) error {
 	if w.mergeRestorePoint == "" {
 		return nil
