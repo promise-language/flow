@@ -54,7 +54,7 @@ func (s *step) result() StepId { return StepId(s.resultName()) }
 type WriteContract struct {
 	MayBranch   bool // may switch or create branches
 	MayCommit   bool // may move HEAD (new commits)
-	MayEditTree bool // may leave tracked files dirty
+	MayEditTree bool // may leave tracked files dirty in a tree it was handed clean
 }
 
 // CaptureSource declares where an artifact step's one result comes from —

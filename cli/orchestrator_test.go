@@ -92,24 +92,29 @@ func TestWriteContract_CommitViolation(t *testing.T) {
 	}
 }
 
+// The dirty clause is DIFFERENTIAL, like the two beside it: what it forbids is
+// the step turning a clean tree dirty, so the tree has to be dirtied by the
+// HANDLER, after ctx.Worktree() has recorded the clean tree the step was handed.
+// Dirtying it before dispatch tests the opposite thing — see
+// TestWriteContract_InheritedDirtIsNotAViolation.
 func TestWriteContract_DirtyTreeViolation(t *testing.T) {
-	app, be, claim := testApp(t, func(f *flow.Flow) {
+	// Declared ahead of the fixture so the handler closure can reach the arena
+	// it is dispatched against; assigned the moment testApp returns, which is
+	// long before RunOne runs the handler.
+	var be *fake.Orchestrator
+	app, backend, claim := testApp(t, func(f *flow.Flow) {
 		f.AddStep("plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
 			// Acquire the worktree to trigger snapshot capture.
 			if _, err := ctx.Worktree(); err != nil {
 				return flow.StepResult{}, err
 			}
+			// The step's own doing, which is the whole of what MayEditTree=false
+			// forbids.
+			be.SetDirty(true)
 			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
 		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
 	}, &stubAgent{name: "stub"})
-
-	// Dirty the worktree BEFORE dispatch so IsDirty returns true after the
-	// handler. We need to set it after the worktree is created but before
-	// the check runs. The fake's Worktree() creates the fakeWorktree lazily;
-	// we pre-create it by fetching once, then set dirty.
-	wt, _ := be.Worktree(context.Background(), claim.ItemRef)
-	_ = wt
-	be.SetDirty(true)
+	be = backend
 
 	res, err := RunOne(context.Background(), app, claim)
 	if err != nil {
@@ -121,8 +126,307 @@ func TestWriteContract_DirtyTreeViolation(t *testing.T) {
 	if res.Park == nil || res.Park.Kind != flow.ParkWriteContract {
 		t.Fatalf("park = %+v, want ParkWriteContract", res.Park)
 	}
-	if !strings.Contains(res.Park.Reason, "uncommitted changes") {
-		t.Errorf("reason = %q, want contains 'uncommitted changes'", res.Park.Reason)
+	// The reason names the tree the step was HANDED, not the tree it left. That
+	// clause is the whole correction: an absolute check refused the same step for
+	// a reason that was not true of it, and an operator reading the park has to
+	// be able to tell the two apart.
+	if !strings.Contains(res.Park.Reason, "uncommitted changes") ||
+		!strings.Contains(res.Park.Reason, "handed clean") {
+		t.Errorf("reason = %q, want it to name both the uncommitted changes and the clean tree they were made in",
+			res.Park.Reason)
+	}
+}
+
+// A step handed a dirty tree that added nothing to it EDITED NOTHING, and a
+// contract about what the step may do while it runs
+// (docs/flow-registration.md § Step configuration: "checked after the step runs
+// against what actually happened") has nothing to refuse. Reporting it as a
+// violation is what makes a refusal-driven handoff unbuildable: the refusal is
+// what left the tree dirty, and this check runs before the election the step
+// made in response is ever looked at.
+func TestWriteContract_InheritedDirtIsNotAViolation(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			if _, err := ctx.Worktree(); err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
+	}, &stubAgent{name: "stub"})
+
+	// Dirty BEFORE dispatch: the tree the step is handed. The fake creates its
+	// worktree lazily, so it is pre-created here for SetDirty to reach.
+	if _, err := be.Worktree(context.Background(), claim.ItemRef); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	be.SetDirty(true)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusDone) {
+		t.Fatalf("status = %q (park %+v), want done: the step edited nothing", res.Status, res.Park)
+	}
+}
+
+// The route the step ELECTED is taken, which is the whole of what the absolute
+// check cost: "the step parks write-contract and the route it elected is never
+// taken — the handoff is unreachable regardless of what the graph declares."
+// Completing is not the deliverable; reaching the successor is, so the journal
+// and the pending step are what this asserts rather than the status alone.
+//
+// The shape is the one the item names: an operation was refused, the refusal is
+// what left the tree dirty, and the step answers it by handing off to the step
+// that repairs — with a contract that permits it none of the three writes,
+// because it performed none of them. The repair is elected by its RESULT, which
+// is `commit` here only because that is the artifact the fixture registers.
+func TestWriteContract_InheritedDirtReachesTheElectedHandoff(t *testing.T) {
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("open request", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			if _, err := ctx.Worktree(); err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Next("commit", "the commit was refused").Markdown("refused"), nil
+		}, flow.StepConfig{
+			Prompts: flow.PromptsAgent, Role: "contributor", Entry: true,
+			Next:   []flow.StepId{"commit"},
+			Writes: flow.WriteContract{},
+		})
+		f.AddStep("repair disclosure", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "repaired").CommitHash("abc"), nil
+		}, flow.StepConfig{
+			Prompts: flow.PromptsAgent, Role: "contributor",
+			MayFinalize: []flow.Disposition{flow.DispositionResolved},
+			Writes:      flow.WriteContract{MayCommit: true, MayEditTree: true},
+		})
+	}, &stubAgent{name: "stub"})
+
+	if _, err := be.Worktree(context.Background(), claim.ItemRef); err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	be.SetDirty(true)
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Status != string(flow.StatusDone) {
+		t.Fatalf("status = %q (park %+v), want done", res.Status, res.Park)
+	}
+	assertNext(t, res, "commit", false)
+	state, err := be.Load(context.Background(), claim.ItemRef)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.Journal) != 1 {
+		t.Fatalf("journal has %d entries, want 1 — the election is journaled with the result", len(state.Journal))
+	}
+	if state.Journal[0].Route.Next != "commit" {
+		t.Errorf("journaled route = %+v, want it to elect the repair step", state.Journal[0].Route)
+	}
+}
+
+// Differential on the dirty clause is not an amnesty on the other two. A tree
+// that arrived dirty says nothing about whether the step branched or committed,
+// and both are still measured against the snapshot.
+func TestWriteContract_InheritedDirtDoesNotExcuseBranchOrCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		act  func(flow.StepCtx, flow.Worktree) error
+		want string
+	}{
+		{
+			name: "commit",
+			act: func(ctx flow.StepCtx, wt flow.Worktree) error {
+				return wt.Commit(ctx.Context(), "rogue commit")
+			},
+			want: "commit moved",
+		},
+		{
+			name: "branch",
+			act: func(ctx flow.StepCtx, wt flow.Worktree) error {
+				_, err := wt.Branch(ctx.Context(), "rogue-branch", "")
+				return err
+			},
+			want: "branch moved",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, be, claim := testApp(t, func(f *flow.Flow) {
+				f.AddStep("plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+					wt, err := ctx.Worktree()
+					if err != nil {
+						return flow.StepResult{}, err
+					}
+					if err := tc.act(ctx, wt); err != nil {
+						return flow.StepResult{}, err
+					}
+					return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+				}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
+			}, &stubAgent{name: "stub"})
+
+			if _, err := be.Worktree(context.Background(), claim.ItemRef); err != nil {
+				t.Fatalf("Worktree: %v", err)
+			}
+			be.SetDirty(true)
+
+			res, err := RunOne(context.Background(), app, claim)
+			if err != nil {
+				t.Fatalf("RunOne: %v", err)
+			}
+			if res.Park == nil || res.Park.Kind != flow.ParkWriteContract {
+				t.Fatalf("park = %+v, want ParkWriteContract", res.Park)
+			}
+			if !strings.Contains(res.Park.Reason, tc.want) {
+				t.Errorf("reason = %q, want contains %q", res.Park.Reason, tc.want)
+			}
+		})
+	}
+}
+
+// dirtyReadFailsOnceBackend hands out a worktree whose FIRST dirtiness read
+// fails — the one the snapshot takes — and which reports the truth afterwards.
+// It is the only arrangement that tells a snapshot that recorded nothing from
+// one that recorded "was clean" by default.
+type dirtyReadFailsOnceBackend struct {
+	*fake.Orchestrator
+}
+
+func (b *dirtyReadFailsOnceBackend) Worktree(ctx context.Context, ref flow.ItemRef) (flow.Worktree, error) {
+	inner, err := b.Orchestrator.Worktree(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	return &dirtyReadFailsOnceWorktree{Worktree: inner}, nil
+}
+
+type dirtyReadFailsOnceWorktree struct {
+	flow.Worktree
+	asked bool
+}
+
+func (w *dirtyReadFailsOnceWorktree) IsDirty(ctx context.Context) (bool, error) {
+	if !w.asked {
+		w.asked = true
+		return false, errors.New("git: index is locked")
+	}
+	return w.Worktree.IsDirty(ctx)
+}
+
+// A dirtiness read that failed recorded nothing, so the dirty clause measures
+// nothing. The alternative, recording "was clean" when the answer could not be
+// taken, would manufacture exactly the violation this item exists to stop
+// reporting.
+func TestWriteContract_UnreadableDirtSnapshotSkipsTheCheck(t *testing.T) {
+	var be *fake.Orchestrator
+	acquired := false
+	app, backend, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			// Takes the snapshot, whose dirtiness read is the one that fails.
+			if _, err := ctx.Worktree(); err != nil {
+				return flow.StepResult{}, err
+			}
+			acquired = true
+			// Dirt the post-handler read WOULD see, if there were a snapshot to
+			// compare it against.
+			be.SetDirty(true)
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
+	}, &stubAgent{name: "stub"})
+	be = backend
+	app.Orchestrator = &dirtyReadFailsOnceBackend{Orchestrator: backend}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if !acquired {
+		t.Fatal("the handler never acquired the worktree, so no snapshot was attempted and the test proves nothing")
+	}
+	if res.Status != string(flow.StatusDone) {
+		t.Fatalf("status = %q (park %+v), want done: an unreadable dirtiness read measures nothing", res.Status, res.Park)
+	}
+}
+
+// Fail-open is PER CLAUSE, the way the post-handler side already works: a
+// dirtiness read that could not be taken costs the dirty clause and nothing
+// else. Discarding the whole snapshot over it would let a step that could not be
+// asked one question go unmeasured on two it could — the commit it moved is
+// readable either way.
+func TestWriteContract_UnreadableDirtStillMeasuresTheCommit(t *testing.T) {
+	app, backend, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			wt, err := ctx.Worktree()
+			if err != nil {
+				return flow.StepResult{}, err
+			}
+			if err := wt.Commit(ctx.Context(), "rogue commit"); err != nil {
+				return flow.StepResult{}, err
+			}
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}, Writes: flow.WriteContract{}})
+	}, &stubAgent{name: "stub"})
+	app.Orchestrator = &dirtyReadFailsOnceBackend{Orchestrator: backend}
+
+	res, err := RunOne(context.Background(), app, claim)
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if res.Park == nil || res.Park.Kind != flow.ParkWriteContract {
+		t.Fatalf("park = %+v, want ParkWriteContract", res.Park)
+	}
+	if !strings.Contains(res.Park.Reason, "commit moved") {
+		t.Errorf("reason = %q, want contains 'commit moved'", res.Park.Reason)
+	}
+}
+
+// The two checks are separate and stay that way. Making `Writes` differential
+// says nothing about `Leaves`, which is "always clean" on both branch-naming
+// states (docs/flow-registration.md § Step configuration) and stays absolute: a
+// step that must complete over inherited dirt declares `Leaves: as-found`, the
+// member that already means "whatever state the step was handed is the state it
+// may hand on".
+func TestWriteContract_LeavesStaysAbsoluteOverInheritedDirt(t *testing.T) {
+	for _, tc := range []struct {
+		leaves   flow.LeavesState
+		wantPark flow.ParkKind // "" = the step completes
+	}{
+		{leaves: flow.LeavesAsFound},
+		{leaves: flow.LeavesItemBranch, wantPark: flow.ParkBlocked},
+	} {
+		t.Run(string(tc.leaves), func(t *testing.T) {
+			app, be, claim := testApp(t, func(f *flow.Flow) {
+				f.AddStep("plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+					if _, err := ctx.Worktree(); err != nil {
+						return flow.StepResult{}, err
+					}
+					return ctx.Finalize(flow.DispositionResolved, "done").Markdown("done"), nil
+				}, flow.StepConfig{
+					Prompts: flow.PromptsAgent, Role: "contributor", Entry: true,
+					MayFinalize: []flow.Disposition{flow.DispositionResolved},
+					Writes:      flow.WriteContract{},
+					Needs:       flow.NeedsItemBranch,
+					Leaves:      tc.leaves,
+				})
+			}, &stubAgent{name: "stub"})
+			putItemBranchInTheWorktree(t, be, claim.ItemRef)
+			be.SetDirty(true)
+
+			res, err := RunOne(context.Background(), app, claim)
+			if err != nil {
+				t.Fatalf("RunOne: %v", err)
+			}
+			if tc.wantPark == "" {
+				if res.Status != string(flow.StatusDone) {
+					t.Fatalf("status = %q (park %+v), want done", res.Status, res.Park)
+				}
+				return
+			}
+			if res.Park == nil || res.Park.Kind != tc.wantPark {
+				t.Fatalf("park = %+v, want %q — the Leaves verification, not the write contract", res.Park, tc.wantPark)
+			}
+		})
 	}
 }
 

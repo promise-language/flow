@@ -1316,6 +1316,31 @@ func (sc *stepCtx) axisReports() []flow.AxisReport {
 // pre-handler snapshot and the step's WriteContract. Returns an empty string
 // when the contract holds, or a violation reason string.
 //
+// ALL THREE COMPARISONS ARE DIFFERENTIAL. `Writes` is what the step may do to
+// the worktree WHILE IT RUNS, "checked after the step runs against what actually
+// happened" (docs/flow-registration.md § Step configuration,
+// docs/resolution.md § Steps and the worktree) — so each clause asks what THIS
+// step did, never what state the tree happens to be in. A step handed a dirty
+// tree that added nothing to it edited nothing, and reporting it as having
+// violated a contract it kept makes a refusal-driven handoff unbuildable: the
+// refusal is what left the tree dirty, and this check runs before the election
+// the step made in response is ever looked at.
+//
+// The dirty clause is differential AT THE GRANULARITY IsDirty OFFERS, which is
+// one bit: it catches a step that dirtied a tree it was handed clean, and not
+// one that added to dirt it inherited. docs/orchestrator.md § `verify` and
+// `integration` names that same limitation for the GATE contract and answers it
+// with CapturePatch before and after. That answer does not transfer here, twice
+// over. The questions differ — a gate must leave the tree THE SAME and may not
+// commit, where a step may be permitted to commit, and CapturePatch diffs
+// against HEAD, so a step exercising MayCommit over inherited work moves HEAD,
+// changes the patch, and is reported as having edited a tree it only recorded.
+// And CapturePatch is not a fingerprint every orchestrator can supply: returning
+// no bytes is legal, because the content may live server-side
+// (docs/orchestrator.md § Worktree surface). A comparison resting on it would
+// silently never fire on a conforming orchestrator that returns none, which is
+// worse than a narrower check that always means what it says.
+//
 // Uses the parent ctx (not stepCtx) for the post-handler reads, since the
 // step's deadline may have been consumed.
 func checkWriteContract(ctx context.Context, wt flow.Worktree, snap *writeSnapshot, wc flow.WriteContract) string {
@@ -1335,10 +1360,14 @@ func checkWriteContract(ctx context.Context, wt flow.Worktree, snap *writeSnapsh
 			return fmt.Sprintf("commit moved: was %.12s, now %.12s", snap.commitSHA, sha)
 		}
 	}
-	if !wc.MayEditTree {
+	// A tree that was ALREADY dirty when the step was handed it has nothing to
+	// measure: whatever the step did, it did not turn a clean tree dirty, and
+	// that is the only thing MayEditTree forbids. So the read is skipped
+	// outright rather than taken and discarded.
+	if !wc.MayEditTree && snap.wasClean {
 		dirty, err := wt.IsDirty(ctx)
 		if err == nil && dirty {
-			return "tree has uncommitted changes to tracked files"
+			return "left uncommitted changes to tracked files in a tree it was handed clean"
 		}
 	}
 	return ""
@@ -1498,6 +1527,11 @@ func invocationID() string {
 type writeSnapshot struct {
 	branch    flow.BranchName
 	commitSHA flow.CommitSha
+	// wasClean records that the tree was OBSERVED to have no changes to tracked
+	// files when the step was handed it. False covers both a tree that was
+	// already dirty and one whose dirtiness could not be read — neither gives
+	// the dirty clause anything to compare against.
+	wasClean bool
 }
 
 // stepCtx is the concrete StepCtx the orchestrator hands to handlers. It
@@ -1979,11 +2013,23 @@ func (s *stepCtx) acquireWorktree() (flow.Worktree, error) {
 // snapshotWrites takes the write-contract snapshot, once per dispatch and only
 // before the handler runs.
 //
-// If either read fails, writeSnap stays nil — fail-open on an infrastructure
-// error, since the handler has not run yet — and the attempt is NOT repeated:
-// a second attempt could only succeed later, and a snapshot taken mid-handler
+// If a read fails, what it would have recorded is fail-open — an infrastructure
+// error, and the handler has not run yet — and the attempt is NOT repeated: a
+// second attempt could only succeed later, and a snapshot taken mid-handler
 // would judge the contract against a state the handler itself had already
 // changed.
+//
+// FAIL-OPEN IS PER CLAUSE, not per snapshot, which is the rule the post-handler
+// side already runs on: checkWriteContract skips the branch comparison when
+// CurrentBranch fails there and still measures the commit, and skips the commit
+// when RevParse fails and still measures the tree. An unreadable dirtiness read
+// therefore costs the dirty clause and nothing else — disabling the branch and
+// commit clauses over it would let a step that could not be asked one question
+// go unmeasured on two it could.
+//
+// The branch and commit pair stays coupled because the branch read is what the
+// commit comparison is qualified by (a permitted branch switch moves HEAD), not
+// because a snapshot is indivisible.
 func (s *stepCtx) snapshotWrites() {
 	if s.writeSnapTaken || s.worktree == nil {
 		return
@@ -1991,8 +2037,13 @@ func (s *stepCtx) snapshotWrites() {
 	s.writeSnapTaken = true
 	branch, berr := s.worktree.CurrentBranch(s.ctx)
 	sha, serr := s.worktree.RevParse(s.ctx, flow.HeadRevision)
+	dirty, derr := s.worktree.IsDirty(s.ctx)
 	if berr == nil && serr == nil {
-		s.writeSnap = &writeSnapshot{branch: branch, commitSHA: sha}
+		// OBSERVED clean, never merely "not observed dirty": a read that failed
+		// recorded nothing, and recording "was clean" by default would
+		// manufacture exactly the violation this differential reading exists to
+		// stop reporting.
+		s.writeSnap = &writeSnapshot{branch: branch, commitSHA: sha, wasClean: derr == nil && !dirty}
 	}
 }
 
