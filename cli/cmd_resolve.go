@@ -366,8 +366,8 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		// Whether this iteration is going to dispatch a handler at all — the
 		// other half of the question the pacing wait answers, and the half no
 		// declaration can answer, because there is no step to have declared
-		// anything. RunOne has three pre-dispatch exits and the peek already
-		// holds what each is decided from:
+		// anything. Three of RunOne's pre-dispatch exits are decided from what
+		// the peek already holds:
 		//
 		//   - !acts      — outside the remit: RunOne blocks, or, on an item
 		//                  already finalized, takes the finalize path.
@@ -378,6 +378,15 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		// under a curve that measures spend stalls it against nothing — the
 		// reason a mechanical step skips the wait, on the iteration every
 		// completed resolution ends with.
+		//
+		// NOT EVERY PRE-DISPATCH EXIT IS HERE, and the ones missing are missing
+		// deliberately: a preflight refusal and the treasurer's invocation and
+		// cost gates also stop before a dispatch, but the first is a call with
+		// its own cost that running twice per iteration would pay for twice,
+		// and the second would be the driver keeping a second copy of the
+		// treasurer's arithmetic — the thing the park classification below is
+		// careful not to do. They are the remaining work docs/cli.md § Resolving
+		// carries, not an oversight of this expression (#450).
 		//
 		// A FAILED PEEK is not one of them: st == nil means we do not know,
 		// RunOne re-derives and may well dispatch, so a transient read error
