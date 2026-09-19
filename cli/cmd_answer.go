@@ -60,15 +60,34 @@ func (app *App) cmdAnswer(ctx context.Context, args []string) int {
 		return 1
 	}
 
+	// WHAT THIS INVOCATION CAN ANSWER, derived ONCE and read by every form
+	// below — the reading forms, the prompt, and the pick — so no two of them
+	// can disagree about what is answerable.
+	//
+	// Ordinarily the item's own questions. But a park whose kind says a human
+	// must answer is a park a human must be able to answer, and whether the
+	// asking step managed to register its question is not something the
+	// answerer can see or fix; when nothing was registered, the park's own
+	// question stands in (parkQuestion).
+	questions := item.Questions
+	pending := item.PendingQuestions()
+	if q, ok := parkQuestion(item); ok {
+		// It is unanswered by construction — the park is what says a human
+		// must answer — and parkQuestion fires only on an item carrying no
+		// question at all, so it is both the whole list and the whole pending
+		// set.
+		questions = []flow.Question{q}
+		pending = questions
+	}
+
 	// --answered prints the WHOLE HISTORY: every question and its answer, in
 	// order, not only the outstanding one. A question already answered once, in
 	// different words, is invisible otherwise — to the operator and to the
 	// asking step alike.
 	if *answered {
-		return app.emitQuestions(mode, ref, item.Questions)
+		return app.emitQuestions(mode, ref, questions)
 	}
 
-	pending := item.PendingQuestions()
 	if len(pending) == 0 {
 		fmt.Fprintf(app.Err, "answer: no outstanding questions on %s\n", ref.Display)
 		return 1
@@ -95,7 +114,7 @@ func (app *App) cmdAnswer(ctx context.Context, args []string) int {
 			// ways to ask for the machine form from a terminal — would emit
 			// something no decoder can read. The reading form is what the mode
 			// has to offer, and it carries the same questions.
-			return app.emitQuestions(mode, ref, item.Questions)
+			return app.emitQuestions(mode, ref, questions)
 		}
 		// The question first: an operator cannot answer what they have not been
 		// shown, and showing it is what the bare form is FOR.
@@ -115,23 +134,91 @@ func (app *App) cmdAnswer(ctx context.Context, args []string) int {
 		text = reply
 	}
 
-	// The id is passed THROUGH, not merely selected for the output line. It is
-	// what the answer is recorded against, which is what makes the question stop
-	// being pending — and what lets the outstanding-question marker clear only
-	// when no pending question remains, rather than on the first of several.
-	if err := app.Orchestrator.PostAnswer(ctx, ref, target.ID, text); err != nil {
+	id, err := app.recordAnswer(ctx, ref, target, text)
+	if err != nil {
 		fmt.Fprintln(app.Err, "answer:", err)
 		return 1
 	}
 
 	payload := answerPayload{
 		Item:       ref.Display,
-		QuestionID: string(target.ID),
+		QuestionID: string(id),
 		Answered:   true,
 	}
 	return app.emit(mode, payload, func() {
-		fmt.Fprintf(app.Out, "answered %s on %s\n", target.ID, ref.Display)
+		fmt.Fprintf(app.Out, "answered %s on %s\n", id, ref.Display)
 	})
+}
+
+// parkQuestion is the question a question-park is waiting on when NOTHING WAS
+// REGISTERED — the state #165 stranded in, where the park says a human must
+// answer and the item carries no question for an answer to be recorded
+// against.
+//
+// It is DERIVED, never stored, and only from a park of kind `question` on an
+// item with no question at all: an item that has one — answered or not — has
+// its own, and a park of any other kind is not waiting on an answer.
+//
+// It carries NO ID, which is what tells recordAnswer the question has still to
+// be registered, and its text is the park's REASON, because the reason is all
+// the park kept — the one-line form questionReason wrote. The ask itself was
+// published where the step asked it and never copied onto the item's state, so
+// a restatement is the most the park can offer.
+func parkQuestion(item *flow.Item) (flow.Question, bool) {
+	if item == nil || item.Park == nil || item.Park.Kind != flow.ParkQuestion {
+		return flow.Question{}, false
+	}
+	if len(item.Questions) > 0 {
+		return flow.Question{}, false
+	}
+	return flow.Question{
+		AgentQuestion: flow.AgentQuestion{Header: item.Park.Reason},
+		// The park's own ask time, read back through the one parser that
+		// knows the marker's spelling rather than a second reading of
+		// Details here.
+		AskedAt: flow.QuestionAskedAt(item.Park),
+	}, true
+}
+
+// recordAnswer records the answer AGAINST THE QUESTION IT ANSWERS, registering
+// that question first when the park has been standing in for one.
+//
+// There is no other way to record an answer and no other way to deliver one:
+// PostAnswer names the question it answers, and what a resumed step reads is
+// Item.Questions. So a park that registered nothing is answered by registering
+// its question and answering that — and AskQuestion is where a QuestionId
+// comes from.
+//
+// THE REGISTRATION HAPPENS HERE AND NOWHERE EARLIER, because it is a write:
+// every form that only reads — including the operator who is prompted and says
+// nothing — must leave the item exactly as it found it.
+func (app *App) recordAnswer(ctx context.Context, ref flow.ItemRef, target flow.Question, text string) (flow.QuestionId, error) {
+	if target.ID == "" {
+		rec, err := app.Orchestrator.AskQuestion(ctx, ref, target.AgentQuestion)
+		if err != nil {
+			return "", fmt.Errorf("register the question %s parked on: %w", ref.Display, err)
+		}
+		// THE RETURN IS WHERE A QuestionId COMES FROM, and one that comes back
+		// without an id registered nothing an answer can be recorded against —
+		// which is the state this whole path exists to get an item out of.
+		// Stop here, as the ask route stops (stepCtx.AskQuestions), rather than
+		// post against an empty id: an orchestrator lenient enough to accept it
+		// would report an answer that landed nowhere, and the operator would be
+		// told the park was cleared while it still stands.
+		if rec.ID == "" {
+			return "", fmt.Errorf("registering the question %s parked on recorded no question id, "+
+				"so there is nothing to record an answer against", ref.Display)
+		}
+		target = rec
+	}
+	// The id is passed THROUGH, not merely selected for the output line. It is
+	// what the answer is recorded against, which is what makes the question stop
+	// being pending — and what lets the outstanding-question marker clear only
+	// when no pending question remains, rather than on the first of several.
+	if err := app.Orchestrator.PostAnswer(ctx, ref, target.ID, text); err != nil {
+		return "", err
+	}
+	return target.ID, nil
 }
 
 // answerTarget resolves the positionals into an item and the answer text.
@@ -263,8 +350,16 @@ func (app *App) emitQuestions(mode OutputMode, ref flow.ItemRef, questions []flo
 // Nothing goes through titleLine here, and that is deliberate: the ask
 // convention puts the options, the evidence and the recommendation in the text,
 // and those are what the operator is being asked to decide on.
+//
+// NO IDENTIFIER IS SHOWN FOR ONE NOTHING REGISTERED. The park's own question
+// has no id until it is answered (parkQuestion, recordAnswer), and printing an
+// empty one would offer `--question` a value it can never match.
 func (app *App) printQuestionInFull(q flow.Question) {
-	fmt.Fprintf(app.Out, "question %s\n", q.ID)
+	if q.ID == "" {
+		fmt.Fprintln(app.Out, "question")
+	} else {
+		fmt.Fprintf(app.Out, "question %s\n", q.ID)
+	}
 	for _, line := range questionBlock(questionPayload{Header: q.Header, Text: q.Text}) {
 		fmt.Fprintf(app.Out, "  %s\n", line)
 	}

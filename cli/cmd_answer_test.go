@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/promise-language/flow"
 	"github.com/promise-language/flow/pkg/orchestrator/fake"
@@ -596,6 +597,494 @@ func TestCmdAnswer_AnsweredOnAnItemWithNoQuestions(t *testing.T) {
 	if !strings.Contains(errBuf.String(), "no questions") {
 		t.Errorf("stderr = %q, want it to say there are none", errBuf.String())
 	}
+}
+
+// ---------------------------------------------------------------------------
+// A park that registered no question
+// ---------------------------------------------------------------------------
+
+// strandedParkReason is what the park kept of the question: the one-line form
+// questionReason writes. The ask itself was published where the step asked it
+// and never copied onto the item's state, so this is all an answerer has.
+const strandedParkReason = "question: may ItemEditor publish?"
+
+// strandedAskedAt is the instant the park's `asked-at` marker carries — fixed,
+// so a test can assert the answer left the resume's window alone.
+var strandedAskedAt = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+// strandedParkSetup builds the state #165 stranded in: the item is parked
+// `kind: question` — the park says a human must answer — and NOTHING
+// registered a question for an answer to be recorded against.
+//
+// The park is written directly rather than raised by a step, because no step
+// can reach this state any more: ctx.Park refuses the kind and ctx.AskQuestions
+// refuses an ask the orchestrator returned without an id (cli/orchestrator.go).
+// Those doors were shut after items had already parked this way, and recovering
+// one is what `answer` has to do.
+func strandedParkSetup(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer, *fake.Orchestrator, string) {
+	t.Helper()
+	return strandedParkSetupOn(t, flow.ParkQuestion)
+}
+
+// strandedParkSetupOn is strandedParkSetup over a chosen park kind, for the
+// test that only a question park stands in for a question.
+func strandedParkSetupOn(t *testing.T, kind flow.ParkKind) (*App, *bytes.Buffer, *bytes.Buffer, *fake.Orchestrator, string) {
+	t.Helper()
+	app, be, claim := testApp(t, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", Entry: true, MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	}, &stubAgent{name: "stub"})
+
+	if err := be.Park(context.Background(), claim.ItemRef, flow.ParkRequest{
+		Kind:    kind,
+		Step:    "plan",
+		Reason:  strandedParkReason,
+		Details: flow.MarkQuestionAsked(strandedAskedAt),
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+
+	var out, errBuf bytes.Buffer
+	app.Out = &out
+	app.Err = &errBuf
+	// Non-interactive unless a test says otherwise, for the reason
+	// answerTestSetup gives.
+	app.In = strings.NewReader("")
+	return app, &out, &errBuf, be, claim.ItemRef.Display
+}
+
+// assertNoQuestions checks the item still carries none — what every form that
+// only READS has to leave behind on a park that registered nothing.
+func assertNoQuestions(t *testing.T, be *fake.Orchestrator, itemID string) {
+	t.Helper()
+	item, err := be.Load(context.Background(), refFor(t, be, itemID))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(item.Questions) != 0 {
+		t.Errorf("questions = %+v, want none — reading must register nothing", item.Questions)
+	}
+}
+
+// A PARK WHOSE KIND SAYS A HUMAN MUST ANSWER IS A PARK A HUMAN MUST BE ABLE TO
+// ANSWER. Whether the asking step managed to register its question is not
+// something the answerer can see or fix, so `answer` takes the park's own
+// question, registers it so the answer has a question to be recorded against,
+// and records the answer there.
+func TestCmdAnswer_AParkThatRegisteredNoQuestionIsAnswerable(t *testing.T) {
+	app, out, errBuf, be, itemID := strandedParkSetup(t)
+
+	if code := app.cmdAnswer(context.Background(), []string{itemID, "yes, publish it"}); code != 0 {
+		t.Fatalf("cmdAnswer = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "answered") {
+		t.Errorf("stdout = %q, want the answer reported", out.String())
+	}
+
+	item, err := be.Load(context.Background(), refFor(t, be, itemID))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(item.Questions) != 1 {
+		t.Fatalf("questions = %d, want the park's question registered so the answer has one", len(item.Questions))
+	}
+	if item.Questions[0].Answer != "yes, publish it" {
+		t.Errorf("answer = %q, want what was typed", item.Questions[0].Answer)
+	}
+	// THE ITEM IS RESUMABLE. Blockedness reads the questions rather than the
+	// bare park, so answering the last one is what stops it waiting on a
+	// person — which is the whole of what the stranding cost.
+	if item.Blocked {
+		t.Errorf("still blocked (%s: %s) — answering the park must clear the wait", item.BlockKind, item.BlockReason)
+	}
+	// AND THE PARK STANDS, carrying the `asked-at` window the resumed step
+	// reads its replies through. An answer that cleared it would delete its own
+	// delivery.
+	if item.Park == nil || item.Park.Kind != flow.ParkQuestion {
+		t.Fatalf("park = %+v, want the question park left for the resume", item.Park)
+	}
+	if got := flow.QuestionAskedAt(item.Park); !got.Equal(strandedAskedAt) {
+		t.Errorf("asked-at = %s, want it untouched at %s", got, strandedAskedAt)
+	}
+}
+
+// The registered question carries what the park kept, and the id the
+// registration mints is the one reported — the id `status` lists and
+// `--question` matches from here on.
+func TestCmdAnswer_TheParksQuestionIsRegisteredWithTheParksReason(t *testing.T) {
+	app, out, errBuf, be, itemID := strandedParkSetup(t)
+
+	if code := app.cmdAnswer(context.Background(), []string{"--json", itemID, "yes"}); code != 0 {
+		t.Fatalf("cmdAnswer = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	var payload answerPayload
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal %s: %v", out.String(), err)
+	}
+	if payload.QuestionID == "" {
+		t.Fatal("question_id is empty — the answer names no question")
+	}
+
+	item, err := be.Load(context.Background(), refFor(t, be, itemID))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(item.Questions) != 1 {
+		t.Fatalf("questions = %d, want 1", len(item.Questions))
+	}
+	if string(item.Questions[0].ID) != payload.QuestionID {
+		t.Errorf("reported id %q, registered %q — the two must be the same question",
+			payload.QuestionID, item.Questions[0].ID)
+	}
+	if item.Questions[0].Header != strandedParkReason {
+		t.Errorf("header = %q, want the park's reason — all the park kept", item.Questions[0].Header)
+	}
+}
+
+// The bare form prints what the item is parked on rather than refusing, and
+// READS ONLY: an operator who has not answered yet must leave the item exactly
+// as they found it.
+func TestCmdAnswer_BareOnAParkWithNoQuestionPrintsWhatItIsParkedOn(t *testing.T) {
+	app, out, errBuf, be, itemID := strandedParkSetup(t)
+
+	if code := app.cmdAnswer(context.Background(), nil); code != 0 {
+		t.Fatalf("cmdAnswer = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), strandedParkReason) {
+		t.Errorf("stdout = %q, want the park's question printed", out.String())
+	}
+	// AND NO IDENTIFIER WHERE THERE IS NONE. The heading is the bare word: an
+	// id printed for a question nothing registered would be an empty one, which
+	// offers `--question` a value it can never match.
+	if !strings.HasPrefix(out.String(), "question\n") {
+		t.Errorf("stdout = %q, want it to open with `question` and no id", out.String())
+	}
+	assertNoQuestions(t, be, itemID)
+}
+
+// On a terminal the park's question is shown and the reply taken, which is what
+// the bare form is for — the same one command, on an item that registered
+// nothing.
+func TestCmdAnswer_InteractiveOnAParkWithNoQuestionPromptsAndRecords(t *testing.T) {
+	app, out, errBuf, be, itemID := strandedParkSetup(t)
+	asTerminal(t, app, "publish it\n")
+
+	if code := app.cmdAnswer(context.Background(), nil); code != 0 {
+		t.Fatalf("cmdAnswer = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), strandedParkReason) {
+		t.Errorf("stdout = %q, want the question shown before the prompt", out.String())
+	}
+	if got := answerOn(t, be, itemID); got != "publish it" {
+		t.Errorf("answer = %q, want the typed reply", got)
+	}
+}
+
+// AN OPERATOR WHO IS ASKED AND SAYS NOTHING HAS ANSWERED NOTHING — and on a
+// park that registered no question that means nothing is registered either.
+// Registering the question is a write, and a write on the way to an answer
+// nobody gave would leave a question the park never asked.
+func TestCmdAnswer_AnEmptyReplyOnAParkRegistersNothing(t *testing.T) {
+	app, _, errBuf, be, itemID := strandedParkSetup(t)
+	asTerminal(t, app, "\n")
+
+	if code := app.cmdAnswer(context.Background(), nil); code != 1 {
+		t.Fatalf("cmdAnswer = %d, want 1", code)
+	}
+	if !strings.Contains(errBuf.String(), "no answer given") {
+		t.Errorf("stderr = %q, want it to say nothing was recorded", errBuf.String())
+	}
+	assertNoQuestions(t, be, itemID)
+
+	item, err := be.Load(context.Background(), refFor(t, be, itemID))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if item.Park == nil || !item.Blocked {
+		t.Errorf("park = %+v, blocked = %v — nothing was answered, so the wait stands", item.Park, item.Blocked)
+	}
+}
+
+// --question NAMES A REGISTERED QUESTION, and a park that registered none has
+// no id to match. It refuses rather than quietly answering the park instead:
+// an operator who named an id meant that id.
+func TestCmdAnswer_QuestionFlagFindsNothingOnAParkThatRegisteredNone(t *testing.T) {
+	app, _, errBuf, be, itemID := strandedParkSetup(t)
+
+	if code := app.cmdAnswer(context.Background(), []string{itemID, "yes", "--question", "q1"}); code != 1 {
+		t.Fatalf("cmdAnswer = %d, want 1", code)
+	}
+	if !strings.Contains(errBuf.String(), "not found") {
+		t.Errorf("stderr = %q, want 'not found'", errBuf.String())
+	}
+	assertNoQuestions(t, be, itemID)
+}
+
+// Once answered, the park's question is a registered question like any other:
+// it is answered, so it is not pending, and a second answer is refused the way
+// a second answer to any question is. The park standing does not re-open it.
+func TestCmdAnswer_AParkIsNotAnsweredTwice(t *testing.T) {
+	app, _, errBuf, be, itemID := strandedParkSetup(t)
+
+	if code := app.cmdAnswer(context.Background(), []string{itemID, "yes"}); code != 0 {
+		t.Fatalf("first cmdAnswer = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	if code := app.cmdAnswer(context.Background(), []string{itemID, "no, actually"}); code != 1 {
+		t.Fatalf("second cmdAnswer = %d, want 1", code)
+	}
+	if !strings.Contains(errBuf.String(), "no outstanding questions") {
+		t.Errorf("stderr = %q, want 'no outstanding questions'", errBuf.String())
+	}
+
+	item, err := be.Load(context.Background(), refFor(t, be, itemID))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(item.Questions) != 1 {
+		t.Errorf("questions = %d, want the one — a refused answer registers nothing", len(item.Questions))
+	}
+	if item.Questions[0].Answer != "yes" {
+		t.Errorf("answer = %q, want the first one kept", item.Questions[0].Answer)
+	}
+}
+
+// ONLY A QUESTION PARK STANDS IN FOR A QUESTION. A park of another kind is not
+// waiting on an answer, whatever else it is waiting on, and answering it would
+// record a decision against a stop nobody asked a question about.
+func TestCmdAnswer_OnlyAQuestionParkStandsInForAQuestion(t *testing.T) {
+	app, _, errBuf, be, itemID := strandedParkSetupOn(t, flow.ParkTreasurerRefused)
+
+	if code := app.cmdAnswer(context.Background(), []string{itemID, "yes"}); code != 1 {
+		t.Fatalf("cmdAnswer = %d, want 1", code)
+	}
+	if !strings.Contains(errBuf.String(), "no outstanding questions") {
+		t.Errorf("stderr = %q, want 'no outstanding questions'", errBuf.String())
+	}
+	assertNoQuestions(t, be, itemID)
+}
+
+// failingAskBackend cannot register a question. `answer` must report that and
+// post NOTHING: an answer recorded against no question lands nowhere, and an
+// operator who typed one has to know it did not land.
+type failingAskBackend struct {
+	flow.Orchestrator
+	posted bool
+}
+
+func (b *failingAskBackend) AskQuestion(context.Context, flow.ItemRef, flow.AgentQuestion) (flow.Question, error) {
+	return flow.Question{}, errors.New("this orchestrator could not record the question")
+}
+
+func (b *failingAskBackend) PostAnswer(context.Context, flow.ItemRef, flow.QuestionId, string) error {
+	b.posted = true
+	return nil
+}
+
+func TestCmdAnswer_AFailedRegistrationRecordsNoAnswer(t *testing.T) {
+	app, _, errBuf, be, itemID := strandedParkSetup(t)
+	wrapped := &failingAskBackend{Orchestrator: app.Orchestrator}
+	app.Orchestrator = wrapped
+
+	if code := app.cmdAnswer(context.Background(), []string{itemID, "yes"}); code != 1 {
+		t.Fatalf("cmdAnswer = %d, want 1", code)
+	}
+	if wrapped.posted {
+		t.Error("an answer was posted against a question nothing registered")
+	}
+	if !strings.Contains(errBuf.String(), "register") {
+		t.Errorf("stderr = %q, want the failed registration named", errBuf.String())
+	}
+	assertNoQuestions(t, be, itemID)
+}
+
+// THE ORDINARY PARKED ITEM — one whose asking step DID register its question —
+// is answered through that question, and the park changes nothing about it.
+// This is the state every question park is in when the ask route worked, and it
+// is the half of this that had to keep working: a stand-in that fired on the
+// park rather than on the absence of a question would register a SECOND
+// question, record the answer against that, and leave the question the step
+// actually asked pending forever with the operator told it was answered.
+func TestCmdAnswer_AParkWithARegisteredQuestionAnswersThatOne(t *testing.T) {
+	app, out, errBuf, be, itemID := answerTestSetup(t)
+	ref := refFor(t, be, itemID)
+	item, err := be.Load(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	registered := item.Questions[0].ID
+
+	// Parked exactly as the ask route parks: the kind, the step, the one-line
+	// reason, and the backend's own ask time as the marker.
+	if err := be.Park(context.Background(), ref, flow.ParkRequest{
+		Kind:    flow.ParkQuestion,
+		Step:    "plan",
+		Reason:  "question: should we re-plan?",
+		Details: flow.MarkQuestionAsked(item.Questions[0].AskedAt),
+	}); err != nil {
+		t.Fatalf("Park: %v", err)
+	}
+
+	if code := app.cmdAnswer(context.Background(), []string{"--json", itemID, "yes, re-plan"}); code != 0 {
+		t.Fatalf("cmdAnswer = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	var payload answerPayload
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal %s: %v", out.String(), err)
+	}
+	if payload.QuestionID != string(registered) {
+		t.Errorf("answered %q, want the question the step registered, %q", payload.QuestionID, registered)
+	}
+
+	after, err := be.Load(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(after.Questions) != 1 {
+		t.Fatalf("questions = %d, want the one already registered — nothing registers a second", len(after.Questions))
+	}
+	if after.Questions[0].Answer != "yes, re-plan" {
+		t.Errorf("answer = %q, want it recorded against the registered question", after.Questions[0].Answer)
+	}
+	if after.Blocked {
+		t.Errorf("still blocked (%s: %s) — the last pending question was answered", after.BlockKind, after.BlockReason)
+	}
+}
+
+// postFailsOnceBackend fails the FIRST answer it is asked to post and posts
+// every one after it, so a test can walk the half-landed write: the question
+// registered, the answer not.
+type postFailsOnceBackend struct {
+	flow.Orchestrator
+	failed bool
+}
+
+func (b *postFailsOnceBackend) PostAnswer(ctx context.Context, ref flow.ItemRef, id flow.QuestionId, text string) error {
+	if !b.failed {
+		b.failed = true
+		return errors.New("the answer comment could not be posted")
+	}
+	return b.Orchestrator.PostAnswer(ctx, ref, id, text)
+}
+
+// A REGISTRATION THAT LANDS AND AN ANSWER THAT DOES NOT is reported as the
+// failure it is — and leaves the item better off than it found it rather than
+// stranded again: the question the park was waiting on is registered and
+// pending, so the next attempt answers it by the ordinary route, with an id
+// `status` can now show.
+func TestCmdAnswer_AFailedPostLeavesTheQuestionRegisteredAndAnswerable(t *testing.T) {
+	app, out, errBuf, be, itemID := strandedParkSetup(t)
+	app.Orchestrator = &postFailsOnceBackend{Orchestrator: app.Orchestrator}
+
+	if code := app.cmdAnswer(context.Background(), []string{itemID, "yes"}); code != 1 {
+		t.Fatalf("first cmdAnswer = %d, want 1", code)
+	}
+	if !strings.Contains(errBuf.String(), "could not be posted") {
+		t.Errorf("stderr = %q, want the failed write reported", errBuf.String())
+	}
+	if strings.Contains(out.String(), "answered") {
+		t.Errorf("stdout = %q, want nothing reported as answered", out.String())
+	}
+
+	item, err := be.Load(context.Background(), refFor(t, be, itemID))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(item.Questions) != 1 || item.Questions[0].Answer != "" {
+		t.Fatalf("questions = %+v, want the park's one registered and still pending", item.Questions)
+	}
+	if item.Questions[0].Header != strandedParkReason {
+		t.Errorf("header = %q, want the park's reason", item.Questions[0].Header)
+	}
+
+	// The retry takes the ordinary route — there is a registered question now —
+	// and lands, registering nothing further.
+	if code := app.cmdAnswer(context.Background(), []string{itemID, "yes"}); code != 0 {
+		t.Fatalf("second cmdAnswer = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	if got := answerOn(t, be, itemID); got != "yes" {
+		t.Errorf("answer = %q, want the retry's text recorded", got)
+	}
+	assertStillPending(t, be, itemID, 0)
+}
+
+// idlessAskBackend reports SUCCESS and registers nothing an answer can name:
+// its AskQuestion returns no question id, and its PostAnswer would accept
+// anything. This is the nonconformance stepCtx.AskQuestions already refuses at
+// the ask route; the answer route has to refuse it too, or the one command that
+// rescues a stranded park reports the park cleared while it still stands.
+type idlessAskBackend struct {
+	flow.Orchestrator
+	posted bool
+}
+
+func (b *idlessAskBackend) AskQuestion(context.Context, flow.ItemRef, flow.AgentQuestion) (flow.Question, error) {
+	return flow.Question{}, nil
+}
+
+func (b *idlessAskBackend) PostAnswer(context.Context, flow.ItemRef, flow.QuestionId, string) error {
+	b.posted = true
+	return nil
+}
+
+func TestCmdAnswer_ARegistrationWithNoIdRecordsNoAnswer(t *testing.T) {
+	app, out, errBuf, _, itemID := strandedParkSetup(t)
+	wrapped := &idlessAskBackend{Orchestrator: app.Orchestrator}
+	app.Orchestrator = wrapped
+
+	if code := app.cmdAnswer(context.Background(), []string{itemID, "yes"}); code != 1 {
+		t.Fatalf("cmdAnswer = %d, want 1; stdout=%q", code, out.String())
+	}
+	if wrapped.posted {
+		t.Error("an answer was posted against an empty question id — it lands nowhere")
+	}
+	if !strings.Contains(errBuf.String(), "no question id") {
+		t.Errorf("stderr = %q, want the missing id named", errBuf.String())
+	}
+	if strings.Contains(out.String(), "answered") {
+		t.Errorf("stdout = %q, want nothing reported as answered", out.String())
+	}
+}
+
+// --answered IS A READING FORM, so it reaches the park's question like the
+// others rather than reporting an item with nothing on it. The history of a
+// stranded park is the one question it is waiting on, unanswered.
+func TestCmdAnswer_AnsweredOnAParkWithNoQuestionPrintsIt(t *testing.T) {
+	app, out, errBuf, be, itemID := strandedParkSetup(t)
+
+	if code := app.cmdAnswer(context.Background(), []string{itemID, "--answered"}); code != 0 {
+		t.Fatalf("cmdAnswer = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), strandedParkReason) {
+		t.Errorf("stdout = %q, want the park's question printed", out.String())
+	}
+	assertNoQuestions(t, be, itemID)
+}
+
+// The read forms reach --json on a stranded park too, so a tool sees what the
+// item is waiting on instead of an error. The id is empty because nothing
+// registered one — an identifier `--question` could never match must not be
+// offered as though it could.
+func TestCmdAnswer_JSONReadOnAParkCarriesItsQuestion(t *testing.T) {
+	app, out, errBuf, be, itemID := strandedParkSetup(t)
+
+	if code := app.cmdAnswer(context.Background(), []string{"--json", itemID}); code != 0 {
+		t.Fatalf("cmdAnswer = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	var payload answerPayload
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal %s: %v", out.String(), err)
+	}
+	if len(payload.Questions) != 1 {
+		t.Fatalf("questions = %d, want the park's one", len(payload.Questions))
+	}
+	if payload.Questions[0].ID != "" {
+		t.Errorf("id = %q, want empty — nothing registered this question", payload.Questions[0].ID)
+	}
+	if payload.Questions[0].Header != strandedParkReason || payload.Questions[0].Answered {
+		t.Errorf("question payload wrong: %+v", payload.Questions[0])
+	}
+	assertNoQuestions(t, be, itemID)
 }
 
 // refFor resolves a display id the fixture handed back.
