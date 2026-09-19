@@ -139,6 +139,31 @@ func (b *failingClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, overr
 	return flow.Claim{}, b.claimErr
 }
 
+// loadFailsAfterClaimBackend fails every Load taken once the claim has been
+// taken — the loop's peek and RunOne's own read — while leaving the reads the
+// claim itself needs intact. Gated on the claim rather than on a call count so
+// the fixture does not have to know how many reads precede the loop.
+type loadFailsAfterClaimBackend struct {
+	*fake.Orchestrator
+	claimed bool
+	err     error
+}
+
+func (b *loadFailsAfterClaimBackend) Claim(ctx context.Context, ref flow.ItemRef, overrides []flow.ClaimOverride) (flow.Claim, error) {
+	c, err := b.Orchestrator.Claim(ctx, ref, overrides)
+	if err == nil {
+		b.claimed = true
+	}
+	return c, err
+}
+
+func (b *loadFailsAfterClaimBackend) Load(ctx context.Context, ref flow.ItemRef) (*flow.Item, error) {
+	if b.claimed {
+		return nil, b.err
+	}
+	return b.Orchestrator.Load(ctx, ref)
+}
+
 // resolvingFailingListBackend implements flow.RefResolver (so the explicit-id
 // path takes the fast lane and never hits ListEligible) AND forces
 // ListEligible to error — together they prove the explicit-id branch of
@@ -1978,10 +2003,24 @@ func TestCmdResolve_QuotaUnreadableWarnedOnce(t *testing.T) {
 	// SUCCEEDED, paced, and slept for as long as the account said. That is what
 	// hung this package for ten minutes with the tree sound.
 	//
-	// The loop runs at least twice (step + finalize), so the dedup guard is
-	// still exercised.
-	app, _, errBuf := resolveTestApp(t, be)
+	// TWO AGENT STEPS, because the dedup guard only exists on a run that
+	// attempts the read twice. This test used to take the second attempt from
+	// the finalize pass of a one-step flow — and that pass stopped reading the
+	// quota at all once an iteration that dispatches nothing stopped being
+	// paced, leaving the assertion true of a run that attempted ONE read and
+	// passing with `quotaWarned` deleted outright. The second attempt is now
+	// the second step's, which is a dispatch and will not stop being one.
+	reads := 0
+	app, _, errBuf := resolveTestAppFlow(t, be, func(f *flow.Flow) {
+		f.AddStep("write plan", "plan", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Next("commit", "planned").Markdown("the plan"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Entry: true, Role: "contributor", Next: []flow.StepId{"commit"}})
+		f.AddStep("open branch", "commit", func(ctx flow.StepCtx) (flow.StepResult, error) {
+			return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("abc"), nil
+		}, flow.StepConfig{Prompts: flow.PromptsAgent, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
+	})
 	app.Quota = func() ([]windowUsage, error) {
+		reads++
 		return nil, fmt.Errorf("no credentials (injected)")
 	}
 
@@ -1989,10 +2028,44 @@ func TestCmdResolve_QuotaUnreadableWarnedOnce(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
 	}
+	// The premise, asserted rather than assumed: the guard has to suppress a
+	// second attempt, and a run that made only one would report a deduped
+	// warning it never deduplicated. Two per agent step — the pacing read and
+	// RunOne's own pre-dispatch check, as
+	// TestCmdResolve_PacingIsDecidedForEachPendingStep counts them — so four
+	// says both steps were paced and the finalize pass was not.
+	if reads != 4 {
+		t.Fatalf("quota read %d times, want 4 — two agent steps, each paced and pre-checked; the dedup guard is only exercised by a second failing pacing read", reads)
+	}
 	output := errBuf.String()
 	count := strings.Count(output, "quota unreadable")
 	if count != 1 {
 		t.Errorf("expected exactly 1 'quota unreadable' warning (dedup); got %d in:\n%s", count, output)
+	}
+}
+
+// pacingQuota is the reading every pacing test below runs against: a window all
+// but spent with almost none of it elapsed, so paceDelay answers with the
+// (short) remainder and an iteration that consulted the quota is visible twice
+// over — as a counted read, and as a pacing line. The delay is real, which is
+// what makes the line print; it is short, which is what keeps the test quick.
+//
+// Just under 1.0, never at it: an EXHAUSTED window is a different condition —
+// the pre-dispatch check withholds the dispatch entirely rather than pacing it
+// — and these tests are about pacing. The delay is identical either way (the
+// target is already exceeded at full elapse, so it is the whole remainder).
+//
+// One reading, so a test asserting the wait was served and a test asserting it
+// was skipped cannot be answering different windows.
+func pacingQuota(reads *int) func() ([]windowUsage, error) {
+	return func() ([]windowUsage, error) {
+		*reads++
+		return []windowUsage{{
+			Label:    "5h",
+			Length:   time.Second,
+			Used:     0.99,
+			ResetsAt: time.Now().Add(30 * time.Millisecond),
+		}}, nil
 	}
 }
 
@@ -2020,25 +2093,7 @@ func TestCmdResolve_AMechanicalStepIsNotPaced(t *testing.T) {
 				readsBeforeStep = quotaReads
 				return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
 			}, tc.prompts)
-			// A reading that forces a wait: the window is all but spent with
-			// almost none of it elapsed, so the delay is the (short) remainder
-			// of the window. The delay is real, which is what makes the line
-			// print; it is short, which is what keeps the test quick.
-			//
-			// Just under 1.0, not at it: an EXHAUSTED window is a different
-			// condition — the pre-dispatch check withholds the dispatch
-			// entirely rather than pacing it — and this test is about pacing.
-			// The delay is identical either way (the target is already
-			// exceeded at full elapse, so it is the whole remainder).
-			app.Quota = func() ([]windowUsage, error) {
-				quotaReads++
-				return []windowUsage{{
-					Label:    "5h",
-					Length:   time.Second,
-					Used:     0.99,
-					ResetsAt: time.Now().Add(30 * time.Millisecond),
-				}}, nil
-			}
+			app.Quota = pacingQuota(&quotaReads)
 
 			code := app.cmdResolve(context.Background(), []string{"1"})
 			if code != 0 {
@@ -2094,19 +2149,7 @@ func TestCmdResolve_PacingIsDecidedForEachPendingStep(t *testing.T) {
 			return ctx.Finalize(flow.DispositionResolved, "done").CommitHash("abc"), nil
 		}, flow.StepConfig{Prompts: flow.PromptsNone, Role: "contributor", MayFinalize: []flow.Disposition{flow.DispositionResolved}})
 	})
-	// Every reading forces a (short) wait, so an iteration that consults the
-	// quota is visible twice over: as a read, and as a pacing line. Just under
-	// 1.0 for the reason the test above gives — an exhausted window withholds
-	// the dispatch instead of pacing it.
-	app.Quota = func() ([]windowUsage, error) {
-		quotaReads++
-		return []windowUsage{{
-			Label:    "5h",
-			Length:   time.Second,
-			Used:     0.99,
-			ResetsAt: time.Now().Add(30 * time.Millisecond),
-		}}, nil
-	}
+	app.Quota = pacingQuota(&quotaReads)
 
 	code := app.cmdResolve(context.Background(), []string{"1"})
 	if code != 0 {
@@ -2131,6 +2174,269 @@ func TestCmdResolve_PacingIsDecidedForEachPendingStep(t *testing.T) {
 	}
 	if strings.Contains(output[planAt:branchAt], "pacing — waiting") {
 		t.Errorf("a pacing wait sits between the agent step and the mechanical one; got:\n%s", output)
+	}
+	// And none after the last step either. The iteration that finalizes has no
+	// pending step at all, so it dispatches nothing and can spend nothing —
+	// two reads for the whole resolution, both the agent step's, and no third.
+	if finalizeAt := strings.Index(output, "no step eligible — finalizing…"); finalizeAt < 0 {
+		t.Fatalf("the run never reached the finalize pass; got:\n%s", output)
+	}
+	if strings.Contains(output[branchAt:], "pacing — waiting") {
+		t.Errorf("the finalize pass waited for quota headroom it cannot spend; got:\n%s", output)
+	}
+	if quotaReads != 2 {
+		t.Errorf("quota read %d times over the whole resolution, want 2 — only the agent step pays for a reading", quotaReads)
+	}
+}
+
+// AN ITERATION THAT DISPATCHES NOTHING IS NOT PACED. `Mechanical()` answers
+// "dispatching this step invokes no agent" for a step that declared it; an
+// iteration with no step to have declared anything is in the same class and
+// further along it — RunOne's three pre-dispatch exits invoke no agent because
+// they never reach a dispatch. Every completed resolution ends on one of them,
+// so pacing that pass withholds the item's terminal status — and everything a
+// scheduler does on seeing it — against spend the pass cannot make
+// (docs/cli.md § Resolving).
+func TestCmdResolve_AnIterationThatDispatchesNothingIsNotPaced(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		build    func(t *testing.T) (*App, *bytes.Buffer)
+		wantCode int
+		narrates string
+	}{
+		{
+			// The finalize pass — the iteration every completed resolution ends
+			// with. The step before it is mechanical so that NOTHING in the run
+			// has a reason to consult the quota: any reading at all is this
+			// pass's.
+			name: "the finalize pass",
+			build: func(t *testing.T) (*App, *bytes.Buffer) {
+				be := fake.New()
+				be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+				app, _, errBuf := resolveTestAppPrompts(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+					return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+				}, flow.PromptsNone)
+				return app, errBuf
+			},
+			narrates: "no step eligible — finalizing…",
+		},
+		{
+			// Outside the remit: RunOne blocks without dispatching, and the
+			// peek knows it from inRemit — before the pacing block, not after.
+			name: "an item outside the remit",
+			build: func(t *testing.T) (*App, *bytes.Buffer) {
+				be := fake.New()
+				be.AddItem("1", flow.Item{Type: "chore", Title: "1"}) // the fixture's flow accepts "task"
+				app, _, errBuf := resolveTestApp(t, be)
+				return app, errBuf
+			},
+			wantCode: 1, // a condition somebody must clear
+			narrates: "no flow accepts this item's type…",
+		},
+		{
+			// The remit's finalized exemption: the item is outside the remit
+			// AND takes the finalize path rather than the block. Either way
+			// nothing is dispatched, so the pacing verdict is the same.
+			name: "a finalized item outside the remit",
+			build: func(t *testing.T) (*App, *bytes.Buffer) {
+				be := fake.New()
+				be.AddItem("1", flow.Item{Type: "chore", Title: "1", Finalized: true})
+				be.SetStatus("1", flow.StatusTerminal, "completed")
+				app, _, errBuf := resolveTestApp(t, be)
+				return app, errBuf
+			},
+			narrates: "finalized ✓",
+		},
+		{
+			// Waiting on unfinished items: RunOne stops clean before dispatch,
+			// through the very predicate the peek reads.
+			name: "an item waiting on unfinished items",
+			build: func(t *testing.T) (*App, *bytes.Buffer) {
+				be := fake.New()
+				be.AddItem("1", flow.Item{Type: "task", Title: "waits"})
+				be.AddItem("2", flow.Item{Type: "task", Title: "the blocker"})
+				item, err := be.ResolveRef(t.Context(), "1")
+				if err != nil {
+					t.Fatalf("ResolveRef: %v", err)
+				}
+				blocker, err := be.ResolveRef(t.Context(), "2")
+				if err != nil {
+					t.Fatalf("ResolveRef: %v", err)
+				}
+				blockOn(t, be, item, blocker)
+				app, _, errBuf := resolveTestApp(t, be)
+				return app, errBuf
+			},
+			wantCode: 1, // a condition somebody must clear
+			narrates: "waits on unfinished dependencies — not dispatching",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, errBuf := tc.build(t)
+			quotaReads := 0
+			app.Quota = pacingQuota(&quotaReads)
+
+			code := app.cmdResolve(context.Background(), []string{"1"})
+			if code != tc.wantCode {
+				t.Fatalf("exit code = %d, want %d; err=%q", code, tc.wantCode, errBuf.String())
+			}
+			output := errBuf.String()
+			// The pass under test actually happened — without this the
+			// assertions below would pass on a run that never got there.
+			if !strings.Contains(output, tc.narrates) {
+				t.Fatalf("the run never reached the pass under test (%q); got:\n%s", tc.narrates, output)
+			}
+			if quotaReads != 0 {
+				t.Errorf("quota read %d times, want 0 — a pass that dispatches nothing cannot spend, so the wait is skipped entirely", quotaReads)
+			}
+			if strings.Contains(output, "pacing — waiting") {
+				t.Errorf("a pass that dispatches nothing waited for quota headroom; got:\n%s", output)
+			}
+		})
+	}
+}
+
+// A FAILED PEEK IS NOT A PASS THAT DISPATCHES NOTHING. The peek is best-effort,
+// so a read that fails leaves it knowing nothing — and not knowing is not the
+// same as knowing no dispatch is coming. RunOne re-derives and may well
+// dispatch, so the run paces exactly as it did before rather than letting a
+// transient read error silently disable the wait.
+func TestCmdResolve_AnUnreadablePeekStillPaces(t *testing.T) {
+	be := &loadFailsAfterClaimBackend{Orchestrator: fake.New(), err: errors.New("backend unreachable")}
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	app, _, errBuf := resolveTestApp(t, be)
+	quotaReads := 0
+	app.Quota = pacingQuota(&quotaReads)
+
+	// RunOne's own load fails too — a peek that cannot read is a run that
+	// cannot advance — so the run ends on the condition, AFTER the wait.
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1 — the advance could not load the item; err=%q", code, errBuf.String())
+	}
+	output := errBuf.String()
+	if quotaReads != 1 {
+		t.Errorf("quota read %d times, want 1 — an unreadable peek paces as before", quotaReads)
+	}
+	if !strings.Contains(output, "pacing — waiting") {
+		t.Errorf("an unreadable peek skipped the wait, reporting as certain what it could not read; got:\n%s", output)
+	}
+}
+
+// A BLOCK THAT DOES NOT STOP THE ADVANCE DOES NOT STOP THE WAIT EITHER. Only
+// waits-on-items holds a dispatch back; the two park-derived kinds are the
+// item's blockedness as `list` and `status` report it, and the owning arena
+// still picks the item up and runs the step (cli/orchestrator.go
+// blockedFromAdvancing, and the fake's blockednessOf on account-exhausted:
+// "safe for resumption"). So an iteration carrying one is about to dispatch an
+// agent step and must be paced like any other.
+//
+// The bare Item.Blocked is the plausible wrong reading here, and it fails
+// SILENTLY in the expensive direction: the step runs, spends, and blows through
+// the very target the operator set pacing to hold.
+func TestCmdResolve_ABlockThatDoesNotStopTheAdvanceStillPaces(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		park flow.ParkRequest
+		kind flow.BlockKind
+	}{
+		// The two kinds left once waits-on-items is spoken for. Both are
+		// derived from a park the item already carries, which is why a run can
+		// meet one on its FIRST iteration, before it has dispatched anything.
+		{
+			name: "waits-on-condition",
+			park: flow.ParkRequest{Kind: flow.ParkAccountExhausted, Reason: "the allowance is spent"},
+			kind: flow.WaitsOnCondition,
+		},
+		{
+			name: "waits-on-person",
+			park: flow.ParkRequest{Kind: flow.ParkTreasurerRefused, Reason: "the treasurer refused"},
+			kind: flow.WaitsOnPerson,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			be := fake.New()
+			be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+			ref, err := be.ResolveRef(t.Context(), "1")
+			if err != nil {
+				t.Fatalf("ResolveRef: %v", err)
+			}
+			if err := be.Park(t.Context(), ref, tc.park); err != nil {
+				t.Fatalf("Park: %v", err)
+			}
+			// The fixture is only worth anything if the backend really does
+			// report the item blocked under this kind — a park the fake read as
+			// not blocked at all would make the test about nothing.
+			st, err := be.Load(t.Context(), ref)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if !st.Blocked || st.BlockKind != tc.kind {
+				t.Fatalf("item reads blocked=%v kind=%q, want blocked under %q", st.Blocked, st.BlockKind, tc.kind)
+			}
+
+			quotaReads := 0
+			app, _, errBuf := resolveTestApp(t, be) // one agent step, "write plan"
+			app.Quota = pacingQuota(&quotaReads)
+
+			if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+				t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+			}
+			output := errBuf.String()
+			// The step really was dispatched — the run did not stop on the
+			// block, which is the premise the wait follows from.
+			ran := strings.Index(output, `running "write plan"…`)
+			if ran < 0 {
+				t.Fatalf("the run stopped on a block that does not stop an advance; got:\n%s", output)
+			}
+			if strings.Contains(output, "waits on unfinished dependencies") {
+				t.Fatalf("the fixture blocked the item on items, not on %s; got:\n%s", tc.kind, output)
+			}
+			if !strings.Contains(output[:ran], "pacing — waiting") {
+				t.Errorf("an agent step under a %s block ran without waiting for quota headroom; got:\n%s", tc.kind, output)
+			}
+			// Two for the dispatching iteration — the pacing read and RunOne's
+			// pre-dispatch check — and none for the finalize pass after it.
+			if quotaReads != 2 {
+				t.Errorf("quota read %d times, want 2 — the agent step is paced and pre-checked, the finalize pass neither", quotaReads)
+			}
+		})
+	}
+}
+
+// AN ITEM PAST THE REMIT QUESTION IS STILL PACED. The remit stops being
+// consulted at the journal's first entry (cli/orchestrator.go inRemit), so an
+// item whose TYPE no flow accepts but which already carries a journal is one
+// RunOne goes on to dispatch a step for — the case
+// TestCmdResolve_ItemWithAJournalIsNarratedPastTheRemit pins for the narration.
+// The pacing verdict reads the same `acts`, and must reach the same answer: a
+// peek that decided the remit from the type alone would skip the wait in front
+// of a real agent dispatch, and the narration one branch below would name the
+// step it was not waiting for.
+func TestCmdResolve_AnItemPastTheRemitQuestionIsStillPaced(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "chore", Title: "1", Journal: []flow.JournalEntry{
+		// One completed execution. Only its presence is read: it is what puts
+		// the item past the remit question, and the checklist still picks the
+		// entry step.
+		{Step: "plan", Execution: 1, Route: flow.Route{Next: "plan"}},
+	}})
+	quotaReads := 0
+	app, _, errBuf := resolveTestApp(t, be) // remit: "task" only
+	app.Quota = pacingQuota(&quotaReads)
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	output := errBuf.String()
+	ran := strings.Index(output, `running "write plan"…`)
+	if ran < 0 {
+		t.Fatalf("the run never dispatched the step the journal leaves pending; got:\n%s", output)
+	}
+	if !strings.Contains(output[:ran], "pacing — waiting") {
+		t.Errorf("an item past the remit question ran an agent step unpaced; got:\n%s", output)
+	}
+	if quotaReads != 2 {
+		t.Errorf("quota read %d times, want 2 — the agent step is paced and pre-checked, the finalize pass after it neither", quotaReads)
 	}
 }
 

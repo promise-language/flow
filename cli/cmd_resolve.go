@@ -283,7 +283,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		// Best-effort peek at the step about to run. RunOne re-derives this
 		// itself; the peek never gates execution (a transient read error just
 		// skips the label and paces as before). It answers two questions: what
-		// to name on the progress line, and whether the step is mechanical —
+		// to name on the progress line, and whether this iteration can spend —
 		// which decides whether to pace at all, so it is read BEFORE the pacing
 		// block rather than after it.
 		//
@@ -363,15 +363,52 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			}
 		}
 
+		// Whether this iteration is going to dispatch a handler at all — the
+		// other half of the question the pacing wait answers, and the half no
+		// declaration can answer, because there is no step to have declared
+		// anything. Three of RunOne's pre-dispatch exits are decided from what
+		// the peek already holds:
+		//
+		//   - !acts      — outside the remit: RunOne blocks, or, on an item
+		//                  already finalized, takes the finalize path.
+		//   - next == "" — no step eligible: RunOne finalizes.
+		//   - blocked    — waiting on unfinished items: RunOne stops clean.
+		//
+		// None of them dispatches anything, so none can spend, and holding one
+		// under a curve that measures spend stalls it against nothing — the
+		// reason a mechanical step skips the wait, on the iteration every
+		// completed resolution ends with.
+		//
+		// NOT EVERY PRE-DISPATCH EXIT IS HERE, and the ones missing are missing
+		// deliberately: a preflight refusal and the treasurer's invocation and
+		// cost gates also stop before a dispatch, but the first is a call with
+		// its own cost that running twice per iteration would pay for twice,
+		// and the second would be the driver keeping a second copy of the
+		// treasurer's arithmetic — the thing the park classification below is
+		// careful not to do. They are the remaining work docs/cli.md § Resolving
+		// carries, not an oversight of this expression (#450).
+		//
+		// A FAILED PEEK is not one of them: st == nil means we do not know,
+		// RunOne re-derives and may well dispatch, so a transient read error
+		// paces exactly as it did before rather than silently disabling the
+		// wait.
+		//
+		// The same predicates the narration below reads, so the two cannot
+		// disagree about whether a dispatch is coming.
+		dispatches := st == nil || (acts && next != "" && !blockedFromAdvancing(st))
+
 		// Pace against subscription quota. The check is before dispatch so the
 		// delay costs nothing that is in flight.
 		//
 		// A mechanical step skips the wait ENTIRELY, not a shortened one: the
 		// curve measures spend the step cannot make, and holding a free step
-		// for hours under it stalls the resolution against nothing. The check
-		// stays here, before dispatch — moving the wait inside the dispatch
-		// would have a handler hold its claim and worktree while it waited,
-		// withdrawing the arena from the fleet.
+		// for hours under it stalls the resolution against nothing. An
+		// iteration that dispatches nothing at all skips it for the same
+		// reason and to a greater degree — there is not even a step to be free
+		// (docs/cli.md § Resolving). The check stays here, before dispatch —
+		// moving the wait inside the dispatch would have a handler hold its
+		// claim and worktree while it waited, withdrawing the arena from the
+		// fleet.
 		//
 		// An EXHAUSTED window is not paced against — it PARKS, and the park is
 		// RunOne's (docs/environment.md § The agent account). Pacing holds a
@@ -382,7 +419,7 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 		// hours holding the arena — "nothing is served by a process sitting in
 		// front of it" — and the pre-dispatch check downstream never sees the
 		// condition it exists for.
-		if !mechanical && app.Quota != nil && (targets.FiveHour > 0 || targets.SevenDay > 0) {
+		if dispatches && !mechanical && app.Quota != nil && (targets.FiveHour > 0 || targets.SevenDay > 0) {
 			if usage, qerr := app.Quota(); qerr == nil {
 				// One instant for both readings: a wait and a park decided
 				// against two different "now"s could each answer for a window

@@ -450,6 +450,8 @@ That refusal is not a lost race. A lost race is about an item and the answer is 
 
 `resolve` imposes no bounds of its own. What a step may spend — dispatches, cost, and the time allowance each dispatch runs within — is the treasurer's to decide, and `resolve` enforces the allowance it was handed rather than a judgement of its own about slowness.
 
+**`resolve` holds for quota headroom only before a dispatch that could spend it.** A step declaring `none` and a signal wait are exempt because dispatching them invokes no agent (§ Output). An iteration that dispatches **nothing at all** is exempt for the same reason and to a greater degree: no step eligible and the item finalizing, an item whose type is outside this binary's remit, an item waiting on unfinished blockers. Every completed resolution ends with such a pass, and holding it withholds the item's terminal status — and every scheduling decision made on seeing it — against spend the pass cannot make.
+
 ### A park is re-dispatched when the kind says a re-dispatch clears it
 
 **Whether a park is worth another dispatch is the park kind's own answer, and `resolve` reads it rather than deciding for itself.** Every park publishes `redispatch_may_clear` (§ One-shot reports), derived from the kind by the one classification the vocabulary holds ([orchestrator.md](orchestrator.md) § Vocabularies: "The kind also decides whether re-dispatch can clear it"). A driver that stopped on all of them identically would stop on conditions the same system says cure themselves; one that retried all of them would loop against an answer that does not change. There is no second table in the driver — two readings of one question is how the vocabulary and the driver come to disagree.
