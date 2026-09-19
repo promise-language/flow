@@ -775,7 +775,22 @@ type Orchestrator interface {
 	Claim(ctx context.Context, ref ItemRef, overrides []ClaimOverride) (Claim, error)
 
 	// Release relinquishes the lease.
-	Release(ctx context.Context, ref ItemRef) error
+	//
+	// A ZERO ref names no item, and releases the arena's own record alone —
+	// the same thing an accepted release by a displaced arena takes apart. It
+	// is how an arena whose lease record cannot be READ is freed: a record
+	// nothing can parse names no item to release on the backend, so there is
+	// nothing to address and the local record is the whole of what comes off.
+	//
+	// The arena's own record is cleared only when the ref is the one this
+	// arena holds, or is zero. Releasing some OTHER item's claim must leave
+	// this arena's lease, drafts and session exactly where they were.
+	//
+	// overrides names safety checks the operator chose to bypass, from the same
+	// closed set Claim takes: dirty-tree and stale-base bypass the two worktree
+	// preconditions, and already-held is what permits releasing a record this
+	// arena does not hold.
+	Release(ctx context.Context, ref ItemRef, overrides []ClaimOverride) error
 
 	// LookupClaim reports who holds this item, or (nil, nil) if unclaimed.
 	LookupClaim(ctx context.Context, ref ItemRef) (*ClaimInfo, error)

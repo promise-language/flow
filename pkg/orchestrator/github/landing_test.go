@@ -417,7 +417,7 @@ func TestLanding_EveryStopEndsTheRound(t *testing.T) {
 				// record), and the release of the mainline must not depend on
 				// it succeeding: an arena on its way out holding the mainline is
 				// the failure this exists to prevent.
-				_ = b.Release(t.Context(), ref)
+				_ = b.Release(t.Context(), ref, nil)
 			},
 		},
 		{

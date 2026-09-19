@@ -70,7 +70,7 @@ func TestWorkInProgress_ReleaseLeavesNoRecords(t *testing.T) {
 			t.Fatalf("SaveWorkInProgress(%s): %v", step, err)
 		}
 	}
-	if err := b.Release(ctx, ref); err != nil {
+	if err := b.Release(ctx, ref, nil); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 	for _, step := range []flow.StepId{"plan", "review"} {

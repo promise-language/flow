@@ -90,7 +90,7 @@ func TestIntegration_ClaimAppendReleaseCycle(t *testing.T) {
 		t.Fatalf("Claim: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := b.Release(context.Background(), claim.ItemRef); err != nil {
+		if err := b.Release(context.Background(), claim.ItemRef, nil); err != nil {
 			t.Logf("Release cleanup: %v", err)
 		}
 	})

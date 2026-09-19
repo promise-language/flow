@@ -210,7 +210,7 @@ func releaseClaim(t *testing.T, be *fake.Orchestrator, itemID string) {
 	if err != nil {
 		t.Fatalf("ResolveRef: %v", err)
 	}
-	if err := be.Release(context.Background(), ref); err != nil {
+	if err := be.Release(context.Background(), ref, nil); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 }

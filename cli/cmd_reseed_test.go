@@ -83,7 +83,7 @@ func TestCmdReseed_NoClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LookupActiveClaim: %v", err)
 	}
-	if err := be.Release(context.Background(), claim.ItemRef); err != nil {
+	if err := be.Release(context.Background(), claim.ItemRef, nil); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 

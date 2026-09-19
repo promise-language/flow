@@ -2104,12 +2104,20 @@ func newFinalizeBackend(t *testing.T) (*Orchestrator, *ghMock, *gitRecorder) {
 
 // claimForFinalize builds a claim suitable for Finalize tests without
 // hitting the GitHub API (the git recorder can't serve the Claim flow).
+// claimForFinalize is the lease record Claim would have written, which is what
+// makes Finalize's Release read the item as this arena's own.
+//
+// Arena is not decoration. LookupActiveClaim discards a record whose arena is
+// not this checkout's — a file this checkout did not write — so a claim built
+// without it reads as "this arena holds nothing", and a double that answers
+// that is not modelling a held item at all.
 func claimForFinalize(b *Orchestrator) flow.Claim {
 	ref := b.refFromIssue(42)
 	tok, _ := b.saveClaimToken(claimToken{StateCommentID: finalizeStateCommentID, ClaimID: "test"})
 	return flow.Claim{
 		OrchestratorName: b.Name(),
 		ItemRef:          ref,
+		Arena:            b.arena(),
 		Account:          "alice",
 		Token:            tok,
 	}
@@ -2265,8 +2273,11 @@ func TestBackend_Finalize_RefusesDirtyWorktree(t *testing.T) {
 	if refused.Code != "dirty-tree" {
 		t.Errorf("Code = %q, want dirty-tree", refused.Code)
 	}
+	// Release names --force here and Finalize must not: Finalize takes no
+	// overrides, so the flag does not reach this check and offering it would
+	// send the operator to an invocation that cannot exist.
 	if refused.Override != "" {
-		t.Errorf("Override = %q, want none: nothing bypasses the check at a release", refused.Override)
+		t.Errorf("Override = %q, want none: no flag reaches Finalize's own check", refused.Override)
 	}
 	// Finalize is the THIRD call site of the shared check, and the one with no
 	// test of its own for what it tells the operator to do. It ends in a
@@ -3162,7 +3173,7 @@ func TestBackend_Release_RefusesADirtyTree(t *testing.T) {
 		return []byte(porcelain), nil
 	}
 
-	err := b.Release(t.Context(), b.refFromIssue(42))
+	err := b.Release(t.Context(), b.refFromIssue(42), nil)
 	if err == nil {
 		t.Fatal("Release should refuse a dirty worktree")
 	}
@@ -3176,8 +3187,12 @@ func TestBackend_Release_RefusesADirtyTree(t *testing.T) {
 	if refused.ItemScoped {
 		t.Error("ItemScoped = true; the tree is the arena's, and no other item would fare better")
 	}
-	if refused.Override != "" {
-		t.Errorf("Override = %q, want none: nothing bypasses a release precondition", refused.Override)
+	// The ordinary way past is still git — the recovery asserted just below says
+	// so — but the refusal names the operator's emergency override, because an
+	// arena being decommissioned has no tree to tidy and would otherwise read a
+	// refusal with no way out (docs/cli.md § Releasing).
+	if refused.Override != "force" {
+		t.Errorf("Override = %q, want force", refused.Override)
 	}
 	// The act it names is the one the normative documents name, and NOT the
 	// stash the claim-side refusal offers.
@@ -3201,7 +3216,7 @@ func TestBackend_Release_RefusesAnOffBaseArena(t *testing.T) {
 		return []byte("flow/issue-42\n"), nil
 	}
 
-	err := b.Release(t.Context(), b.refFromIssue(42))
+	err := b.Release(t.Context(), b.refFromIssue(42), nil)
 	if err == nil {
 		t.Fatal("Release should refuse an arena off the base branch")
 	}
@@ -3212,8 +3227,8 @@ func TestBackend_Release_RefusesAnOffBaseArena(t *testing.T) {
 	if refused.Code != "not-on-base" {
 		t.Errorf("Code = %q, want not-on-base", refused.Code)
 	}
-	if refused.Override != "" {
-		t.Errorf("Override = %q, want none", refused.Override)
+	if refused.Override != "force" {
+		t.Errorf("Override = %q, want force", refused.Override)
 	}
 	if !strings.Contains(refused.Reason, "flow/issue-42") || !strings.Contains(refused.Reason, "main") {
 		t.Errorf("Reason = %q, want it to name where HEAD is and where it should be", refused.Reason)
@@ -3233,7 +3248,7 @@ func TestBackend_Release_DirtyAndOffBaseReportsTheDirtyTree(t *testing.T) {
 		return []byte("flow/issue-42\n"), nil
 	}
 
-	err := b.Release(t.Context(), b.refFromIssue(42))
+	err := b.Release(t.Context(), b.refFromIssue(42), nil)
 	var refused flow.ErrClaimRefused
 	if !errors.As(err, &refused) {
 		t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
@@ -3264,7 +3279,7 @@ func TestBackend_Release_AGitFailureIsAnErrorNotARefusal(t *testing.T) {
 				return nil, errors.New(c.msg)
 			}
 
-			err := b.Release(t.Context(), b.refFromIssue(42))
+			err := b.Release(t.Context(), b.refFromIssue(42), nil)
 			if err == nil {
 				t.Fatal("Release must surface a git failure rather than proceeding")
 			}
@@ -3286,7 +3301,7 @@ func TestBackend_Release_AGitFailureIsAnErrorNotARefusal(t *testing.T) {
 func TestBackend_Release_CleanArenaOnTheTrunkSucceeds(t *testing.T) {
 	b, mock, _ := releaseBackend(t)
 
-	if err := b.Release(t.Context(), b.refFromIssue(42)); err != nil {
+	if err := b.Release(t.Context(), b.refFromIssue(42), nil); err != nil {
 		t.Fatalf("Release of a clean arena on the base branch: %v", err)
 	}
 	names := mock.labelNames()

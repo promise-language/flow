@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -20,7 +21,48 @@ type releaseRefusing struct {
 	err error
 }
 
-func (b *releaseRefusing) Release(context.Context, flow.ItemRef) error { return b.err }
+func (b *releaseRefusing) Release(context.Context, flow.ItemRef, []flow.ClaimOverride) error {
+	return b.err
+}
+
+// unreadableLease models the state #212 is about: the lease record exists and
+// cannot be parsed, so LookupActiveClaim answers with the parse error and
+// nothing can say which item this arena holds. Release still has to run.
+type unreadableLease struct {
+	*fake.Orchestrator
+	err error
+
+	releasedRef      flow.ItemRef
+	releasedOverride []flow.ClaimOverride
+	released         bool
+}
+
+func (b *unreadableLease) LookupActiveClaim(context.Context) (*flow.Claim, error) {
+	return nil, b.err
+}
+
+func (b *unreadableLease) Release(ctx context.Context, ref flow.ItemRef, ov []flow.ClaimOverride) error {
+	b.releasedRef, b.releasedOverride, b.released = ref, ov, true
+	return b.Orchestrator.Release(ctx, ref, ov)
+}
+
+// recordingRelease reports what the command handed the backend, for the cases
+// where WHICH ref and WHICH overrides travelled is the whole assertion.
+type recordingRelease struct {
+	*fake.Orchestrator
+	ref       flow.ItemRef
+	overrides []flow.ClaimOverride
+	called    bool
+	err       error
+}
+
+func (b *recordingRelease) Release(ctx context.Context, ref flow.ItemRef, ov []flow.ClaimOverride) error {
+	b.ref, b.overrides, b.called = ref, ov, true
+	if b.err != nil {
+		return b.err
+	}
+	return b.Orchestrator.Release(ctx, ref, ov)
+}
 
 func releaseTestApp(t *testing.T, be flow.Orchestrator) (*App, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
@@ -74,10 +116,11 @@ func TestCmdRelease_RendersATypedRefusal(t *testing.T) {
 		t.Fatalf("Claim: %v", err)
 	}
 	be := &releaseRefusing{Orchestrator: inner, err: flow.ErrClaimRefused{
-		Code:   "dirty-tree",
-		Reason: "worktree has uncommitted or untracked changes",
-		Detail: " M cli/cmd_release.go\n?? scratch.md",
-		Check:  "clean-tree",
+		Code:     "dirty-tree",
+		Reason:   "worktree has uncommitted or untracked changes",
+		Detail:   " M cli/cmd_release.go\n?? scratch.md",
+		Check:    "clean-tree",
+		Override: "force",
 	}}
 	app, _, errBuf := releaseTestApp(t, be)
 
@@ -94,11 +137,191 @@ func TestCmdRelease_RendersATypedRefusal(t *testing.T) {
 	if !strings.Contains(out, "\n   M cli/cmd_release.go") || !strings.Contains(out, "\n  ?? scratch.md") {
 		t.Errorf("the detail is missing or not indented under the refusal; got %q", out)
 	}
-	// Nothing bypasses a release precondition, so there is no override to
-	// offer — and offering one would point the operator at a flag that does
-	// not exist.
-	if strings.Contains(out, "override with") {
-		t.Errorf("offered an override for a release; got %q", out)
+	// The release preconditions ARE overridable now, and the flag is the
+	// operator's emergency (docs/cli.md § Releasing). Naming it is the point:
+	// an operator whose arena is being decommissioned otherwise reads a refusal
+	// with no way out and reaches for the hand-deletion instead.
+	if !strings.Contains(out, "override with --force") {
+		t.Errorf("the refusal does not name --force; got %q", out)
+	}
+}
+
+// The state #212 is about, and the whole of what it asks for: a lease record
+// this arena cannot parse leaves it with no way to say what it holds, and
+// release is the command that has to get it out anyway. It goes ahead against
+// a ref that names NOTHING, so the backend takes apart the local record alone.
+func TestCmdRelease_ClearsALeaseRecordItCannotRead(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	if _, err := inner.Claim(context.Background(), itemRefFor("1"), nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	be := &unreadableLease{
+		Orchestrator: inner,
+		err:          errors.New(`parse /w/.flow/active.json: unexpected end of JSON input`),
+	}
+	app, out, errBuf := releaseTestApp(t, be)
+
+	if code := app.cmdRelease(context.Background(), nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if !be.released {
+		t.Fatal("Release was never reached — the command stopped on the parse error, which is the defect")
+	}
+	// A ref naming an item would be a guess: the record that would have said
+	// which one is the record nothing can read.
+	if len(be.releasedRef.Ref) != 0 {
+		t.Errorf("released ref = %+v, want the zero ref", be.releasedRef)
+	}
+	// The operator is told both halves, because "released 1" here would be a
+	// claim about the item that nothing checked.
+	if !strings.Contains(out.String(), "unreadable lease record") {
+		t.Errorf("stdout does not say what was cleared; got %q", out.String())
+	}
+	if !strings.Contains(out.String(), "NOT touched") {
+		t.Errorf("stdout does not say the item's own record was left alone; got %q", out.String())
+	}
+	// The path is the only diagnosis available, so it still reaches the
+	// operator — on stderr, where a report that is not the command's answer goes.
+	if !strings.Contains(errBuf.String(), "active.json") {
+		t.Errorf("the parse error naming the path was swallowed; got %q", errBuf.String())
+	}
+}
+
+// An unreadable lease does not suspend the preconditions. The tree may hold
+// work belonging to whatever the record named, and a release that cannot say
+// which item it was leaves even less to attribute it to — so the refusal stands
+// and --force is what carries it.
+func TestCmdRelease_AnUnreadableLeaseIsStillRefusedOnADirtyTree(t *testing.T) {
+	inner := fake.New()
+	be := &releaseRefusingWithUnreadableLease{
+		unreadableLease: unreadableLease{
+			Orchestrator: inner,
+			err:          errors.New("parse active.json: unexpected end of JSON input"),
+		},
+		refusal: flow.ErrClaimRefused{
+			Code:     "dirty-tree",
+			Reason:   "worktree has uncommitted or untracked changes",
+			Check:    "clean-tree",
+			Override: "force",
+		},
+	}
+	app, out, errBuf := releaseTestApp(t, be)
+
+	if code := app.cmdRelease(context.Background(), nil); code != 1 {
+		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
+	}
+	if out.String() != "" {
+		t.Errorf("a refused release reported a clearing it did not make; got %q", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "override with --force") {
+		t.Errorf("the way out is not named; got %q", errBuf.String())
+	}
+}
+
+type releaseRefusingWithUnreadableLease struct {
+	unreadableLease
+	refusal flow.ErrClaimRefused
+}
+
+func (b *releaseRefusingWithUnreadableLease) Release(context.Context, flow.ItemRef, []flow.ClaimOverride) error {
+	return b.refusal
+}
+
+// The second shape: a claim record that lives on the item and not in this
+// arena's lease file. It is addressed by id, the way `claim <id>` and
+// `status <id>` address theirs.
+func TestCmdRelease_ByItemIdReleasesTheNamedItem(t *testing.T) {
+	be := fake.New()
+	be.AddItem("7", flow.Item{Type: "task", Title: "7"})
+	if _, err := be.Claim(context.Background(), itemRefFor("7"), nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	app, out, errBuf := releaseTestApp(t, be)
+
+	if code := app.cmdRelease(context.Background(), []string{"7"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if got, want := out.String(), "released 7\n"; got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+	if info, err := be.LookupClaim(context.Background(), itemRefFor("7")); err != nil || info != nil {
+		t.Errorf("LookupClaim = (%+v, %v), want unheld — the named claim was not dropped", info, err)
+	}
+}
+
+// --force is one thing, and it is the same three overrides `claim --force`
+// builds. A release that overrode a different set from the claim which must
+// follow it would hand on a tree that claim then refuses.
+func TestCmdRelease_ForceCarriesTheSameOverridesAsClaim(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem("7", flow.Item{Type: "task", Title: "7"})
+	if _, err := inner.Claim(context.Background(), itemRefFor("7"), nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	be := &recordingRelease{Orchestrator: inner}
+	app, _, errBuf := releaseTestApp(t, be)
+
+	if code := app.cmdRelease(context.Background(), []string{"7", "--force"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	want := []flow.ClaimOverride{flow.OverrideDirtyTree, flow.OverrideAlreadyHeld, flow.OverrideStaleBase}
+	if !slices.Equal(be.overrides, want) {
+		t.Errorf("overrides = %v, want %v", be.overrides, want)
+	}
+	if be.ref.Display != "7" {
+		t.Errorf("released ref = %q, want 7", be.ref.Display)
+	}
+}
+
+// Without --force nothing is bypassed, and the absence has to be visible: an
+// override list built unconditionally would make every release a forced one.
+func TestCmdRelease_WithoutForcePassesNoOverrides(t *testing.T) {
+	inner := fake.New()
+	inner.AddItem("7", flow.Item{Type: "task", Title: "7"})
+	if _, err := inner.Claim(context.Background(), itemRefFor("7"), nil); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	be := &recordingRelease{Orchestrator: inner}
+	app, _, errBuf := releaseTestApp(t, be)
+
+	if code := app.cmdRelease(context.Background(), []string{"7"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if len(be.overrides) != 0 {
+		t.Errorf("overrides = %v, want none", be.overrides)
+	}
+}
+
+// refusingRefRecordingRelease reuses the id resolver that already refuses
+// (refusingRefBackend, cmd_claim_test.go) and only adds the record of whether
+// Release was reached.
+type refusingRefRecordingRelease struct {
+	refusingRefBackend
+	released bool
+}
+
+func (b *refusingRefRecordingRelease) Release(ctx context.Context, ref flow.ItemRef, ov []flow.ClaimOverride) error {
+	b.released = true
+	return b.refusingRefBackend.Release(ctx, ref, ov)
+}
+
+// An id that does not resolve is a plain failure, not a refusal: nothing was
+// refused, the command could not find out what was being asked about. And it
+// must not fall through to the zero ref, which would silently turn "release
+// this item" into "clear this arena's record".
+func TestCmdRelease_AnUnresolvableIdIsAPlainFailure(t *testing.T) {
+	be := &refusingRefRecordingRelease{refusingRefBackend: refusingRefBackend{fake.New()}}
+	app, _, errBuf := releaseTestApp(t, be)
+
+	if code := app.cmdRelease(context.Background(), []string{"nope"}); code != 1 {
+		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
+	}
+	if be.released {
+		t.Error("the backend was asked to release a ref that never resolved")
+	}
+	if strings.Contains(errBuf.String(), "refused") {
+		t.Errorf("an unresolvable id was dressed as a refusal; got %q", errBuf.String())
 	}
 }
 

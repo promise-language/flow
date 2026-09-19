@@ -829,7 +829,10 @@ func accountName(a flow.AccountId) string {
 // Returns the run's exit code: 0 for the handoff, 1 when the claim could not be
 // given up.
 func (app *App) handOff(ctx context.Context, claim flow.Claim, awaits flow.Awaits, s standing) int {
-	if err := app.Orchestrator.Release(ctx, claim.ItemRef); err != nil {
+	// No overrides: a handoff is an ordinary release, and --force is the
+	// operator's emergency rather than something a run reaches for on its own
+	// (docs/cli.md § Releasing).
+	if err := app.Orchestrator.Release(ctx, claim.ItemRef, nil); err != nil {
 		// A refused release is typed, and its DETAIL is what tells the operator
 		// how to clear it — which files are in the way, or which branch HEAD is
 		// on (docs/cli.md § Releasing). So the consequence is stated on its own

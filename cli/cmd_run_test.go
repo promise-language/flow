@@ -89,7 +89,7 @@ func runStepStubFlow(f *flow.Flow) {
 func TestCmdRun_NoActiveClaimJSONCarriesTheRefusal(t *testing.T) {
 	app, be, claim := testApp(t, runStepStubFlow, &stubAgent{name: "stub"})
 	// testApp pre-claims; drop it so the arena holds nothing.
-	if err := be.Release(context.Background(), claim.ItemRef); err != nil {
+	if err := be.Release(context.Background(), claim.ItemRef, nil); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
@@ -121,7 +121,7 @@ func TestCmdRun_NoActiveClaimJSONCarriesTheRefusal(t *testing.T) {
 // prose is the line it always was, on stderr, and stdout stays empty.
 func TestCmdRun_NoActiveClaimHumanIsUnchanged(t *testing.T) {
 	app, be, claim := testApp(t, runStepStubFlow, &stubAgent{name: "stub"})
-	if err := be.Release(context.Background(), claim.ItemRef); err != nil {
+	if err := be.Release(context.Background(), claim.ItemRef, nil); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}

@@ -232,7 +232,7 @@ func TestBackend_ClaimRefusesASecondItemInAnOccupiedArena(t *testing.T) {
 	}
 
 	// Releasing the first is what frees the arena for the second.
-	if err := b.Release(ctx, itemRef("1")); err != nil {
+	if err := b.Release(ctx, itemRef("1"), nil); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 	if _, err := b.Claim(ctx, itemRef("2"), nil); err != nil {
@@ -1542,7 +1542,7 @@ func TestBackend_ReleaseDropsWorkInProgress(t *testing.T) {
 	if err := b.SaveWorkInProgress(ctx, ref, "plan", "reasoning"); err != nil {
 		t.Fatalf("SaveWorkInProgress: %v", err)
 	}
-	if err := b.Release(ctx, ref); err != nil {
+	if err := b.Release(ctx, ref, nil); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 	if got, err := b.LoadWorkInProgress(ctx, ref, "plan"); got != "" || err != nil {
@@ -1564,7 +1564,7 @@ func TestBackend_ReleaseDropsTheAgentSession(t *testing.T) {
 	if err := b.SaveAgentSession(ctx, ref, flow.AgentSession{SessionID: "sess-1", Boundary: "review"}); err != nil {
 		t.Fatalf("SaveAgentSession: %v", err)
 	}
-	if err := b.Release(ctx, ref); err != nil {
+	if err := b.Release(ctx, ref, nil); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 	if got, err := b.LoadAgentSession(ctx, ref); got != (flow.AgentSession{}) || err != nil {
@@ -1722,7 +1722,7 @@ func awaitingRole(t *testing.T, b *fake.Orchestrator, id string, role flow.RoleN
 	if err := b.AppendEntry(context.Background(), ref, e); err != nil {
 		t.Fatalf("AppendEntry: %v", err)
 	}
-	if err := b.Release(context.Background(), ref); err != nil {
+	if err := b.Release(context.Background(), ref, nil); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 	return ref

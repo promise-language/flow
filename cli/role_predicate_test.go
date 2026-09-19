@@ -215,7 +215,7 @@ func TestCmdResolve_PassesTheRolePredicateToTheSelection(t *testing.T) {
 	if err != nil || claim == nil {
 		t.Fatalf("LookupActiveClaim = (%+v, %v), want the claim testApp took", claim, err)
 	}
-	if err := be.Release(ctx, claim.ItemRef); err != nil {
+	if err := be.Release(ctx, claim.ItemRef, nil); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 	// Nothing selectable: the command stops early, and the assertion is about

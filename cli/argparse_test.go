@@ -61,7 +61,6 @@ func TestNoArgsCommands_RejectExtraPositional(t *testing.T) {
 	}{
 		{"doctor", func(a *App, args []string) int { return a.cmdDoctor(context.Background(), args, nil) }},
 		{"list", func(a *App, args []string) int { return a.cmdList(context.Background(), args) }},
-		{"release", func(a *App, args []string) int { return a.cmdRelease(context.Background(), args) }},
 		{"run-step", func(a *App, args []string) int { return a.cmdRun(context.Background(), args) }},
 	}
 	for _, tc := range cases {
@@ -78,8 +77,9 @@ func TestNoArgsCommands_RejectExtraPositional(t *testing.T) {
 	}
 }
 
-// status and resolve take an OPTIONAL single positional (the item id), so one
-// positional is valid — but a SECOND positional must still be rejected.
+// status, resolve and release take an OPTIONAL single positional (the item
+// id), so one positional is valid — but a SECOND positional must still be
+// rejected.
 func TestOptionalPositionalCommands_RejectSecondPositional(t *testing.T) {
 	cases := []struct {
 		name string
@@ -87,6 +87,7 @@ func TestOptionalPositionalCommands_RejectSecondPositional(t *testing.T) {
 	}{
 		{"status", func(a *App, args []string) int { return a.cmdStatus(context.Background(), args) }},
 		{"resolve", func(a *App, args []string) int { return a.cmdResolve(context.Background(), args) }},
+		{"release", func(a *App, args []string) int { return a.cmdRelease(context.Background(), args) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -521,7 +521,9 @@ type refusingRelease struct {
 	err error
 }
 
-func (b *refusingRelease) Release(context.Context, flow.ItemRef) error { return b.err }
+func (b *refusingRelease) Release(context.Context, flow.ItemRef, []flow.ClaimOverride) error {
+	return b.err
+}
 
 // Dropping the claim is the promise a handoff makes. A release that fails stops
 // the run at exit 1 rather than reporting a handoff that did not happen.
@@ -580,8 +582,11 @@ func TestCmdResolve_ARefusedReleaseIsRenderedWithItsDetail(t *testing.T) {
 	if !strings.Contains(out, "\n  ?? scratch.md") {
 		t.Errorf("the detail is missing or not indented under the refusal; got %q", out)
 	}
+	// The renderer prints the override the backend sent and never invents one.
+	// This refusal carries none, so none is offered — a line pointing at a flag
+	// the refusal did not name is a signpost to an invocation that does nothing.
 	if strings.Contains(out, "override with") {
-		t.Errorf("offered an override for a release; nothing bypasses these checks. got %q", out)
+		t.Errorf("the renderer invented an override the refusal did not carry; got %q", out)
 	}
 	if n := strings.Count(out, "worktree has uncommitted or untracked changes"); n != 1 {
 		t.Errorf("the reason is printed %d times, want 1 — a repeat of it buries the detail; got %q", n, out)

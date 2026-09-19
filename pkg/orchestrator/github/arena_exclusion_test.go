@@ -620,7 +620,7 @@ func TestBackend_Release_RemovesTheArenaLabel(t *testing.T) {
 	}
 
 	one.run(func() {
-		if err := one.b.Release(t.Context(), one.b.refFromIssue(42)); err != nil {
+		if err := one.b.Release(t.Context(), one.b.refFromIssue(42), nil); err != nil {
 			t.Fatalf("Release: %v", err)
 		}
 	})
@@ -635,7 +635,7 @@ func TestBackend_Release_RemovesTheArenaLabel(t *testing.T) {
 	mock.strictLabelRemoval = true
 	mock.mu.Unlock()
 	one.run(func() {
-		if err := one.b.Release(t.Context(), one.b.refFromIssue(42)); err != nil {
+		if err := one.b.Release(t.Context(), one.b.refFromIssue(42), nil); err != nil {
 			t.Errorf("a second Release must not error on labels already gone: %v", err)
 		}
 	})
@@ -660,7 +660,7 @@ func TestBackend_Release_PartialFailureLeavesTheItemReadingHeld(t *testing.T) {
 	mock.mu.Unlock()
 
 	one.run(func() {
-		if err := one.b.Release(t.Context(), one.b.refFromIssue(42)); err == nil {
+		if err := one.b.Release(t.Context(), one.b.refFromIssue(42), nil); err == nil {
 			t.Fatal("Release must surface the failed removal, not report success")
 		}
 		// The lease file is untouched, so this arena can retry the release —
@@ -1008,7 +1008,7 @@ func TestBackend_Release_ByADisplacedArenaLeavesTheTakeOverIntact(t *testing.T) 
 	})
 
 	one.run(func() {
-		if err := one.b.Release(t.Context(), one.b.refFromIssue(42)); err != nil {
+		if err := one.b.Release(t.Context(), one.b.refFromIssue(42), nil); err != nil {
 			t.Fatalf("a displaced arena must be able to let go of its stale lease: %v", err)
 		}
 		// Its own file is what it cleared, so it is free to claim again.
@@ -1038,7 +1038,7 @@ func TestBackend_Release_ByADisplacedArenaLeavesTheTakeOverIntact(t *testing.T) 
 	// And the taker's own release is unaffected: it holds the record, so it
 	// removes the record.
 	two.run(func() {
-		if err := two.b.Release(t.Context(), two.b.refFromIssue(42)); err != nil {
+		if err := two.b.Release(t.Context(), two.b.refFromIssue(42), nil); err != nil {
 			t.Fatalf("the holder's Release: %v", err)
 		}
 	})
@@ -1068,7 +1068,7 @@ func TestBackend_Release_ARecordNamingNoArenaStillComesOff(t *testing.T) {
 	mock.mu.Unlock()
 
 	one.run(func() {
-		if err := one.b.Release(t.Context(), one.b.refFromIssue(42)); err != nil {
+		if err := one.b.Release(t.Context(), one.b.refFromIssue(42), nil); err != nil {
 			t.Fatalf("Release: %v", err)
 		}
 	})
@@ -1102,7 +1102,7 @@ func TestBackend_Release_AFailedItemReadChangesNothing(t *testing.T) {
 	mock.mu.Unlock()
 
 	one.run(func() {
-		if err := one.b.Release(t.Context(), one.b.refFromIssue(42)); err == nil {
+		if err := one.b.Release(t.Context(), one.b.refFromIssue(42), nil); err == nil {
 			t.Fatal("Release must surface a failed item read rather than deciding without it")
 		}
 		// The lease file stays, so the arena retries rather than reading free
@@ -1163,5 +1163,302 @@ func TestFingerprintArena(t *testing.T) {
 	fp := fingerprintArena(h1w1)
 	if strings.Contains(fp, "h1") || strings.Contains(fp, "one") || strings.Contains(fp, "/") {
 		t.Errorf("fingerprint %q carries the arena in the clear", fp)
+	}
+}
+
+// #212's second shape: a claim record on the item with no matching lease
+// anywhere this arena can read. Arena two releases arena one's record.
+//
+// Without --force it is refused, and the reason is not that the record is
+// precious — it is that one's tree, drafts and session are not readable from
+// here at all, so the two preconditions cannot be evaluated against the arena
+// the release would be freeing. Refusing is the honest answer to a question
+// that cannot be asked (docs/cli.md § Releasing).
+func TestBackend_Release_ByItemIdRefusesAnotherArenasRecordWithoutForce(t *testing.T) {
+	mock, one, two := twoArenas(t)
+	one.claimed(t)
+	mock.mu.Lock()
+	mock.mutations = nil // the setup claim's writes are not the release's
+	mock.mu.Unlock()
+
+	two.run(func() {
+		err := two.b.Release(t.Context(), two.b.refFromIssue(42), nil)
+		if err == nil {
+			t.Fatal("releasing another arena's record must be refused without --force")
+		}
+		var refused flow.ErrClaimRefused
+		if !errors.As(err, &refused) {
+			t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+		}
+		if refused.Code != "already-held" {
+			t.Errorf("Code = %q, want already-held — the code Claim uses for the same record", refused.Code)
+		}
+		if refused.Override != "force" {
+			t.Errorf("Override = %q, want force: a refusal with no way out is what sent operators to the label editor", refused.Override)
+		}
+	})
+
+	// And nothing moved: the holder's record is intact on the item.
+	names := mock.labelNames()
+	if !contains(names, one.b.labels.Owner("alice")) || !contains(names, one.b.labels.Arena(one.b.arenaFingerprint())) {
+		t.Errorf("labels = %v, want the holder's record untouched by a refused release", names)
+	}
+	mock.mu.Lock()
+	mutations := append([]string(nil), mock.mutations...)
+	mock.mu.Unlock()
+	if len(mutations) != 0 {
+		t.Errorf("a refused release wrote to GitHub: %v", mutations)
+	}
+}
+
+// With --force it comes off — the whole of what #212 asks for. And the arena
+// doing the forcing keeps its OWN state: clistate.Clear is arena-wide, so a
+// release that cleared unconditionally would take this arena's lease, drafts
+// and session with somebody else's label.
+func TestBackend_Release_ByItemIdWithForceTakesTheRecordOffAndKeepsOurOwn(t *testing.T) {
+	mock, one, two := twoArenas(t)
+	one.claimed(t)
+
+	// Arena two is mid-resolution on a DIFFERENT item, which is the state that
+	// must survive.
+	mock.mu.Lock()
+	mock.issueLabels = append(mock.issueLabels, "flow:implement")
+	mock.mu.Unlock()
+	var twosOwn flow.Claim
+	two.run(func() {
+		twosOwn = flow.Claim{
+			OrchestratorName: two.b.Name(),
+			ItemRef:          two.b.refFromIssue(77),
+			Arena:            two.b.arena(),
+			Account:          "alice",
+		}
+		if err := clistate.Save(twosOwn); err != nil {
+			t.Fatalf("seed arena two's own lease: %v", err)
+		}
+		if err := clistate.SaveWork("77", "implement", "half-written reasoning"); err != nil {
+			t.Fatalf("seed arena two's draft: %v", err)
+		}
+	})
+
+	two.run(func() {
+		err := two.b.Release(t.Context(), two.b.refFromIssue(42),
+			[]flow.ClaimOverride{flow.OverrideDirtyTree, flow.OverrideAlreadyHeld, flow.OverrideStaleBase})
+		if err != nil {
+			t.Fatalf("a forced release of another arena's record: %v", err)
+		}
+	})
+
+	names := mock.labelNames()
+	if contains(names, one.b.labels.Owner("alice")) {
+		t.Errorf("labels = %v, want the owner half gone — left on, the item reads held forever", names)
+	}
+	if contains(names, one.b.labels.Arena(one.b.arenaFingerprint())) {
+		t.Errorf("labels = %v, want the HOLDER's arena half gone, not ours", names)
+	}
+	mock.mu.Lock()
+	assignees := append([]string(nil), mock.assignees...)
+	mock.mu.Unlock()
+	if contains(assignees, "alice") {
+		t.Errorf("assignees = %v, want the holder unassigned", assignees)
+	}
+
+	two.run(func() {
+		active, err := two.b.LookupActiveClaim(t.Context())
+		if err != nil {
+			t.Fatalf("LookupActiveClaim: %v", err)
+		}
+		if active == nil {
+			t.Fatal("releasing #42 wiped arena two's own lease on #77 — that is the state nothing else holds")
+		}
+		if active.ItemRef.Display != twosOwn.ItemRef.Display {
+			t.Errorf("active = %q, want %q", active.ItemRef.Display, twosOwn.ItemRef.Display)
+		}
+		body, err := clistate.LoadWork("77", "implement")
+		if err != nil {
+			t.Fatalf("LoadWork: %v", err)
+		}
+		if body != "half-written reasoning" {
+			t.Errorf("draft = %q, want it intact: discarding it is the work bought twice", body)
+		}
+	})
+}
+
+// The exit #212 opens for an arena whose lease record cannot be parsed: a ref
+// that names nothing releases the local record alone, and reaches GitHub not at
+// all — there is no item to name, so anything it touched would be a guess.
+func TestBackend_Release_AZeroRefClearsTheLocalRecordAndTouchesNoItem(t *testing.T) {
+	mock, one, _ := twoArenas(t)
+	one.claimed(t)
+	mock.mu.Lock()
+	mock.mutations = nil
+	mock.requests = nil
+	mock.mu.Unlock()
+
+	one.run(func() {
+		if err := one.b.Release(t.Context(), flow.ItemRef{}, nil); err != nil {
+			t.Fatalf("Release of a ref naming nothing: %v", err)
+		}
+		active, err := one.b.LookupActiveClaim(t.Context())
+		if err != nil {
+			t.Fatalf("LookupActiveClaim: %v", err)
+		}
+		if active != nil {
+			t.Errorf("active = %+v, want none: clearing the local record is the whole of this", active)
+		}
+	})
+
+	mock.mu.Lock()
+	mutations := append([]string(nil), mock.mutations...)
+	mock.mu.Unlock()
+	if len(mutations) != 0 {
+		t.Errorf("a zero-ref release wrote to GitHub: %v", mutations)
+	}
+	if requests := mock.snapshotRequests(); len(requests) != 0 {
+		t.Errorf("requests = %v, want none: with no item named there is nothing to read either", requests)
+	}
+	// The ownership on the item is untouched, which is exactly what the command
+	// says out loud — and why it says it.
+	names := mock.labelNames()
+	if !contains(names, one.b.labels.Owner("alice")) || !contains(names, one.b.labels.Arena(one.b.arenaFingerprint())) {
+		t.Errorf("labels = %v, want the item's own record left exactly as it stands", names)
+	}
+}
+
+// A zero ref does not suspend the preconditions. The tree may hold work
+// belonging to whatever the unreadable record named, and a release that cannot
+// say which item it was leaves even less to attribute it to.
+func TestBackend_Release_AZeroRefIsStillRefusedOnADirtyTree(t *testing.T) {
+	_, one, _ := twoArenas(t)
+	one.claimed(t)
+	one.rec.handlers["status --porcelain --untracked-files=normal"] = func([]string) ([]byte, error) {
+		return []byte(" M flow.go\n?? scratch.md\n"), nil
+	}
+
+	one.run(func() {
+		err := one.b.Release(t.Context(), flow.ItemRef{}, nil)
+		var refused flow.ErrClaimRefused
+		if !errors.As(err, &refused) {
+			t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+		}
+		if refused.Code != "dirty-tree" {
+			t.Errorf("Code = %q, want dirty-tree", refused.Code)
+		}
+		// And the record it could not read is still there, so a second attempt
+		// after dealing with the tree has something to clear.
+		if _, err := os.Stat(filepath.Join(one.flowDir, "active.json")); err != nil {
+			t.Errorf("a refused release cleared the lease file anyway: %v", err)
+		}
+	})
+
+	// --force is what carries it, because an arena being decommissioned has no
+	// tree to tidy and would otherwise have no exit at all.
+	one.run(func() {
+		if err := one.b.Release(t.Context(), flow.ItemRef{},
+			[]flow.ClaimOverride{flow.OverrideDirtyTree}); err != nil {
+			t.Fatalf("--force must carry a zero-ref release past the dirty tree: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(one.flowDir, "active.json")); !os.IsNotExist(err) {
+			t.Errorf("the forced release did not clear the lease file: %v", err)
+		}
+	})
+}
+
+// The overrides reach the two preconditions one for one, the way Claim's do.
+func TestBackend_Release_OverridesBypassTheWorktreePreconditions(t *testing.T) {
+	t.Run("dirty-tree", func(t *testing.T) {
+		_, one, _ := twoArenas(t)
+		one.claimed(t)
+		one.rec.handlers["status --porcelain --untracked-files=normal"] = func([]string) ([]byte, error) {
+			return []byte(" M flow.go\n"), nil
+		}
+		one.run(func() {
+			if err := one.b.Release(t.Context(), one.b.refFromIssue(42),
+				[]flow.ClaimOverride{flow.OverrideDirtyTree}); err != nil {
+				t.Fatalf("OverrideDirtyTree must carry the release: %v", err)
+			}
+		})
+	})
+	t.Run("stale-base", func(t *testing.T) {
+		_, one, _ := twoArenas(t)
+		one.claimed(t)
+		one.rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+			return []byte("flow/issue-42\n"), nil
+		}
+		one.run(func() {
+			if err := one.b.Release(t.Context(), one.b.refFromIssue(42),
+				[]flow.ClaimOverride{flow.OverrideStaleBase}); err != nil {
+				t.Fatalf("OverrideStaleBase must carry the release past an off-base HEAD: %v", err)
+			}
+		})
+	})
+	// And each reaches only its own: the dirty-tree override does not also
+	// excuse an off-base HEAD, or one flag would quietly mean both.
+	t.Run("dirty-tree does not bypass off-base", func(t *testing.T) {
+		_, one, _ := twoArenas(t)
+		one.claimed(t)
+		one.rec.handlers["rev-parse --abbrev-ref HEAD"] = func([]string) ([]byte, error) {
+			return []byte("flow/issue-42\n"), nil
+		}
+		one.run(func() {
+			err := one.b.Release(t.Context(), one.b.refFromIssue(42),
+				[]flow.ClaimOverride{flow.OverrideDirtyTree})
+			var refused flow.ErrClaimRefused
+			if !errors.As(err, &refused) || refused.Code != "not-on-base" {
+				t.Fatalf("err = %v, want the not-on-base refusal to stand", err)
+			}
+		})
+	})
+}
+
+// Displacement across ACCOUNTS, not only across arenas. `claim --force` from a
+// different login replaces the owner half as well as the arena half, so the
+// arena left behind holds a lease on an item whose record names neither its
+// account nor itself.
+//
+// Its position is identical to the same-account displacement above: release is
+// its only exit, and the record is not its to dismantle. A release that refused
+// it — on the ground that the record belongs to somebody else — would leave the
+// arena unable to claim anything, since the binding is one-to-one and its lease
+// file still names #42.
+func TestBackend_Release_ByAnArenaDisplacedAcrossAccountsClearsOnlyItsOwnRecord(t *testing.T) {
+	mock, one, _ := twoArenas(t)
+	one.claimed(t)
+
+	// Another login took it over: Claim's Phase 3 replaces both halves.
+	mock.mu.Lock()
+	mock.issueLabels = slices.DeleteFunc(mock.issueLabels, func(n string) bool {
+		return n == one.b.labels.Owner("alice") || n == one.b.labels.Arena(one.b.arenaFingerprint())
+	})
+	mock.issueLabels = append(mock.issueLabels, one.b.labels.Owner("bob"), one.b.labels.Arena("beefbeefbeefbeef"))
+	mock.assignees = []string{"bob"}
+	mock.mutations = nil
+	mock.mu.Unlock()
+
+	one.run(func() {
+		if err := one.b.Release(t.Context(), one.b.refFromIssue(42), nil); err != nil {
+			t.Fatalf("an arena displaced across accounts must be able to let go of its stale lease: %v", err)
+		}
+		active, err := one.b.LookupActiveClaim(t.Context())
+		if err != nil {
+			t.Fatalf("LookupActiveClaim: %v", err)
+		}
+		if active != nil {
+			t.Errorf("the displaced arena still holds %+v; its own record is the one thing it must clear", active)
+		}
+	})
+
+	names := mock.labelNames()
+	if !contains(names, one.b.labels.Owner("bob")) || !contains(names, one.b.labels.Arena("beefbeefbeefbeef")) {
+		t.Errorf("labels = %v, want the taker's record intact — without it #42 reads free while bob runs it", names)
+	}
+	mock.mu.Lock()
+	assignees := append([]string(nil), mock.assignees...)
+	mutations := append([]string(nil), mock.mutations...)
+	mock.mu.Unlock()
+	if !contains(assignees, "bob") {
+		t.Errorf("assignees = %v, want the taker still assigned", assignees)
+	}
+	if len(mutations) != 0 {
+		t.Errorf("a displaced arena's release wrote to GitHub: %v", mutations)
 	}
 }

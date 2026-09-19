@@ -873,7 +873,22 @@ func (b *Orchestrator) Claim(ctx context.Context, ref flow.ItemRef, overrides []
 	return c, nil
 }
 
-func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef) error {
+// Release relinquishes the lease. The overrides are accepted and ignored: this
+// double models no worktree, so it has neither of the two preconditions they
+// bypass, and it holds one arena, so there is no foreign record for
+// already-held to reach.
+//
+// A ZERO ref names no item and drops the arena's own record alone — the exit an
+// arena whose lease record cannot be parsed takes (docs/orchestrator.md §
+// Required surface → Release). Modelled here because it is a contract every
+// orchestrator answers, not a detail of the file the github one keeps.
+func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef, overrides []flow.ClaimOverride) error {
+	if len(ref.Ref) == 0 {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		b.active = nil
+		return nil
+	}
 	id, err := refID(ref)
 	if err != nil {
 		return err
@@ -1685,7 +1700,7 @@ func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef, d flow.Di
 	// A finished flow awaits nobody.
 	rec.awaits = flow.Awaits{}
 	b.mu.Unlock()
-	return b.Release(ctx, ref)
+	return b.Release(ctx, ref, nil)
 }
 
 // ---------------------------------------------------------------------------
