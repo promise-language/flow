@@ -78,6 +78,41 @@ type ghMock struct {
 	// failing must not depend on how many other requests happen to precede it.
 	failIssueRead bool
 
+	// repoLabels is the repository's own label objects — name → description —
+	// which is a different store from issueLabels above: one is what labels
+	// EXIST in the repository, the other is which of them this issue carries.
+	// The project-scope exclusion lives in the first (landing.go), and the
+	// refusal to create a name already there IS the exclusion, so a mock that
+	// let a duplicate through would let two arenas land at once and report that
+	// the code did.
+	repoLabels map[string]string
+
+	// failRepoLabelRead answers the repository-label read with 500, for the
+	// caller whose correctness is in what it does when it cannot find out who
+	// holds the mainline.
+	failRepoLabelRead bool
+
+	// dropRepoLabelOnRead removes this label immediately after answering one
+	// read of it, and then clears itself: the window every take has between
+	// finding out who holds the mainline and acting on the answer. Driven from
+	// the mock because it cannot be reached from outside one.
+	dropRepoLabelOnRead string
+
+	// refuseRepoLabelCreateStatus and refuseRepoLabelCreateBody answer a label
+	// creation that would otherwise SUCCEED with this status and body. The
+	// `already_exists` refusal below is served first and is untouched by them,
+	// because that one IS the exclusion: what these drive is every OTHER way a
+	// create can be refused — a validation failure that is not the name, a
+	// GitHub that is down — none of which may be read as somebody holding the
+	// mainline.
+	refuseRepoLabelCreateStatus int
+	refuseRepoLabelCreateBody   string
+
+	// failRepoLabelWrite answers the repository-label rewrite with 500, for the
+	// arena re-taking its own record against a GitHub that will not take the
+	// write.
+	failRepoLabelWrite bool
+
 	// comments
 	nextCommentID int64
 	comments      []ghMockComment
@@ -411,6 +446,104 @@ func (m *ghMock) server() *httptest.Server {
 				m.handleRemoveLabel(w, r, strings.TrimPrefix(parts[1], "labels/"))
 				return
 			}
+			http.NotFound(w, r)
+		}
+	})
+
+	// POST /repos/{o}/{r}/labels — repository label creation, which refuses a
+	// name already taken exactly as GitHub does: 422 carrying the
+	// `already_exists` validation code. That refusal is what the project-scope
+	// exclusion is made of, so it is modelled rather than approximated.
+	mux.HandleFunc(prefix+"/labels", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		var body struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.repoLabels == nil {
+			m.repoLabels = map[string]string{}
+		}
+		if _, taken := m.repoLabels[body.Name]; taken {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			fmt.Fprint(w, `{"message":"Validation Failed","errors":[`+
+				`{"resource":"Label","code":"already_exists","field":"name"}]}`)
+			return
+		}
+		// Served AFTER the name check, so a test driving another refusal still
+		// gets the real one where the name is genuinely taken.
+		if m.refuseRepoLabelCreateStatus != 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(m.refuseRepoLabelCreateStatus)
+			fmt.Fprint(w, m.refuseRepoLabelCreateBody)
+			return
+		}
+		m.repoLabels[body.Name] = body.Description
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(w, map[string]any{"name": body.Name, "description": body.Description})
+	})
+
+	// GET/PATCH/DELETE /repos/{o}/{r}/labels/{name} — the other three halves. A
+	// name that is not there is 404 on all of them, like the real API.
+	mux.HandleFunc(prefix+"/labels/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, prefix+"/labels/")
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		switch r.Method {
+		case http.MethodPatch:
+			// Rewrites the description and NEVER creates: a PATCH that
+			// conjured the name would make the exclusion takeable by a call
+			// that is not the create, and the mock would then be the only
+			// place two arenas could not both hold the mainline.
+			if m.failRepoLabelWrite {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
+			if _, ok := m.repoLabels[name]; !ok {
+				http.NotFound(w, r)
+				return
+			}
+			var body struct {
+				Description string `json:"description"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			m.repoLabels[name] = body.Description
+			writeJSON(w, map[string]any{"name": name, "description": body.Description})
+		case http.MethodGet:
+			if m.failRepoLabelRead {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
+			desc, ok := m.repoLabels[name]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			if m.dropRepoLabelOnRead == name {
+				delete(m.repoLabels, name)
+				m.dropRepoLabelOnRead = ""
+			}
+			writeJSON(w, map[string]any{"name": name, "description": desc})
+		case http.MethodDelete:
+			if _, ok := m.repoLabels[name]; !ok {
+				http.NotFound(w, r)
+				return
+			}
+			delete(m.repoLabels, name)
+			w.WriteHeader(http.StatusNoContent)
+		default:
 			http.NotFound(w, r)
 		}
 	})

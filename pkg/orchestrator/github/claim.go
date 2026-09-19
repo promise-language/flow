@@ -574,6 +574,12 @@ func (b *Orchestrator) refuseDirtyTree(ctx context.Context, recovery, override s
 // Addressed by ref: the account is ambient, so it is read rather than taken off
 // a claim value the caller might be holding after the lease was revoked.
 func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef) error {
+	// Giving the lease up ends any landing round with it, and the mainline's
+	// exclusion is never held across a stop (landing.go). Before the refusals
+	// below, because every ambiguity about a lock resolves toward releasing it:
+	// an arena on its way out holding the mainline is the failure this must not
+	// produce, and a refused release is not a round.
+	b.releaseLanding()
 	issueNum, err := b.issueNumber(ref)
 	if err != nil {
 		return err
@@ -673,6 +679,9 @@ func (b *Orchestrator) Release(ctx context.Context, ref flow.ItemRef) error {
 // comes before the worktree return so a checkout failure leaves the claim
 // recoverable, and the return precedes the release for the same reason.
 func (b *Orchestrator) Finalize(ctx context.Context, ref flow.ItemRef, d flow.Disposition) error {
+	// The flow is finished with the item, so any landing round is over too.
+	// Same rule and same position as Release above.
+	b.releaseLanding()
 	issueNum, err := b.issueNumber(ref)
 	if err != nil {
 		return fmt.Errorf("github.Finalize: %w", err)

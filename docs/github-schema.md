@@ -186,7 +186,7 @@ Readers detecting this trailer must fetch the full body from the orphan branch r
 
 ## Labels
 
-All labels use a configurable prefix (default `flow:`). The label set is closed:
+All labels use a configurable prefix (default `flow:`). The label set is closed. Every label below goes **on an item**, except `flow:landing`, which is the one label that is a repository-scoped object in its own right:
 
 | Label | Meaning |
 |---|---|
@@ -195,6 +195,7 @@ All labels use a configurable prefix (default `flow:`). The label set is closed:
 | `flow:owner:<login>` | The item is claimed by `<login>`. |
 | `flow:arena:<fingerprint>` | The **arena** holding the claim, as an opaque digest of its `(HostId, ArenaId)`. Written and removed with `flow:owner:<login>`, which it is the other half of. |
 | `flow:claim:<token>` | Transient claim-race token, self-limiting (see "Claim protocol" below). |
+| `flow:landing` | The **project-scope exclusion**: the one landing round this repository's mainline admits at a time ([gates-and-commands.md](gates-and-commands.md) § Two scopes). **Never attached to an item**, and the only label that is not. Its **description** carries the holder — `<arena-fingerprint> <acquired-unix-hex>` — written in the same request as the name. See "Landing exclusion" below. |
 | `flow:blocked` | The item is parked (generic block or deterministic refusal). |
 | `flow:needs-answer` | The item is parked waiting for a human answer. |
 | `flow:disabled` | The item is excluded from processing. Claim is refused. |
@@ -216,6 +217,20 @@ The other half-record reads the other way: `flow:arena:<fingerprint>` with **no*
 Park labels are added when a park is recorded and removed when the park is cleared (by a grant, a resume, or a reset). A park label that outlives its condition is worse than no label — it is read as current.
 
 **The neutral values of the two selection axes have no label.** `medium` and `default` are not spellable: a state reachable both by a label and by that label's absence is one state with two spellings, and nothing keeps the two reading alike — an item demoted from `high` to `medium` and an item nobody ever assessed are the same item to selection, and must be the same item to a reader. So `SetPriority(medium)` and `SetUrgency(default)` remove the axis's label rather than writing one, and an item carrying no label of either kind is fully specified.
+
+### Landing exclusion
+
+> **`flow:landing` is a label object and never an item's label, and the refusal to create a name already taken is the exclusion itself.**
+
+A label name is unique within a repository and its creation is atomic, so creating one is an **atomic create-if-absent every machine working this mainline can see, needing no server** — which is the whole of what [gates-and-commands.md](gates-and-commands.md) § Two scopes asks of project scope. Deleting the label releases it. It is not attached to an item because the resource it protects is the mainline, which is not any one item's.
+
+**The holder is written in the same request as the name.** § Two scopes requires that naming the holder be part of taking the exclusion: a holder its own tools cannot recognise is a deadlock rather than a missing diagnostic. The description is `<arena-fingerprint> <acquired-unix-hex>` — a **fingerprint** for the reason `flow:arena:<fingerprint>` carries one, and an instant because the round's own declared bound is what says a holder is gone.
+
+**A record older than the round's bound is collected.** There is no kernel in common between two machines, so the release authority host scope has — the process dying — does not exist here. What replaces it is the round's own bound: one `integration` timeout plus what the rest of the round costs. A record past that belongs to an arena that parked, crashed or went quiet, and it is removed by whoever meets it, exactly as an abandoned `flow:claim:<token>` is. A record nothing can parse is collected too, for the same reason an untimestamped claim token is: it has no way to expire on its own.
+
+**The instant is the round's, so an arena meeting its own abandoned record rewrites it rather than inheriting it.** A record an arena finds under its own fingerprint is one no round is inside — an arena runs one round at a time ([resolution.md](resolution.md) § A claim binds worktrees, not processes) — so it is that arena's to take back. What it must not take back is the instant: that is the abandoned round's, and a round measuring its bound from a clock that started before it begins with part of the bound spent, or with none of it left, and is collected from under a measurement still running. The description is rewritten **in place**, because a delete followed by a create leaves the mainline momentarily unheld and whoever polls in that gap takes an exclusion the arena is about to believe it holds.
+
+**A collection can never cost a wrong landing.** The bound is a judgement about what a round costs, and one set too short would otherwise put two arenas inside one round. So the holder **re-reads the record before it merges** and refuses when it is no longer its own — a transient refusal, not a verdict about the change: the work comes back behind whatever landed meanwhile and re-enters through the drift election ([orchestrator.md](orchestrator.md) § Drift is evidence for judgment).
 
 ## Signals from GitHub state
 

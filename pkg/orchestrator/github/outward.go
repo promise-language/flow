@@ -218,6 +218,121 @@ func (o *outward) RemoveLabel(ctx context.Context, issue int, name string) error
 	})
 }
 
+// CreateRepoLabel creates a repository-scoped label carrying `description`, and
+// reports GitHub's refusal of a name already taken as errLabelExists.
+//
+// THE REFUSAL IS THE POINT, not an inconvenience to absorb. A label name is
+// unique within a repository and the creation is atomic, so this is an
+// atomic create-if-absent every machine working the repository can see — which
+// is what the project-scope exclusion is built out of (landing.go). AddLabels
+// above cannot serve: adding a label to an issue CREATES the name silently
+// when it does not exist, so it can never report the name was taken.
+//
+// The description is written in the same request as the name, and that is a
+// requirement rather than a convenience: docs/gates-and-commands.md § Two
+// scopes says naming the holder is part of taking the exclusion, because a
+// holder its own tools cannot recognise is a deadlock rather than a missing
+// diagnostic.
+//
+// Origin `flow` for the same reason AddLabels fixes it: both strings are the
+// flow's — a closed suffix vocabulary, and a digest the flow computed — and no
+// agent prose reaches either. The exclusion's holder is a fingerprint and never
+// the (HostId, ArenaId) pair, which is what keeps that true; see
+// fingerprintArena.
+func (o *outward) CreateRepoLabel(ctx context.Context, name, description string) error {
+	d := flow.Disclosure{Act: flow.ActLabel, Text: stated(flow.OriginFlow, name, description)}
+	return o.publish(ctx, d, func(ctx context.Context) error {
+		_, _, err := o.client.Issues.CreateLabel(ctx, o.owner, o.repo, &github.Label{
+			Name:        github.Ptr(name),
+			Description: github.Ptr(description),
+			// A colour is required by the API. This one is nobody's topic
+			// colour: the label is never on an issue, so what it looks like in
+			// a list is not a thing anybody sees.
+			Color: github.Ptr("ededed"),
+		})
+		if err != nil && isLabelExists(err) {
+			return errLabelExists
+		}
+		return err
+	})
+}
+
+// SetRepoLabelDescription rewrites a repository-scoped label's description in
+// place, leaving the name — and so the exclusion itself — untouched.
+//
+// IT IS NOT A SECOND WAY TO TAKE THE EXCLUSION. Taking it is CreateRepoLabel
+// and only ever that, because only a create is refused when the name is there.
+// This is for the one holder that already has the record and needs the record
+// to say something else: an arena re-taking its OWN abandoned record, whose
+// instant is the previous round's and would otherwise measure this round's
+// bound from a clock that started before it (landing.go).
+//
+// IN PLACE RATHER THAN DELETE-AND-RETAKE, which is the whole reason it exists:
+// a delete followed by a create leaves the mainline momentarily unheld, and
+// anything polling in that gap takes an exclusion the arena believes it still
+// has. The description is the only field sent, so a name this cannot rename is
+// a name no request of this shape can collide over.
+//
+// A label that is not there is reported as errLabelMissing rather than absorbed:
+// the caller's next move is to CREATE one, and a rewrite that silently reported
+// success would leave it believing a record exists that does not.
+func (o *outward) SetRepoLabelDescription(ctx context.Context, name, description string) error {
+	d := flow.Disclosure{Act: flow.ActLabel, Text: stated(flow.OriginFlow, name, description)}
+	return o.publish(ctx, d, func(ctx context.Context) error {
+		_, _, err := o.client.Issues.EditLabel(ctx, o.owner, o.repo, name, &github.Label{
+			Description: github.Ptr(description),
+		})
+		if err != nil && isNotFound(err) {
+			return errLabelMissing
+		}
+		return err
+	})
+}
+
+// errLabelExists is CreateRepoLabel's typed refusal: the name is taken, which
+// for the exclusion means somebody else holds it.
+var errLabelExists = errors.New("a label with that name already exists")
+
+// errLabelMissing is SetRepoLabelDescription's: there is no label of that name
+// to rewrite, which for the exclusion means the record went away underneath the
+// rewrite and taking it is a create again.
+var errLabelMissing = errors.New("no label with that name exists")
+
+// isLabelExists reads GitHub's uniqueness refusal off the validation error,
+// by its code rather than its prose — unlike isAlreadyRecorded below, which has
+// only a message to go on. 422 is shared with refusals that must stay errors
+// (a name too long, a colour that will not parse), so the code is what tells
+// them apart.
+func isLabelExists(err error) bool {
+	var er *github.ErrorResponse
+	if !errors.As(err, &er) {
+		return false
+	}
+	for _, e := range er.Errors {
+		if e.Code == "already_exists" {
+			return true
+		}
+	}
+	return false
+}
+
+// DeleteRepoLabel removes a repository-scoped label. Deleting one that is not
+// there is not an error — a release that raced a collection has nothing left to
+// do — so a 404 is absorbed.
+//
+// It is a WRITE and goes through publish like every other: it publishes no text
+// of its own, and a seam with one unguarded write is a seam with none.
+func (o *outward) DeleteRepoLabel(ctx context.Context, name string) error {
+	d := flow.Disclosure{Act: flow.ActLabel, Text: stated(flow.OriginFlow, name)}
+	return o.publish(ctx, d, func(ctx context.Context) error {
+		_, err := o.client.Issues.DeleteLabel(ctx, o.owner, o.repo, name)
+		if err != nil && isNotFound(err) {
+			return nil
+		}
+		return err
+	})
+}
+
 // AddAssignees assigns logins to an issue. A login is a person's, typed by the
 // person configuring the flow or read back from their own `gh` session — so
 // the origin is fixed to operator for the same reason AddLabels fixes flow.
@@ -590,6 +705,25 @@ func (o *outward) SearchIssues(ctx context.Context, query string, opt *github.Se
 func (o *outward) GetIssue(ctx context.Context, issue int) (*github.Issue, error) {
 	iss, _, err := o.client.Issues.Get(ctx, o.owner, o.repo, issue)
 	return iss, err
+}
+
+// GetRepoLabel reads a repository-scoped label's description, and reports false
+// when no label of that name exists.
+//
+// NEVER SERVED FROM THE CACHE, and that is a property rather than an accident:
+// cachePolicy (cache.go) answers freshNever for every path but the four it
+// names, and this one is not among them. An exclusion answered from a record
+// written minutes ago would report a holder that has moved on, which is the one
+// way this read is worse than not making it.
+func (o *outward) GetRepoLabel(ctx context.Context, name string) (description string, ok bool, err error) {
+	l, _, err := o.client.Issues.GetLabel(ctx, o.owner, o.repo, name)
+	if err != nil {
+		if isNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return l.GetDescription(), true, nil
 }
 
 // GetComment reads one comment and returns the ETag GitHub issued for it.

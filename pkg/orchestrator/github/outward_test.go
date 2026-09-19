@@ -185,6 +185,24 @@ func outwardWrites() map[string]func(context.Context, *outward) error {
 		"RemoveLabel": func(ctx context.Context, o *outward) error {
 			return o.RemoveLabel(ctx, 42, "flow:seeded")
 		},
+		// The exclusion's own two writes. Repository-scoped and on no item, so
+		// the disclosure carries no Item — which is exactly why they have to be
+		// driven here: a write that names no item is the easiest kind to add
+		// without a guard.
+		"CreateRepoLabel": func(ctx context.Context, o *outward) error {
+			return o.CreateRepoLabel(ctx, "flow:landing", "0123456789abcdef 6899a680")
+		},
+		"DeleteRepoLabel": func(ctx context.Context, o *outward) error {
+			return o.DeleteRepoLabel(ctx, "flow:landing")
+		},
+		"SetRepoLabelDescription": func(ctx context.Context, o *outward) error {
+			// The rewrite needs a record to rewrite, and the create above is
+			// the only thing that makes one — a PATCH never conjures a name.
+			// Its own refusal under a refusing guard is not what this drive
+			// asserts; the rewrite's is, and it is reached either way.
+			_ = o.CreateRepoLabel(ctx, "flow:landing", "0123456789abcdef 6899a680")
+			return o.SetRepoLabelDescription(ctx, "flow:landing", "fedcba9876543210 6899a681")
+		},
 		"AddAssignees": func(ctx context.Context, o *outward) error {
 			return o.AddAssignees(ctx, 42, []string{"alice"})
 		},
@@ -266,6 +284,7 @@ var outwardReads = map[string]bool{
 	"DownloadContents":       true,
 	"GetContents":            true,
 	"GetRef":                 true,
+	"GetRepoLabel":           true,
 	"ListPullRequests":       true,
 	"ListReviews":            true,
 	"ListBlockedBy":          true,

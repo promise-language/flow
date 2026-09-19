@@ -1172,6 +1172,15 @@ type Worktree interface {
 	//
 	// Waiting is not failing, and the wait is reported to the ledger through
 	// AddWaiting, never as work.
+	//
+	// WHICH ACT IS THE LANDING DEPENDS ON THE MODEL, and only the one that
+	// lands takes the exclusion. Where the push IS the integration there is no
+	// branch between it and trunk, and this is it. Where the orchestrator lands
+	// through a request, a branch is not trunk
+	// (docs/resolution-standalone.md § Where verify is required): the push
+	// publishes work for review, the round's landing act is
+	// RequestManager.Merge, and a Push that took the mainline's exclusion would
+	// queue every contributor in the fleet behind one mainline.
 	Push(ctx context.Context) error
 
 	// Drift reports how far the world has moved under the branch: commits the
@@ -1379,6 +1388,15 @@ type RequestManager interface {
 	// happened — and because a merge completes a signal rather than an
 	// artifact, nothing waits on it: the step is dispatched again.
 	// May trigger orchestrator signals (e.g. pr-merged).
+	//
+	// IT IS THE LANDING ACT HERE, so it ENDS the landing round and gives the
+	// project-scope exclusion back — on a refused merge as well as a successful
+	// one, because a round that landed nothing is over too, and a lock held in
+	// a finished round starves every landing behind it.
+	//
+	// It MAY WAIT where nothing opened the round before it, on the terms Push
+	// states: waiting is not failing, and the wait is reported to the ledger as
+	// waiting, never as work.
 	Merge(ctx context.Context, url RequestUrl) error
 
 	// FindPR returns the pull request for the current claim branch.
@@ -1386,9 +1404,21 @@ type RequestManager interface {
 
 	// PrepareMergeResult sets the tree to reflect the merge result, so a gate
 	// measures what will actually land rather than the branch in isolation.
+	//
+	// IT OPENS THE LANDING ROUND, so it is where the project-scope exclusion is
+	// taken (docs/gates-and-commands.md § Two scopes). The serialized section
+	// is the round: a lock over the landing act alone leaves the measurement
+	// this call sets up open to invalidation, which is the case the exclusion
+	// exists for. It MAY WAIT, on the terms Push states. A preparation that
+	// FAILED ends the round — it measured nothing and will land nothing.
 	PrepareMergeResult(ctx context.Context, base BranchName) error
 
 	// RevertMergePrep undoes that preparation.
+	//
+	// IT DOES NOT END THE LANDING ROUND. Undoing the local merge is what lets
+	// the branch be pushed as the branch rather than as the merge, so it falls
+	// between the measurement and the land — and giving the exclusion back here
+	// would reopen exactly the window it closes.
 	RevertMergePrep(ctx context.Context) error
 
 	// RebuildTools rebuilds project tools so they match the current tree.
