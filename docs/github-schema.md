@@ -171,11 +171,18 @@ A step the route reaches again produces a further comment (append-only); `v=` ca
 
 ## Remarks
 
-A remark ([orchestrator.md](orchestrator.md) § Remarks) is an **ordinary issue comment carrying no marker at all** — its text and nothing else. It is the same shape an answer is posted in, and it is the shape for the same reason: every machine-readable write on an issue carries an HTML marker and every reader of them selects on one, so a comment without a marker is invisible to all of them and cannot be mistaken for state.
+A remark ([orchestrator.md](orchestrator.md) § Remarks) is an ordinary issue comment opened by the `flow:remark` marker, with the operator's text below it and nothing else:
 
-That is also what makes a remark useful. It appears in the thread exactly where a person writing the same sentence by hand would have put it, and reads as what it is.
+```html
+<!-- flow:remark -->
+released: the arena was needed elsewhere
+```
 
-**Nothing reads it back.** There is no remark store, no index and no id: the issue thread is where it lives, and the way to read it is the way a person reads any comment.
+**The marker is what keeps a remark from being read as an answer.** Answers are not stored anywhere on this schema — *the issue thread is the answer store* (§ Questions), and the read half takes every comment posted after a question's `asked-at` that carries **no** flow marker. That is the one reader here selecting on a marker's *absence*, so an unmarked remark recorded while a step waits for a human would clear that wait and resume the step on prose nobody offered as a reply.
+
+It costs the remark nothing a reader would notice. An HTML comment does not render, so it still appears in the thread exactly where a person writing the same sentence by hand would have put it, and reads as what it is.
+
+**Nothing reads it back.** The marker separates a remark from a reply; it does not make one addressable. There is no remark store, no index and no id: the issue thread is where it lives, and the way to read it is the way a person reads any comment.
 
 ## Large artifact storage
 

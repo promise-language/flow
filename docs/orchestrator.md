@@ -363,6 +363,8 @@ The orchestrator stores the ledger and decides none of it: admission, allowances
 
 **Empty text is refused.** A remark that says nothing is a publication nobody asked for, it cannot be taken back, and accepting it would put an empty record on the item that every consumer reads as well-formed.
 
+**A remark is not an answer, and recording one resolves nothing.** An orchestrator whose answer store is the place a remark lands — the thread it asked the question in, say — owes that separation to the caller: a remark recorded while a step waits on a human must not be read back as the reply, or the wait clears with nobody having decided and the step resumes on prose no one offered. `PostAnswer` is how a question is answered, and it names the question. This is the one obligation a remark's storage carries beyond keeping the text.
+
 **Publishing.** The result is visible to everyone who can see the item and is not undone by forgetting it happened, so it is an outward write and subject to whatever guards those — see [disclosure.md](disclosure.md), where it is the `remark` act. It is a distinct act from `item-edit` because the two carry different things and a guard decides differently about each: `item-edit` rewrites the **request**, where a remark is an observation appended beside it.
 
 **An orchestrator with nowhere to keep one refuses**, typed, so *never supported here* is distinguishable from *not right now*.

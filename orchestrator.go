@@ -1013,6 +1013,13 @@ type Orchestrator interface {
 	// Empty text is REFUSED. A remark that says nothing is a publication
 	// nobody asked for, and it cannot be taken back.
 	//
+	// IT IS NOT AN ANSWER AND RESOLVES NOTHING. An orchestrator whose answer
+	// store is the place a remark lands — the thread it asked the question in,
+	// say — MUST keep the two apart: a remark recorded while a step waits on a
+	// human that reads back as the reply clears the wait with nobody having
+	// decided, and the step resumes on prose no one offered. PostAnswer answers
+	// a question, and it names the one it answers.
+	//
 	// Publishing, so it passes whatever guards outward writes (docs/disclosure.md).
 	// An orchestrator with nowhere to keep one refuses with ErrUnsupported.
 	Remark(ctx context.Context, ref ItemRef, text string) error

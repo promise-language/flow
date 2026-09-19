@@ -190,6 +190,10 @@ A remark is an append, not a field, which is why it is not one of edit's
 flags: it is published beside the request rather than changing it. Empty
 text records nothing and exits 1.
 
+It is not an answer. Recording one never clears a step's wait for a
+human, whether or not there is one — answer answers, and it names the
+question it answers.
+
 It takes no claim, and it publishes: the remark is visible to everyone who
 can see the item.`},
 

@@ -30,6 +30,17 @@ func editFlagNames() []string {
 	}
 }
 
+// editFieldOf names the FIELD a flag stages, which is what `changed` reports.
+// The two differ in one place: `--body-file` is a second way to give the body,
+// not a second field, and reporting the flag would put two names on one effect
+// — so a reader checking whether the body landed would have to know both.
+func editFieldOf(flagName string) string {
+	if flagName == "body-file" {
+		return "body"
+	}
+	return flagName
+}
+
 // cmdEdit changes the item itself — the one thing the command set could not do.
 //
 // ONE COMMAND, NOT ONE PER FIELD, because ItemEditor is a transaction and a
@@ -93,10 +104,13 @@ func (app *App) cmdEdit(ctx context.Context, args []string) int {
 		return app.usageError("edit: unknown urgency %q (valid: %s)", *urgency, joinNames(flow.AllUrgencies()))
 	}
 
+	// Fields, not flags — and `--body` and `--body-file` cannot both be set,
+	// having been refused above, so the one flag that maps to another field's
+	// name cannot produce that name twice.
 	var staged []string
 	for _, name := range editFlagNames() {
 		if set[name] {
-			staged = append(staged, name)
+			staged = append(staged, editFieldOf(name))
 		}
 	}
 	if len(staged) == 0 {

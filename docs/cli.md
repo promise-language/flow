@@ -188,6 +188,8 @@ If the item has more than one outstanding question, the one being answered is na
 
 **There is one flag per editor method**, and they carry no rules of their own. What can be written together is the orchestrator's to decide: it refuses at the commit rather than applying the part it can, and the refusal reaches the operator **as the orchestrator worded it** — a backend whose store keeps item fields and dependencies apart says so, and says to split the edit, and a line substituted here would report a permanent limitation in place of a combination to re-shape.
 
+**`--body-file` is a second way to give the body, not a second field.** A rewritten description is a file long before it is an argument — that is what the observed workaround reached for — so the body may be given inline or read from a path, and giving it both ways is a usage error. What the report names is the **field**: an invocation that read the body from a file says the body changed, because anything acting on the report is asking what moved, not which flag carried it.
+
 **It takes no claim.** Correcting a title, retracting a blocker or deferring an item is not something the holder does — usually that nobody holds the item is the point — so `edit` addresses the item by id, like `status` and `answer`, and works from any machine. That is [orchestrator.md](orchestrator.md) § Editing's rule, and this is the command that depends on it.
 
 **An edit that stages nothing is a usage error, not a no-op.** Exit 0 covers "there was nothing to do"; an invocation that asked for nothing is a different thing, and reporting success for it would tell an operator who mistyped a flag that their change landed.
@@ -207,6 +209,10 @@ This is the operator's half of a facility the SDK already had. A run that discov
 **It is an append, not a field, which is why it is not one of `edit`'s flags.** A remark is published *beside* the request rather than changing it, and folding it into the editor would either break "all of them or none of them" — the one property that editor exists to give — or make a remark unusable in combination, since publishing one is a write of a different shape from setting a field.
 
 **The item id is first and always required.** It is never read as the text and the text is never read as an id: a remark whose first word is a number would otherwise be indistinguishable from a reference, and a backend read would decide what the invocation meant.
+
+**The text may be given inline or read from a path** — `--body-file`, as `edit`'s body is — and giving it both ways is a usage error. Prose worth recording is regularly longer than a shell argument, which is what the observed workaround reached for.
+
+**A remark is not an answer.** It is recorded on an item whether or not a step is waiting for a human, and recording one never clears a wait: `answer` is the command that answers, and it names the question it answers. A backend whose answer store is the same place a remark lands owes that separation to whoever records one — see [github-schema.md](github-schema.md) § Remarks for how this one keeps it.
 
 **Empty text records nothing**, and exits 1. A remark that says nothing is a publication nobody asked for and nothing can take back — the same judgement § Answering makes about an operator who is asked and says nothing.
 

@@ -807,8 +807,8 @@ usage:
   %[1]s reseed [--force]              clear seed state (artifacts, budgets, park) on the active claim
 
 answer, edit, remark, status, list, quota, grant, claim, run-step, and resolve print
-human-readable text on a
-terminal and JSON when piped or redirected; --json / --human (or FLOW_OUTPUT=json|human)
+human-readable text on a terminal and JSON when piped or redirected;
+--json / --human (or FLOW_OUTPUT=json|human)
 force one. resolve's human text is its progress narration on stderr, which it
 prints in both modes — in human mode it writes nothing to stdout at all.`, bin)
 }

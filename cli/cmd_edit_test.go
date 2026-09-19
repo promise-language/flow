@@ -174,6 +174,24 @@ func TestCmdEdit_BodyFileIsTheSameAsBody(t *testing.T) {
 	}
 }
 
+// `changed` reports the FIELD, so the two ways of giving the body report the
+// same one. Reporting the flag would put two names on one effect, and anything
+// acting on the report would have to know both to learn the body moved.
+func TestCmdEdit_BodyFileReportsTheBodyField(t *testing.T) {
+	app, _, out, errBuf := editTestSetup(t)
+	path := filepath.Join(t.TempDir(), "body.md")
+	if err := os.WriteFile(path, []byte("from a file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := app.cmdEdit(context.Background(), []string{"--json", "1", "--body-file", path}); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	changed, _ := decode(t, out)["changed"].([]any)
+	if len(changed) != 1 || changed[0] != "body" {
+		t.Errorf("changed = %v, want [body] — the field, not the flag that carried it", changed)
+	}
+}
+
 // An unreadable --body-file is an environment condition, not a malformed
 // invocation: the command line is well-formed and the file is not there.
 func TestCmdEdit_BodyFileUnreadable(t *testing.T) {
