@@ -244,6 +244,14 @@ func TestBackend_Claim_RefusesAnItemAnotherArenaHoldsUnderTheSameAccount(t *test
 			t.Errorf("Reason = %q, want the holder's fingerprint %q, the only handle tying it to the item",
 				refused.Reason, one.b.arenaFingerprint())
 		}
+		// And it names the ACT, which is Claim's own: take the item over. The
+		// shared predicate states the record and nothing else, because a release
+		// refused on the same record offers the opposite act — so the advice
+		// belongs at the call site, and a caller that stopped appending it would
+		// leave an operator with a refusal and no verb.
+		if !strings.Contains(refused.Reason, "use --force to take over") {
+			t.Errorf("Reason = %q, want the act a claim offers named", refused.Reason)
+		}
 	})
 
 	// Nothing was written: no claim token minted, no ownership asserted on an
@@ -295,6 +303,13 @@ func TestBackend_Claim_RefusesAnArenaThatTookTheItemDuringOurPreconditions(t *te
 		}
 		if refused.Code != "already-held" || !refused.ItemScoped {
 			t.Errorf("refusal = %+v, want already-held and item-scoped", refused)
+		}
+		// The second place Claim raises this refusal, and it has to read like
+		// the first: the shared predicate states the record, and the act — take
+		// the item over — is the caller's to name, because the release refusing
+		// on the same record offers the opposite one.
+		if !strings.Contains(refused.Reason, "use --force to take over") {
+			t.Errorf("Reason = %q, want the act a claim offers named here too", refused.Reason)
 		}
 	})
 	if !fetched {
@@ -1205,6 +1220,13 @@ func TestBackend_Release_ByItemIdRefusesAnotherArenasRecordWithoutForce(t *testi
 		if !strings.Contains(refused.Reason, "is held by another arena") {
 			t.Errorf("Reason = %q, want it to name the record that is in the way", refused.Reason)
 		}
+		// Same fields as Claim's refusal for the same record, Check included:
+		// "active-claim" there names the ARENA-OCCUPIED check, a different
+		// condition under a different code, so borrowing the name here would
+		// hand a driver keying on (Code, Check) two meanings for one pair.
+		if refused.Check != "" {
+			t.Errorf("Check = %q, want none — Claim's already-held carries none either", refused.Check)
+		}
 	})
 
 	// And nothing moved: the holder's record is intact on the item.
@@ -1469,5 +1491,128 @@ func TestBackend_Release_ByAnArenaDisplacedAcrossAccountsClearsOnlyItsOwnRecord(
 	}
 	if len(mutations) != 0 {
 		t.Errorf("a displaced arena's release wrote to GitHub: %v", mutations)
+	}
+}
+
+// #212's second shape as the repository actually carries it: #140 and #265 hold
+// a complete claim record naming THIS arena's fingerprint, and no lease file
+// anywhere names them — the arena was reimaged, or the worktree deleted with the
+// item still labelled, or a claim was rolled back after the record posted.
+//
+// The record is this arena's OWN, so nothing has to be overridden to take it
+// apart: `release <item-id>` is the whole route, and a version that demanded
+// --force here would leave the operator back at the label editor docs/tags.md
+// forbids. The bare `release` cannot reach it — this arena's active claim is
+// nothing, so there is nothing for it to drop.
+func TestBackend_Release_ByItemIdTakesOffOurOwnRecordWithNoLeaseNamingIt(t *testing.T) {
+	mock, one, _ := twoArenas(t)
+	one.claimed(t)
+
+	// The lease is gone; the record on the item is not. That divergence is the
+	// whole of the second shape.
+	one.run(func() {
+		if err := os.Remove(filepath.Join(one.flowDir, "active.json")); err != nil {
+			t.Fatalf("remove the lease this arena no longer has: %v", err)
+		}
+		active, err := one.b.LookupActiveClaim(t.Context())
+		if err != nil || active != nil {
+			t.Fatalf("LookupActiveClaim = (%+v, %v), want the arena holding nothing", active, err)
+		}
+		if err := one.b.Release(t.Context(), one.b.refFromIssue(42), nil); err != nil {
+			t.Fatalf("a record naming this arena must come off without an override: %v", err)
+		}
+	})
+
+	names := mock.labelNames()
+	if contains(names, one.b.labels.Owner("alice")) {
+		t.Errorf("labels = %v, want the owner half gone — left on, the item reads held forever", names)
+	}
+	if contains(names, one.b.labels.Arena(one.b.arenaFingerprint())) {
+		t.Errorf("labels = %v, want the arena half gone", names)
+	}
+	mock.mu.Lock()
+	assignees := append([]string(nil), mock.assignees...)
+	mock.mu.Unlock()
+	if contains(assignees, "alice") {
+		t.Errorf("assignees = %v, want the assignee half of the record gone too", assignees)
+	}
+}
+
+// The two shapes of #212 meeting: the record is on the item, and the lease file
+// that would have named it cannot be parsed. The id supplies what the file
+// cannot, and the release clears BOTH — the record on the item and the
+// unreadable file — so the arena is genuinely free afterwards rather than freed
+// on the server and still wedged locally.
+func TestBackend_Release_ByItemIdAlsoClearsALeaseItCouldNotRead(t *testing.T) {
+	mock, one, _ := twoArenas(t)
+	one.claimed(t)
+
+	lease := filepath.Join(one.flowDir, "active.json")
+	if err := os.WriteFile(lease, []byte("{\"item_r"), 0o644); err != nil {
+		t.Fatalf("truncate the lease the way an interrupted write would: %v", err)
+	}
+
+	one.run(func() {
+		if _, err := one.b.LookupActiveClaim(t.Context()); err == nil {
+			t.Fatal("the harness did not produce an unreadable lease, so this test proves nothing")
+		}
+		if err := one.b.Release(t.Context(), one.b.refFromIssue(42), nil); err != nil {
+			t.Fatalf("Release: %v", err)
+		}
+		if _, err := os.Stat(lease); !os.IsNotExist(err) {
+			t.Errorf("the unreadable lease survived the release: %v — the arena is still wedged", err)
+		}
+	})
+
+	if names := mock.labelNames(); contains(names, one.b.labels.Owner("alice")) {
+		t.Errorf("labels = %v, want the record the id named taken off", names)
+	}
+}
+
+// The half-record written before flow:arena: existed — flow:owner:<login> with
+// no arena label beside it — read at the RELEASE end. It names no arena to
+// compare, so the only arena that can prove the record is its own is the one
+// whose lease file says so; an arena that cannot is refused, and --force is what
+// carries it (docs/github-schema.md § Labels: "Recovering from a holder that is
+// gone is --force … on `release <item-id>` when the record is only to be
+// dropped").
+//
+// This is the one row where the answer turns on the LEASE rather than on the
+// labels, and getting it the other way round is what would let an arena strip a
+// legacy record another arena is running under.
+func TestBackend_Release_ByItemIdOnALegacyRecordNeedsForceWhenWeDoNotHoldIt(t *testing.T) {
+	mock, _, two := twoArenas(t)
+	mock.mu.Lock()
+	mock.issueLabels = []string{"flow:implement", two.b.labels.Owner("alice")}
+	mock.mu.Unlock()
+
+	two.run(func() {
+		err := two.b.Release(t.Context(), two.b.refFromIssue(42), nil)
+		var refused flow.ErrClaimRefused
+		if !errors.As(err, &refused) {
+			t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+		}
+		if refused.Code != "already-held" {
+			t.Errorf("Code = %q, want already-held", refused.Code)
+		}
+		// It says what is MISSING, which is what tells the operator this is a
+		// record from before the arena half rather than a live holder to wait on.
+		if !strings.Contains(refused.Reason, "records no arena") {
+			t.Errorf("Reason = %q, want it to say the record names no arena", refused.Reason)
+		}
+	})
+
+	if names := mock.labelNames(); !contains(names, two.b.labels.Owner("alice")) {
+		t.Fatalf("labels = %v, want the record untouched by a refused release", names)
+	}
+
+	two.run(func() {
+		if err := two.b.Release(t.Context(), two.b.refFromIssue(42),
+			[]flow.ClaimOverride{flow.OverrideAlreadyHeld}); err != nil {
+			t.Fatalf("--force is the documented recovery and must work: %v", err)
+		}
+	})
+	if names := mock.labelNames(); contains(names, two.b.labels.Owner("alice")) {
+		t.Errorf("labels = %v, want the owner half gone — it is the half that says a lease was taken", names)
 	}
 }

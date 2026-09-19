@@ -225,6 +225,60 @@ func TestCmdRelease_ATransientLookupFailureStopsRatherThanClearing(t *testing.T)
 	}
 }
 
+// The recovery #212 exists to provide, end to end: an unreadable lease AND a
+// tree that will not come clean — the arena being decommissioned, the machine
+// that is not coming back. The bare form carries --force, so the zero ref and
+// the three overrides travel together. Without this the flag reaches only the
+// by-id form, and the state the issue is about keeps its one way out being a
+// hand-deletion.
+func TestCmdRelease_ForceReachesTheBareFormOnAnUnreadableLease(t *testing.T) {
+	be := &unreadableLease{
+		Orchestrator: fake.New(),
+		err:          errors.New(`parse /w/.flow/active.json: unexpected end of JSON input`),
+	}
+	app, out, errBuf := releaseTestApp(t, be)
+
+	if code := app.cmdRelease(context.Background(), []string{"--force"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if !be.released {
+		t.Fatal("Release was never reached")
+	}
+	if len(be.releasedRef.Ref) != 0 {
+		t.Errorf("released ref = %+v, want the zero ref — --force does not invent an item either",
+			be.releasedRef)
+	}
+	want := []flow.ClaimOverride{flow.OverrideDirtyTree, flow.OverrideAlreadyHeld, flow.OverrideStaleBase}
+	if !slices.Equal(be.releasedOverride, want) {
+		t.Errorf("overrides = %v, want %v", be.releasedOverride, want)
+	}
+	if !strings.Contains(out.String(), "unreadable lease record") {
+		t.Errorf("stdout does not say what was cleared; got %q", out.String())
+	}
+}
+
+// An arena holding nothing has nothing to drop, and saying so is not the same
+// answer as the unreadable record above: there the command goes ahead against a
+// ref naming nothing, here it stops. A single `err != nil || claim == nil`
+// branch would collapse the two and turn every empty arena into a clearing.
+func TestCmdRelease_NoActiveClaimIsRefused(t *testing.T) {
+	be := &recordingRelease{Orchestrator: fake.New()}
+	app, out, errBuf := releaseTestApp(t, be)
+
+	if code := app.cmdRelease(context.Background(), nil); code != 1 {
+		t.Fatalf("exit code = %d, want 1; err=%q", code, errBuf.String())
+	}
+	if be.called {
+		t.Errorf("the backend was asked to release %+v; there was no claim to drop", be.ref)
+	}
+	if out.String() != "" {
+		t.Errorf("stdout = %q, want nothing: no clearing was made", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "no active claim") {
+		t.Errorf("stderr = %q, want 'no active claim'", errBuf.String())
+	}
+}
+
 // An unreadable lease does not suspend the preconditions. The tree may hold
 // work belonging to whatever the record named, and a release that cannot say
 // which item it was leaves even less to attribute it to — so the refusal stands

@@ -854,3 +854,46 @@ func TestSaveKeepsTheLeaseFileMode(t *testing.T) {
 		t.Errorf("mode = %v, want 0644", got)
 	}
 }
+
+// The success path above leaves no temp file because the rename consumed it.
+// The FAILURE path has to clear one deliberately, and it is the path that
+// matters: on the lease it would otherwise accumulate one temp file per
+// interrupted write, in a directory the project is required to gitignore and
+// that nothing else prunes.
+//
+// A rename onto a DIRECTORY is the failure that can be arranged portably: the
+// temp file is created, written, synced and closed, and only the last step
+// fails — which is the one branch the earlier tests cannot reach, since a
+// read-only directory stops the create before there is anything to clean up.
+func TestSaveThatFailsAtTheRenameLeavesNoTemporaryFile(t *testing.T) {
+	dir := t.TempDir()
+	flowDir := filepath.Join(dir, ".flow")
+	t.Setenv("FLOW_DIR", flowDir)
+
+	if err := os.MkdirAll(filepath.Join(flowDir, "active.json"), 0o755); err != nil {
+		t.Fatalf("put a directory where the lease file goes: %v", err)
+	}
+
+	err := clistate.Save(flow.Claim{
+		OrchestratorName: "fake",
+		Arena:            flow.Arena{Host: "build01", Id: "/w/one"},
+		Account:          "alice",
+		ItemRef:          flow.ItemRef{OrchestratorName: "fake", Display: "test#1", Ref: json.RawMessage(`"1"`)},
+	})
+	if err == nil {
+		t.Fatal("Save must report a write it could not make")
+	}
+
+	entries, rerr := os.ReadDir(flowDir)
+	if rerr != nil {
+		t.Fatalf("ReadDir: %v", rerr)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != 1 || names[0] != "active.json" {
+		t.Errorf("%s holds %v, want nothing but the target the rename could not replace — "+
+			"a temp file here is one per interrupted write, forever", flowDir, names)
+	}
+}
