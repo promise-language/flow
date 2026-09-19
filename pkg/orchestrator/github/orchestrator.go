@@ -315,6 +315,13 @@ func (b *Orchestrator) loadItem(ctx context.Context, issueNum int, cachedComment
 	if err != nil {
 		return nil, fmt.Errorf("get issue %d: %w", issueNum, err)
 	}
+	// The same refusal Get and Claim make, on the path a typed number actually
+	// takes: `status <n>` loads (cli/cmd_status.go), it does not Get. Without it
+	// here the command renders a pull request as a full item — title, holder,
+	// checklist — which is the reading the refusal exists to stop.
+	if refused := refusePullRequest(issue, issueNum); refused != nil {
+		return nil, *refused
+	}
 
 	lbls := labelNamesOf(issue.Labels)
 	holder, _ := b.holderFromLabels(lbls)
