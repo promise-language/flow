@@ -573,7 +573,8 @@ func (app *App) cmdResolve(ctx context.Context, args []string) int {
 			return 1
 		case flow.StatusSkipped:
 			// A preflight refusal — an already-finalized item, an item outside
-			// this binary's coverage. Nothing to re-dispatch: the next cycle
+			// this binary's coverage — or a manual hold, an item an operator
+			// has taken hand control of. Nothing to re-dispatch: the next cycle
 			// answers identically until somebody acts.
 			fmt.Fprintf(app.Err, "resolve: %s %s — run `status %s` to inspect\n", claim.ItemRef.Display, res.Status, claim.ItemRef.Display)
 			return 0

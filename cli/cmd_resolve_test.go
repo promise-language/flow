@@ -1841,6 +1841,40 @@ func TestCmdResolve_BlockedOnItemsJSONCarriesTheKindAndBlockers(t *testing.T) {
 	}
 }
 
+// `resolve` stops at a manual hold on the first iteration: exit 0, nothing
+// dispatched, and the loop does not spin. The skip arm is the right end for it
+// — the next cycle answers identically until the person driving the item hands
+// it back, so there is nothing to re-dispatch and nobody outside to act.
+func TestCmdResolve_ManualHoldStopsTheRunWithoutDispatching(t *testing.T) {
+	be := fake.New()
+	be.AddItem("1", flow.Item{Type: "task", Title: "1"})
+	planRuns := 0
+	app, _, errBuf := resolveTestAppStep(t, be, func(ctx flow.StepCtx) (flow.StepResult, error) {
+		planRuns++
+		return ctx.Finalize(flow.DispositionResolved, "done").Markdown("the plan"), nil
+	})
+	setManual(t, be, be.Ref("1"), true)
+
+	if code := app.cmdResolve(context.Background(), []string{"1"}); code != 0 {
+		t.Fatalf("exit code = %d, want 0; err=%q", code, errBuf.String())
+	}
+	if planRuns != 0 {
+		t.Errorf("the plan ran %d times, want 0 — nothing dispatches the item underneath the person driving it", planRuns)
+	}
+	if !strings.Contains(errBuf.String(), "skipped") {
+		t.Errorf("stderr = %q, want the skip reported", errBuf.String())
+	}
+	// The run ended at the hold rather than looping to the runaway guard: the
+	// journal stays empty and the item is not finalized.
+	state, err := be.Load(context.Background(), be.Ref("1"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.Journal) != 0 || state.Finalized {
+		t.Errorf("item advanced under the hold: %d journal entries, finalized=%v", len(state.Journal), state.Finalized)
+	}
+}
+
 // A block from elsewhere — a preflight gate a person must clear — prints no
 // `blocked by:` line: there are no blockers to send the operator to.
 func TestCmdResolve_PreflightBlockPrintsNoBlockedByLine(t *testing.T) {

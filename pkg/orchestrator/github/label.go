@@ -135,8 +135,9 @@ func (s structuralLabel) matches(rest string) bool {
 //     above: the driver's own next claim was the one refused. Another arena is
 //     kept off by the already-held refusal while the driver holds the lease; a
 //     manual item nobody holds is claimable, and what keeps it from being
-//     DISPATCHED is the manual hold at dispatch (docs/resolution.md § skipped;
-//     #170). Neither docs/github-schema.md § Claim protocol nor
+//     DISPATCHED is the manual hold at dispatch — cli.RunOne reads Item.Manual
+//     before it dispatches and reports `skipped` (docs/resolution.md
+//     § Reporting). Neither docs/github-schema.md § Claim protocol nor
 //     docs/orchestrator.md § What an orchestrator may refuse lists manual among
 //     the refusals.
 //   - disabled: structural, NOT maintained. No operation writes it — it is
