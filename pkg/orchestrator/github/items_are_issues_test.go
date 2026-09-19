@@ -2,6 +2,7 @@ package github
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/promise-language/flow"
@@ -9,8 +10,9 @@ import (
 
 // An item is an issue (docs/github-schema.md § Items are issues). The Issues
 // API returns pull requests too, out of one number space, so a number typed at
-// `claim`, `resolve` or `status` can name either — and every by-ref path
-// refuses the one that is not an item, where `List` merely skips it.
+// `claim`, `resolve` or `status` can name either — and a by-ref path that takes
+// an item or describes one refuses the thing that is not an item, where `List`
+// merely skips it and `Release` is the exception the last test here records.
 //
 // The refusals below all come from ONE predicate, refusePullRequest
 // (discover.go); these tests exist because it is reached from three places and
@@ -145,6 +147,86 @@ func TestBackend_Claim_RefusesAPullRequestUnderEveryOverride(t *testing.T) {
 	}
 }
 
+// ABOVE THE TWO LABEL PREFLIGHTS, which is the position claim.go states and
+// which nothing else here holds it to: both of those answer "this item is
+// stopped", and telling an operator who typed a pull request number that the
+// item is disabled, or that another binary owns it, answers the wrong question
+// and sends them to clear a label on a pull request. Either refusal keeps the
+// lease safe; only this one names what is actually wrong.
+func TestBackend_Claim_RefusesAPullRequestCarryingStopLabels(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		label string
+		// The code the SAME claim gets when the ref is an ordinary issue —
+		// TestBackend_Claim_HeldReclaimStillRefusesStopLabels' answer, and what
+		// this one is displacing.
+		asIssue flow.ClaimRefusalCode
+	}{
+		{"disabled", "flow:disabled", "disabled"},
+		{"other binary", "flow:review", "other-binary"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b, mock, rec := newClaimPrecondBackend(t)
+			scriptCleanWorktree(rec)
+			mock.mu.Lock()
+			mock.issueIsPullRequest = true
+			mock.issueLabels = append(mock.issueLabels, c.label)
+			mock.mu.Unlock()
+
+			_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+			var refused flow.ErrClaimRefused
+			if !errors.As(err, &refused) {
+				t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+			}
+			if refused.Code != "not-an-item" {
+				t.Errorf("Code = %q, want %q — %q is what this ref would get if it were an item",
+					refused.Code, "not-an-item", c.asIssue)
+			}
+		})
+	}
+}
+
+// #140 ITSELF, the state the defect left on the repository: a merged pull
+// request carrying a whole claim record — owner label, a foreign arena label,
+// an assignee — and closed.
+//
+// The record is what makes this more than a repeat of the bare case. Read
+// without the kind check, those labels are a claim held by another arena under
+// this same account, so the refusal that comes back is `already-held` with
+// `--force` offered — an answer that is about the record and invites the one
+// gesture that took the lease in the first place. The kind is decided before
+// anything reads the record.
+func TestBackend_Claim_RefusesAMergedPullRequestCarryingAClaimRecord(t *testing.T) {
+	b, mock, rec := newClaimPrecondBackend(t)
+	scriptCleanWorktree(rec)
+	mock.mu.Lock()
+	mock.issueIsPullRequest = true
+	mock.issueState = "closed"
+	mock.issueLabels = append(mock.issueLabels,
+		b.labels.Owner("alice"), b.labels.Arena("71a26faeeed277b5"))
+	mock.assignees = []string{"alice"}
+	mock.mu.Unlock()
+
+	_, err := b.Claim(t.Context(), b.refFromIssue(42), nil)
+	var refused flow.ErrClaimRefused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error is not ErrClaimRefused: %T: %v", err, err)
+	}
+	if refused.Code != "not-an-item" {
+		t.Errorf("Code = %q, want %q — the kind is decided before the claim record is read",
+			refused.Code, "not-an-item")
+	}
+	if refused.Override != "" {
+		t.Errorf("Override = %q, want none — the record makes it look takeable, and it is not", refused.Override)
+	}
+	mock.mu.Lock()
+	mutations := append([]string(nil), mock.mutations...)
+	mock.mu.Unlock()
+	if len(mutations) != 0 {
+		t.Errorf("a refused claim wrote to GitHub: %v", mutations)
+	}
+}
+
 // Get must answer identically to List for the same item at the same moment
 // (docs/orchestrator.md § Required surface). List skips a pull request, so Get
 // cannot describe one.
@@ -200,6 +282,13 @@ func TestBackend_Load_RefusesAPullRequest(t *testing.T) {
 	}
 	if !refused.ItemScoped {
 		t.Error("ItemScoped = false, want true")
+	}
+	// THE REASON IS THE WHOLE OF WHAT THE OPERATOR IS TOLD — `status <n>` prints
+	// the error and nothing else — so it has to name the number they typed and
+	// what is wrong with it. The code is for the auto-select loop; a person
+	// reading "claim refused:" and no clause learns nothing.
+	if !strings.Contains(refused.Reason, "#42") || !strings.Contains(refused.Reason, "pull request") {
+		t.Errorf("Reason = %q, want the number typed and what it names", refused.Reason)
 	}
 }
 
