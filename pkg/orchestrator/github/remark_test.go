@@ -118,6 +118,12 @@ func TestBackend_RemarkIsNotReadBackAsAnAnswer(t *testing.T) {
 	if err := b.Remark(t.Context(), claim.ItemRef, "released: the arena was needed elsewhere"); err != nil {
 		t.Fatalf("Remark: %v", err)
 	}
+	// A real reply in the same window, so what is asserted is that the remark
+	// is excluded and not that ReadAnswers stopped returning anything: a fix
+	// that dropped every comment would pass the exclusion and strand the item.
+	if err := b.PostAnswer(t.Context(), claim.ItemRef, asked.ID, "main — the release branch is cut from it"); err != nil {
+		t.Fatalf("PostAnswer: %v", err)
+	}
 	item, err := b.Load(t.Context(), claim.ItemRef)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -126,8 +132,8 @@ func TestBackend_RemarkIsNotReadBackAsAnAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadAnswers: %v", err)
 	}
-	if len(answers) != 0 {
-		t.Errorf("ReadAnswers = %+v, want none — a remark is not a reply to the question", answers)
+	if len(answers) != 1 || !strings.Contains(answers[0].Answer, "main — the release branch is cut from it") {
+		t.Errorf("ReadAnswers = %+v, want only the reply — a remark is not one", answers)
 	}
 }
 

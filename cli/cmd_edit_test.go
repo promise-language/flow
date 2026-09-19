@@ -140,7 +140,7 @@ func TestCmdEdit_RemovesTagAndBlocker(t *testing.T) {
 // A command per field would be a transaction per field, which is the property
 // the single command exists to keep.
 func TestCmdEdit_SeveralChangesAreOneTransaction(t *testing.T) {
-	app, be, _, errBuf := editTestSetup(t)
+	app, be, out, errBuf := editTestSetup(t)
 	counting := &countingEditBackend{Orchestrator: be}
 	app.Orchestrator = counting
 
@@ -155,6 +155,78 @@ func TestCmdEdit_SeveralChangesAreOneTransaction(t *testing.T) {
 	it := loadItem(t, be, "1")
 	if it.Title != "corrected" || it.Priority != flow.PriorityHigh || !slices.Contains(it.Tags, flow.TagId("cli")) {
 		t.Errorf("item = %+v, want all three changes landed", it)
+	}
+	// The one line names EVERY field that landed, in declaration order. An
+	// operator who staged three changes and is told only that the item was
+	// edited has to re-read it to learn which of them took.
+	if got := out.String(); !strings.Contains(got, "edited 1 — title, add-tag, priority") {
+		t.Errorf("stdout = %q, want the report to name every field that landed", got)
+	}
+}
+
+// Several blockers in one invocation are several adds, and each ref is
+// resolved and staged. Every case above passes one, so a loop that resolved
+// the first and stopped — or staged only the first — would satisfy all of them.
+func TestCmdEdit_EveryBlockerRefIsStaged(t *testing.T) {
+	app, be, _, errBuf := editTestSetup(t)
+	be.AddItem("3", flow.Item{Type: "task", Title: "a third"})
+
+	if code := app.cmdEdit(context.Background(),
+		[]string{"1", "--block-on", "2", "--block-on", "3"}); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	var got []string
+	for _, b := range loadItem(t, be, "1").BlockedBy {
+		got = append(got, b.Ref.Display)
+	}
+	if len(got) != 2 || !slices.Contains(got, "2") || !slices.Contains(got, "3") {
+		t.Errorf("blockedBy = %v, want both 2 and 3 recorded", got)
+	}
+}
+
+// The ref that does not resolve is NAMED, which is the whole reason the
+// refusal carries the id: an operator who passed four --block-on flags learns
+// which one was the typo. And the good ref beside it does not land alone —
+// resolution happens for all of them before the editor opens, so a typo among
+// several costs no write at all.
+func TestCmdEdit_UnresolvableBlockerIsNamedAndNothingLands(t *testing.T) {
+	app, be, out, errBuf := editTestSetup(t)
+	guard := &refusingEditBackend{Orchestrator: be, unresolvable: "nosuch"}
+	app.Orchestrator = guard
+
+	code := app.cmdEdit(context.Background(),
+		[]string{"1", "--block-on", "2", "--block-on", "nosuch"})
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%q", code, errBuf.String())
+	}
+	if out.String() != "" {
+		t.Errorf("stdout = %q, want empty", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "nosuch") {
+		t.Errorf("stderr = %q, want it to name the ref that did not resolve", errBuf.String())
+	}
+	if guard.opened {
+		t.Error("an editor was opened although one blocker ref did not resolve")
+	}
+	if bl := loadItem(t, be, "1").BlockedBy; len(bl) != 0 {
+		t.Errorf("blockedBy = %v, want nothing recorded — the ref that did resolve must not land alone", bl)
+	}
+}
+
+// An item id that resolves but names nothing: the editor cannot be opened. That
+// is an environment condition — the item was deleted, or the backend answered —
+// not a malformed invocation, so it exits 1 and prints nothing to stdout.
+func TestCmdEdit_EditorCannotBeOpened(t *testing.T) {
+	app, _, out, errBuf := editTestSetup(t)
+
+	if code := app.cmdEdit(context.Background(), []string{"77", "--title", "x"}); code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%q", code, errBuf.String())
+	}
+	if out.String() != "" {
+		t.Errorf("stdout = %q, want empty on a refusal in human mode", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "edit:") || !strings.Contains(errBuf.String(), "77") {
+		t.Errorf("stderr = %q, want the command's prefix and the item it could not open", errBuf.String())
 	}
 }
 
@@ -490,14 +562,27 @@ func (e *countingEditor) Commit(ctx context.Context) error {
 
 // refusingEditBackend records that Edit was reached at all — how a test proves
 // a rejection happened before the command took any action.
+//
+// With `unresolvable` set it also refuses to resolve that one id, which is how
+// a test puts a bad ref among good ones: the fake's own resolver mints a ref
+// for every non-empty string, so the only id it refuses carries no name to
+// assert on.
 type refusingEditBackend struct {
 	*fake.Orchestrator
-	opened bool
+	unresolvable string
+	opened       bool
 }
 
 func (b *refusingEditBackend) Edit(ctx context.Context, ref flow.ItemRef) (flow.ItemEditor, error) {
 	b.opened = true
 	return b.Orchestrator.Edit(ctx, ref)
+}
+
+func (b *refusingEditBackend) ResolveRef(ctx context.Context, input string) (flow.ItemRef, error) {
+	if b.unresolvable != "" && input == b.unresolvable {
+		return flow.ItemRef{}, fmt.Errorf("no such item %q", input)
+	}
+	return b.Orchestrator.ResolveRef(ctx, input)
 }
 
 // commitFailsBackend fails the commit with a caller-supplied error, which is

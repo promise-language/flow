@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,31 @@ func TestCmdRemark_BodyFileUnreadable(t *testing.T) {
 	}
 	if len(be.Remarks("1")) != 0 {
 		t.Error("a remark was recorded from a file that could not be read")
+	}
+}
+
+// A file of blank lines says nothing, exactly as an empty argument does. The
+// rule is about the TEXT, not about which flag carried it — and this is the
+// route where the text arrives after a successful read, so a check placed with
+// the argument rather than with the value would let it through.
+func TestCmdRemark_BodyFileWithNoTextRecordsNothing(t *testing.T) {
+	app, be, out, errBuf := editTestSetup(t)
+	path := filepath.Join(t.TempDir(), "blank.md")
+	if err := os.WriteFile(path, []byte("\n  \t\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := app.cmdRemark(context.Background(), []string{"1", "--body-file", path}); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if out.String() != "" {
+		t.Errorf("stdout = %q, want empty", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "nothing was recorded") {
+		t.Errorf("stderr = %q, want 'nothing was recorded'", errBuf.String())
+	}
+	if len(be.Remarks("1")) != 0 {
+		t.Error("a remark was recorded from a file carrying no text")
 	}
 }
 
@@ -124,15 +150,30 @@ func TestCmdRemark_UsageErrors(t *testing.T) {
 // An orchestrator with nowhere to keep prose has no combination to re-shape
 // and no way to be asked again, so the named line IS the whole answer here —
 // unlike `edit`, where the sentinel carries an instruction.
+//
+// Bare AND wrapped, because wrapped is the shape a real backend returns: it
+// names itself before the sentinel. Matching the sentinel by identity rather
+// than through the wrap would pass the bare case and drop every real one into
+// the generic branch, unnamed.
 func TestCmdRemark_UnsupportedBackend(t *testing.T) {
-	app, be, _, errBuf := editTestSetup(t)
-	app.Orchestrator = &unsupportedRemarkBackend{Orchestrator: be}
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"bare", flow.ErrUnsupported},
+		{"wrapped", fmt.Errorf("tracker: no comment store: %w", flow.ErrUnsupported)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, be, _, errBuf := editTestSetup(t)
+			app.Orchestrator = &refusingRemarkBackend{Orchestrator: be, err: tc.err}
 
-	if code := app.cmdRemark(context.Background(), []string{"1", "text"}); code != 1 {
-		t.Fatalf("exit = %d, want 1", code)
-	}
-	if !strings.Contains(errBuf.String(), "does not support remark") {
-		t.Errorf("stderr = %q, want 'does not support remark'", errBuf.String())
+			if code := app.cmdRemark(context.Background(), []string{"1", "text"}); code != 1 {
+				t.Fatalf("exit = %d, want 1", code)
+			}
+			if !strings.Contains(errBuf.String(), "does not support remark") {
+				t.Errorf("stderr = %q, want 'does not support remark'", errBuf.String())
+			}
+		})
 	}
 }
 
@@ -245,14 +286,6 @@ func TestFakeRemark_AccumulatesInOrder(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Doubles
 // ---------------------------------------------------------------------------
-
-type unsupportedRemarkBackend struct {
-	*fake.Orchestrator
-}
-
-func (b *unsupportedRemarkBackend) Remark(ctx context.Context, ref flow.ItemRef, text string) error {
-	return flow.ErrUnsupported
-}
 
 type refusingRemarkBackend struct {
 	*fake.Orchestrator
